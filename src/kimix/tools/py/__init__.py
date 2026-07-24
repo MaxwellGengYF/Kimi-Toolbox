@@ -17,7 +17,7 @@ from kimix.tools.common import (
     ProcessTask,
 )
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from kimi_cli.session import Session
 
 if TYPE_CHECKING:
@@ -29,17 +29,12 @@ class Params(BaseModel):
 
     code: str = Field(
         default="",
-        alias="source_code",  # backward compat with stream display / other agents
+        validation_alias=AliasChoices("code", "source_code", "file"),
         description=(
-            "Inline Python code to execute. Accepts `code` or `source_code`. "
-            "Mutually exclusive with `file`. "
-            "When `file` is not set and `code` ends with '.py' and the file exists, "
-            "it is treated as a file path (deprecated — use `file` explicitly)."
+            "Inline Python code to execute. Accepts `code` or `file`. "
+            "When the value ends with '.py' and the file exists, "
+            "it is treated as a file path."
         ),
-    )
-    file: str | None = Field(
-        default=None,
-        description="Path to a .py file to run. Mutually exclusive with `code`.",
     )
     output_path: str | None = Field(
         default=None,
@@ -94,22 +89,7 @@ class Params(BaseModel):
                     "Accepts `deduplicate_output` or `token_kill`. "
                     "Set to False to see raw, unfiltered output.",
     )
-    venv: str | None = Field(
-        default=None,
-        description=(
-            "Path to a Python virtual environment directory. "
-            "If provided, the venv's python executable is used instead of the system python. "
-            "Example: '.venv' or 'myproject/.venv'."
-        ),
-    )
-    pip_install: list[str] | None = Field(
-        default=None,
-        description=(
-            "List of pip packages to install before execution. "
-            "Uses the venv's pip if `venv` is set, otherwise the system pip. "
-            "Example: ['requests', 'numpy>=1.21']."
-        ),
-    )
+
 
     @model_validator(mode="after")
     def _normalize_mode(self) -> "Params":
@@ -124,13 +104,9 @@ class Params(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "Params":
-        has_code = bool(self.code)
-        has_file = self.file is not None
-        if has_code and has_file:
-            raise ValueError("Specify either `code` or `file`, not both.")
-        if not has_code and not has_file and self.task_id is None and self.mode != "interactive":
-            raise ValueError("Either `code` or `file` must be provided (unless interactive=True or task_id is set).")
-        if self.task_id is not None and not has_code:
+        if not self.code and self.task_id is None and self.mode != "interactive":
+            raise ValueError("`code` must be provided (unless interactive=True or task_id is set).")
+        if self.task_id is not None and not self.code:
             raise ValueError("code cannot be empty when continuing a session via task_id")
         return self
 
@@ -139,8 +115,7 @@ class Python(CallableTool2[Params]):
     name: str = "Python"
     description: str = (
         "Execute Python code or run a .py file directly. "
-        "Use `code` for inline Python code, or `file` to run an existing .py file. "
-        "Use `venv` to specify a virtual environment directory. "
+        "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
         "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
         "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
         "Set `deduplicate_output=False` (or `token_kill=False`) to disable deduplication of repeated "
@@ -162,87 +137,31 @@ class Python(CallableTool2[Params]):
         self._script_counter = 0
 
     def _resolve_python(self, params: Params) -> str:
-        """Resolve the Python executable to use.
-
-        If ``params.venv`` is set, returns the venv's python executable.
-        Otherwise returns ``sys.executable``.
-        """
-        if params.venv:
-            venv_path = Path(params.venv)
-            if sys.platform == "win32":
-                python_exe = venv_path / "Scripts" / "python.exe"
-            else:
-                python_exe = venv_path / "bin" / "python"
-            if python_exe.is_file():
-                return str(python_exe)
-            raise ValueError(f"Venv python not found at {python_exe}")
+        """Resolve the Python executable. Always returns ``sys.executable``."""
         return sys.executable
 
-    async def _maybe_pip_install(self, params: Params) -> ToolError | None:
-        """Pre-execution pip install hook.
 
-        If ``params.pip_install`` is set, runs pip install before the
-        main Python execution. Returns a ``ToolError`` on failure or
-        ``None`` on success (or when no packages are requested).
-        """
-        if not params.pip_install:
-            return None
-        try:
-            python_exe = self._resolve_python(params)
-            pip_args = [python_exe, "-m", "pip", "install", "--quiet"] + params.pip_install
-            proc = await asyncio.create_subprocess_exec(
-                *pip_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                err_text = stderr.decode("utf-8", errors="replace") if stderr else ""
-                return ToolError(
-                    output=err_text,
-                    message=f"pip install failed with code {proc.returncode}.",
-                    brief="pip install failed",
-                )
-        except Exception as e:
-            return ToolError(
-                output="",
-                message=f"pip install failed: {e}",
-                brief="pip install error",
-            )
-        return None
 
     def _resolve_script_source(self, params: Params) -> tuple[str | None, bool]:
         """Resolve the script source from params.
 
         Priority:
-          1. ``params.file`` — explicit file path (always treated as file mode).
-          2. ``params.code`` ending with ``.py`` and existing file — auto-detected
-             file path (deprecated, emits warning).
-          3. ``params.code`` — inline code, written to a temp file.
+          1. ``params.code`` ending with ``.py`` and existing file — file path mode.
+          2. ``params.code`` non-empty — inline code, written to a temp file.
+          3. None / empty — returns (None, False)
 
         Returns ``(script_path, is_file_mode)`` where ``is_file_mode`` is True
         when the source is an existing file (not inline code).
         """
-        # Priority 1: explicit file param
-        if params.file is not None:
-            return params.file, True
-
         if not params.code:
             return None, False
 
-        # Priority 2: legacy auto-detection (deprecated)
+        # Priority 1: code ending with .py and existing file → file path mode
         code_path = Path(params.code)
         if params.code.endswith('.py') and code_path.is_file():
-            import warnings
-            warnings.warn(
-                "Auto-detecting .py files from `code` parameter is deprecated. "
-                "Use `file` parameter instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             return params.code, True
 
-        # Priority 3: inline code — write to a temp file
+        # Priority 2: inline code — write to a temp file
         session_dir = Path(self._session.dir)
         script_name = f"{self._script_counter}.py"
         script_path = str(session_dir / script_name)
@@ -257,11 +176,6 @@ class Python(CallableTool2[Params]):
         if params.task_id is not None:
             return await self._continue_session(params)
 
-        # Pre-execution: pip install if requested
-        pip_error = await self._maybe_pip_install(params)
-        if pip_error is not None:
-            return pip_error
-
         async with self._semaphore:
             if params.mode == "interactive":
                 return await self._start_interactive(params)
@@ -273,7 +187,7 @@ class Python(CallableTool2[Params]):
 
     async def _start_interactive(self, params: Params) -> ToolReturnValue:
         """Start an interactive Python session."""
-        # Determine script path: prefer `file`, then auto-detect from `code`
+        # Determine script path from `code` (auto-detect .py file or inline code)
         script_path, _ = self._resolve_script_source(params)
 
         if script_path is not None:
@@ -534,7 +448,7 @@ class Python(CallableTool2[Params]):
         output_truncated = False
         if len(output) > 65536:
             # Use the source (file path or inline code) as context for summarization
-            source_context = params.file if params.file else params.code
+            source_context = params.code
             output = await _summarize_long_output_async(self._session, source_context, output)
             output_truncated = True
         output = await _maybe_export_output_async(output)

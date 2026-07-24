@@ -91,7 +91,7 @@ def get_system_prompt(
                 if yolo:
                     items.append('Yolo: no asking. accept all. When choices or options appear, independently pick the best one and continue; do not ask the user which to choose.')
 
-                items.append('Use `ContextRetrieval` to recall past conversation turns that were compacted out of context.')
+                items.append('Use `ContextRetrieval` whenever not sure about the history and memory.')
             else:
                 items.append('Sub-Agent: only report results. If any option, output the question and stop.')
         if extra_system_prompt and extra_system_prompt.role_callback:

@@ -223,14 +223,9 @@ class TestTaskOutput:
 # ---------------------------------------------------------------------------
 class TestPythonParams:
     def test_code_empty_without_interactive_or_file(self) -> None:
-        """code="" with no file/interactive/task_id should raise a validation error."""
-        with pytest.raises(ValueError, match="Either `code` or `file` must be provided"):
+        """code="" with no interactive/task_id should raise a validation error."""
+        with pytest.raises(ValueError, match="code` must be provided"):
             PyParams(code="", interactive=False)
-
-    def test_code_and_file_mutually_exclusive(self) -> None:
-        """Both code and file should raise a validation error."""
-        with pytest.raises(ValueError, match="Specify either `code` or `file`, not both"):
-            PyParams(code="print('hi')", file="script.py")
 
     def test_task_id_without_code(self) -> None:
         """task_id="xxx" with code="" should raise a validation error."""
@@ -241,7 +236,6 @@ class TestPythonParams:
         """interactive=True with code="" should be valid."""
         params = PyParams(code="", interactive=True)
         assert params.mode == "interactive"
-        assert params.code == ""
 
     def test_task_id_with_code_valid(self) -> None:
         """task_id="xxx" with code="..." should be valid."""
@@ -255,12 +249,7 @@ class TestPythonParams:
         assert params.code == "print('hi')"
         assert params.mode == "run"
 
-    def test_file_only_valid(self) -> None:
-        """file="..." with no code should be valid."""
-        params = PyParams(file="script.py")
-        assert params.file == "script.py"
-        assert params.code == ""
-        assert params.mode == "run"
+
 
     def test_mode_background(self) -> None:
         """mode='background' should work."""
@@ -286,16 +275,6 @@ class TestPythonParams:
         """Both interactive=True and run_in_background=True should raise."""
         with pytest.raises(ValueError, match="Cannot set both interactive=True and run_in_background=True"):
             PyParams(code="print('hi')", interactive=True, run_in_background=True)
-
-    def test_venv_field(self) -> None:
-        """venv parameter should be accepted."""
-        params = PyParams(code="print('hi')", venv=".venv")
-        assert params.venv == ".venv"
-
-    def test_pip_install_field(self) -> None:
-        """pip_install should be accepted."""
-        params = PyParams(code="print('hi')", pip_install=["requests", "numpy"])
-        assert params.pip_install == ["requests", "numpy"]
 
 
 # ---------------------------------------------------------------------------
@@ -508,39 +487,6 @@ class TestPython:
                     break
         assert output_line_count <= 15, f"Expected <=15 output lines, got {output_line_count}"
 
-    # New file param tests ------------------------------------------------
-
-    async def test_file_param_success(self, mock_session: MagicMock, tmp_path: Path) -> None:
-        """Use explicit `file` parameter to run a .py file."""
-        py_file = tmp_path / "hello_file_param.py"
-        py_file.write_text("print('hello_from_file_param')", encoding='utf-8')
-        tool = Python(session=mock_session)
-        params = PyParams(file=str(py_file), timeout=10)
-        result = await tool(params)
-        output_str = str(result.output)
-        assert "hello_from_file_param" in output_str
-        assert "task_id:" in output_str
-        assert "status: completed" in output_str
-
-    async def test_file_param_failure(self, mock_session: MagicMock, tmp_path: Path) -> None:
-        """Use explicit `file` parameter with a failing script."""
-        py_file = tmp_path / "fail_file_param.py"
-        py_file.write_text("import sys; sys.exit(99)", encoding='utf-8')
-        tool = Python(session=mock_session)
-        params = PyParams(file=str(py_file), timeout=10)
-        result = await tool(params)
-        assert isinstance(result, ToolError)
-        output_str = str(result.output)
-        assert "status: completed" in output_str
-
-    async def test_file_param_not_found_raises_error(self, mock_session: MagicMock) -> None:
-        """A non-existent `file` path should be treated as an actual file path (unlike old code param)."""
-        tool = Python(session=mock_session)
-        params = PyParams(file="/nonexistent/path/script.py", timeout=10)
-        result = await tool(params)
-        # The subprocess will fail because the file doesn't exist
-        assert isinstance(result, (ToolError, ToolOk))
-
     # Mode tests -----------------------------------------------------------
 
     async def test_mode_background(self, mock_session: MagicMock) -> None:
@@ -573,55 +519,6 @@ class TestPython:
         output_str = str(result.output)
         assert "run_mode_test" in output_str
         assert "status: completed" in output_str
-
-    # Venv tests -----------------------------------------------------------
-
-    async def test_venv_resolves_python(self, mock_session: MagicMock, tmp_path: Path) -> None:
-        """venv parameter resolves to the venv's python executable."""
-        # Create a virtual environment
-        import subprocess as sp
-        venv_dir = tmp_path / ".testvenv"
-        sp.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, capture_output=True)
-
-        tool = Python(session=mock_session)
-        params = PyParams(code="import sys; print(sys.executable)", venv=str(venv_dir), timeout=30)
-        result = await tool(params)
-        output_str = str(result.output)
-        # The output should contain the venv python path
-        if sys.platform == "win32":
-            assert "Scripts\\python.exe" in output_str or ".testvenv" in output_str
-        else:
-            assert ".testvenv/bin/python" in output_str or ".testvenv" in output_str
-
-    async def test_venv_not_found(self, mock_session: MagicMock) -> None:
-        """Non-existent venv path should raise ValueError when resolving python."""
-        tool = Python(session=mock_session)
-        params = PyParams(code="print('hi')", venv="/nonexistent/venv")
-        with pytest.raises(ValueError, match="Venv python not found"):
-            tool._resolve_python(params)
-
-    # Pip install tests ----------------------------------------------------
-
-    async def test_pip_install_hook_runs(self, mock_session: MagicMock) -> None:
-        """pip_install should attempt to install packages."""
-        # Skip if pip is not available in the test environment
-        import subprocess as sp
-        try:
-            sp.run([sys.executable, "-m", "pip", "--version"],
-                   capture_output=True, check=True, timeout=5)
-        except (sp.CalledProcessError, FileNotFoundError):
-            pytest.skip("pip is not available in this environment")
-
-        tool = Python(session=mock_session)
-        # Use a tiny package that's quick to install
-        params = PyParams(
-            code="import six; print(six.__version__)",
-            pip_install=["six"],
-            timeout=30,
-        )
-        result = await tool(params)
-        output_str = str(result.output)
-        assert "status: completed" in output_str or "six" in output_str
 
 
 class TestAsyncIntegration:

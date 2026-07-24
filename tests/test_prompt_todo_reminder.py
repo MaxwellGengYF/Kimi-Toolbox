@@ -136,20 +136,19 @@ def test_reminder_injected_when_todos_unfinished(monkeypatch: Any) -> None:
     assert len(session.prompts) == 3
     assert session.prompts[0] == "hello"
     reminder = session.prompts[1]
-    assert "<system-reminder>" in reminder
     assert "You have unfinished `TodoList` tasks" in reminder
     assert "- [pending] Analyze requirement" in reminder
     assert "- [in_progress] Implement helper" in reminder
-    assert "- [done] Run tests" in reminder
-    assert "</system-reminder>" in reminder
+    # Done todos are excluded from the reminder
+    assert "- [done] Run tests" not in reminder
 
     strong_reminder = session.prompts[2]
-    assert "<system-reminder>" in strong_reminder
     assert "CRITICAL" in strong_reminder
     assert "Mark every remaining item `done` with `TodoList`" in strong_reminder
     assert "- [pending] Analyze requirement" in strong_reminder
     assert "- [in_progress] Implement helper" in strong_reminder
-    assert "</system-reminder>" in strong_reminder
+    # Done todos are excluded from strong reminder too
+    assert "- [done] Run tests" not in strong_reminder
 
 
 def test_no_reminder_when_all_todos_done(monkeypatch: Any) -> None:
@@ -205,7 +204,7 @@ def test_reminder_stops_when_todos_marked_done(monkeypatch: Any) -> None:
     session = FakeSessionWithCLI(has_set_todo=True, todos=todos)
 
     async def mark_done_prompt(self: Any, prompt: str, *, merge_wire_messages: bool = False) -> Any:
-        if "system-reminder" in prompt:
+        if "unfinished" in prompt and "TodoList" in prompt:
             session._cli.session.state.todos[0].status = "done"
         self.last_prompt = prompt
         self.prompts.append(prompt)
@@ -259,10 +258,10 @@ def test_reminder_includes_sub_todos(monkeypatch: Any) -> None:
 
     assert len(session.prompts) >= 2
     reminder = session.prompts[1]
-    assert "<system-reminder>" in reminder
     assert "- [in_progress] Parent task" in reminder
     assert "  - [pending] Sub task A" in reminder
-    assert "  - [done] Sub task B" in reminder
+    # Done sub-todos are excluded from the reminder
+    assert "Sub task B" not in reminder
 
 
 def test_todos_are_cleared_after_prompt_async(monkeypatch: Any) -> None:
@@ -365,7 +364,7 @@ def test_todos_cleared_even_when_reminder_fails(monkeypatch: Any) -> None:
     _suppress_stream(monkeypatch)
 
     async def failing_prompt(self: Any, prompt: str, *, merge_wire_messages: bool = False) -> Any:
-        if "system-reminder" in prompt:
+        if "unfinished" in prompt and "TodoList" in prompt:
             raise RuntimeError("reminder failed")
         self.last_prompt = prompt
         self.prompts.append(prompt)

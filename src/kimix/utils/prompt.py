@@ -95,7 +95,7 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
     if all(getattr(todo, "status", None) == "done" for todo in todos):
         return None
 
-    lines = ["<system-reminder>"]
+    lines = []
     if strong:
         lines.append(
             "CRITICAL: Unfinished `TodoList` tasks remain. Mark every remaining item `done` with `TodoList` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[done]`."
@@ -107,22 +107,26 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
     for todo in todos:
         title = getattr(todo, "title", "")
         status = getattr(todo, "status", "")
+        # Skip todos already marked as done
+        if status == "done":
+            continue
         notes = getattr(todo, "notes", None)
         if notes:
             lines.append(f"- [{status}] {title}  Notes: {notes}")
         else:
             lines.append(f"- [{status}] {title}")
-        # Render sub-todos if present
+        # Render sub-todos if present (skip done sub-todos)
         sub_todos = getattr(todo, "sub_todos", None) or []
         for st in sub_todos:
             st_title = getattr(st, "title", "") if not isinstance(st, dict) else st.get("title", "")
             st_status = getattr(st, "status", "") if not isinstance(st, dict) else st.get("status", "")
+            if st_status == "done":
+                continue
             st_notes = getattr(st, "notes", None) if not isinstance(st, dict) else st.get("notes", None)
             if st_notes:
                 lines.append(f"  - [{st_status}] {st_title}  Notes: {st_notes}")
             else:
                 lines.append(f"  - [{st_status}] {st_title}")
-    lines.append("</system-reminder>")
     return "\n".join(lines)
 
 async def _clear_session_todos(session: Session) -> None:
@@ -598,10 +602,10 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
         plan_size = len(plan_content.encode("utf-8"))
         regular_session = await _create_default_session_async()
         if plan_size > 100 * 1024:
-            impl_prompt = f"Read the plan in `{plan_file}`, carefully research, read all related files first, then implement the plan."
+            impl_prompt = f"Read this plan `{plan_file}`, carefully research, read all related files first, call TodoList to record, then implement the plan step-by-step."
             review_reminder = f"Review the plan in `{plan_file}` and ensure all tasks are completed."
         else:
-            impl_prompt = f"carefully research, read all related files first, then implement the plan:\n\n{plan_content}"
+            impl_prompt = f"Read this plan:\n\n{plan_content}\n\ncarefully research, read all related files first, call TodoList to record, then implement the plan step-by-step:"
             review_reminder = f"Review this plan and ensure all tasks are completed:\n\n{plan_content}"
         await prompt_async(
             impl_prompt,
