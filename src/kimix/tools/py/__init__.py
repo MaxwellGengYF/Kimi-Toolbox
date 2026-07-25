@@ -294,6 +294,7 @@ class Python(CallableTool2[Params]):
                 message=(
                     f"Interactive Python started. task_id: `{task_id}`. "
                     "Send 'exit()' to close the session."
+                    + self._module_not_found_hint(output, python_exe)
                 ),
                 brief="Interactive Python started",
             )
@@ -512,7 +513,10 @@ class Python(CallableTool2[Params]):
         return await self._format_session_result(
             task_id, stream, params, output, status,
             wait_matched=matched, elapsed_seconds=elapsed,
-            message=f"Data sent to `{task_id}`. Status: {status}.",
+            message=(
+                f"Data sent to `{task_id}`. Status: {status}."
+                + self._module_not_found_hint(output, self._resolve_python(params))
+            ),
             brief="Data sent and output retrieved",
         )
 
