@@ -25,9 +25,9 @@ class TestBashParamAliases:
         assert params.cmd == "second"
 
     def test_default_value_preserved(self) -> None:
-        # Use interactive=True to allow empty cmd
+        # Use mode='interactive' to allow empty cmd
         from kimix.tools.file.bash.bash_tool import BashParams
-        params = BashParams(interactive=True)
+        params = BashParams(mode="interactive")
         assert params.cmd == ""
         assert params.timeout == 30
 
@@ -49,18 +49,36 @@ class TestBashModeParameter:
         params = BashParams(cmd="echo hello")
         assert params.mode == "execute"
 
-    def test_mode_send_requires_task_id(self) -> None:
-        with pytest.raises(ValidationError, match="task_id"):
-            BashParams(cmd="input text", mode="send")
+    def test_mode_send_without_task_id_valid(self) -> None:
+        params = BashParams(cmd="echo hi", mode="send")
+        assert params.mode == "send"
 
     def test_mode_send_with_task_id(self) -> None:
         params = BashParams(cmd="input text", mode="send", task_id="bash_abc")
         assert params.mode == "send"
         assert params.task_id == "bash_abc"
 
-    def test_legacy_task_id_auto_infers_mode_send(self) -> None:
-        params = BashParams(cmd="input text", task_id="bash_abc")
+    def test_run_alias_execute(self) -> None:
+        params = BashParams(cmd="echo hi", mode="run")
+        assert params.mode == "execute"
+
+    def test_background_alias_send(self) -> None:
+        params = BashParams(cmd="echo hi", mode="background")
         assert params.mode == "send"
+
+    def test_invalid_mode_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BashParams(cmd="echo hi", mode="exec")
+
+    def test_mode_description_documents_aliases(self) -> None:
+        desc = BashParams.model_fields["mode"].description or ""
+        assert "run" in desc
+        assert "background" in desc
+
+    def test_task_id_continues_session_regardless_of_mode(self) -> None:
+        params = BashParams(cmd="input", mode="execute", task_id="bash_abc")
+        assert params.mode == "execute"
+        assert params.task_id == "bash_abc"
 
 
 # ── Defect 1.4: deduplicate_output ───────────────────────────────────────

@@ -247,34 +247,29 @@ class TestPythonParams:
         """code="..." with no interactive/task_id should be valid."""
         params = PyParams(code="print('hi')")
         assert params.code == "print('hi')"
-        assert params.mode == "run"
+        assert params.mode == "execute"
 
 
 
     def test_mode_background(self) -> None:
-        """mode='background' should work."""
+        """mode='background' should be aliased to 'send'."""
         params = PyParams(code="print('hi')", mode="background")
-        assert params.mode == "background"
+        assert params.mode == "send"
+
+    def test_mode_send_new_name(self) -> None:
+        """mode='send' should work."""
+        params = PyParams(code="print('hi')", mode="send")
+        assert params.mode == "send"
 
     def test_mode_interactive(self) -> None:
         """mode='interactive' should work."""
         params = PyParams(code="print('hi')", mode="interactive")
         assert params.mode == "interactive"
 
-    def test_run_in_background_deprecated(self) -> None:
-        """run_in_background=True should be converted to mode='background'."""
-        params = PyParams(code="print('hi')", run_in_background=True)
-        assert params.mode == "background"
-
     def test_interactive_deprecated(self) -> None:
         """interactive=True should be converted to mode='interactive'."""
         params = PyParams(code="print('hi')", interactive=True)
         assert params.mode == "interactive"
-
-    def test_both_deprecated_booleans_raises(self) -> None:
-        """Both interactive=True and run_in_background=True should raise."""
-        with pytest.raises(ValueError, match="Cannot set both interactive=True and run_in_background=True"):
-            PyParams(code="print('hi')", interactive=True, run_in_background=True)
 
 
 # ---------------------------------------------------------------------------
@@ -490,9 +485,20 @@ class TestPython:
     # Mode tests -----------------------------------------------------------
 
     async def test_mode_background(self, mock_session: MagicMock) -> None:
-        """mode='background' starts a task and returns immediately."""
+        """mode='background' (alias for 'send') starts a task and returns immediately."""
         tool = Python(session=mock_session)
         params = PyParams(code="import time; time.sleep(100)", mode="background", timeout=5)
+        result = await tool(params)
+        assert isinstance(result, ToolOk)
+        assert "Background task started" in result.brief
+        # cleanup
+        for tid in list(get_all_tasks(mock_session).keys()):
+            remove_task_id(mock_session, tid)
+
+    async def test_mode_send_new_name(self, mock_session: MagicMock) -> None:
+        """mode='send' starts a task and returns immediately."""
+        tool = Python(session=mock_session)
+        params = PyParams(code="import time; time.sleep(100)", mode="send", timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
         assert "Background task started" in result.brief
@@ -511,13 +517,22 @@ class TestPython:
         for tid in list(get_all_tasks(mock_session).keys()):
             remove_task_id(mock_session, tid)
 
-    async def test_mode_run_default(self, mock_session: MagicMock) -> None:
-        """mode='run' (default) executes code and waits."""
+    async def test_mode_execute_default(self, mock_session: MagicMock) -> None:
+        """mode='execute' (default) executes code and waits."""
         tool = Python(session=mock_session)
-        params = PyParams(code="print('run_mode_test')", mode="run", timeout=10)
+        params = PyParams(code="print('run_mode_test')", mode="execute", timeout=10)
         result = await tool(params)
         output_str = str(result.output)
         assert "run_mode_test" in output_str
+        assert "status: completed" in output_str
+
+    async def test_mode_run_alias_still_works(self, mock_session: MagicMock) -> None:
+        """mode='run' (alias for 'execute') still works."""
+        tool = Python(session=mock_session)
+        params = PyParams(code="print('run_alias_test')", mode="run", timeout=10)
+        result = await tool(params)
+        output_str = str(result.output)
+        assert "run_alias_test" in output_str
         assert "status: completed" in output_str
 
 

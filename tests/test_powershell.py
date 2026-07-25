@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
@@ -78,6 +79,15 @@ class TestPowershellParams:
     def test_send_new_behavior(self) -> None:
         p = PowershellParams(cmd="Get-Date", mode="send")
         assert p.mode == "send"
+
+    def test_invalid_mode_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PowershellParams(cmd="Get-Date", mode="exec")
+
+    def test_mode_description_documents_aliases(self) -> None:
+        desc = PowershellParams.model_fields["mode"].description or ""
+        assert "run" in desc
+        assert "background" in desc
 
 
 class TestPowershellParamsFullCoverage:

@@ -167,11 +167,12 @@ class PowershellParams(BaseModel):
         alias="command",  # LLM can use "command" instead of "cmd"
         description="PowerShell command or input text for an existing session. Accepts `cmd` or `command`."
     )
-    mode: Literal["execute", "send"] = Field(
+    mode: Literal["execute", "send", "interactive"] = Field(
         default="execute",
         description=(
-            "'execute': Run the PowerShell command. "
-            "'send': Send command as stdin text to an existing session identified by `task_id`."
+            "'execute' (alias: 'run'): Run the PowerShell command. "
+            "'send' (alias: 'background'): Execute the command in background, return task_id immediately. "
+            "'interactive': Start a persistent PowerShell REPL, return task_id for further input."
         ),
     )
     timeout: int = Field(
@@ -179,14 +180,6 @@ class PowershellParams(BaseModel):
         ge=1,
         le=900,
         description="Timeout in seconds (1-900)."
-    )
-    interactive: bool = Field(
-        default=False,
-        description=(
-            "Run PowerShell interactively. "
-            "The process stays alive and accepts further input via task_id. "
-            "Returns a task_id immediately; use TaskOutput to read output."
-        ),
     )
     task_id: str | None = Field(
         default=None,
@@ -214,27 +207,26 @@ class PowershellParams(BaseModel):
                     "Set to False to see raw, unfiltered output.",
     )
 
-    @model_validator(mode="after")
-    def _infer_mode(self) -> "PowershellParams":
-        """Backward compat: when task_id is set but mode is default 'execute', auto-switch to 'send'."""
-        if self.task_id is not None and self.mode == "execute":
-            object.__setattr__(self, 'mode', 'send')
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_mode(cls, data: dict) -> dict:
+        """Convert deprecated boolean flags and mode aliases to canonical names."""
+        if isinstance(data, dict):
+            if data.get('interactive', False):
+                data['mode'] = 'interactive'
+            if 'mode' in data:
+                if data['mode'] == 'run':
+                    data['mode'] = 'execute'
+                elif data['mode'] == 'background':
+                    data['mode'] = 'send'
+        return data
 
     @model_validator(mode="after")
     def _validate_cmd(self) -> "PowershellParams":
-        if self.mode == "execute" and not self.interactive and not self.cmd:
-            raise ValueError("cmd cannot be empty unless interactive=True or mode='send'")
-        if self.mode == "send":
-            if not self.cmd:
-                raise ValueError("cmd cannot be empty when mode='send'")
-            if not self.task_id:
-                raise ValueError("mode='send' requires task_id to identify the target session")
-        if self.task_id is not None and self.mode != "send":
-            raise ValueError("task_id requires mode='send'")
-        return self
-        if self.task_id is not None and self.mode != "send":
-            raise ValueError("task_id requires mode='send'")
+        if self.mode == "execute" and not self.cmd and self.task_id is None:
+            raise ValueError("cmd cannot be empty when mode='execute' and no task_id")
+        if self.task_id is not None and not self.cmd:
+            raise ValueError("cmd cannot be empty when continuing a session via task_id")
         return self
 
 class Powershell(CallableTool2[PowershellParams]):
@@ -294,16 +286,14 @@ class Powershell(CallableTool2[PowershellParams]):
         Returns:
             ToolOk on success, ToolError on failure or timeout.
         """
-        if params.mode == "send":
-            if not params.task_id:
-                return ToolError(
-                    output="",
-                    message="mode='send' requires task_id to identify the target session.",
-                    brief="Missing task_id",
-                )
+        # Early dispatch: continue an existing session
+        if params.task_id is not None:
             return await self._continue_session(params)
 
-        if not params.interactive and not params.cmd:
+        if params.mode == "send":
+            return await self._execute_background(params)
+
+        if params.mode != "interactive" and not params.cmd:
             return ToolError(
                 output="Empty command.",
                 message="No command specified.",
@@ -360,7 +350,7 @@ class Powershell(CallableTool2[PowershellParams]):
             from kimix.utils.windows_env import refresh_env_from_registry
             refresh_env_from_registry()
 
-        if params.interactive:
+        if params.mode == "interactive":
             ps_args = ["-NoP", "-Exec", "Bypass", "-NoL"]
             if cmd:
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT + cmd])
@@ -561,6 +551,30 @@ class Powershell(CallableTool2[PowershellParams]):
                 message=f"Invalid wait_for_pattern: {e}",
                 brief="Invalid pattern",
             )
+
+    async def _execute_background(self, params: PowershellParams) -> ToolReturnValue:
+        """Execute a PowerShell command in background and return immediately with task_id."""
+        cmd = params.cmd
+        executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
+        raw_command = (
+            _PWSH_CONSOLE_INIT
+            + "try{" + cmd + "}catch{$_|Out-String|Write-Error;exit 1}"
+            + ";exit $LASTEXITCODE"
+        )
+        encoded_cmd, param_name, was_encoded = self._maybe_encode_command(raw_command)
+        process_task = ProcessTask(
+            executable,
+            ["-NoP", "-NonI", "-Exec", "Bypass", "-NoL", param_name, encoded_cmd],
+            None,
+            _env_with_rg_bin_path(),
+        )
+        task_id = await process_task.start(self._session, "pwsh")
+
+        return ToolOk(
+            output=f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
+            message=f"Command started in background. task_id: `{task_id}`",
+            brief="Background task started",
+        )
 
     async def _continue_session(self, params: PowershellParams) -> ToolReturnValue:
         """Send input to an existing PowerShell session and optionally wait for output."""

@@ -223,15 +223,27 @@ class TestBashParams:
         p = BashParams(command="echo hello")
         assert p.cmd == "echo hello"
 
-    def test_mode_send_requires_task_id(self) -> None:
-        with pytest.raises(ValueError, match="task_id"):
-            BashParams(cmd="hi", mode="send")
+    def test_mode_send_without_task_id_valid(self) -> None:
+        p = BashParams(cmd="echo hi", mode="send")
+        assert p.mode == "send"
 
     def test_mode_send_with_task_id_succeeds(self) -> None:
         p = BashParams(cmd="hi", task_id="bash_0")
-        # _infer_mode should auto-set mode to "send"
-        assert p.mode == "send"
+        assert p.mode == "execute"
         assert p.task_id == "bash_0"
+
+    def test_task_id_with_any_mode_valid(self) -> None:
+        p = BashParams(cmd="input", mode="execute", task_id="bash_0")
+        assert p.mode == "execute"
+        assert p.task_id == "bash_0"
+
+    def test_run_alias_execute(self) -> None:
+        p = BashParams(cmd="echo hi", mode="run")
+        assert p.mode == "execute"
+
+    def test_background_alias_send(self) -> None:
+        p = BashParams(cmd="echo hi", mode="background")
+        assert p.mode == "send"
 
     def test_deduplicate_output_accepts_token_kill_alias(self) -> None:
         p = BashParams(cmd="ls", token_kill=False)
@@ -997,14 +1009,27 @@ class TestPowershellParams:
         p = PowershellParams(command="Get-ChildItem")
         assert p.cmd == "Get-ChildItem"
 
-    def test_mode_send_requires_task_id(self) -> None:
-        with pytest.raises(ValueError, match="task_id"):
-            PowershellParams(cmd="hi", mode="send")
+    def test_mode_send_without_task_id_valid(self) -> None:
+        p = PowershellParams(cmd="Get-ChildItem", mode="send")
+        assert p.mode == "send"
 
     def test_mode_send_with_task_id_succeeds(self) -> None:
-        p = PowershellParams(cmd="hi", task_id="pwsh_0")
-        assert p.mode == "send"
+        p = PowershellParams(cmd="Get-ChildItem", task_id="pwsh_0")
+        assert p.mode == "execute"
         assert p.task_id == "pwsh_0"
+
+    def test_task_id_with_any_mode_valid(self) -> None:
+        p = PowershellParams(cmd="Get-ChildItem", mode="execute", task_id="pwsh_0")
+        assert p.mode == "execute"
+        assert p.task_id == "pwsh_0"
+
+    def test_run_alias_execute(self) -> None:
+        p = PowershellParams(cmd="Get-ChildItem", mode="run")
+        assert p.mode == "execute"
+
+    def test_background_alias_send(self) -> None:
+        p = PowershellParams(cmd="Get-ChildItem", mode="background")
+        assert p.mode == "send"
 
     def test_deduplicate_output_accepts_token_kill_alias(self) -> None:
         p = PowershellParams(cmd="ls", token_kill=False)
@@ -1566,19 +1591,19 @@ class TestComplexCommands:
 # ============================================================================
 
 class TestBashParamsInteractive:
-    def test_empty_cmd_non_interactive_raises(self) -> None:
+    def test_empty_cmd_execute_raises(self) -> None:
         with pytest.raises(ValueError):
-            BashParams(cmd="", interactive=False)
+            BashParams(cmd="")
 
     def test_empty_cmd_interactive_succeeds(self) -> None:
-        p = BashParams(cmd="", interactive=True)
+        p = BashParams(cmd="", mode="interactive")
         assert p.cmd == ""
-        assert p.interactive is True
+        assert p.mode == "interactive"
 
     def test_cmd_and_interactive_succeeds(self) -> None:
-        p = BashParams(cmd="ls", interactive=True)
+        p = BashParams(cmd="ls", mode="interactive")
         assert p.cmd == "ls"
-        assert p.interactive is True
+        assert p.mode == "interactive"
 
 
 # ============================================================================
@@ -1637,7 +1662,7 @@ class TestBashInteractiveArgumentBuilding:
             mock_instance.start.return_value.set_result("bash-interactive-id")
             mock_pt.return_value = mock_instance
 
-            params = BashParams(cmd="echo start", interactive=True)
+            params = BashParams(cmd="echo start", mode="interactive")
             result = await bash(params)
 
             assert isinstance(result, ToolOk)
@@ -1660,7 +1685,7 @@ class TestBashInteractiveArgumentBuilding:
             mock_instance.start.return_value.set_result("bash-interactive-id")
             mock_pt.return_value = mock_instance
 
-            params = BashParams(cmd="", interactive=True)
+            params = BashParams(cmd="", mode="interactive")
             result = await bash(params)
 
             assert isinstance(result, ToolOk)
@@ -1679,7 +1704,7 @@ class TestBashInteractiveArgumentBuilding:
             mock_instance.start.return_value.set_result("task-456")
             mock_pt.return_value = mock_instance
 
-            params = BashParams(cmd="", interactive=True)
+            params = BashParams(cmd="", mode="interactive")
             result = await bash(params)
 
             assert isinstance(result, ToolOk)
@@ -1854,7 +1879,7 @@ class TestBashSessionContinuation:
 class TestBashInteractiveIntegration:
     async def test_interactive_echo(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
-        params = BashParams(cmd="", interactive=True)
+        params = BashParams(cmd="", mode="interactive")
         result = await bash(params)
         assert isinstance(result, ToolOk)
         task_id = result.message.split("`")[1]
@@ -1874,7 +1899,7 @@ class TestBashInteractiveIntegration:
 
     async def test_interactive_start_with_wait_for_pattern(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
-        params = BashParams(cmd="echo hello", interactive=True, wait_for_pattern="hello", timeout=10)
+        params = BashParams(cmd="echo hello", mode="interactive", wait_for_pattern="hello", timeout=10)
         result = await bash(params)
         assert isinstance(result, ToolOk)
         assert "bash" in result.output

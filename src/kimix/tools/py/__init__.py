@@ -50,8 +50,8 @@ class Params(BaseModel):
     mode: Literal["execute", "send", "interactive"] = Field(
         default="execute",
         description=(
-            "'execute': Run code and wait for completion (default). "
-            "'send': Execute code in background, return immediately with task_id. "
+            "'execute' (alias: 'run'): Run code and wait for completion (default). "
+            "'send' (alias: 'background'): Execute code in background, return immediately with task_id. "
             "'interactive': Start a persistent Python REPL, return task_id for further input."
         ),
     )

@@ -120,6 +120,15 @@ class TestPythonUnifiedMode:
         params = PythonParams(code="print(1)", mode="send")
         assert params.mode == "send"
 
+    def test_invalid_mode_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PythonParams(code="print(1)", mode="exec")
+
+    def test_mode_description_documents_aliases(self) -> None:
+        desc = PythonParams.model_fields["mode"].description or ""
+        assert "run" in desc
+        assert "background" in desc
+
 
 
 

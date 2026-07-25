@@ -43,10 +43,45 @@ class TestBackwardCompatibility:
         params = PythonParams(interactive=True)
         assert params.mode == "interactive"
 
-    def test_python_run_in_background_legacy_bool(self) -> None:
+    def test_bash_interactive_legacy_bool(self) -> None:
+        from kimix.tools.file.bash.bash_tool import BashParams
+        params = BashParams(cmd="ls", interactive=True)
+        assert params.mode == "interactive"
+
+    def test_powershell_interactive_legacy_bool(self) -> None:
+        from kimix.tools.file.bash.pwsh_tool import PowershellParams
+        params = PowershellParams(cmd="Get-Date", interactive=True)
+        assert params.mode == "interactive"
+
+    def test_python_run_alias(self) -> None:
         from kimix.tools.py import Params as PythonParams
-        params = PythonParams(code="print(1)", run_in_background=True)
-        assert params.mode == "background"
+        params = PythonParams(code="print(1)", mode="run")
+        assert params.mode == "execute"
+
+    def test_python_background_alias(self) -> None:
+        from kimix.tools.py import Params as PythonParams
+        params = PythonParams(code="print(1)", mode="background")
+        assert params.mode == "send"
+
+    def test_bash_run_alias(self) -> None:
+        from kimix.tools.file.bash.bash_tool import BashParams
+        params = BashParams(cmd="echo hi", mode="run")
+        assert params.mode == "execute"
+
+    def test_bash_background_alias(self) -> None:
+        from kimix.tools.file.bash.bash_tool import BashParams
+        params = BashParams(cmd="echo hi", mode="background")
+        assert params.mode == "send"
+
+    def test_powershell_run_alias(self) -> None:
+        from kimix.tools.file.bash.pwsh_tool import PowershellParams
+        params = PowershellParams(cmd="Get-Date", mode="run")
+        assert params.mode == "execute"
+
+    def test_powershell_background_alias(self) -> None:
+        from kimix.tools.file.bash.pwsh_tool import PowershellParams
+        params = PowershellParams(cmd="Get-Date", mode="background")
+        assert params.mode == "send"
 
     def test_editfile_single_edit_auto_wrap(self) -> None:
         from kimi_cli.tools.file.replace import Params as EditFileParams
