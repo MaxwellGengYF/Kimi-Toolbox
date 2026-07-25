@@ -1,6 +1,6 @@
 [project]
 name = "kosong-x"
-version = "0.53.11"
+version = "0.54.1"
 description = "The LLM abstraction layer for modern AI agent applications."
 readme = "README.md"
 requires-python = ">=3.14"

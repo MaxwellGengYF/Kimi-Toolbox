@@ -1,6 +1,6 @@
 [project]
 name = "kimi-cli-x"
-version = "1.44.12"
+version = "1.45.1"
 description = "Kimi Code CLI is your next CLI agent."
 readme = "README.md"
 requires-python = ">=3.14"
