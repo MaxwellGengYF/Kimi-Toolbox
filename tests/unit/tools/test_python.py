@@ -28,6 +28,53 @@ class TestPythonCodeUnified:
         params = PythonParams(mode="interactive")
         assert params.code == ""
 
+    def test_task_id_with_code_valid_any_mode(self) -> None:
+        for mode in ("execute", "send", "interactive"):
+            p = PythonParams(code="print(1)", task_id="python_1", mode=mode)
+            assert p.task_id == "python_1"
+
+    def test_task_id_without_code_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PythonParams(code="", task_id="python_1", mode="send")
+
+    def test_timeout_default(self) -> None:
+        assert PythonParams(code="pass").timeout == 30
+
+    def test_timeout_min_max(self) -> None:
+        assert PythonParams(code="pass", timeout=1).timeout == 1
+        assert PythonParams(code="pass", timeout=900).timeout == 900
+
+    def test_timeout_below_min_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PythonParams(code="pass", timeout=0)
+
+    def test_timeout_above_max_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PythonParams(code="pass", timeout=901)
+
+    def test_max_lines_field_and_none(self) -> None:
+        assert PythonParams(code="pass", max_lines=50).max_lines == 50
+        assert PythonParams(code="pass", max_lines=None).max_lines is None
+
+    def test_max_lines_below_min_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PythonParams(code="pass", max_lines=2)
+
+    def test_wait_for_pattern_field(self) -> None:
+        assert PythonParams(code="pass", wait_for_pattern="^ok").wait_for_pattern == "^ok"
+
+    def test_output_path_field(self) -> None:
+        assert PythonParams(code="pass", output_path="out.txt").output_path == "out.txt"
+
+    def test_deduplicate_output_default_true(self) -> None:
+        assert PythonParams(code="pass").deduplicate_output is True
+
+    def test_deduplicate_output_new_name(self) -> None:
+        assert PythonParams(code="pass", deduplicate_output=False).deduplicate_output is False
+
+    def test_deduplicate_output_token_kill_alias(self) -> None:
+        assert PythonParams(code="pass", token_kill=False).deduplicate_output is False
+
     def test_file_alias_accepted(self) -> None:
         """file=... alias maps to the code field."""
         params = PythonParams(file="script.py")

@@ -51,21 +51,95 @@ class TestPowershellParams:
     def test_cmd_only_succeeds(self) -> None:
         p = PowershellParams(cmd="Get-Location")
         assert p.cmd == "Get-Location"
-        assert p.interactive is False
+        assert p.mode == "execute"
 
-    def test_empty_cmd_non_interactive_raises(self) -> None:
+    def test_empty_cmd_execute_raises(self) -> None:
         with pytest.raises(ValueError):
-            PowershellParams(cmd="", interactive=False)
+            PowershellParams(cmd="")
 
     def test_empty_cmd_interactive_succeeds(self) -> None:
-        p = PowershellParams(cmd="", interactive=True)
+        p = PowershellParams(cmd="", mode="interactive")
         assert p.cmd == ""
-        assert p.interactive is True
+        assert p.mode == "interactive"
 
     def test_cmd_and_interactive_succeeds(self) -> None:
-        p = PowershellParams(cmd="Get-Location", interactive=True)
+        p = PowershellParams(cmd="Get-Location", mode="interactive")
         assert p.cmd == "Get-Location"
-        assert p.interactive is True
+        assert p.mode == "interactive"
+
+    def test_run_alias_execute(self) -> None:
+        p = PowershellParams(cmd="Get-Date", mode="run")
+        assert p.mode == "execute"
+
+    def test_background_alias_send(self) -> None:
+        p = PowershellParams(cmd="Get-Date", mode="background")
+        assert p.mode == "send"
+
+    def test_send_new_behavior(self) -> None:
+        p = PowershellParams(cmd="Get-Date", mode="send")
+        assert p.mode == "send"
+
+
+class TestPowershellParamsFullCoverage:
+    """Cover every PowershellParams field and alias."""
+
+    def test_command_alias_accepted(self) -> None:
+        p = PowershellParams(command="Get-Location")
+        assert p.cmd == "Get-Location"
+
+    def test_legacy_interactive_flag_sets_mode(self) -> None:
+        p = PowershellParams(cmd="Get-Date", interactive=True)
+        assert p.mode == "interactive"
+
+    def test_task_id_with_cmd_valid(self) -> None:
+        p = PowershellParams(cmd="dir", task_id="pwsh_1")
+        assert p.task_id == "pwsh_1"
+        assert p.mode == "execute"
+
+    def test_task_id_with_any_mode_valid(self) -> None:
+        for mode in ("execute", "send", "interactive"):
+            p = PowershellParams(cmd="dir", task_id="pwsh_1", mode=mode)
+            assert p.task_id == "pwsh_1"
+
+    def test_task_id_without_cmd_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            PowershellParams(cmd="", task_id="pwsh_1", mode="send")
+
+    def test_wait_for_pattern_field(self) -> None:
+        p = PowershellParams(cmd="Get-Date", wait_for_pattern="^ok")
+        assert p.wait_for_pattern == "^ok"
+
+    def test_timeout_default(self) -> None:
+        assert PowershellParams(cmd="x").timeout == 30
+
+    def test_timeout_min_max(self) -> None:
+        assert PowershellParams(cmd="x", timeout=1).timeout == 1
+        assert PowershellParams(cmd="x", timeout=900).timeout == 900
+
+    def test_timeout_below_min_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            PowershellParams(cmd="x", timeout=0)
+
+    def test_timeout_above_max_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            PowershellParams(cmd="x", timeout=901)
+
+    def test_max_lines_field_and_none(self) -> None:
+        assert PowershellParams(cmd="x", max_lines=50).max_lines == 50
+        assert PowershellParams(cmd="x", max_lines=None).max_lines is None
+
+    def test_max_lines_below_min_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            PowershellParams(cmd="x", max_lines=2)
+
+    def test_deduplicate_output_default_true(self) -> None:
+        assert PowershellParams(cmd="x").deduplicate_output is True
+
+    def test_deduplicate_output_new_name(self) -> None:
+        assert PowershellParams(cmd="x", deduplicate_output=False).deduplicate_output is False
+
+    def test_deduplicate_output_token_kill_alias(self) -> None:
+        assert PowershellParams(cmd="x", token_kill=False).deduplicate_output is False
 
 
 # ============================================================================
@@ -122,7 +196,7 @@ class TestPowershellArgumentBuilding:
             mock_instance.start.return_value.set_result("pwsh-interactive-id")
             mock_pt.return_value = mock_instance
 
-            params = PowershellParams(cmd="Read-Host 'Name'", interactive=True)
+            params = PowershellParams(cmd="Read-Host 'Name'", mode="interactive")
             result = await pwsh(params)
 
             assert isinstance(result, ToolOk)
@@ -144,7 +218,7 @@ class TestPowershellArgumentBuilding:
             mock_instance.start.return_value.set_result("pwsh-interactive-id")
             mock_pt.return_value = mock_instance
 
-            params = PowershellParams(cmd="", interactive=True)
+            params = PowershellParams(cmd="", mode="interactive")
             result = await pwsh(params)
 
             assert isinstance(result, ToolOk)
@@ -162,7 +236,7 @@ class TestPowershellArgumentBuilding:
             mock_instance.start.return_value.set_result("task-123")
             mock_pt.return_value = mock_instance
 
-            params = PowershellParams(cmd="", interactive=True)
+            params = PowershellParams(cmd="", mode="interactive")
             result = await pwsh(params)
 
             assert isinstance(result, ToolOk)
@@ -284,7 +358,7 @@ class TestPowershellSessionContinuation:
 class TestPowershellInteractiveIntegration:
     async def test_interactive_read_host(self, mock_session: MagicMock) -> None:
         pwsh = Powershell(session=mock_session)
-        params = PowershellParams(cmd="Read-Host -Prompt 'Name'", interactive=True)
+        params = PowershellParams(cmd="Read-Host -Prompt 'Name'", mode="interactive")
         result = await pwsh(params)
         assert isinstance(result, ToolOk)
         task_id = result.message.split("`")[1]
@@ -309,7 +383,7 @@ class TestPowershellInteractiveIntegration:
 
     async def test_persistent_repl_session(self, mock_session: MagicMock) -> None:
         pwsh = Powershell(session=mock_session)
-        params = PowershellParams(cmd="", interactive=True)
+        params = PowershellParams(cmd="", mode="interactive")
         result = await pwsh(params)
         assert isinstance(result, ToolOk)
         task_id = result.message.split("`")[1]
