@@ -1,6 +1,7 @@
 """Python tool that executes code or runs .py files via the system Python executable."""
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -46,22 +47,13 @@ class Params(BaseModel):
         le=900,
         description="Timeout in seconds (1-900)."
     )
-    mode: Literal["run", "background", "interactive"] = Field(
-        default="run",
+    mode: Literal["execute", "send", "interactive"] = Field(
+        default="execute",
         description=(
-            "'run': Execute code and wait for completion (default). "
-            "'background': Execute code in background, return immediately with task_id. "
+            "'execute': Run code and wait for completion (default). "
+            "'send': Execute code in background, return immediately with task_id. "
             "'interactive': Start a persistent Python REPL, return task_id for further input."
         ),
-    )
-    # Deprecated boolean aliases for mode
-    run_in_background: bool = Field(
-        default=False,
-        description="[Deprecated] Use mode='background' instead.",
-    )
-    interactive: bool = Field(
-        default=False,
-        description="[Deprecated] Use mode='interactive' instead.",
     )
     task_id: str | None = Field(
         default=None,
@@ -90,22 +82,24 @@ class Params(BaseModel):
                     "Set to False to see raw, unfiltered output.",
     )
 
-
-    @model_validator(mode="after")
-    def _normalize_mode(self) -> "Params":
-        """Convert deprecated boolean flags to mode string."""
-        if self.interactive and self.run_in_background:
-            raise ValueError("Cannot set both interactive=True and run_in_background=True")
-        if self.interactive:
-            object.__setattr__(self, 'mode', 'interactive')
-        elif self.run_in_background:
-            object.__setattr__(self, 'mode', 'background')
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_mode(cls, data: dict) -> dict:
+        """Convert deprecated boolean flags and mode aliases to canonical names."""
+        if isinstance(data, dict):
+            if data.get('interactive', False):
+                data['mode'] = 'interactive'
+            if 'mode' in data:
+                if data['mode'] == 'run':
+                    data['mode'] = 'execute'
+                elif data['mode'] == 'background':
+                    data['mode'] = 'send'
+        return data
 
     @model_validator(mode="after")
     def _validate_source(self) -> "Params":
         if not self.code and self.task_id is None and self.mode != "interactive":
-            raise ValueError("`code` must be provided (unless interactive=True or task_id is set).")
+            raise ValueError("`code` must be provided (unless mode='interactive' or task_id is set).")
         if self.task_id is not None and not self.code:
             raise ValueError("code cannot be empty when continuing a session via task_id")
         return self
@@ -124,7 +118,11 @@ class Python(CallableTool2[Params]):
         "you can use the \"rtk\" executable to reduce token usage: rtk is a valid binary available on "
         "PATH with the usage pattern `rtk <process> <arguments...>`. For example: "
         "subprocess.run([\"rtk\", \"pytest\", \"-v\"]) or subprocess.run(\"rtk pip list\", shell=True). "
-        "rtk automatically deduplicates and truncates the output of the wrapped command."
+        "rtk automatically deduplicates and truncates the output of the wrapped command. "
+        "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
+        "the backend interpreter). To install packages for scripts run by this tool, use "
+        "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
+        "'uv pip install <pkg>' in the project directory — not bare 'pip install'."
         " "
         + _interactive_scope_text(is_shell=False)
     )
@@ -135,10 +133,86 @@ class Python(CallableTool2[Params]):
         self._session = session
         self._semaphore = asyncio.Semaphore(8)
         self._script_counter = 0
+        self._resolved_python: str | None = None
 
     def _resolve_python(self, params: Params) -> str:
-        """Resolve the Python executable. Always returns ``sys.executable``."""
+        """Resolve the Python executable used to run scripts.
+
+        Priority order:
+          1. ``KIMIX_PYTHON_EXECUTABLE`` env var (explicit override).
+          2. A project ``.venv`` next to the session dir / cwd (walking up).
+          3. ``VIRTUAL_ENV`` env var (active venv).
+          4. ``sys.executable`` (fallback, backward compatible).
+
+        The result is cached, but the cached path is re-validated on each call
+        so a deleted/moved interpreter triggers re-resolution.
+        """
+        if self._resolved_python and Path(self._resolved_python).is_file():
+            return self._resolved_python
+        self._resolved_python = self._resolve_python_uncached()
+        return self._resolved_python
+
+    def _resolve_python_uncached(self) -> str:
+        # 1. explicit override
+        override = os.environ.get("KIMIX_PYTHON_EXECUTABLE")
+        if override and Path(override).is_file():
+            return override
+        # 2. project .venv next to the session dir / cwd, walking up
+        bases: list[Path] = []
+        try:
+            bases.append(Path(self._session.dir))
+        except TypeError:
+            pass
+        bases.append(Path.cwd())
+        for base in bases:
+            for parent in (base, *base.parents):
+                for candidate in (
+                    parent / ".venv" / "Scripts" / "python.exe",  # Windows
+                    parent / ".venv" / "bin" / "python",          # POSIX
+                ):
+                    if candidate.is_file():
+                        return str(candidate)
+        # 3. VIRTUAL_ENV
+        venv = os.environ.get("VIRTUAL_ENV")
+        if venv:
+            for candidate in (
+                Path(venv) / "Scripts" / "python.exe",
+                Path(venv) / "bin" / "python",
+            ):
+                if candidate.is_file():
+                    return str(candidate)
+        # 4. fallback
         return sys.executable
+
+    @staticmethod
+    def _build_env(python_exe: str) -> dict[str, str] | None:
+        """Build a child-process env that pins pip/python to the resolved venv.
+
+        Returns None when the interpreter is not inside a virtualenv (e.g. the
+        ``sys.executable`` fallback), leaving the default env untouched.
+        """
+        exe = Path(python_exe)
+        if exe.parent.name not in ("Scripts", "bin"):
+            return None
+        venv_dir = exe.parent.parent
+        if not (venv_dir / "pyvenv.cfg").is_file():
+            return None
+        env = dict(os.environ)
+        env["PATH"] = str(exe.parent) + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        return env
+
+    @staticmethod
+    def _module_not_found_hint(output: str, python_exe: str) -> str:
+        """Return a remediation hint when the output shows ModuleNotFoundError."""
+        match = re.search(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]", output)
+        if not match:
+            return ""
+        return (
+            f" Hint: the script ran with interpreter '{python_exe}'. If you installed "
+            "the package with plain 'pip install', it may have gone to a different "
+            f"environment. Retry with '{python_exe}' -m pip install {match.group(1)}."
+        )
 
 
 
@@ -179,7 +253,7 @@ class Python(CallableTool2[Params]):
         async with self._semaphore:
             if params.mode == "interactive":
                 return await self._start_interactive(params)
-            elif params.mode == "background":
+            elif params.mode == "send":
                 # Execute in background mode
                 return await self._execute_code(params, background=True)
             else:
@@ -201,7 +275,9 @@ class Python(CallableTool2[Params]):
             return pattern
 
         python_exe = self._resolve_python(params)
-        process_task = ProcessTask(python_exe, args, append_newline=True)
+        process_task = ProcessTask(
+            python_exe, args, env=self._build_env(python_exe), append_newline=True
+        )
         task_id = await process_task.start(self._session, "python")
 
         if params.wait_for_pattern is not None and process_task.stream is not None:
@@ -257,7 +333,7 @@ class Python(CallableTool2[Params]):
         python_exe = self._resolve_python(params)
         args = [script_path]
 
-        process_task = ProcessTask(python_exe, args)
+        process_task = ProcessTask(python_exe, args, env=self._build_env(python_exe))
         task_id = await process_task.start(self._session, "python")
 
         if background:
@@ -329,7 +405,10 @@ class Python(CallableTool2[Params]):
             if not success:
                 return ToolError(
                     output=output,
-                    message="Python execution failed",
+                    message=(
+                        f"Python execution failed (interpreter: {python_exe})"
+                        + self._module_not_found_hint(output, python_exe)
+                    ),
                     brief="Python execution error"
                 )
             success_message = f"{source_label}: `{display_script_path}`"
@@ -354,7 +433,11 @@ class Python(CallableTool2[Params]):
         if not success:
             return ToolError(
                 output=block,
-                message=f"{source_label}: `{display_script_path}` failed",
+                message=(
+                    f"{source_label}: `{display_script_path}` failed "
+                    f"(interpreter: {python_exe})"
+                    + self._module_not_found_hint(output, python_exe)
+                ),
                 brief="Python execution error"
             )
 
