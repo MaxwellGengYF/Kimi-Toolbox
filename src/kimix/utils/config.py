@@ -21,7 +21,45 @@ _REQUIRED_PROVIDER_KEYS: tuple[str, ...] = ("type", "max_context_size", "model",
 _SUB_PROVIDER_PICK_PRIORITY: tuple[str | None, ...] = (None, "sub_agent", "planner")
 
 
+# Keys that identify a specific provider entry and must never be inherited
+# from the top-level config into sub-providers.
+_SUB_PROVIDER_NO_INHERIT_KEYS: frozenset[str] = frozenset({"model", "model_name", "name", "role"})
+
+
 # ── Sub-provider normalization ─────────────────────────────────────────────
+
+
+def _inherit_sub_provider_defaults(
+    config_data: dict[str, Any],
+    sub_provider: Any,
+    sub_providers: Any,
+) -> None:
+    """Fill missing keys in each sub-provider entry from the top-level config.
+
+    Any key present in ``config_data`` (except identity keys such as ``model``
+    and ``role``) is copied into a sub-provider entry only when that entry does
+    not already define the key. Mutates the raw sub-provider entries in place
+    so that later normalization/validation sees the inherited values.
+    """
+    if not config_data:
+        return
+    defaults = {
+        k: v for k, v in config_data.items() if k not in _SUB_PROVIDER_NO_INHERIT_KEYS
+    }
+    if not defaults:
+        return
+
+    def _fill(entry: Any) -> None:
+        if isinstance(entry, dict):
+            for key, value in defaults.items():
+                entry.setdefault(key, value)
+
+    for src in (sub_provider, sub_providers):
+        if isinstance(src, dict):
+            _fill(src)
+        elif isinstance(src, list):
+            for entry in src:
+                _fill(entry)
 
 
 def _normalize_sub_providers(
@@ -241,6 +279,7 @@ def _load_and_set_provider(config_data: dict[str, Any]) -> None:
 
     sub_provider = config_data.pop("sub_provider", None)
     sub_providers = config_data.pop("sub_providers", None)
+    _inherit_sub_provider_defaults(config_data, sub_provider, sub_providers)
     normalized_providers = _normalize_sub_providers(sub_provider, sub_providers)
     _pick_main_from_sub_providers(config_data, sub_provider, sub_providers)
     base.set_default_provider(config_data)

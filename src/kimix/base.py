@@ -546,6 +546,29 @@ def _flush_tool_call_part_output(
     output_function(payload, MessageType.ToolCallingPart)
     tmp_data[_TOOL_CALL_PART_EMITTED_LEN_KEY] = len(payload)
 
+# Mapping from argument-key aliases (pydantic Field(alias=...)) to the
+# canonical key used for streaming decisions, color lookup, and display.
+_ARG_KEY_ALIASES: dict[str, str] = {
+    "old_string": "old",
+    "new_string": "new",
+    "text": "content",
+    "source_code": "code",
+    "task": "prompt",
+    "file_path": "path",
+    "cmd": "command",
+    "session": "session_id",
+    "edits": "edit",
+    "items": "todos",
+    "block": "wait",
+    "token_kill": "deduplicate_output",
+}
+
+
+def _canonical_key(key: str) -> str:
+    """Return the canonical form of *key*, resolving pydantic Field aliases."""
+    return _ARG_KEY_ALIASES.get(key, key)
+
+
 # Tool names eligible for streaming argument display.
 # Only these tools benefit from the incremental decoded output;
 # all other tools (e.g. Grep, Powershell, Bash) use the legacy
@@ -556,18 +579,19 @@ _STREAM_TOOL_NAMES = frozenset({
     "Python",
     "Agent",
     "EditFile",
+    "EditPlan",
 })
 
 # Tool-call argument keys whose (potentially very long) string values are
 # printed decoded, token by token, as they stream in from the LLM.
+# Aliases (e.g. old_string, new_string, text, source_code, task) are
+# canonicalized via _canonical_key() before lookup.
 _STREAM_ARG_KEYS = frozenset({
     "content",       # WriteFile / WritePlan
     "code",          # Python
     "prompt",        # Agent
-    "old", "new",    # EditFile edit items
-    "old_string", "new_string", "text", "source_code",
+    "old", "new",    # EditFile / EditPlan edit items
     "question", "context", "instruction",
-    "task",          # Agent (alias of prompt)
 })
 
 # Foreground color for the "⚡ ToolName" header printed when a tool call
@@ -766,9 +790,7 @@ class _ToolCallStreamPrinter:
     # _flush_emit. Keys not listed here fall back to GRAY_LIGHT.
     _STREAM_KEY_COLORS: dict[str, Color | Color256] = {
         "old": Color.BRIGHT_RED,
-        "old_string": Color.BRIGHT_RED,
         "new": Color.BRIGHT_GREEN,
-        "new_string": Color.BRIGHT_GREEN,
         "code": Color.BRIGHT_BLUE,
         "prompt": Color.BRIGHT_YELLOW,
         "question": Color.BRIGHT_YELLOW,
@@ -1049,6 +1071,7 @@ class _ToolCallStreamPrinter:
             self._value_chars.append(s)
 
     def _begin_string_value(self) -> None:
+        self._current_key = _canonical_key(self._current_key)
         self._string_streamed = self._current_key in _STREAM_ARG_KEYS
         self._value_chars = []
         self._state = self._IN_STRING
@@ -1078,7 +1101,8 @@ class _ToolCallStreamPrinter:
     def _emit_compact(self, text: str) -> None:
         if len(text) > 60:
             text = text[:60] + "..."
-        segment = f"{self._separator()}{self._current_key}:\n{text}" if self._current_key \
+        canonical_key = _canonical_key(self._current_key) if self._current_key else ""
+        segment = f"{self._separator()}{canonical_key}:\n{text}" if canonical_key \
             else f"{self._separator()}{text}"
         _stream.colorful_print_word(
             segment, fg=Color.BRIGHT_MAGENTA, require_new_line=False, flush=True)
@@ -1149,7 +1173,7 @@ def _print_compact_tool_header(session: Session, last_tc: ToolCall) -> bool:
     if formatted:
         _stream.colorful_print_word(
             f"⚡ {last_tc.function.name} {formatted}",
-            fg=_tool_header_color(last_tc.function.name), require_new_line=True)
+            fg=_tool_header_color(last_tc.function.name), require_new_line=True, flush=True)
         tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
         tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = last_tc.id
         return True
@@ -1232,7 +1256,7 @@ def _handle_tool_call(
                 # A new tool call supersedes any previous stream printer.
                 _finish_tool_call_stream(session)
                 _stream.colorful_print_word(
-                    f"⚡ {name}", fg=_tool_header_color(name), require_new_line=True)
+                    f"⚡ {name}", fg=_tool_header_color(name), require_new_line=True, flush=True)
                 _stream._state = StreamPrintState.Other
                 printer = _ToolCallStreamPrinter(name, session)
                 session._tmp_data[_TOOL_CALL_STREAM_KEY] = printer
@@ -1250,7 +1274,7 @@ def _handle_tool_call(
         else:
             return
         _stream.colorful_print_word(
-            header, fg=_tool_header_color(name), require_new_line=True)
+            header, fg=_tool_header_color(name), require_new_line=True, flush=True)
         _stream._state = StreamPrintState.Other
         session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
         session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
@@ -1365,12 +1389,14 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
                     f"{prefix}{tool_name}",
                     fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
                     require_new_line=True,
+                    flush=True,
                 )
         else:
             _stream.colorful_print_word(
                 f"{prefix}{result_text}",
                 fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
                 require_new_line=True,
+                flush=True,
             )
     else:
         _stream.print_word('', True)

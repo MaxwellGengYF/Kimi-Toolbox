@@ -451,14 +451,162 @@ def test_tool_header_color_always_bright_magenta() -> None:
 def test_stream_color_for_key_mapping_and_fallback() -> None:
     printer = base._ToolCallStreamPrinter
     assert printer._stream_color_for_key("old") is base.Color.BRIGHT_RED
-    assert printer._stream_color_for_key("old_string") is base.Color.BRIGHT_RED
     assert printer._stream_color_for_key("new") is base.Color.BRIGHT_GREEN
-    assert printer._stream_color_for_key("new_string") is base.Color.BRIGHT_GREEN
     assert printer._stream_color_for_key("code") is base.Color.BRIGHT_BLUE
     assert printer._stream_color_for_key("prompt") is base.Color.BRIGHT_YELLOW
     assert printer._stream_color_for_key("content") is base.Color.BRIGHT_BLACK
     assert printer._stream_color_for_key("context") is base.GRAY
+    # Aliases are canonicalized before lookup, so the raw color dict
+    # returns the fallback for alias keys.
+    assert printer._stream_color_for_key("old_string") is base.GRAY_LIGHT
+    assert printer._stream_color_for_key("new_string") is base.GRAY_LIGHT
     assert printer._stream_color_for_key("anything_else") is base.GRAY_LIGHT
+
+
+async def test_stream_prints_with_alias_old_string(monkeypatch: Any) -> None:
+    """When the LLM sends old_string / new_string aliases, the stream
+    printer canonicalizes them and displays old: / new: with correct
+    colors (red for old, green for new)."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"path": "f.py", "edit": [{"old_string": "aaa", "new_string": "bbb"}]}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi("".join(chunks))
+
+    # Header printed.
+    assert "\x1b[95m\u26a1 EditFile\x1b[0m" in output
+    # Old value displayed in bright red, labeled "old:" (canonical).
+    assert "\x1b[91maaa\x1b[0m" in output, "old_string value should be bright red"
+    assert "\nold:\n" in plain, "alias old_string should display as canonical 'old:'"
+    # New value displayed in bright green, labeled "new:" (canonical).
+    assert "\x1b[92mbbb\x1b[0m" in output, "new_string value should be bright green"
+    assert "\nnew:\n" in plain, "alias new_string should display as canonical 'new:'"
+    # Stream finished cleanly.
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_prints_editplan_with_aliases(monkeypatch: Any) -> None:
+    """EditPlan streaming works with old_string / new_string aliases."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="EditPlan", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"edit": [{"old_string": "aaa", "new_string": "bbb"}]}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi("".join(chunks))
+
+    # EditPlan header printed (bright magenta).
+    assert "\x1b[95m\u26a1 EditPlan\x1b[0m" in output
+    # Canonical labels displayed.
+    assert "\nold:\n" in plain
+    assert "\nnew:\n" in plain
+    # Values streamed with correct colors.
+    assert "\x1b[91maaa\x1b[0m" in output
+    assert "\x1b[92mbbb\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_alias_text_maps_to_content(monkeypatch: Any) -> None:
+    """The 'text' alias streams as 'content' with bright black color."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"path": "x.py", "text": "hello world"}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi("".join(chunks))
+
+    # Label is canonical "content:".
+    assert "\ncontent:\n" in plain, "alias 'text' should display as canonical 'content:'"
+    # Value is streamed (not compact) with bright black color.
+    assert "\x1b[90mhello world\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_alias_source_code_maps_to_code(monkeypatch: Any) -> None:
+    """The 'source_code' alias streams as 'code' with bright blue color."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="Python", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"source_code": "print(1)"}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi("".join(chunks))
+
+    # Label is canonical "code:".
+    assert "\ncode:\n" in plain, "alias 'source_code' should display as canonical 'code:'"
+    # Value is streamed with bright blue color.
+    assert "\x1b[94mprint(1)\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_alias_task_maps_to_prompt(monkeypatch: Any) -> None:
+    """The 'task' alias streams as 'prompt' with bright yellow color."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="Agent", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"task": "do it now"}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi("".join(chunks))
+
+    # Label is canonical "prompt:".
+    assert "\nprompt:\n" in plain, "alias 'task' should display as canonical 'prompt:'"
+    # Value is streamed with bright yellow color.
+    assert "\x1b[93mdo it now\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
 
 
 async def test_stream_colors_writefile_header_and_content_white(monkeypatch: Any) -> None:
@@ -755,7 +903,129 @@ async def test_powershell_bash_streamed_fragments_print_command_alias(monkeypatc
         await base.print_agent_json(ToolCallPart(arguments_part='{"command": "Get-Da'), session)
         await base.print_agent_json(ToolCallPart(arguments_part='te"}'), session)
         plain = _plain(chunks)
-        assert f"⚡ {tool_name}" in plain
+        assert f"\u26a1 {tool_name}" in plain
         assert "Get-Date" in plain, (
             f"{tool_name}: streamed header missing command: {plain!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Flush tests — verify that tool headers and results use flush=True
+# so output appears immediately rather than sitting in stdout's buffer.
+# ---------------------------------------------------------------------------
+
+
+def _capture_base_stream_with_flush(monkeypatch: Any) -> tuple[list[str], list[bool]]:
+    """Like _capture_base_stream but also captures ``flush`` flags per call."""
+    chunks: list[str] = []
+    flush_flags: list[bool] = []
+
+    def print_func(
+        *values: object,
+        sep: str = " ",
+        end: str = "\n",
+        flush: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        chunks.append(sep.join(str(value) for value in values) + end)
+        flush_flags.append(flush)
+
+    monkeypatch.setattr(base, "_stream", base.PrintStream(print_func=print_func))
+    monkeypatch.setattr(base, "_text_buffer", None)
+    monkeypatch.setattr(base, "_quiet", False)
+    monkeypatch.setattr(base, "_colorful_print", True)
+    return chunks, flush_flags
+
+
+async def test_compact_path_tool_header_flushes(monkeypatch: Any) -> None:
+    """Fix 1: Compact-path headers (TaskOutput, etc.) must use ``flush=True``
+    so the ``\u26a1`` line appears immediately, not buffered for seconds."""
+    chunks, flush_flags = _capture_base_stream_with_flush(monkeypatch)
+    session = FakeSession()
+
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(
+                name="TaskOutput",
+                arguments='{"task_id": "pwsh_xxx"}',
+            ),
+        ),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "\u26a1 TaskOutput" in plain
+    assert any(flush_flags), (
+        "No flush=True found — compact-path tool header did not flush"
+    )
+
+
+async def test_fragmented_compact_header_flushes(monkeypatch: Any) -> None:
+    """Fix 1b: When compact-path arguments arrive via ToolCallPart fragments,
+    ``_print_compact_tool_header`` must use ``flush=True``."""
+    chunks, flush_flags = _capture_base_stream_with_flush(monkeypatch)
+    session = FakeSession()
+
+    # Empty-args header + one fragment that completes the JSON.
+    await base.print_agent_json(
+        ToolCall(id="call-1", function=ToolCall.FunctionBody(name="Glob", arguments="")),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"pattern": "*.py"}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "\u26a1 Glob" in plain
+    assert any(flush_flags), (
+        "No flush=True found — fragmented compact header did not flush"
+    )
+
+
+async def test_stream_path_header_flushes(monkeypatch: Any) -> None:
+    """Fix 2: Stream-path tool headers must use ``flush=True`` for immediate
+    visibility even before argument fragments arrive."""
+    chunks, flush_flags = _capture_base_stream_with_flush(monkeypatch)
+    session = FakeSession()
+
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        ),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "\u26a1 WriteFile" in plain
+    assert any(flush_flags), (
+        "No flush=True found — stream-path tool header did not flush"
+    )
+
+
+async def test_tool_result_flushes(monkeypatch: Any) -> None:
+    """Fix 3: Tool-result ``\u2713/\u2717`` lines must use ``flush=True`` so
+    success/failure feedback appears immediately."""
+    chunks, flush_flags = _capture_base_stream_with_flush(monkeypatch)
+    session = FakeSession()
+
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(
+                is_error=False,
+                message="ok",
+                output="",
+                display=[],
+            ),
+        ),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "\u2713 ok" in plain
+    assert any(flush_flags), (
+        "No flush=True found — tool result did not flush"
+    )
