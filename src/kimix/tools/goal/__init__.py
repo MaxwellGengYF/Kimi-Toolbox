@@ -68,6 +68,9 @@ class Goal(CallableTool2[Params]):
 
         # --- If code is empty string → clear the goal ---
         if not params.code.strip():
+            # Clean up any existing temp files before clearing
+            old_goal = self._load_goal()
+            Goal._cleanup_temp_files(old_goal)
             save_err = self._save_goal(None)
             if save_err:
                 return ToolError(
@@ -112,6 +115,9 @@ class Goal(CallableTool2[Params]):
             # (new code replaces old, status resets to pending)
 
         # --- Build new goal state ---
+        # Clean up previous goal's temp files before replacing
+        Goal._cleanup_temp_files(current_goal)
+
         goal_state: dict[str, Any] = {
             "code": code,
             "status": "pending",
@@ -229,16 +235,51 @@ class Goal(CallableTool2[Params]):
         fd, path = _tf.mkstemp(suffix=".py", prefix="run_goal_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(code)
+        # Record the fallback temp file so it can be cleaned up later
+        goal_state["_fallback_temp_file"] = path
         return path
+
+    @staticmethod
+    def _cleanup_temp_files(goal_state: dict[str, Any] | None) -> None:
+        """Clean up temp files referenced by a goal state.
+
+        Removes both the ``temp_file_path`` and any fallback temp file
+        that may have been created by ``_resolve_goal_executable``.
+        """
+        if goal_state is None:
+            return
+        paths_to_remove = set()
+
+        # 1. Temp file from _resolve_goal_code (inline code save)
+        tfp = goal_state.get("temp_file_path")
+        if tfp:
+            paths_to_remove.add(tfp)
+
+        # 2. Fallback temp file created by _resolve_goal_executable
+        fallback = goal_state.get("_fallback_temp_file")
+        if fallback:
+            paths_to_remove.add(fallback)
+
+        for p in paths_to_remove:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     async def _run_goal_code(
         goal_state: dict[str, Any],
         timeout: int = 30,
         python_exe: str | None = None,
+        executable: str | None = None,
     ) -> tuple[bool, str]:
-        """Execute the goal code and return ``(success, output_or_error)``."""
-        executable = Goal._resolve_goal_executable(goal_state)
+        """Execute the goal code and return ``(success, output_or_error)``.
+
+        If ``executable`` is provided it is used directly; otherwise the
+        executable path is resolved via ``_resolve_goal_executable``.
+        """
+        if executable is None:
+            executable = Goal._resolve_goal_executable(goal_state)
         if executable is None:
             return False, "Goal has no runnable code."
 
@@ -417,9 +458,11 @@ class RunGoal(CallableTool2[RunGoalParams]):
         goal["status"] = "in_progress"
         self._save_goal(goal)
 
-        # Run the code
+        # Run the code — pass already-resolved executable to avoid double resolution
         try:
-            success, output = await Goal._run_goal_code(goal, timeout=params.timeout)
+            success, output = await Goal._run_goal_code(
+                goal, timeout=params.timeout, executable=executable,
+            )
         except Exception as exc:
             goal["status"] = "pending"
             self._save_goal(goal)
@@ -428,6 +471,9 @@ class RunGoal(CallableTool2[RunGoalParams]):
                 message=f"Goal execution raised an unexpected error: {exc}",
                 brief="Goal execution error",
             )
+
+        # Clean up temp files (both the original temp file and any fallback)
+        Goal._cleanup_temp_files(goal)
 
         if success:
             # Clear the goal on success
@@ -438,7 +484,8 @@ class RunGoal(CallableTool2[RunGoalParams]):
                 brief="Goal succeeded",
             )
         else:
-            # Restore to pending on failure
+            # Restore to pending on failure — strip internal keys before persisting
+            goal.pop("_fallback_temp_file", None)
             goal["status"] = "pending"
             self._save_goal(goal)
             return ToolError(

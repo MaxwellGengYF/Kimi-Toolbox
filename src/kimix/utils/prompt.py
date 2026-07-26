@@ -185,10 +185,14 @@ async def _clear_session_goal(session: Session) -> None:
     runtime = getattr(cli, "_runtime", None)
     if runtime is None:
         return
+    from kimix.tools.goal import Goal
 
     if getattr(runtime, "role", "root") == "root":
         custom_data = getattr(session, 'get_custom_data', lambda: None)()
         if custom_data is not None:
+            old_goal = custom_data.get("goal")
+            if isinstance(old_goal, dict):
+                Goal._cleanup_temp_files(old_goal)
             custom_data.pop("goal", None)
     else:
         subagent_store = getattr(runtime, "subagent_store", None)
@@ -199,6 +203,9 @@ async def _clear_session_goal(session: Session) -> None:
             state_file = subagent_store.instance_dir(subagent_id) / "state.json"
             state_file.parent.mkdir(parents=True, exist_ok=True)
             data = _read_subagent_state(state_file)
+            old_goal = data.get("goal")
+            if isinstance(old_goal, dict):
+                Goal._cleanup_temp_files(old_goal)
             data.pop("goal", None)
             atomic_json_write(data, state_file)
 
@@ -253,18 +260,24 @@ async def _try_run_session_goal(session: Session) -> bool:
     await _save_session_goal(session, goal)
 
     try:
-        success, output = await Goal._run_goal_code(goal)
+        success, output = await Goal._run_goal_code(
+            goal, executable=executable,
+        )
     except Exception:
         goal["status"] = "pending"
+        Goal._cleanup_temp_files(goal)
+        goal.pop("_fallback_temp_file", None)
         await _save_session_goal(session, goal)
         return False
 
+    Goal._cleanup_temp_files(goal)
     if success:
         # Clear the goal on success
         await _save_session_goal(session, None)
         return True
     else:
         goal["status"] = "pending"
+        goal.pop("_fallback_temp_file", None)
         await _save_session_goal(session, goal)
         return False
 
@@ -430,14 +443,6 @@ async def _run_single_prompt(
     format_output: bool = False,
 ) -> bool:
     """Send a single prompt to the session with retries and return True on success."""
-    # Snapshot current goal state before running
-    custom_data = getattr(session, 'get_custom_data', lambda: None)()
-    if custom_data:
-        goal = custom_data.get("goal")
-        if isinstance(goal, dict) and goal.get("status") != "done":
-            # Mark that we're about to attempt goal execution
-            custom_data["_goal_attempt_pending"] = True
-
     if info_print:
         base._stream.colorful_print_word(f"{label}\n", fg=base.Color.BRIGHT_CYAN, require_new_line=True)
 

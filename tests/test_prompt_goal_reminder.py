@@ -525,9 +525,14 @@ class TestGoalEnforcementLoop:
 
 
 class TestRunSinglePromptGoalSnapshot:
-    """Tests that _run_single_prompt snapshots goal state before running."""
+    """Verify that _run_single_prompt no longer snapshots goal state.
 
-    async def test_snapshot_marks_attempt_pending_when_goal_undone(self) -> None:
+    The dead ``_goal_attempt_pending`` flag was removed in a previous fix.
+    These tests confirm no unintended side effects remain.
+    """
+
+    async def test_no_goal_attempt_pending_flag(self) -> None:
+        """_run_single_prompt does not create the dead _goal_attempt_pending flag."""
         custom_data: dict[str, Any] = {
             "goal": {"code": "x=1", "status": "pending", "is_file": False, "temp_file_path": None},
         }
@@ -537,67 +542,28 @@ class TestRunSinglePromptGoalSnapshot:
         session.get_custom_data.return_value = custom_data
         session._cancel_event = None
 
-        # We need info_print=False so the colorful_print_word is not called
-        # Let's use monkeypatch to suppress stream output
-        # Actually, _run_single_prompt calls colorful_print_word at the start.
-        # We need to handle that.
-
-        # Instead, let's just test the logic directly by calling _run_single_prompt
-        # with a session that will fail gracefully
         async def fake_prompt(*args, **kwargs):
             yield TextPart(text="done")
 
         session.prompt = fake_prompt
 
         import kimix.base as base
-        original_print = base._stream.colorful_print_word
+        orig_cfp = base._stream.colorful_print_word
         base._stream.colorful_print_word = lambda *args, **kwargs: None
-        original_print_word = base._stream.print_word
+        orig_pw = base._stream.print_word
         base._stream.print_word = lambda *args, **kwargs: None
 
         try:
             await prompt_mod._run_single_prompt(
-                session=session,
-                prompt_str="test",
-                output_function=None,
-                cancel_callable=None,
-                merge_wire_messages=False,
-                info_print=False,
-                label="test",
+                session=session, prompt_str="test",
+                output_function=None, cancel_callable=None,
+                merge_wire_messages=False, info_print=False, label="test",
             )
         except Exception:
             pass
         finally:
-            base._stream.colorful_print_word = original_print
-            base._stream.print_word = original_print_word
-
-        assert custom_data.get("_goal_attempt_pending") is True
-
-    async def test_snapshot_skipped_when_goal_done(self) -> None:
-        custom_data: dict[str, Any] = {
-            "goal": {"code": "x=1", "status": "done", "is_file": False, "temp_file_path": None},
-        }
-        session = MagicMock()
-        session.get_custom_data.return_value = custom_data
-        _ = custom_data  # just use it
-
-        # Just test the snapshot logic directly (the flag check before _run_single_prompt)
-        if custom_data:
-            goal = custom_data.get("goal")
-            if isinstance(goal, dict) and goal.get("status") != "done":
-                custom_data["_goal_attempt_pending"] = True
-
-        assert "_goal_attempt_pending" not in custom_data or not custom_data["_goal_attempt_pending"]
-
-    async def test_snapshot_skipped_when_no_goal(self) -> None:
-        custom_data: dict[str, Any] = {}
-        session = MagicMock()
-        session.get_custom_data.return_value = custom_data
-
-        if custom_data:
-            goal = custom_data.get("goal")
-            if isinstance(goal, dict) and goal.get("status") != "done":
-                custom_data["_goal_attempt_pending"] = True
+            base._stream.colorful_print_word = orig_cfp
+            base._stream.print_word = orig_pw
 
         assert "_goal_attempt_pending" not in custom_data
 

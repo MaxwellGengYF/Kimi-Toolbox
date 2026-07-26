@@ -87,7 +87,7 @@ def get_system_prompt(
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
             items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, check `ContextUsage`; if usage is high, call `Compact` before the next step.')
             items.append('Multi-step: use `TodoList`. Finish all before ending.')
-            items.append('Use `Goal` to define the ultimate project goal as executable Python code, and `RunGoal` to execute it automatically.')
+            items.append('ALWAYS: define the goal with the `Goal` tool and run it with the `RunGoal` tool.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. When choices or options appear, independently pick the best one and continue; do not ask the user which to choose.')
