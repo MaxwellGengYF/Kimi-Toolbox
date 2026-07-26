@@ -20,6 +20,7 @@ from kimix.tools.common import (
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from kimi_cli.session import Session
+from kimi_cli.share import get_share_dir
 
 if TYPE_CHECKING:
     from kimix.tools.background.utils import BackgroundStream
@@ -188,18 +189,41 @@ class Python(CallableTool2[Params]):
     def _build_env(python_exe: str) -> dict[str, str] | None:
         """Build a child-process env that pins pip/python to the resolved venv.
 
+        The shared ``bin`` directory is always prepended to PATH so that any
+        ``rtk`` invoked from user scripts resolves to our binary first.
+
         Returns None when the interpreter is not inside a virtualenv (e.g. the
-        ``sys.executable`` fallback), leaving the default env untouched.
+        ``sys.executable`` fallback) and the shared ``bin`` directory is already
+        first in PATH, preserving the zero-copy fast path.
         """
+        bin_dir = str(get_share_dir() / "bin")
+        path_sep = os.pathsep
+        current_path = os.environ.get("PATH", "")
+        already_first = (
+            current_path.startswith(bin_dir + path_sep) or current_path == bin_dir
+        )
+
+        def _prepend(env: dict[str, str]) -> dict[str, str]:
+            if already_first:
+                return env
+            entries = [e for e in current_path.split(path_sep) if e and e != bin_dir]
+            env["PATH"] = path_sep.join([bin_dir] + entries)
+            return env
+
         exe = Path(python_exe)
-        if exe.parent.name not in ("Scripts", "bin"):
-            return None
-        venv_dir = exe.parent.parent
-        if not (venv_dir / "pyvenv.cfg").is_file():
-            return None
+        is_venv = (
+            exe.parent.name in ("Scripts", "bin")
+            and (exe.parent.parent / "pyvenv.cfg").is_file()
+        )
+
+        if not is_venv:
+            return None if already_first else _prepend(os.environ.copy())
+
         env = dict(os.environ)
-        env["PATH"] = str(exe.parent) + os.pathsep + env.get("PATH", "")
-        env["VIRTUAL_ENV"] = str(venv_dir)
+        env["VIRTUAL_ENV"] = str(exe.parent.parent)
+        venv_bin_dir = str(exe.parent)
+        entries = [e for e in current_path.split(path_sep) if e and e != bin_dir]
+        env["PATH"] = path_sep.join([bin_dir, venv_bin_dir] + entries)
         return env
 
     @staticmethod

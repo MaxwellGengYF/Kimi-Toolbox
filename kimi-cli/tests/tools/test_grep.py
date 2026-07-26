@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +20,7 @@ from kimi_cli.tools.file.grep_local import (
     Grep,
     Params,
     _build_rg_args,
+    _env_with_shared_bin_path,
     _find_existing_rtk,
     _format_cmd,
     _strip_path_prefix,
@@ -252,7 +254,7 @@ async def test_grep_head_limit(grep_tool: Grep, temp_test_files):
 
 
 async def test_grep_output_truncation(grep_tool: Grep):
-    """Ensure extremely long output is truncated automatically."""
+    """Ensure extremely long output is truncated/deduplicated automatically."""
     with tempfile.TemporaryDirectory() as temp_dir:
         test_file = Path(temp_dir) / "big.txt"
         test_file.write_text(
@@ -273,7 +275,13 @@ async def test_grep_output_truncation(grep_tool: Grep):
 
         assert not result.is_error
         assert isinstance(result.output, str)
-        assert result.message == snapshot("Output truncated to 102400 bytes. Output truncated.")
+        # When rtk wraps rg it may deduplicate the repeated lines first, in
+        # which case the Grep tool's own byte-limit truncation does not fire.
+        # Either the Grep-tool message or an empty message is acceptable.
+        assert result.message in (
+            "",
+            "Output truncated to 102400 bytes. Output truncated.",
+        )
         assert len(result.output) < DEFAULT_MAX_CHARS + 100
 
 
@@ -696,7 +704,7 @@ async def test_grep_single_file_relative_path(grep_tool: Grep):
 
 def test_build_rg_args_defaults():
     """Default mode (files_with_matches): fixed params and output mode flag."""
-    args = _build_rg_args("/usr/bin/rg", Params(pattern="test", path="/tmp"))
+    args = _build_rg_args("rg", Params(pattern="test", path="/tmp"))
 
     # Fixed params always present
     assert "--no-config" in args
@@ -761,7 +769,7 @@ def test_build_rg_args_flag_mapping():
             "type": "py",
         }
     )
-    args = _build_rg_args("/usr/bin/rg", params)
+    args = _build_rg_args("rg", params)
 
     assert "--ignore-case" in args
     assert "--multiline" in args
@@ -778,12 +786,12 @@ def test_build_rg_args_flag_mapping():
     assert args[dd_idx + 2] == "/tmp"
 
     # single_threaded adds -j 1
-    st_args = _build_rg_args("/usr/bin/rg", Params(pattern="x", path="/tmp"), single_threaded=True)
+    st_args = _build_rg_args("rg", Params(pattern="x", path="/tmp"), single_threaded=True)
     idx = st_args.index("-j")
     assert st_args[idx + 1] == "1"
 
     # expanduser expands ~ in path
-    tilde_args = _build_rg_args("/usr/bin/rg", Params(pattern="x", path="~/foo"))
+    tilde_args = _build_rg_args("rg", Params(pattern="x", path="~/foo"))
     assert not tilde_args[-1].startswith("~")
     assert "foo" in tilde_args[-1]
 
@@ -906,12 +914,12 @@ async def test_grep_include_ignored_default_false(grep_tool: Grep):
 def test_build_rg_args_include_ignored():
     """include_ignored=True should add --no-ignore flag to rg args."""
     params = Params(pattern="test", path="/tmp", include_ignored=True)
-    args = _build_rg_args("/usr/bin/rg", params)
+    args = _build_rg_args("rg", params)
     assert "--no-ignore" in args
 
     # Default: no --no-ignore
     params_default = Params(pattern="test", path="/tmp")
-    args_default = _build_rg_args("/usr/bin/rg", params_default)
+    args_default = _build_rg_args("rg", params_default)
     assert "--no-ignore" not in args_default
 
 
@@ -1704,20 +1712,87 @@ def test_find_existing_rtk_ignores_path(tmp_path, monkeypatch):
     assert _find_existing_rtk(bin_name) is None
 
 
+def test_env_with_shared_bin_path_prepends_share_bin(tmp_path, monkeypatch):
+    """The shared bin directory is moved to the front of PATH."""
+    share = tmp_path / "share"
+    share.mkdir()
+    bin_dir = share / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: share)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin", str(bin_dir)]))
+
+    env = _env_with_shared_bin_path()
+    entries = env["PATH"].split(os.pathsep)
+    assert entries[0] == str(bin_dir)
+    assert entries == [str(bin_dir), "/usr/bin", "/bin"]
+
+
+def test_env_with_shared_bin_path_removes_duplicate_elsewhere(tmp_path, monkeypatch):
+    """A duplicate shared bin entry elsewhere in PATH is removed."""
+    share = tmp_path / "share"
+    share.mkdir()
+    bin_dir = share / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: share)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([str(bin_dir), "/usr/bin", str(bin_dir), "/bin"])
+    )
+
+    env = _env_with_shared_bin_path()
+    entries = env["PATH"].split(os.pathsep)
+    assert entries == [str(bin_dir), "/usr/bin", "/bin"]
+
+
+def test_env_with_shared_bin_path_idempotent_when_first(tmp_path, monkeypatch):
+    """When shared bin is already first, the result keeps it first and clean."""
+    share = tmp_path / "share"
+    share.mkdir()
+    bin_dir = share / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: share)
+    original = {"PATH": str(bin_dir) + os.pathsep + "/usr/bin"}
+
+    env = _env_with_shared_bin_path(original)
+    assert env["PATH"].split(os.pathsep) == [str(bin_dir), "/usr/bin"]
+    # Calling again is a no-op.
+    assert _env_with_shared_bin_path(env)["PATH"] == env["PATH"]
+
+
+def test_env_with_shared_bin_path_wins_over_global_rg(tmp_path, monkeypatch):
+    """Even if another rg/rg.exe exists on PATH, share/bin is resolved first."""
+    share = tmp_path / "share"
+    share.mkdir()
+    bin_dir = share / "bin"
+    bin_dir.mkdir()
+    fake_global = tmp_path / "fake_global"
+    fake_global.mkdir()
+    (fake_global / "rg").touch()
+    (fake_global / "rg.exe").touch()
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: share)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([str(fake_global), "/usr/bin", "/bin"])
+    )
+
+    env = _env_with_shared_bin_path()
+    entries = env["PATH"].split(os.pathsep)
+    assert entries[0] == str(bin_dir)
+    assert entries[1] == str(fake_global)
+
+
 def test_build_rg_args_with_rtk():
-    """rtk path prefixes the argv; rg path stays the wrapped executable."""
+    """rtk path prefixes the argv; rg stays the bare wrapped executable."""
     params = Params(pattern="hello")
-    args = _build_rg_args("/abs/bin/rg", params, rtk_path="/abs/bin/rtk")
+    args = _build_rg_args("rg", params, rtk_path="/abs/bin/rtk")
     assert args[0] == "/abs/bin/rtk"
-    assert args[1] == "/abs/bin/rg"
+    assert args[1] == "rg"
     assert "--no-config" in args
 
 
 def test_build_rg_args_without_rtk_unchanged():
-    """No rtk_path → argv identical to plain rg invocation."""
+    """No rtk_path → argv uses the bare rg command name."""
     params = Params(pattern="hello")
-    args = _build_rg_args("/abs/bin/rg", params)
-    assert args[0] == "/abs/bin/rg"
+    args = _build_rg_args("rg", params)
+    assert args[0] == "rg"
 
 
 def test_format_cmd_reflects_rtk_when_active():
@@ -1738,7 +1813,7 @@ def test_grep_params_token_kill_alias():
 
 @pytest.mark.asyncio
 async def test_grep_rtk_active_by_default(grep_tool: Grep, temp_test_files, captured_exec):
-    """Default params wrap rg with the absolute share/bin rtk path."""
+    """Default params wrap the bare rg command with the absolute share/bin rtk path."""
     temp_dir, _ = temp_test_files
     grep_tool._rtk_path = _share_bin_rtk()
     grep_tool._rtk_path_task = None
@@ -1748,15 +1823,15 @@ async def test_grep_rtk_active_by_default(grep_tool: Grep, temp_test_files, capt
 
     args = captured_exec["args"]
     share_bin = str(get_share_dir() / "bin")
-    # [<share>/bin/rtk, <share>/bin/rg, --no-config, ...] — both absolute
+    # [<share>/bin/rtk, rg, --no-config, ...] — rtk absolute, rg bare name
     assert args[0] == _share_bin_rtk()
-    assert args[1] == grep_tool._rg_path
+    assert args[1] == "rg"
     assert Path(args[0]).is_absolute()
-    assert Path(args[1]).is_absolute()
     assert args[0].startswith(share_bin)
-    assert args[1].startswith(share_bin)
-    # No PATH-prepend env tricks: no env kwarg passed to the subprocess.
-    assert "env" not in captured_exec["kwargs"]
+    # PATH is rewritten so the bare ``rg`` resolves to the managed binary.
+    assert "env" in captured_exec["kwargs"]
+    path_entries = captured_exec["kwargs"]["env"]["PATH"].split(os.pathsep)
+    assert path_entries[0] == share_bin
     # Display brief reflects the real rtk-wrapped invocation.
     assert result.brief.startswith("rtk ") or "rtk" in result.brief.split(" ")[0]
 
@@ -1781,8 +1856,11 @@ async def test_grep_rtk_disabled_no_rtk_work(
     assert not result.is_error
 
     args = captured_exec["args"]
-    assert args[0] == grep_tool._rg_path
-    assert "env" not in captured_exec["kwargs"]
+    assert args[0] == "rg"
+    assert "env" in captured_exec["kwargs"]
+    share_bin = str(get_share_dir() / "bin")
+    path_entries = captured_exec["kwargs"]["env"]["PATH"].split(os.pathsep)
+    assert path_entries[0] == share_bin
 
 
 @pytest.mark.asyncio
@@ -1796,7 +1874,7 @@ async def test_grep_rtk_missing_falls_back_to_plain_rg(
 
     result = await grep_tool(Params(pattern="Hello", path=temp_dir))
     assert not result.is_error
-    assert captured_exec["args"][0] == grep_tool._rg_path
+    assert captured_exec["args"][0] == "rg"
 
 
 @pytest.mark.asyncio
@@ -1814,7 +1892,7 @@ async def test_grep_rtk_download_failure_falls_back(
 
     result = await grep_tool(Params(pattern="Hello", path=temp_dir))
     assert not result.is_error
-    assert captured_exec["args"][0] == grep_tool._rg_path
+    assert captured_exec["args"][0] == "rg"
 
 
 @pytest.mark.asyncio

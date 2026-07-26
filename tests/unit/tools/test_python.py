@@ -226,32 +226,84 @@ class TestResolvePython:
 
 
 class TestBuildEnv:
-    def test_none_for_non_venv(self) -> None:
-        assert Python._build_env(sys.executable) is None or True  # depends on host
+    @pytest.fixture
+    def fake_share_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Patch get_share_dir to a tmp_path containing a fake bin directory."""
+        share = tmp_path / "share"
+        (share / "bin").mkdir(parents=True)
+        monkeypatch.setattr("kimix.tools.py.get_share_dir", lambda: share)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        return share
 
-    def test_none_when_parent_not_scripts_bin(self, tmp_path: Path) -> None:
-        exe = tmp_path / "python.exe"
+    def test_env_for_non_venv_prepends_shared_bin(
+        self, fake_share_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ensure the shared bin is NOT already first so we exercise the build path.
+        monkeypatch.setenv(
+            "PATH", os.pathsep.join(["/usr/bin", "/bin", str(fake_share_dir / "bin")])
+        )
+        non_venv_python = str(fake_share_dir.parent / "python.exe")
+        env = Python._build_env(non_venv_python)
+        assert env is not None
+        assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
+        assert env.get("VIRTUAL_ENV") is None
+
+    def test_env_when_parent_not_scripts_bin(
+        self, fake_share_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exe = fake_share_dir.parent / "python.exe"
         exe.touch()
-        assert Python._build_env(str(exe)) is None
+        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+        env = Python._build_env(str(exe))
+        assert env is not None
+        assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
+        assert env.get("VIRTUAL_ENV") is None
 
-    def test_env_prepends_scripts_and_sets_virtual_env(self, tmp_path: Path) -> None:
-        venv = tmp_path / ".venv"
+    def test_env_prepends_shared_bin_then_venv_bin_and_sets_virtual_env(
+        self, fake_share_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        venv = fake_share_dir.parent / ".venv"
         scripts = venv / "Scripts"
         scripts.mkdir(parents=True)
         exe = scripts / "python.exe"
         exe.touch()
         (venv / "pyvenv.cfg").touch()
+        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
         env = Python._build_env(str(exe))
         assert env is not None
-        assert env["PATH"].split(os.pathsep)[0] == str(scripts)
+        path_entries = env["PATH"].split(os.pathsep)
+        assert path_entries[0] == str(fake_share_dir / "bin")
+        assert path_entries[1] == str(scripts)
         assert env["VIRTUAL_ENV"] == str(venv)
 
-    def test_none_without_pyvenv_cfg(self, tmp_path: Path) -> None:
-        scripts = tmp_path / "weird" / "Scripts"
+    def test_env_without_pyvenv_cfg(
+        self, fake_share_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scripts = fake_share_dir.parent / "weird" / "Scripts"
         scripts.mkdir(parents=True)
         exe = scripts / "python.exe"
         exe.touch()
-        assert Python._build_env(str(exe)) is None
+        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+        env = Python._build_env(str(exe))
+        assert env is not None
+        assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
+        assert env.get("VIRTUAL_ENV") is None
+
+    def test_global_rtk_is_shadowed_by_shared_bin(
+        self, fake_share_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global_rtk = fake_share_dir.parent / "global_rtk"
+        global_rtk.mkdir()
+        monkeypatch.setenv(
+            "PATH", os.pathsep.join([str(global_rtk), "/usr/bin", "/bin"])
+        )
+        # Use a non-venv interpreter path so we exercise the non-venv branch.
+        non_venv_python = str(fake_share_dir.parent / "python.exe")
+        env = Python._build_env(non_venv_python)
+        assert env is not None
+        path_entries = env["PATH"].split(os.pathsep)
+        assert path_entries[0] == str(fake_share_dir / "bin")
+        assert path_entries[1] == str(global_rtk)
 
 
 class TestModuleNotFoundHint:

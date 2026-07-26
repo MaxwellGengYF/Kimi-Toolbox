@@ -8,6 +8,7 @@ from kimix.tools.common import (
     _is_known_rtk_command,
     _maybe_rewrite_shell_command_with_rtk,
     _rtk_available,
+    _rtk_binary_path,
     _truncate_lines,
     _token_filter_output,
 )
@@ -323,12 +324,14 @@ def test_rtk_available_when_present(tmp_path):
     bin_name = "rtk.exe" if os.name == "nt" else "rtk"
     (bin_dir / bin_name).touch()
     with patch("kimi_cli.share.get_share_dir", return_value=tmp_path):
+        _rtk_binary_path.cache_clear()
         _rtk_available.cache_clear()
         assert _rtk_available() is True
 
 
 def test_rtk_available_when_missing(tmp_path):
     with patch("kimi_cli.share.get_share_dir", return_value=tmp_path):
+        _rtk_binary_path.cache_clear()
         _rtk_available.cache_clear()
         assert _rtk_available() is False
 
@@ -353,26 +356,26 @@ def test_is_known_rtk_command_unknown():
 def rtk_available(tmp_path):
     """Pretend rtk exists: fake binary in a fake share/bin, available gate on.
 
-    Yields the absolute fake rtk path that rewritten commands must start with.
+    Yields the absolute fake rtk path for tests that still need it.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     bin_name = "rtk.exe" if os.name == "nt" else "rtk"
     rtk_path = bin_dir / bin_name
     rtk_path.touch()
+    _rtk_binary_path.cache_clear()
     with (
         patch("kimi_cli.share.get_share_dir", return_value=tmp_path),
         patch("kimix.tools.common._rtk_available", return_value=True),
     ):
         yield rtk_path
+    _rtk_binary_path.cache_clear()
 
 
 def test_rewrite_known_single_command(rtk_available):
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk("git status", token_kill=True)
     assert changed is True
-    # Absolute, quoted rtk path — never the bare `rtk ` PATH-reliant form.
-    assert rewritten == f'"{rtk_available}" git status'
-    assert not rewritten.startswith("rtk ")
+    assert rewritten == "rtk git status"
 
 
 def test_rewrite_compound_command(rtk_available):
@@ -380,7 +383,7 @@ def test_rewrite_compound_command(rtk_available):
         "git status && cargo test", token_kill=True
     )
     assert changed is True
-    assert rewritten == f'"{rtk_available}" git status && "{rtk_available}" cargo test'
+    assert rewritten == "rtk git status && rtk cargo test"
 
 
 def test_rewrite_already_prefixed(rtk_available):
@@ -445,7 +448,7 @@ def test_rewrite_leftmost_pipeline(rtk_available):
         "git status | grep x", token_kill=True
     )
     assert changed is True
-    assert rewritten == f'"{rtk_available}" git status | grep x'
+    assert rewritten == "rtk git status | grep x"
 
 
 def test_rewrite_with_env_assignment(rtk_available):
@@ -453,7 +456,7 @@ def test_rewrite_with_env_assignment(rtk_available):
         "VAR=value git status", token_kill=True
     )
     assert changed is True
-    assert rewritten == f'VAR=value "{rtk_available}" git status'
+    assert rewritten == "VAR=value rtk git status"
 
 
 def test_rewrite_command_substitution_unchanged(rtk_available):
@@ -528,7 +531,7 @@ def test_rewrite_semicolon_segments_absolute(rtk_available):
         "git status; cargo test", token_kill=True
     )
     assert changed is True
-    assert rewritten == f'"{rtk_available}" git status; "{rtk_available}" cargo test'
+    assert rewritten == "rtk git status; rtk cargo test"
 
 
 def test_rewrite_pipe_segments_absolute(rtk_available):
@@ -536,21 +539,20 @@ def test_rewrite_pipe_segments_absolute(rtk_available):
         "git status || cargo test", token_kill=True
     )
     assert changed is True
-    assert rewritten == f'"{rtk_available}" git status || "{rtk_available}" cargo test'
+    assert rewritten == "rtk git status || rtk cargo test"
 
 
-def test_rewrite_never_emits_bare_rtk(rtk_available):
-    """The rewritten command must never contain a bare `rtk ` prefix."""
+def test_rewrite_always_emits_bare_rtk(rtk_available):
+    """The rewritten command must use the bare `rtk` prefix, never the absolute path."""
     for cmd in ("git status", "git status && cargo test", "git log | head"):
         rewritten, changed = _maybe_rewrite_shell_command_with_rtk(cmd, token_kill=True)
         if changed:
-            assert not rewritten.startswith("rtk ")
-            assert " rtk " not in rewritten.replace(f'"{rtk_available}"', "")
-            assert rewritten.startswith(f'"{rtk_available}" ')
+            assert rewritten.startswith("rtk ")
+            assert str(rtk_available) not in rewritten
 
 
 def test_rewrite_no_binary_no_rewrite(tmp_path):
-    """Gate says rtk is available but binary is gone → no rewrite."""
+    """When the available gate is True we trust it and rewrite to bare `rtk`."""
     with (
         patch("kimi_cli.share.get_share_dir", return_value=tmp_path),
         patch("kimix.tools.common._rtk_available", return_value=True),
@@ -558,8 +560,8 @@ def test_rewrite_no_binary_no_rewrite(tmp_path):
         rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
             "git status", token_kill=True
         )
-        assert changed is False
-        assert rewritten == "git status"
+        assert changed is True
+        assert rewritten == "rtk git status"
 
 
 def test_rewrite_already_absolute_quoted_untouched(rtk_available):
@@ -584,8 +586,7 @@ def test_rewrite_pwsh_uses_call_operator(rtk_available):
         "git status", token_kill=True, pwsh=True
     )
     assert changed is True
-    # PowerShell cannot invoke a quoted command without the `&` operator.
-    assert rewritten == f'& "{rtk_available}" git status'
+    assert rewritten == "& rtk git status"
 
 
 def test_rewrite_pwsh_compound_command(rtk_available):
@@ -593,11 +594,11 @@ def test_rewrite_pwsh_compound_command(rtk_available):
         "git status; cargo test", token_kill=True, pwsh=True
     )
     assert changed is True
-    assert rewritten == f'& "{rtk_available}" git status; & "{rtk_available}" cargo test'
+    assert rewritten == "& rtk git status; & rtk cargo test"
 
 
 def test_rewrite_pwsh_already_rewritten_untouched(rtk_available):
-    cmd = f'& "{rtk_available}" git status'
+    cmd = "& rtk git status"
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
         cmd, token_kill=True, pwsh=True
     )

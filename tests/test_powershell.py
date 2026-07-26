@@ -12,7 +12,7 @@ from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 
-from kimix.tools.common import ProcessTask
+from kimix.tools.common import ProcessTask, _rtk_binary_path
 from kimix.tools.file.bash import Powershell
 from kimix.tools.file.bash.pwsh_tool import PowershellParams, _PWSH_CONSOLE_INIT, find_pwsh
 from kimix.tools.background.utils import TaskData, _pop_task_data
@@ -451,3 +451,91 @@ class TestPowershellInteractiveIntegration:
         exit_result = await pwsh(PowershellParams(cmd="exit", task_id=task_id, timeout=5))
         assert isinstance(exit_result, ToolOk)
         assert "status: completed" in exit_result.output
+
+
+# ============================================================================
+# RTK rewrite path
+# ============================================================================
+
+class TestPowershellRtkRewrite:
+    @pytest.fixture
+    def mock_session(self) -> MagicMock:
+        session = MagicMock(spec=Session)
+        session.custom_data = {}
+        session.custom_config.get.return_value = {}
+        return session
+
+    async def test_pwsh_rewrites_known_command_to_bare_rtk(
+        self, mock_session: MagicMock
+    ) -> None:
+        _rtk_binary_path.cache_clear()
+        with patch("kimix.tools.common._rtk_available", return_value=True), patch(
+            "kimix.tools.file.bash.pwsh_tool.find_pwsh", return_value=r"C:\pwsh\pwsh.exe"
+        ):
+            pwsh = Powershell(session=mock_session)
+
+            with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+                mock_instance = MagicMock()
+                mock_instance.start = MagicMock(return_value=asyncio.Future())
+                mock_instance.start.return_value.set_result("pwsh-rtk-id")
+                mock_instance.wait = MagicMock(return_value=asyncio.Future())
+                mock_instance.wait.return_value.set_result(None)
+                mock_instance.wait_with_monitor = MagicMock(return_value=asyncio.Future())
+                mock_instance.wait_with_monitor.return_value.set_result((False, 0.0, False))
+                mock_instance.thread_is_alive = MagicMock(return_value=asyncio.Future())
+                mock_instance.thread_is_alive.return_value.set_result(False)
+                mock_instance.stream = MagicMock()
+                mock_instance.stream.pop_output = MagicMock(return_value=asyncio.Future())
+                mock_instance.stream.pop_output.return_value.set_result("mock output")
+                mock_instance.stream.success = MagicMock(return_value=asyncio.Future())
+                mock_instance.stream.success.return_value.set_result(True)
+                mock_instance.stream.exit_code = 0
+                mock_instance.stream.process_elapsed = None
+                mock_pt.return_value = mock_instance
+
+                params = PowershellParams(cmd="git status")
+                result = await pwsh(params)
+
+                assert isinstance(result, ToolOk)
+                args = mock_pt.call_args
+                assert "& rtk git status" in args[0][1][-1]
+                assert "rtk" in result.display[0].command
+                assert str(_rtk_binary_path()) not in result.display[0].command
+                assert "rtk" in result.message
+
+    async def test_pwsh_compound_command_rewrites_each_segment(
+        self, mock_session: MagicMock
+    ) -> None:
+        _rtk_binary_path.cache_clear()
+        with patch("kimix.tools.common._rtk_available", return_value=True), patch(
+            "kimix.tools.file.bash.pwsh_tool.find_pwsh", return_value=r"C:\pwsh\pwsh.exe"
+        ):
+            pwsh = Powershell(session=mock_session)
+
+            with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+                mock_instance = MagicMock()
+                mock_instance.start = MagicMock(return_value=asyncio.Future())
+                mock_instance.start.return_value.set_result("pwsh-rtk-id")
+                mock_instance.wait = MagicMock(return_value=asyncio.Future())
+                mock_instance.wait.return_value.set_result(None)
+                mock_instance.wait_with_monitor = MagicMock(return_value=asyncio.Future())
+                mock_instance.wait_with_monitor.return_value.set_result((False, 0.0, False))
+                mock_instance.thread_is_alive = MagicMock(return_value=asyncio.Future())
+                mock_instance.thread_is_alive.return_value.set_result(False)
+                mock_instance.stream = MagicMock()
+                mock_instance.stream.pop_output = MagicMock(return_value=asyncio.Future())
+                mock_instance.stream.pop_output.return_value.set_result("mock output")
+                mock_instance.stream.success = MagicMock(return_value=asyncio.Future())
+                mock_instance.stream.success.return_value.set_result(True)
+                mock_instance.stream.exit_code = 0
+                mock_instance.stream.process_elapsed = None
+                mock_pt.return_value = mock_instance
+
+                params = PowershellParams(cmd="git status; cargo test")
+                result = await pwsh(params)
+
+                assert isinstance(result, ToolOk)
+                args = mock_pt.call_args
+                assert "& rtk git status; & rtk cargo test" in args[0][1][-1]
+                assert "rtk" in result.display[0].command
+                assert str(_rtk_binary_path()) not in result.display[0].command

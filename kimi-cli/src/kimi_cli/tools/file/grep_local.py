@@ -157,6 +157,31 @@ RG_KILL_GRACE = 5  # seconds: SIGTERM -> SIGKILL
 MAX_BYTES = 100 << 10  # 100KB
 _RG_HEAD_LIMIT_MARGIN = 1000  # extra matches for content-mode --max-count
 _RG_DOWNLOAD_LOCK = asyncio.Lock()
+_RG_CMD = "rg"
+
+
+def _env_with_shared_bin_path(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a copy of environment with the shared ``bin`` directory first on PATH.
+
+    The shared ``bin`` directory contains ``rg`` and ``rtk``.  Prepending it
+    (and removing any duplicate entry elsewhere in PATH) guarantees that our
+    binaries win over any globally-installed copies (``rg`` / ``rg.exe``).
+
+    Args:
+        env: Optional base environment dict. If None, ``os.environ`` is used.
+
+    Returns:
+        A new dict with ``PATH`` updated so the shared ``bin`` directory is first.
+    """
+    bin_dir = str(get_share_dir() / "bin")
+    result = os.environ.copy() if env is None else env.copy()
+
+    current_path = result.get("PATH", "")
+    path_sep = os.pathsep
+    entries = [e for e in current_path.split(path_sep) if e and e != bin_dir]
+    result["PATH"] = path_sep.join([bin_dir] + entries)
+
+    return result
 
 
 def _find_existing_rtk(bin_name: str) -> Path | None:
@@ -249,7 +274,7 @@ async def _ensure_rg_path() -> str:
 
 
 def _build_rg_args(
-    rg_path: str,
+    rg_cmd: str,
     params: Params,
     *,
     single_threaded: bool = False,
@@ -258,12 +283,17 @@ def _build_rg_args(
 ) -> list[str]:
     """Build ripgrep command-line arguments from Params.
 
+    ``rg_cmd`` is the bare executable name (``rg``).  Callers must ensure the
+    shared ``bin`` directory is first on ``PATH`` (see
+    ``_env_with_shared_bin_path``) so this resolves to the binary Kimi manages
+    even if another ``rg`` / ``rg.exe`` exists globally.
+
     When ``rtk_path`` is set, the returned argv is prefixed with the absolute
-    rtk path so rtk wraps rg (``[<abs rtk>, <abs rg>, ...]``) and deduplicates
-    its output. rtk dispatches on the wrapped executable's stem, matching the
-    proven pattern in ``kimix.tools.file.run``. No PATH lookup is involved.
+    rtk path so rtk wraps rg (``[<abs rtk>, rg, ...]``) and deduplicates its
+    output. rtk dispatches on the wrapped executable's stem, matching the
+    proven pattern in ``kimix.tools.file.run``.
     """
-    args: list[str] = [rg_path]
+    args: list[str] = [rg_cmd]
 
     # Fixed args
     args.append("--no-config")  # avoid user config adding slow options
@@ -292,8 +322,13 @@ def _build_rg_args(
             args.extend(["--after-context", str(params.after_context)])
         if params.context is not None:
             args.extend(["--context", str(params.context)])
+        # Always be explicit about line numbers: raw rg defaults to off, but
+        # rtk's ``rg`` subcommand defaults to on.  Passing the flag explicitly
+        # keeps behavior consistent whether rg is invoked bare or via rtk.
         if params.line_number:
             args.append("--line-number")
+        else:
+            args.append("--no-line-number")
         # Stop ripgrep early once we have enough matches for the requested
         # page. A generous margin is included so that sensitive-file
         # filtering still leaves enough results in the common case.
@@ -327,9 +362,9 @@ def _build_rg_args(
     return args
 
 
-def _format_cmd(params: Params, *, rg_path: str = "rg", rtk_path: str | None = None) -> str:
+def _format_cmd(params: Params, *, rg_cmd: str = _RG_CMD, rtk_path: str | None = None) -> str:
     """Format the equivalent ripgrep command string for display."""
-    args = _build_rg_args(rg_path, params, rtk_path=rtk_path)
+    args = _build_rg_args(rg_cmd, params, rtk_path=rtk_path)
     return shlex.join(args)
 
 
@@ -706,7 +741,7 @@ class Grep(CallableTool2[Params]):
             if rtk_path is not None:
                 logger.debug("Wrapping rg with rtk binary: {rtk_bin}", rtk_bin=rtk_path)
             args = _build_rg_args(
-                rg_path,
+                _RG_CMD,
                 params,
                 single_threaded=_retry,
                 resolved_path=str(search_path),
@@ -719,6 +754,7 @@ class Grep(CallableTool2[Params]):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self._work_dir),
+                env=_env_with_shared_bin_path(),
             )
 
             # Stream stdout/stderr incrementally with buffer limit

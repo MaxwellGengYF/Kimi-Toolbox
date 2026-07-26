@@ -194,6 +194,7 @@ _RTK_KNOWN_COMMANDS: frozenset[str] = frozenset(
 )
 
 
+@functools.lru_cache(maxsize=1)
 def _rtk_binary_path() -> Path | None:
     """Return the path to the RTK binary in the share ``bin`` directory, if present."""
     from kimi_cli.share import get_share_dir
@@ -937,14 +938,11 @@ def _rewrite_shell_segment(
     if not _is_known_rtk_command(name):
         return segment, False
 
-    # Never rely on PATH: inject the absolute rtk path, double-quoted so it
-    # is safe with spaces (backslashes inside bash double quotes are literal
-    # here). PowerShell requires the call operator `&` to invoke a quoted
-    # command, bash must not have it.
-    rtk_path = _rtk_binary_path()
-    if rtk_path is None:
-        return segment, False
-    prefix = f'& "{rtk_path}" ' if pwsh else f'"{rtk_path}" '
+    # Use the bare `rtk` executable name. Callers must ensure the shared
+    # `bin` directory is first on PATH (see `_env_with_rg_bin_path`) so this
+    # resolves to our binary even if another `rtk` exists globally.
+    # PowerShell requires the call operator `&` to invoke a command by name.
+    prefix = "& rtk " if pwsh else "rtk "
     return segment[:token_start] + prefix + segment[token_start:], True
 
 
@@ -958,8 +956,8 @@ def _maybe_rewrite_shell_command_with_rtk(
     command substitutions are not rewritten.  Segments already starting with
     ``rtk`` or prefixed with ``RTK_DISABLED=1`` are left untouched.
 
-    When ``pwsh`` is True the injected absolute rtk path is prefixed with the
-    PowerShell call operator ``&`` (required to invoke a quoted command).
+    When ``pwsh`` is True the injected ``rtk`` prefix is prefixed with the
+    PowerShell call operator ``&`` (required to invoke a command by name).
     """
     if not token_kill:
         return command, False
@@ -974,6 +972,8 @@ def _maybe_rewrite_shell_command_with_rtk(
         or stripped.startswith("rtk\t")
         or stripped == "rtk"
         or stripped.startswith("rtk.exe")
+        or stripped.startswith("& rtk ")
+        or stripped == "& rtk"
     ):
         return command, False
 
@@ -1092,17 +1092,17 @@ def _interactive_scope_text(*, is_shell: bool = True) -> str:
 
 
 def _env_with_rg_bin_path(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return a copy of environment with rg shared bin dir prepended to PATH.
+    """Return a copy of environment with the shared ``bin`` directory first on PATH.
 
-    The rg binary is installed to ``get_share_dir() / "bin"`` by the Grep tool.
-    Adding this directory to PATH ensures subprocesses (Bash, PowerShell, Run)
-    can find ``rg`` without relying on the system PATH.
+    The shared ``bin`` directory contains ``rg`` and ``rtk``.  Prepending it
+    (and removing any duplicate entry elsewhere in PATH) guarantees that our
+    binaries win over any globally-installed copies.
 
     Args:
         env: Optional base environment dict. If None, ``os.environ`` is used.
 
     Returns:
-        A new dict with ``PATH`` updated to include the rg bin directory.
+        A new dict with ``PATH`` updated so the shared ``bin`` directory is first.
     """
     from kimi_cli.share import get_share_dir
 
@@ -1111,9 +1111,8 @@ def _env_with_rg_bin_path(env: dict[str, str] | None = None) -> dict[str, str]:
 
     current_path = result.get("PATH", "")
     path_sep = ";" if os.name == "nt" else ":"
-    path_entries = current_path.split(path_sep)
-    if rg_bin_dir not in path_entries:
-        result["PATH"] = f"{rg_bin_dir}{path_sep}{current_path}"
+    entries = [e for e in current_path.split(path_sep) if e and e != rg_bin_dir]
+    result["PATH"] = path_sep.join([rg_bin_dir] + entries)
 
     return result
 
