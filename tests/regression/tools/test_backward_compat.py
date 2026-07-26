@@ -323,6 +323,36 @@ class TestFormatToolArgsAliases:
         alias = _format_tool_args("AgentClose", '{"session": "s1"}')
         assert canonical == alias == "session_id: s1"
 
+    def test_goal_format(self) -> None:
+        from kimix.base import _format_tool_args
+        # Goal with code (hidden/streamed) and default mode
+        result = _format_tool_args("Goal", '{"code": "print(1)", "mode": "append"}')
+        assert result is not None
+        assert "mode: append" in result
+
+    def test_goal_code_file_alias(self) -> None:
+        from kimix.base import _format_tool_args
+        # Goal with code_file alias (should be canonicalized)
+        result = _format_tool_args("Goal", '{"code_file": "print(1)"}')
+        assert result is not None
+
+    def test_goal_empty_code(self) -> None:
+        from kimix.base import _format_tool_args
+        # Goal with empty code (clear) — should still format cleanly
+        result = _format_tool_args("Goal", '{"code": ""}')
+        assert result is not None
+
+    def test_run_goal_format(self) -> None:
+        from kimix.base import _format_tool_args
+        result = _format_tool_args("RunGoal", '{"timeout": 60}')
+        assert result is not None
+        assert "timeout: 60" in result
+
+    def test_run_goal_default_timeout(self) -> None:
+        from kimix.base import _format_tool_args
+        result = _format_tool_args("RunGoal", '{}')
+        assert result is not None
+
     def test_writeplan_text_alias_display(self) -> None:
         from kimix.base import _format_tool_args
         canonical = _format_tool_args("WritePlan", '{"content": "plan"}')

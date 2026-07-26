@@ -87,6 +87,7 @@ def get_system_prompt(
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
             items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, check `ContextUsage`; if usage is high, call `Compact` before the next step.')
             items.append('Multi-step: use `TodoList`. Finish all before ending.')
+            items.append('Use `Goal` to define the ultimate project goal as executable Python code, and `RunGoal` to execute it automatically.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. When choices or options appear, independently pick the best one and continue; do not ask the user which to choose.')
@@ -106,6 +107,7 @@ def get_system_prompt(
                 role_doc = 'You are a planner'
                 items.append('Plan only. Do not implement.')
                 items.append('Record comprehensive and detailed plan with `WritePlan` `EditPlan`.')
+                items.append('For each phase of the plan, include file path reference.')
                 items.append('You cannot write files or run commands. If any requirements need those abilities, reject them in `WritePlan` `EditPlan` and stop.')
             case SystemPromptType.Thinker:
                 worker_logic('thinker')

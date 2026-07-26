@@ -14,6 +14,8 @@
       "kimix.tools.agent:AgentList",
       "kimix.tools.agent:AgentClose",
       "kimix.tools.swarm:AgentSwarm",
+      "kimix.tools.goal:Goal",
+      "kimix.tools.goal:RunGoal",
       "kimi_cli.tools.todo:TodoList",
       "kimix.tools.context:ContextUsage",
       "kimix.tools.context:Compact"

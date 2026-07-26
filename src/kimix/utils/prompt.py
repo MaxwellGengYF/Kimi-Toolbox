@@ -129,6 +129,181 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
                 lines.append(f"  - [{st_status}] {st_title}")
     return "\n".join(lines)
 
+
+async def _maybe_build_goal_reminder(session: Session, *, strong: bool = False) -> str | None:
+    """Check if a goal is set and not yet done. Return a reminder prompt or None."""
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return None
+
+    runtime = getattr(cli, "_runtime", None)
+    role = getattr(runtime, "role", "root") if runtime is not None else "root"
+
+    # Mirror the root/subagent persistence split from Goal tool (same as TodoList)
+    if role == "root":
+        custom_data = getattr(session, 'get_custom_data', lambda: None)()
+        if custom_data is None:
+            return None
+        goal = custom_data.get("goal")
+        if not isinstance(goal, dict):
+            return None
+    else:
+        subagent_store = getattr(runtime, "subagent_store", None)
+        subagent_id = getattr(runtime, "subagent_id", None)
+        if subagent_store is None or subagent_id is None:
+            return None
+        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+        data = _read_subagent_state(state_file)
+        goal = data.get("goal") if isinstance(data.get("goal"), dict) else None
+
+    if not goal:
+        return None
+    if goal.get("status") == "done":
+        return None
+
+    goal_code = goal.get("code", "")
+    if strong:
+        return (
+            "CRITICAL: The project `Goal` has NOT been successfully executed yet. "
+            "The goal is defined as executable Python code. You MUST run it, verify it passes, "
+            "and mark the goal as `done` before finishing the session.\n"
+            f"Goal code:\n```python\n{goal_code}\n```"
+        )
+    else:
+        return (
+            "Reminder: The project `Goal` has not been successfully executed. "
+            "Please run the goal code and mark it as done when it passes.\n"
+            f"Goal code:\n```python\n{goal_code}\n```"
+        )
+
+
+async def _clear_session_goal(session: Session) -> None:
+    """Clear both in-memory and persisted goal for the session."""
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return
+    runtime = getattr(cli, "_runtime", None)
+    if runtime is None:
+        return
+
+    if getattr(runtime, "role", "root") == "root":
+        custom_data = getattr(session, 'get_custom_data', lambda: None)()
+        if custom_data is not None:
+            custom_data.pop("goal", None)
+    else:
+        subagent_store = getattr(runtime, "subagent_store", None)
+        subagent_id = getattr(runtime, "subagent_id", None)
+        if subagent_store is not None and subagent_id is not None:
+            from kimi_cli.utils.io import atomic_json_write
+
+            state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            data = _read_subagent_state(state_file)
+            data.pop("goal", None)
+            atomic_json_write(data, state_file)
+
+
+async def _try_run_session_goal(session: Session) -> bool:
+    """Try to run the current session goal code automatically.
+
+    Loads the goal from the session (root or subagent), resolves the
+    executable, runs it via ``Goal._run_goal_code``.  On success the goal
+    is cleared and the function returns ``True``.  On failure the goal
+    status is reset to ``pending`` and the function returns ``False``.
+
+    Returns ``True`` (no-op) when there is no goal or it is already done.
+    """
+    from kimix.tools.goal import Goal
+
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return True
+    runtime = getattr(cli, "_runtime", None)
+    role = getattr(runtime, "role", "root") if runtime is not None else "root"
+
+    # Load goal (same split as _maybe_build_goal_reminder)
+    if role == "root":
+        custom_data = getattr(session, "get_custom_data", lambda: None)()
+        if custom_data is None:
+            return True
+        goal = custom_data.get("goal")
+        if not isinstance(goal, dict):
+            return True
+    else:
+        subagent_store = getattr(runtime, "subagent_store", None)
+        subagent_id = getattr(runtime, "subagent_id", None)
+        if subagent_store is None or subagent_id is None:
+            return True
+        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+        data = _read_subagent_state(state_file)
+        goal = data.get("goal") if isinstance(data.get("goal"), dict) else None
+        if goal is None:
+            return True
+
+    if goal.get("status") == "done":
+        return True
+
+    # Resolve the executable
+    executable = Goal._resolve_goal_executable(goal)
+    if executable is None:
+        return False
+
+    # Mark in_progress
+    goal["status"] = "in_progress"
+    await _save_session_goal(session, goal)
+
+    try:
+        success, output = await Goal._run_goal_code(goal)
+    except Exception:
+        goal["status"] = "pending"
+        await _save_session_goal(session, goal)
+        return False
+
+    if success:
+        # Clear the goal on success
+        await _save_session_goal(session, None)
+        return True
+    else:
+        goal["status"] = "pending"
+        await _save_session_goal(session, goal)
+        return False
+
+
+async def _save_session_goal(session: Session, goal: dict[str, Any] | None) -> None:
+    """Save (or clear) the goal for the given session.
+
+    Mirrors the root/subagent split.
+    """
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return
+    runtime = getattr(cli, "_runtime", None)
+    if runtime is None:
+        return
+
+    if getattr(runtime, "role", "root") == "root":
+        custom_data = getattr(session, "get_custom_data", lambda: None)()
+        if custom_data is not None:
+            if goal is None:
+                custom_data.pop("goal", None)
+            else:
+                custom_data["goal"] = goal
+    else:
+        subagent_store = getattr(runtime, "subagent_store", None)
+        subagent_id = getattr(runtime, "subagent_id", None)
+        if subagent_store is not None and subagent_id is not None:
+            from kimi_cli.utils.io import atomic_json_write
+
+            state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            data = _read_subagent_state(state_file)
+            if goal is None:
+                data.pop("goal", None)
+            else:
+                data["goal"] = goal
+            atomic_json_write(data, state_file)
+
+
 async def _clear_session_todos(session: Session) -> None:
     """Clear both in-memory and persisted todo content for the session.
 
@@ -255,6 +430,14 @@ async def _run_single_prompt(
     format_output: bool = False,
 ) -> bool:
     """Send a single prompt to the session with retries and return True on success."""
+    # Snapshot current goal state before running
+    custom_data = getattr(session, 'get_custom_data', lambda: None)()
+    if custom_data:
+        goal = custom_data.get("goal")
+        if isinstance(goal, dict) and goal.get("status") != "done":
+            # Mark that we're about to attempt goal execution
+            custom_data["_goal_attempt_pending"] = True
+
     if info_print:
         base._stream.colorful_print_word(f"{label}\n", fg=base.Color.BRIGHT_CYAN, require_new_line=True)
 
@@ -373,6 +556,42 @@ async def prompt_async(
                         require_new_line=True,
                     )
                     break
+
+            # Goal enforcement loop
+            max_goal_attempts = 2
+            for attempt in range(max_goal_attempts):
+                # Before reminding, try to run the goal code automatically
+                auto_success = await _try_run_session_goal(session)
+                if auto_success:
+                    # Goal ran successfully (or no goal) — nothing to enforce
+                    break
+
+                goal_reminder = await _maybe_build_goal_reminder(session, strong=(attempt > 0))
+                if goal_reminder is None:
+                    break
+                if len(goal_reminder) > 65536:  # too long, save to file
+                    name, new_id = _export_to_temp_file(content=goal_reminder)
+                    goal_reminder = f"read and execute: `{name}`"
+                label = "Goal check..." if attempt == 0 else "Final goal check..."
+                try:
+                    await _run_single_prompt(
+                        session,
+                        goal_reminder,
+                        output_function,
+                        cancel_callable,
+                        merge_wire_messages,
+                        info_print,
+                        label=label,
+                        format_output=True,
+                    )
+                except Exception as reminder_exc:
+                    base._stream.colorful_print_word(
+                        f"Goal reminder failed: {reminder_exc}",
+                        fg=Color.BRIGHT_RED,
+                        styles=[Style.BOLD],
+                        require_new_line=True,
+                    )
+                    break
         elif not prompt_success:
             base._stream.colorful_print_word("prompt failed.", fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True)
 
@@ -382,6 +601,7 @@ async def prompt_async(
             if export_todo_list_path is not None:
                 await _export_session_todos(session, export_todo_list_path)
             await _clear_session_todos(session)
+            await _clear_session_goal(session)
             if close_session_after_prompt:
                 await close_session_async(session)
         base._stream.print_word("", True)

@@ -72,7 +72,7 @@ async def _load_config_json(work_dir: KaosPath) -> dict[str, Any]:
         loaded = orjson.loads(raw)
         if isinstance(loaded, dict):
             config_json = loaded
-    except OSError, orjson.JSONDecodeError, ValueError:
+    except (OSError, orjson.JSONDecodeError, ValueError):
         pass
     return {"config_json": config_json}
 

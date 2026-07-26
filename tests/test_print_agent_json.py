@@ -698,7 +698,41 @@ async def test_stream_colors_python_code_blue(monkeypatch: Any) -> None:
     assert "\x1b[94mprint(1)\x1b[0m" in output       # code -> bright blue
 
 
-async def test_stream_colors_agent_prompt_yellow(monkeypatch: Any) -> None:
+async def test_stream_colors_goal_code_blue(monkeypatch: Any) -> None:
+    """Goal code streams as 'code' with bright blue color (same as Python)."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="Goal", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"code": "assert 1+1==2"}'), session)
+
+    output = "".join(chunks)
+    assert "\x1b[95m⚡ Goal\x1b[0m" in output         # header bright magenta
+    assert "\x1b[94massert 1+1==2\x1b[0m" in output   # code -> bright blue
+
+
+async def test_stream_goal_code_file_alias(monkeypatch: Any) -> None:
+    """The 'code_file' alias streams as 'code' with bright blue color."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="Goal", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    args_json = '{"code_file": "print(\'alias\')"}'
+    await base.print_agent_json(
+        ToolCallPart(arguments_part=args_json), session)
+
+    output = "".join(chunks)
+    assert "\x1b[95m⚡ Goal\x1b[0m" in output         # header bright magenta
+    assert "\x1b[94mprint('alias')\x1b[0m" in output  # code_file -> code -> bright blue
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(

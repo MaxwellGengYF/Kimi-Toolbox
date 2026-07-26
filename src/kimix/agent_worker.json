@@ -7,6 +7,8 @@
       "kimix.tools.file.run:Run",
       "kimix.tools.py:Python",
       "kimix.tools.background:TaskOutput",
+      "kimix.tools.goal:Goal",
+      "kimix.tools.goal:RunGoal",
       "kimi_cli.tools.todo:TodoList",
       "kimi_cli.tools.file:ReadFile",
       "kimi_cli.tools.file:ReadMediaFile",

@@ -130,15 +130,15 @@ class Params(BaseModel):
     match_mode: Literal["exact", "fuzzy"] = Field(
         default="exact",
         description=(
-            "'exact' (default): Match titles exactly. "
-            "'fuzzy': Use fuzzy matching for near-miss titles when appending/updating."
+            "'exact': Match titles exactly. "
+            "'fuzzy' (default): Use fuzzy matching for near-miss titles when appending/updating."
         ),
     )
     auto_fix: bool = Field(
-        default=False,
+        default=True,
         description=(
             "When True and multiple items are in_progress, automatically mark the extra "
-            "items as done before applying the update. Use with caution."
+            "items as done before applying the update."
         ),
     )
     @field_validator("mode", mode="before")
