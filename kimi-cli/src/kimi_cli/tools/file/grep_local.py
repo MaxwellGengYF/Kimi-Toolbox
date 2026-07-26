@@ -39,6 +39,8 @@ from kimi_cli._ripgrep_common import (
     _rg_binary_name,
     _rg_download_url,
 )
+from kimi_cli._rtk_common import _rtk_binary_name
+from kimi_cli.install import _RTK_DOWNLOAD_LOCK, _download_and_install_rtk
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import ToolResultBuilder
@@ -142,6 +144,12 @@ class Params(BaseModel):
         default=60,
         ge=1,
     )
+    deduplicate_output: bool = Field(
+        default=True,
+        alias="token_kill",  # backward compat
+        description="Deduplicate repeated output lines via rtk (token killer). "
+        "Set to False to see raw, unfiltered output.",
+    )
 
 
 RG_MAX_BUFFER = 20_000_000  # 20MB stdout/stderr buffer limit
@@ -149,6 +157,36 @@ RG_KILL_GRACE = 5  # seconds: SIGTERM -> SIGKILL
 MAX_BYTES = 100 << 10  # 100KB
 _RG_HEAD_LIMIT_MARGIN = 1000  # extra matches for content-mode --max-count
 _RG_DOWNLOAD_LOCK = asyncio.Lock()
+
+
+def _find_existing_rtk(bin_name: str) -> Path | None:
+    """Find rtk binary in the share bin directory only.
+
+    Unlike ``kimi_cli.install._find_existing_rtk`` this intentionally ignores
+    the bundled deps directory and the global PATH so that subprocess calls
+    never rely on global resolution; the spawned argv always uses the
+    absolute path of the binary Kimi manages in ``share/bin``.
+    """
+    share_bin = get_share_dir() / "bin" / bin_name
+    if share_bin.is_file():
+        return share_bin
+
+    return None
+
+
+async def _ensure_rtk_path() -> str:
+    bin_name = _rtk_binary_name()
+    existing = _find_existing_rtk(bin_name)
+    if existing:
+        return str(existing)
+
+    async with _RTK_DOWNLOAD_LOCK:
+        existing = _find_existing_rtk(bin_name)
+        if existing:
+            return str(existing)
+
+        downloaded = await _download_and_install_rtk(bin_name)
+        return str(downloaded)
 
 
 def _find_existing_rg(bin_name: str) -> Path | None:
@@ -216,8 +254,15 @@ def _build_rg_args(
     *,
     single_threaded: bool = False,
     resolved_path: str | None = None,
+    rtk_path: str | None = None,
 ) -> list[str]:
-    """Build ripgrep command-line arguments from Params."""
+    """Build ripgrep command-line arguments from Params.
+
+    When ``rtk_path`` is set, the returned argv is prefixed with the absolute
+    rtk path so rtk wraps rg (``[<abs rtk>, <abs rg>, ...]``) and deduplicates
+    its output. rtk dispatches on the wrapped executable's stem, matching the
+    proven pattern in ``kimix.tools.file.run``. No PATH lookup is involved.
+    """
     args: list[str] = [rg_path]
 
     # Fixed args
@@ -276,12 +321,15 @@ def _build_rg_args(
     # mismatches with tempfile directories).
     args.append(resolved_path or os.path.expanduser(normalize_user_path(params.path)))
 
+    if rtk_path is not None:
+        args = [rtk_path, *args]
+
     return args
 
 
-def _format_cmd(params: Params, *, rg_path: str = "rg") -> str:
+def _format_cmd(params: Params, *, rg_path: str = "rg", rtk_path: str | None = None) -> str:
     """Format the equivalent ripgrep command string for display."""
-    args = _build_rg_args(rg_path, params)
+    args = _build_rg_args(rg_path, params, rtk_path=rtk_path)
     return shlex.join(args)
 
 
@@ -560,6 +608,35 @@ class Grep(CallableTool2[Params]):
             with contextlib.suppress(RuntimeError):
                 self._rg_path_task = asyncio.create_task(_ensure_rg_path())
 
+        rtk_bin_name = _rtk_binary_name()
+        existing_rtk = _find_existing_rtk(rtk_bin_name)
+        self._rtk_path: str | None = str(existing_rtk) if existing_rtk else None
+        self._rtk_path_task: asyncio.Task[str] | None = None
+        if self._rtk_path is None:
+            with contextlib.suppress(RuntimeError):
+                self._rtk_path_task = asyncio.create_task(_ensure_rtk_path())
+
+    async def _resolve_rtk_path(self) -> str | None:
+        """Resolve the absolute rtk binary path, or None on any failure.
+
+        rtk is an optional output-dedup wrapper: when it cannot be resolved
+        (missing binary, failed download) the caller silently falls back to
+        plain rg, which is fully functional alone.
+        """
+        if self._rtk_path is not None:
+            return self._rtk_path
+        if self._rtk_path_task is None:
+            return None
+        try:
+            rtk_path = await self._rtk_path_task
+        except Exception as e:
+            logger.warning(
+                "Failed to ensure rtk binary, falling back to plain rg: {error}", error=e
+            )
+            return None
+        self._rtk_path = rtk_path
+        return rtk_path
+
     @override
     async def __call__(self, params: Params, *, _retry: bool = False) -> ToolReturnValue:
         has_dirty = (
@@ -582,6 +659,14 @@ class Grep(CallableTool2[Params]):
             else:
                 return await self.backup_grep(params)
 
+        # Resolve rtk (output dedup wrapper) before building argv. Any
+        # failure degrades silently to plain rg — never backup_grep, never an
+        # error. When deduplicate_output is False the argv is byte-for-byte
+        # identical to the plain-rg invocation.
+        rtk_path: str | None = None
+        if params.deduplicate_output:
+            rtk_path = await self._resolve_rtk_path()
+
         try:
             builder = ToolResultBuilder()
             message = ""
@@ -599,7 +684,7 @@ class Grep(CallableTool2[Params]):
                         f"`{params.path}` is a reserved device name on Windows "
                         f"and cannot be searched."
                     ),
-                    brief=f"Reserved device name | {_format_cmd(params)}",
+                    brief=f"Reserved device name | {_format_cmd(params, rtk_path=rtk_path)}",
                 )
 
             # Validate workspace using the work-dir-resolved path.
@@ -614,12 +699,18 @@ class Grep(CallableTool2[Params]):
                 display_path = params.path.replace("\\", "/")
                 return ToolError(
                     message=f"`{display_path}` is outside the workspace.",
-                    brief=f"Path outside workspace | {_format_cmd(params)}",
+                    brief=f"Path outside workspace | {_format_cmd(params, rtk_path=rtk_path)}",
                 )
 
             logger.debug("Using ripgrep binary: {rg_bin}", rg_bin=rg_path)
+            if rtk_path is not None:
+                logger.debug("Wrapping rg with rtk binary: {rtk_bin}", rtk_bin=rtk_path)
             args = _build_rg_args(
-                rg_path, params, single_threaded=_retry, resolved_path=str(search_path)
+                rg_path,
+                params,
+                single_threaded=_retry,
+                resolved_path=str(search_path),
+                rtk_path=rtk_path,
             )
 
             # Execute search as async subprocess (non-blocking, cancellable)
@@ -677,7 +768,7 @@ class Grep(CallableTool2[Params]):
                             f"Grep timed out after {params.timeout}s. "
                             "Try a more specific path or pattern."
                         ),
-                        brief=f"Grep timed out | {_format_cmd(params)}",
+                        brief=f"Grep timed out | {_format_cmd(params, rtk_path=rtk_path)}",
                     )
                 timeout_msg = f"Grep timed out after {params.timeout}s. Partial results returned."
                 message = f"{message} {timeout_msg}" if message else timeout_msg
@@ -690,7 +781,7 @@ class Grep(CallableTool2[Params]):
                     return await self.__call__(params, _retry=True)
                 return ToolError(
                     message=f"Failed to grep. Error: {stderr_str}",
-                    brief=f"Failed to grep | {_format_cmd(params)}",
+                    brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path)}",
                 )
 
             # --- Post-processing pipeline ---
@@ -815,14 +906,16 @@ class Grep(CallableTool2[Params]):
                 no_match_msg = "No matches found"
                 if message:
                     no_match_msg = f"{no_match_msg}. {message}"
-                return builder.ok(message=no_match_msg, brief=_format_cmd(params))
+                return builder.ok(
+                    message=no_match_msg, brief=_format_cmd(params, rtk_path=rtk_path)
+                )
 
             if truncated_by_bytes:
                 byte_msg = f"Output truncated to {MAX_BYTES} bytes."
                 message = f"{message} {byte_msg}" if message else byte_msg
 
             builder.write(output)
-            return builder.ok(message=message, brief=_format_cmd(params))
+            return builder.ok(message=message, brief=_format_cmd(params, rtk_path=rtk_path))
 
         except asyncio.CancelledError:
             raise
@@ -835,7 +928,7 @@ class Grep(CallableTool2[Params]):
             )
             return ToolError(
                 message=f"Failed to grep. Error: {str(e)}",
-                brief=f"Failed to grep | {_format_cmd(params)}",
+                brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path)}",
             )
 
     async def backup_grep(self, params: Params) -> ToolReturnValue:

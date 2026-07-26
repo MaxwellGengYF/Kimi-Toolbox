@@ -905,7 +905,9 @@ def _is_shell_assignment(word: str) -> bool:
     return bool(_ASSIGNMENT_RE.match(word))
 
 
-def _rewrite_shell_segment(segment: str, exclude_read: bool) -> tuple[str, bool]:
+def _rewrite_shell_segment(
+    segment: str, exclude_read: bool, pwsh: bool = False
+) -> tuple[str, bool]:
     """Rewrite the leftmost command in a single shell segment, if known to RTK."""
     i = 0
     while True:
@@ -925,7 +927,9 @@ def _rewrite_shell_segment(segment: str, exclude_read: bool) -> tuple[str, bool]
         token_start = start
         break
 
-    name = Path(token).stem
+    # Strip surrounding quotes so quoted absolute paths (e.g. the rewritten
+    # rtk prefix) are still matched by stem.
+    name = Path(token.strip("\"'")).stem
     if name.lower() in ("rtk", "rtk.exe"):
         return segment, False
     if exclude_read and name.lower() == "read":
@@ -933,11 +937,19 @@ def _rewrite_shell_segment(segment: str, exclude_read: bool) -> tuple[str, bool]
     if not _is_known_rtk_command(name):
         return segment, False
 
-    return segment[:token_start] + "rtk " + segment[token_start:], True
+    # Never rely on PATH: inject the absolute rtk path, double-quoted so it
+    # is safe with spaces (backslashes inside bash double quotes are literal
+    # here). PowerShell requires the call operator `&` to invoke a quoted
+    # command, bash must not have it.
+    rtk_path = _rtk_binary_path()
+    if rtk_path is None:
+        return segment, False
+    prefix = f'& "{rtk_path}" ' if pwsh else f'"{rtk_path}" '
+    return segment[:token_start] + prefix + segment[token_start:], True
 
 
 def _maybe_rewrite_shell_command_with_rtk(
-    command: str, token_kill: bool, exclude_read: bool = False
+    command: str, token_kill: bool, exclude_read: bool = False, pwsh: bool = False
 ) -> tuple[str, bool]:
     """Return ``(rewritten_command, did_rewrite)``.
 
@@ -945,6 +957,9 @@ def _maybe_rewrite_shell_command_with_rtk(
     that may contain ``&&``, ``||``, ``|``, ``;``.  Commands inside quotes or
     command substitutions are not rewritten.  Segments already starting with
     ``rtk`` or prefixed with ``RTK_DISABLED=1`` are left untouched.
+
+    When ``pwsh`` is True the injected absolute rtk path is prefixed with the
+    PowerShell call operator ``&`` (required to invoke a quoted command).
     """
     if not token_kill:
         return command, False
@@ -962,11 +977,20 @@ def _maybe_rewrite_shell_command_with_rtk(
     ):
         return command, False
 
+    # Also leave commands already starting with the absolute rtk path
+    # (quoted or not, with or without the pwsh `&` call operator) untouched.
+    rtk_path = _rtk_binary_path()
+    if rtk_path is not None:
+        rtk_str = str(rtk_path)
+        head = stripped[2:].lstrip() if stripped.startswith("& ") else stripped
+        if head.startswith(rtk_str) or head.startswith(f'"{rtk_str}"'):
+            return command, False
+
     segments = _split_shell_segments(command)
     new_segments: list[tuple[str, str]] = []
     changed = False
     for seg, sep in segments:
-        new_seg, seg_changed = _rewrite_shell_segment(seg, exclude_read)
+        new_seg, seg_changed = _rewrite_shell_segment(seg, exclude_read, pwsh)
         new_segments.append((new_seg, sep))
         changed |= seg_changed
 

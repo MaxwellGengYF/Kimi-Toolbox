@@ -302,7 +302,7 @@ class Powershell(CallableTool2[PowershellParams]):
 
         # Rewrite known commands through RTK before any PS5.1 syntax transform.
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, params.deduplicate_output
+            params.cmd, params.deduplicate_output, pwsh=True
         )
         if self._pwsh_path is not None:
             # PowerShell 7 is available: run the command as-is without syntax transforms.
@@ -607,7 +607,7 @@ class Powershell(CallableTool2[PowershellParams]):
         await stream.pop_output()
 
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, params.deduplicate_output
+            params.cmd, params.deduplicate_output, pwsh=True
         )
         input_text = rtk_cmd
         if not input_text.endswith("\n"):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 from pathlib import Path
@@ -11,7 +12,17 @@ from inline_snapshot import snapshot
 from kaos.path import KaosPath
 from pydantic import ValidationError
 
-from kimi_cli.tools.file.grep_local import Grep, Params, _build_rg_args, _strip_path_prefix
+import kimi_cli.tools.file.grep_local as grep_local
+from kimi_cli._rtk_common import _rtk_binary_name
+from kimi_cli.share import get_share_dir
+from kimi_cli.tools.file.grep_local import (
+    Grep,
+    Params,
+    _build_rg_args,
+    _find_existing_rtk,
+    _format_cmd,
+    _strip_path_prefix,
+)
 from kimi_cli.tools.utils import DEFAULT_MAX_CHARS
 
 
@@ -1613,3 +1624,217 @@ async def test_grep_outside_work_dir_no_matches_has_warning(grep_tool: Grep):
         )
         assert not result.is_error
         assert "[out of work-dir]" in result.message
+
+
+# === Tests for rtk (deduplicate_output) integration ===
+
+
+class _FakeStream:
+    """Minimal async stream returning a fixed payload once, then EOF."""
+
+    def __init__(self, data: bytes = b"") -> None:
+        self._data = data
+        self._done = False
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._done:
+            return b""
+        self._done = True
+        return self._data
+
+
+class _FakeProcess:
+    """Minimal stand-in for asyncio.subprocess.Process."""
+
+    def __init__(self, stdout: bytes = b"file1.py\n", returncode: int = 0) -> None:
+        self.stdout = _FakeStream(stdout)
+        self.stderr = _FakeStream()
+        self.returncode = returncode
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+@pytest.fixture
+def captured_exec(monkeypatch):
+    """Capture argv/kwargs passed to asyncio.create_subprocess_exec."""
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return captured
+
+
+def _share_bin_rtk() -> str:
+    return str(get_share_dir() / "bin" / _rtk_binary_name())
+
+
+def test_find_existing_rtk_share_bin_only(tmp_path, monkeypatch):
+    """_find_existing_rtk finds the binary in share/bin only."""
+    bin_name = _rtk_binary_name()
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: tmp_path)
+    assert _find_existing_rtk(bin_name) is None
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / bin_name).touch()
+    assert _find_existing_rtk(bin_name) == bin_dir / bin_name
+
+
+def test_find_existing_rtk_ignores_path(tmp_path, monkeypatch):
+    """_find_existing_rtk must never fall back to the global PATH."""
+    bin_name = _rtk_binary_name()
+    share = tmp_path / "share"
+    share.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / bin_name).touch()  # fake rtk on PATH, outside share/bin
+    monkeypatch.setattr(grep_local, "get_share_dir", lambda: share)
+    monkeypatch.setenv("PATH", str(other))
+    assert _find_existing_rtk(bin_name) is None
+
+
+def test_build_rg_args_with_rtk():
+    """rtk path prefixes the argv; rg path stays the wrapped executable."""
+    params = Params(pattern="hello")
+    args = _build_rg_args("/abs/bin/rg", params, rtk_path="/abs/bin/rtk")
+    assert args[0] == "/abs/bin/rtk"
+    assert args[1] == "/abs/bin/rg"
+    assert "--no-config" in args
+
+
+def test_build_rg_args_without_rtk_unchanged():
+    """No rtk_path → argv identical to plain rg invocation."""
+    params = Params(pattern="hello")
+    args = _build_rg_args("/abs/bin/rg", params)
+    assert args[0] == "/abs/bin/rg"
+
+
+def test_format_cmd_reflects_rtk_when_active():
+    params = Params(pattern="hello")
+    assert _format_cmd(params, rtk_path="rtk").startswith("rtk rg ")
+    assert not _format_cmd(params).startswith("rtk ")
+
+
+def test_grep_params_deduplicate_output_default():
+    assert Params(pattern="x").deduplicate_output is True
+
+
+def test_grep_params_token_kill_alias():
+    """token_kill=False maps to deduplicate_output=False (backward compat)."""
+    params = Params.model_validate({"pattern": "x", "token_kill": False})
+    assert params.deduplicate_output is False
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_active_by_default(grep_tool: Grep, temp_test_files, captured_exec):
+    """Default params wrap rg with the absolute share/bin rtk path."""
+    temp_dir, _ = temp_test_files
+    grep_tool._rtk_path = _share_bin_rtk()
+    grep_tool._rtk_path_task = None
+
+    result = await grep_tool(Params(pattern="Hello", path=temp_dir))
+    assert not result.is_error
+
+    args = captured_exec["args"]
+    share_bin = str(get_share_dir() / "bin")
+    # [<share>/bin/rtk, <share>/bin/rg, --no-config, ...] — both absolute
+    assert args[0] == _share_bin_rtk()
+    assert args[1] == grep_tool._rg_path
+    assert Path(args[0]).is_absolute()
+    assert Path(args[1]).is_absolute()
+    assert args[0].startswith(share_bin)
+    assert args[1].startswith(share_bin)
+    # No PATH-prepend env tricks: no env kwarg passed to the subprocess.
+    assert "env" not in captured_exec["kwargs"]
+    # Display brief reflects the real rtk-wrapped invocation.
+    assert result.brief.startswith("rtk ") or "rtk" in result.brief.split(" ")[0]
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_disabled_no_rtk_work(
+    grep_tool: Grep, temp_test_files, captured_exec, monkeypatch
+):
+    """deduplicate_output=False → plain rg argv, no rtk resolution attempted."""
+    temp_dir, _ = temp_test_files
+
+    async def _boom() -> str:
+        raise AssertionError("rtk resolution must not be attempted")
+
+    monkeypatch.setattr(grep_local, "_ensure_rtk_path", _boom)
+    grep_tool._rtk_path = None
+    grep_tool._rtk_path_task = None
+
+    result = await grep_tool(
+        Params(pattern="Hello", path=temp_dir, deduplicate_output=False)
+    )
+    assert not result.is_error
+
+    args = captured_exec["args"]
+    assert args[0] == grep_tool._rg_path
+    assert "env" not in captured_exec["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_missing_falls_back_to_plain_rg(
+    grep_tool: Grep, temp_test_files, captured_exec
+):
+    """Missing rtk binary → silent fallback to plain rg, result still returned."""
+    temp_dir, _ = temp_test_files
+    grep_tool._rtk_path = None
+    grep_tool._rtk_path_task = None
+
+    result = await grep_tool(Params(pattern="Hello", path=temp_dir))
+    assert not result.is_error
+    assert captured_exec["args"][0] == grep_tool._rg_path
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_download_failure_falls_back(
+    grep_tool: Grep, temp_test_files, captured_exec
+):
+    """_ensure_rtk_path failure → plain rg, no exception, no backup_grep."""
+    temp_dir, _ = temp_test_files
+
+    async def _fail() -> str:
+        raise RuntimeError("simulated download failure")
+
+    grep_tool._rtk_path = None
+    grep_tool._rtk_path_task = asyncio.ensure_future(_fail())
+
+    result = await grep_tool(Params(pattern="Hello", path=temp_dir))
+    assert not result.is_error
+    assert captured_exec["args"][0] == grep_tool._rg_path
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_preserves_no_match_exit_code(
+    grep_tool: Grep, temp_test_files, monkeypatch
+):
+    """Exit code 1 (no matches) through rtk keeps 'No matches found' semantics."""
+    temp_dir, _ = temp_test_files
+    grep_tool._rtk_path = _share_bin_rtk()
+    grep_tool._rtk_path_task = None
+
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        return _FakeProcess(stdout=b"", returncode=1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    result = await grep_tool(Params(pattern="Hello", path=temp_dir))
+    assert not result.is_error
+    assert "No matches found" in result.message
+    assert captured["args"][0] == _share_bin_rtk()

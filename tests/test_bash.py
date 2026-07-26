@@ -1762,7 +1762,9 @@ class TestBashRtkRewrite:
 
                 assert isinstance(result, ToolOk)
                 args = mock_pt.call_args
-                assert args[0][1] == ["-c", "rtk git status"]
+                # Rewritten to the quoted absolute rtk path, never bare `rtk `.
+                from kimix.tools.common import _rtk_binary_path
+                assert args[0][1] == ["-c", f'"{_rtk_binary_path()}" git status']
 
     async def test_bash_read_builtin_not_rewritten(
         self, mock_session: MagicMock
