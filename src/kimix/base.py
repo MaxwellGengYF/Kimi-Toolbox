@@ -442,6 +442,7 @@ def _print_transition_usage(session: Session, message_type: MessageType | None) 
             f"{left}{right_split}\n",
             fg=GRAY,
             require_new_line=True,
+            flush=True,
         )
     setattr(session, _PRINT_AGENT_JSON_MESSAGE_TYPE_ATTR, message_type)
 
@@ -873,7 +874,7 @@ class _ToolCallStreamPrinter:
                 self._flush_emit(flush=True)
         except Exception:
             pass
-        _stream.print_word("", True)
+        _stream.print_word("", True, flush=True)
         _stream._state = StreamPrintState.Other
         # Release accumulated fragments promptly; they are no longer needed.
         self._json_parts.clear()
@@ -1356,6 +1357,7 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
     display_text = _format_display_blocks(rv.display)
     _stream.print_word(display_text, require_new_line=True)
     result_text = _format_tool_result(wire_msg)
+    flushed = False
     if result_text:
         prefix = ("✗ " if rv.is_error else "✓ ")
         if display_text:
@@ -1391,6 +1393,7 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
                     require_new_line=True,
                     flush=True,
                 )
+                flushed = True
         else:
             _stream.colorful_print_word(
                 f"{prefix}{result_text}",
@@ -1398,8 +1401,9 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
                 require_new_line=True,
                 flush=True,
             )
-    else:
-        _stream.print_word('', True)
+            flushed = True
+    if not flushed:
+        _stream.print_word('', True, flush=True)
     _stream._state = StreamPrintState.Other
     if output_function:
         formatted = f"[ToolResult] {_format_tool_result(wire_msg)}"
@@ -1417,7 +1421,7 @@ def _handle_noop(_wire_msg: Any, _output_function: Callable[[str, MessageType], 
 
 def _handle_compaction_begin(_wire_msg: Any, _output_function: Callable[[str, MessageType], Any] | None, _session: Session, format_output: bool = False) -> None:
     _stream.colorful_print_word(
-        "Compacting...", require_new_line=True, fg=Color.BRIGHT_MAGENTA)
+        "Compacting...", require_new_line=True, fg=Color.BRIGHT_MAGENTA, flush=True)
 
 
 def _handle_think_part(wire_msg: ThinkPart, output_function: Callable[[str, MessageType], Any] | None, _session: Session, format_output: bool = False) -> None:
@@ -1477,7 +1481,7 @@ def _flush_agent_json_text() -> None:
         _text_buffer = None
         if text:
             from kimix.cli_impl.utils import render_markdown
-            _stream.print_word(render_markdown(text), require_new_line=True)
+            _stream.print_word(render_markdown(text), require_new_line=True, flush=True)
 
 
 def print_agent_json_flush_text() -> None:
