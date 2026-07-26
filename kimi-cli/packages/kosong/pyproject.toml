@@ -19,6 +19,7 @@ dependencies = [
     "json_repair>=0.59.10",
     "regex>=2023.0.0",
     "rapidfuzz>=3.0.0",
+    "pybase64>=1.3.0",
 ]
 
 [project.optional-dependencies]

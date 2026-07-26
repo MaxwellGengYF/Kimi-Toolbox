@@ -1,7 +1,6 @@
 """Tests for Defects 4.1-4.4: TodoList improvements."""
 from __future__ import annotations
 
-import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,14 +10,12 @@ from kimi_cli.tools.todo import Params as TodoListParams, Todo
 
 
 class TestTodoListSimplify:
-    def test_parent_title_deprecated_warning(self) -> None:
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+    def test_parent_title_rejected(self) -> None:
+        with pytest.raises(ValidationError):
             TodoListParams(
                 todos=[Todo(title="task", status="pending")],
                 parent_title="some parent",
             )
-            assert any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_match_mode_accepted(self) -> None:
         params = TodoListParams(

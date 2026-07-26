@@ -248,6 +248,11 @@ def test_grep_params_schema(grep_tool: Grep):
                     "minimum": 1,
                     "type": "integer",
                 },
+                "token_kill": {
+                    "default": True,
+                    "description": "Deduplicate repeated output lines via rtk (token killer). Set to False to see raw, unfiltered output.",
+                    "type": "boolean",
+                },
             },
             "required": ["pattern"],
             "type": "object",

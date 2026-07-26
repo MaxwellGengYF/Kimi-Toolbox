@@ -103,7 +103,7 @@ class TestBasicExecution:
 # ============================================================================
 class TestRetryIntegration:
     def test_retry_eventually_succeeds(self) -> None:
-        from conftest import make_fail_once
+        from tests.test_dag.conftest import make_fail_once
         dag = DAG()
         dag.add_node(TaskNode("a", make_fail_once("k"), retries=2))
         exe = make_executor()
