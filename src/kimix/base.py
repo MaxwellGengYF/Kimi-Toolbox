@@ -582,7 +582,7 @@ _STREAM_TOOL_NAMES = frozenset({
     "Agent",
     "EditFile",
     "EditPlan",
-    "Goal",
+    # "Goal" and "RunGoal" removed — both are deleted
 })
 
 # Tool-call argument keys whose (potentially very long) string values are
@@ -744,10 +744,6 @@ def _format_tool_args(name: str, args: str | None) -> str | None:
                 return ""
             case "Compact":
                 return ", ".join(_collect("instruction", "mode"))
-            case "Goal":
-                return ", ".join(_collect("mode", hide=set()))
-            case "RunGoal":
-                return ", ".join(_collect("timeout"))
             case _:
                 return orjson.dumps(parsed).decode("utf-8")
     except TypeError:

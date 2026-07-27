@@ -27,6 +27,7 @@ class TodoItemState(BaseModel):
     title: str
     status: TodoStatus
     notes: str | None = None
+    code: str | None = None
 
 
 class SessionState(BaseModel):

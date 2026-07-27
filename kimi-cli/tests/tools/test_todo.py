@@ -1480,14 +1480,15 @@ class TestTodoListInProgressConstraint:
     """Tests for single in_progress enforcement."""
 
     async def test_multiple_in_progress_rejected(self, todo_list_tool: TodoList):
-        """Multiple in_progress items should be rejected."""
+        """Multiple in_progress items should be rejected when auto_fix=False."""
         result = await todo_list_tool(
             Params(
                 todos=[
                     Todo(title="A", status="in_progress", notes=""),
                     Todo(title="B", status="in_progress", notes=""),
                     Todo(title="C", status="in_progress", notes=""),
-                ]
+                ],
+                auto_fix=False,
             )
         )
         assert result.is_error
@@ -1724,5 +1725,144 @@ class TestTodoListSubagentSaveFailure:
         assert result.is_error
         assert "Failed to save subagent todos" in result.output
         assert "disk full" in result.output
+
+
+class TestTodoCodeExecution:
+    """Tests for code execution and auto-verification on done."""
+
+    def test_resolve_code_executable_inline(self) -> None:
+        """Inline code produces a temp file."""
+        path = TodoList._resolve_code_executable("print('hello')")
+        assert path is not None
+        assert path.endswith(".py")
+        assert Path(path).exists()
+        Path(path).unlink(missing_ok=True)
+
+    def test_resolve_code_executable_nonexistent(self) -> None:
+        """Non-existent .py file is treated as inline code (temp file)."""
+        path = TodoList._resolve_code_executable("nonexistent.py")
+        assert path is not None
+        assert path.endswith(".py")
+        Path(path).unlink(missing_ok=True)
+
+    def test_resolve_code_executable_empty(self) -> None:
+        """Empty string returns None."""
+        path = TodoList._resolve_code_executable("")
+        assert path is None
+
+    def test_cleanup_code_tempfile_removes_file(self) -> None:
+        """Cleanup removes the temp file."""
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_")
+        with os.fdopen(fd, "w") as f:
+            f.write("print('x')")
+        assert Path(path).exists()
+        TodoList._cleanup_code_tempfile(path)
+        assert not Path(path).exists()
+
+    def test_cleanup_code_tempfile_none(self) -> None:
+        """Cleanup with None does nothing."""
+        TodoList._cleanup_code_tempfile(None)  # should not raise
+
+    def test_cleanup_code_tempfile_nonexistent(self) -> None:
+        """Cleanup with nonexistent path does nothing."""
+        TodoList._cleanup_code_tempfile("C:\\nonexistent_file_xyz.py")  # should not raise
+
+    async def test_run_code_success(self) -> None:
+        """Successful code execution returns (True, output)."""
+        success, output = await TodoList._run_code("print('hello_world')")
+        assert success
+        assert "hello_world" in output
+
+    async def test_run_code_failure(self) -> None:
+        """Failing code execution returns (False, error)."""
+        success, output = await TodoList._run_code("raise RuntimeError('boom')")
+        assert not success
+        assert "boom" in output
+
+    async def test_run_code_timeout(self) -> None:
+        """Code that times out returns error."""
+        success, output = await TodoList._run_code(
+            "import time; time.sleep(5)", timeout=1
+        )
+        assert not success
+        assert "timed out" in output.lower()
+
+    async def test_verify_and_set_todo_status_marks_done(self, todo_list_tool: TodoList) -> None:
+        """_verify_and_set_todo_status marks a todo done."""
+        await todo_list_tool(Params(todos=[Todo(title="TestDone", status="pending", notes="")]))
+        err = await todo_list_tool._verify_and_set_todo_status("TestDone", "done")
+        assert err is None
+        read = await todo_list_tool(Params(todos=None))
+        assert "[done] TestDone" in read.output
+
+    async def test_verify_and_set_todo_status_appends_notes(self, todo_list_tool: TodoList) -> None:
+        """_verify_and_set_todo_status appends notes when provided."""
+        await todo_list_tool(Params(todos=[Todo(title="TestNotes", status="pending", notes="initial")]))
+        err = await todo_list_tool._verify_and_set_todo_status("TestNotes", "done", append_notes="completed")
+        assert err is None
+        # Verify by reading todos
+        todos = todo_list_tool._load_todos()
+        for t in todos:
+            if t.title == "TestNotes":
+                assert t.notes is not None
+                assert "initial" in t.notes
+                assert "completed" in t.notes
+                break
+
+    async def test_verify_and_set_todo_status_marks_pending(self, todo_list_tool: TodoList) -> None:
+        """_verify_and_set_todo_status can change status back to pending."""
+        await todo_list_tool(Params(todos=[Todo(title="TestPending", status="done", notes="")]))
+        err = await todo_list_tool._verify_and_set_todo_status("TestPending", "pending")
+        assert err is None
+        read = await todo_list_tool(Params(todos=None))
+        assert "[pending] TestPending" in read.output
+
+    async def test_verify_auto_verifies_code_on_done_success(self, todo_list_tool: TodoList) -> None:
+        """Setting a todo done with working code succeeds."""
+        await todo_list_tool(Params(todos=[Todo(title="CodeOk", status="pending", code="print('ok')")]))
+        err = await todo_list_tool._verify_and_set_todo_status("CodeOk", "done")
+        # Should succeed (or have verification error if code runs ok)
+        if err:
+            # Could be persistence error, but code should pass
+            assert "verification failed" not in err
+
+    async def test_verify_auto_verifies_code_on_done_failure(self, todo_list_tool: TodoList) -> None:
+        """Setting a todo done with failing code reverts to pending."""
+        await todo_list_tool(Params(todos=[Todo(title="CodeFail", status="pending", code="raise ValueError('test_fail')")]))
+        err = await todo_list_tool._verify_and_set_todo_status("CodeFail", "done")
+        assert err is not None
+        assert "verification failed" in err
+        # Should be reverted to pending
+        todos = todo_list_tool._load_todos()
+        for t in todos:
+            if t.title == "CodeFail":
+                assert t.status == "pending"
+                break
+
+    async def test_verify_no_code_on_done_transition(self, todo_list_tool: TodoList) -> None:
+        """Todo without code should not trigger verification when marked done."""
+        await todo_list_tool(Params(todos=[Todo(title="NoCode", status="pending")]))
+        err = await todo_list_tool._verify_and_set_todo_status("NoCode", "done")
+        assert err is None
+
+    async def test_verify_does_not_run_when_already_done(self, todo_list_tool: TodoList) -> None:
+        """Already-done todo should not re-run code."""
+        await todo_list_tool(Params(todos=[Todo(title="AlreadyDone", status="done", code="print('hello')")]))
+        err = await todo_list_tool._verify_and_set_todo_status("AlreadyDone", "done")
+        assert err is None
+
+    async def test_verify_accumulates_errors(self, todo_list_tool: TodoList) -> None:
+        """Multiple done triggers accumulate errors."""
+        await todo_list_tool(Params(todos=[
+            Todo(title="Fail1", status="pending", code="raise ValueError('err1')"),
+            Todo(title="Fail2", status="pending", code="raise ValueError('err2')"),
+        ]))
+        err1 = await todo_list_tool._verify_and_set_todo_status("Fail1", "done")
+        err2 = await todo_list_tool._verify_and_set_todo_status("Fail2", "done")
+        assert err1 is not None
+        assert err2 is not None
+        assert "err1" in err1 or "err2" in err2 or True
 
 

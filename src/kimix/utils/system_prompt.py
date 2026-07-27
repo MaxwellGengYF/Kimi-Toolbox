@@ -86,8 +86,7 @@ def get_system_prompt(
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
             items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, check `ContextUsage`; if usage is high, call `Compact` before the next step.')
-            items.append('Multi-step: use `TodoList`. Finish all before ending.')
-            items.append('ALWAYS: define the goal with the `Goal` tool and run it with the `RunGoal` tool.')
+            items.append('Multi-step: use `TodoList`. Finish all before ending. attach executable `code` to todo items via `TodoList`. Mark them `done` to trigger automatic code verification.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. When choices or options appear, independently pick the best one and continue; do not ask the user which to choose.')

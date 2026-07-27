@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,7 +13,10 @@ from typing import Any, Literal, cast, override
 import orjson
 import rapidfuzz
 from kosong.tooling import CallableTool2, ToolReturnValue
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices, BaseModel, ConfigDict, Field,
+    ValidationError, field_validator, model_validator,
+)
 
 from kimi_cli import logger
 from kimi_cli.session_state import TodoItemState, TodoStatus
@@ -78,6 +84,16 @@ class Todo(BaseModel):
         description="Notes.",
         max_length=65536,
     )
+    code: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("code", "code_file"),
+        description=(
+            "Python code inline or a `.py` file path. "
+            "Omit if this todo has no executable code. "
+            "Pass empty string to clear previously set code. "
+            "Accepts `code` or `code_file`."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -108,6 +124,13 @@ class Todo(BaseModel):
         if not stripped:
             raise ValueError("Title cannot be empty or contain only whitespace")
         return stripped
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _validate_code(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        return str(v)
 
 
 class Params(BaseModel):
@@ -227,7 +250,10 @@ class TodoList(CallableTool2[Params]):
         "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
         "mode='overwrite' replaces the list only when every existing todo is done; "
         "use mode='force_overwrite' to intentionally discard unfinished items.\n"
-        "Keep exactly one item in_progress at a time and mark items done immediately after finishing them."
+        "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
+        "Each todo may include a `code` field with inline Python or a `.py` file path.\n"
+        "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
+        "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors."
     )
     params: type[Params] = Params
 
@@ -414,11 +440,97 @@ class TodoList(CallableTool2[Params]):
         lines: list[str] = []
         for t in selected:
             todo = f"- [{display_status[t.status]}] {t.title}"
+            if t.code:
+                is_file = t.code.endswith(".py")
+                todo += f"  `[code: {'file' if is_file else 'inline'}]`"
             if t.status == "in_progress" and t.notes:
                 todo += f"  Notes: {t.notes}"
             lines.append(todo)
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _resolve_code_executable(code: str) -> str | None:
+        """Resolve the executable file path from a todo's code string.
+
+        Returns the path to a ``.py`` file that can be run, or ``None`` if
+        the code has no runnable content.
+        """
+        if not code:
+            return None
+        fp = Path(code)
+        if fp.is_file():
+            if code.endswith(".py"):
+                return str(fp)
+            return None
+        # Inline code — write to temp file
+        import tempfile as _tf
+        fd, path = _tf.mkstemp(suffix=".py", prefix="run_todo_code_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(code)
+        return path
+
+    @staticmethod
+    async def _run_code(
+        code: str,
+        timeout: int = 30,
+        python_exe: str | None = None,
+        executable: str | None = None,
+    ) -> tuple[bool, str]:
+        """Execute a todo's code and return ``(success, output_or_error)``.
+
+        If ``executable`` is provided it is used directly; otherwise the
+        executable path is resolved via ``_resolve_code_executable``.
+        """
+        if executable is None:
+            executable = TodoList._resolve_code_executable(code)
+        if executable is None:
+            return False, "Todo has no runnable code."
+
+        if python_exe is None:
+            python_exe = sys.executable
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python_exe,
+                executable,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return False, f"Code execution timed out after {timeout}s."
+
+            output = stdout.decode("utf-8", errors="replace")
+            if stderr:
+                error_text = stderr.decode("utf-8", errors="replace")
+                if output:
+                    output += "\n" + error_text
+                else:
+                    output = error_text
+
+            if proc.returncode == 0:
+                return True, output or "Code executed successfully (no output)."
+            else:
+                return False, f"Code failed (exit code {proc.returncode}):\n{output}"
+        except FileNotFoundError:
+            return False, f"Python executable not found: {python_exe}"
+        except Exception as exc:
+            return False, f"Code execution error: {exc}"
+
+    @staticmethod
+    def _cleanup_code_tempfile(temp_file_path: str | None) -> None:
+        """Clean up a temp file created for inline code execution."""
+        if temp_file_path:
+            try:
+                Path(temp_file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # Score threshold for user-facing title suggestions. rapidfuzz returns a
     # normalized similarity in [0, 100]; 60 catches minor typos while avoiding
@@ -570,11 +682,12 @@ class TodoList(CallableTool2[Params]):
 
     @staticmethod
     def _merge_one(old: Todo, new: Todo) -> Todo:
-        """Produce an updated todo preserving old notes when new omits them."""
+        """Produce an updated todo preserving old notes/code when new omits them."""
         return Todo(
             title=old.title,
             status=new.status,
             notes=new.notes if new.notes is not None else old.notes,
+            code=new.code if new.code is not None else old.code,
         )
 
     @staticmethod
@@ -661,10 +774,55 @@ class TodoList(CallableTool2[Params]):
                     title=todo.title,
                     status=todo.status,
                     notes=todo.notes,
+                    code=todo.code,
                 )
                 for todo in todos
             ]
         )
+
+    async def _verify_and_set_todo_status(self, todo_title: str, status: TodoStatus, append_notes: str = "") -> str | None:
+        """Set a todo's status and auto-verify code when marking `done`.
+
+        When marking a todo `done` (previous status was NOT `done`), if the todo has
+        a `code` field, it is executed for verification. If execution fails, the error
+        is collected and returned as part of the result string.
+        Multiple `done` status changes can each trigger their own verification;
+        errors from each are accumulated into a single newline-separated string.
+
+        Returns error message string on verification/persistence failure, None on success.
+        """
+        todos = self._load_todos()
+        archived = self._load_archived_todos()
+        errors: list[str] = []
+        for t in todos:
+            if t.title == todo_title:
+                was_done = t.status == "done"
+                is_becoming_done = status == "done" and not was_done
+                t.status = status
+                if append_notes:
+                    t.notes = ((t.notes or "") + "\n" + append_notes).strip() or None
+                # Auto-verify code when transitioning to done
+                if is_becoming_done and t.code:
+                    executable = TodoList._resolve_code_executable(t.code)
+                    if executable is not None:
+                        try:
+                            success, output = await TodoList._run_code(t.code, executable=executable)
+                        except Exception as exc:
+                            success, output = False, str(exc)
+                        finally:
+                            TodoList._cleanup_code_tempfile(executable)
+                        if not success:
+                            err_msg = f"Todo '{t.title}' verification failed: {output}"
+                            errors.append(err_msg)
+                            # Revert status to pending on verification failure
+                            t.status = "pending"
+                            t.notes = ((t.notes or "") + "\n" + err_msg).strip() or None
+                break
+        combined_errors = "\n".join(errors) if errors else None
+        persist_err = self._save_todos(todos, archived)
+        if persist_err and combined_errors:
+            return persist_err + "\n" + combined_errors
+        return persist_err or combined_errors
 
     # ---- Read mode ---------------------------------------------------------
 

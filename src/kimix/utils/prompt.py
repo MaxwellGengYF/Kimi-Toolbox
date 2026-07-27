@@ -130,8 +130,19 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
     return "\n".join(lines)
 
 
-async def _maybe_build_goal_reminder(session: Session, *, strong: bool = False) -> str | None:
-    """Check if a goal is set and not yet done. Return a reminder prompt or None."""
+async def _maybe_build_code_todo_reminder(session: Session, *, strong: bool = False) -> str | None:
+    """Check todos with code: run pending/in_progress code for verification.
+
+    For each todo that has `code` and is not done:
+    - Execute the code via TodoList._run_code.
+    - If successful: mark the todo `done` via _verify_and_set_todo_status
+      (the method itself will NOT re-run since status is already being set to done).
+    - If failed: collect the error message.
+
+    Returns a reminder string listing failures (or None if all code passed or no code todos).
+    """
+    from kimi_cli.tools.todo import TodoList
+
     cli = getattr(session, "_cli", None)
     if cli is None:
         return None
@@ -139,14 +150,19 @@ async def _maybe_build_goal_reminder(session: Session, *, strong: bool = False) 
     runtime = getattr(cli, "_runtime", None)
     role = getattr(runtime, "role", "root") if runtime is not None else "root"
 
-    # Mirror the root/subagent persistence split from Goal tool (same as TodoList)
+    # Get the TodoList tool instance from the runtime's toolset
+    toolset = getattr(getattr(getattr(cli, "soul", None), "agent", None), "toolset", None)
+    if toolset is None:
+        return None
+    todo_tool = toolset.find("TodoList")
+    if todo_tool is None:
+        return None
+
     if role == "root":
-        custom_data = getattr(session, 'get_custom_data', lambda: None)()
-        if custom_data is None:
+        state = getattr(getattr(cli, "session", None), "state", None)
+        if state is None:
             return None
-        goal = custom_data.get("goal")
-        if not isinstance(goal, dict):
-            return None
+        todos_raw = getattr(state, "todos", None) or []
     else:
         subagent_store = getattr(runtime, "subagent_store", None)
         subagent_id = getattr(runtime, "subagent_id", None)
@@ -154,167 +170,55 @@ async def _maybe_build_goal_reminder(session: Session, *, strong: bool = False) 
             return None
         state_file = subagent_store.instance_dir(subagent_id) / "state.json"
         data = _read_subagent_state(state_file)
-        goal = data.get("goal") if isinstance(data.get("goal"), dict) else None
+        todos_raw = data.get("todos", []) if isinstance(data.get("todos"), list) else []
 
-    if not goal:
-        return None
-    if goal.get("status") == "done":
+    # Iterate todos that have code and are not done; run each for verification
+    failures: list[str] = []
+    for t in todos_raw:
+        code = t.get("code") if isinstance(t, dict) else getattr(t, "code", None)
+        status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
+        title = t.get("title") if isinstance(t, dict) else getattr(t, "title", "")
+
+        if not code or status == "done":
+            continue
+
+        # Execute the code for verification
+        executable = TodoList._resolve_code_executable(code)
+        if executable is None:
+            failures.append(f"  - [{status}] {title}: code not runnable")
+            continue
+
+        try:
+            success, output = await TodoList._run_code(code, executable=executable)
+        except Exception as exc:
+            success, output = False, str(exc)
+        finally:
+            TodoList._cleanup_code_tempfile(executable)
+
+        if success:
+            # Mark done via the tool instance (avoids re-running code)
+            await todo_tool._verify_and_set_todo_status(title, "done")
+        else:
+            failures.append(f"  - [{status}] {title}: verification failed — {output[:500]}")
+
+    if not failures:
         return None
 
-    goal_code = goal.get("code", "")
+    lines: list[str] = []
     if strong:
-        return (
-            "CRITICAL: The project `Goal` has NOT been successfully executed yet. "
-            "The goal is defined as executable Python code. You MUST run it, verify it passes, "
-            "and mark the goal as `done` before finishing the session.\n"
-            f"Goal code:\n```python\n{goal_code}\n```"
+        lines.append(
+            "CRITICAL: The following todo items have code that failed verification:\n"
         )
     else:
-        return (
-            "Reminder: The project `Goal` has not been successfully executed. "
-            "Please run the goal code and mark it as done when it passes.\n"
-            f"Goal code:\n```python\n{goal_code}\n```"
+        lines.append(
+            "The following todo items have code that failed verification:\n"
         )
-
-
-async def _clear_session_goal(session: Session) -> None:
-    """Clear both in-memory and persisted goal for the session."""
-    cli = getattr(session, "_cli", None)
-    if cli is None:
-        return
-    runtime = getattr(cli, "_runtime", None)
-    if runtime is None:
-        return
-    from kimix.tools.goal import Goal
-
-    if getattr(runtime, "role", "root") == "root":
-        custom_data = getattr(session, 'get_custom_data', lambda: None)()
-        if custom_data is not None:
-            old_goal = custom_data.get("goal")
-            if isinstance(old_goal, dict):
-                Goal._cleanup_temp_files(old_goal)
-            custom_data.pop("goal", None)
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is not None and subagent_id is not None:
-            from kimi_cli.utils.io import atomic_json_write
-
-            state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            data = _read_subagent_state(state_file)
-            old_goal = data.get("goal")
-            if isinstance(old_goal, dict):
-                Goal._cleanup_temp_files(old_goal)
-            data.pop("goal", None)
-            atomic_json_write(data, state_file)
-
-
-async def _try_run_session_goal(session: Session) -> bool:
-    """Try to run the current session goal code automatically.
-
-    Loads the goal from the session (root or subagent), resolves the
-    executable, runs it via ``Goal._run_goal_code``.  On success the goal
-    is cleared and the function returns ``True``.  On failure the goal
-    status is reset to ``pending`` and the function returns ``False``.
-
-    Returns ``True`` (no-op) when there is no goal or it is already done.
-    """
-    from kimix.tools.goal import Goal
-
-    cli = getattr(session, "_cli", None)
-    if cli is None:
-        return True
-    runtime = getattr(cli, "_runtime", None)
-    role = getattr(runtime, "role", "root") if runtime is not None else "root"
-
-    # Load goal (same split as _maybe_build_goal_reminder)
-    if role == "root":
-        custom_data = getattr(session, "get_custom_data", lambda: None)()
-        if custom_data is None:
-            return True
-        goal = custom_data.get("goal")
-        if not isinstance(goal, dict):
-            return True
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is None or subagent_id is None:
-            return True
-        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-        data = _read_subagent_state(state_file)
-        goal = data.get("goal") if isinstance(data.get("goal"), dict) else None
-        if goal is None:
-            return True
-
-    if goal.get("status") == "done":
-        return True
-
-    # Resolve the executable
-    executable = Goal._resolve_goal_executable(goal)
-    if executable is None:
-        return False
-
-    # Mark in_progress
-    goal["status"] = "in_progress"
-    await _save_session_goal(session, goal)
-
-    try:
-        success, output = await Goal._run_goal_code(
-            goal, executable=executable,
-        )
-    except Exception:
-        goal["status"] = "pending"
-        Goal._cleanup_temp_files(goal)
-        goal.pop("_fallback_temp_file", None)
-        await _save_session_goal(session, goal)
-        return False
-
-    Goal._cleanup_temp_files(goal)
-    if success:
-        # Clear the goal on success
-        await _save_session_goal(session, None)
-        return True
-    else:
-        goal["status"] = "pending"
-        goal.pop("_fallback_temp_file", None)
-        await _save_session_goal(session, goal)
-        return False
-
-
-async def _save_session_goal(session: Session, goal: dict[str, Any] | None) -> None:
-    """Save (or clear) the goal for the given session.
-
-    Mirrors the root/subagent split.
-    """
-    cli = getattr(session, "_cli", None)
-    if cli is None:
-        return
-    runtime = getattr(cli, "_runtime", None)
-    if runtime is None:
-        return
-
-    if getattr(runtime, "role", "root") == "root":
-        custom_data = getattr(session, "get_custom_data", lambda: None)()
-        if custom_data is not None:
-            if goal is None:
-                custom_data.pop("goal", None)
-            else:
-                custom_data["goal"] = goal
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is not None and subagent_id is not None:
-            from kimi_cli.utils.io import atomic_json_write
-
-            state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            data = _read_subagent_state(state_file)
-            if goal is None:
-                data.pop("goal", None)
-            else:
-                data["goal"] = goal
-            atomic_json_write(data, state_file)
+    lines.extend(failures)
+    lines.append(
+        "\nFix the errors and mark the todos `done` via `TodoList` "
+        "to re-trigger automatic code verification."
+    )
+    return "\n".join(lines)
 
 
 async def _clear_session_todos(session: Session) -> None:
@@ -562,26 +466,22 @@ async def prompt_async(
                     )
                     break
 
-            # Goal enforcement loop
-            max_goal_attempts = 2
-            for attempt in range(max_goal_attempts):
-                # Before reminding, try to run the goal code automatically
-                auto_success = await _try_run_session_goal(session)
-                if auto_success:
-                    # Goal ran successfully (or no goal) — nothing to enforce
+            # Code-todo reminder loop (replaces old goal enforcement loop)
+            # Auto-verification happens inside _verify_and_set_todo_status
+            # when a todo is marked `done`. This loop only provides reminders.
+            max_code_attempts = 2
+            for attempt in range(max_code_attempts):
+                code_reminder = await _maybe_build_code_todo_reminder(session, strong=(attempt > 0))
+                if code_reminder is None:
                     break
-
-                goal_reminder = await _maybe_build_goal_reminder(session, strong=(attempt > 0))
-                if goal_reminder is None:
-                    break
-                if len(goal_reminder) > 65536:  # too long, save to file
-                    name, new_id = _export_to_temp_file(content=goal_reminder)
-                    goal_reminder = f"read and execute: `{name}`"
-                label = "Goal check..." if attempt == 0 else "Final goal check..."
+                if len(code_reminder) > 65536:
+                    name, new_id = _export_to_temp_file(content=code_reminder)
+                    code_reminder = f"read and execute: `{name}`"
+                label = "Code check..." if attempt == 0 else "Final code check..."
                 try:
                     await _run_single_prompt(
                         session,
-                        goal_reminder,
+                        code_reminder,
                         output_function,
                         cancel_callable,
                         merge_wire_messages,
@@ -591,7 +491,7 @@ async def prompt_async(
                     )
                 except Exception as reminder_exc:
                     base._stream.colorful_print_word(
-                        f"Goal reminder failed: {reminder_exc}",
+                        f"Code todo reminder failed: {reminder_exc}",
                         fg=Color.BRIGHT_RED,
                         styles=[Style.BOLD],
                         require_new_line=True,
@@ -606,7 +506,7 @@ async def prompt_async(
             if export_todo_list_path is not None:
                 await _export_session_todos(session, export_todo_list_path)
             await _clear_session_todos(session)
-            await _clear_session_goal(session)
+            # _clear_session_goal removed — code is part of todos now
             if close_session_after_prompt:
                 await close_session_async(session)
         base._stream.print_word("", True)

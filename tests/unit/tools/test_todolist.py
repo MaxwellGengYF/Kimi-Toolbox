@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from kimi_cli.tools.todo import Params as TodoListParams, Todo
+from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
 
 
 class TestTodoListSimplify:
@@ -55,6 +55,7 @@ class TestTodoListSingleInProgress:
                 Todo(title="task B", status="in_progress"),
             ],
             mode="append",
+            auto_fix=False,
         ))
         assert result.is_error
         assert "in_progress" in result.output.lower()
@@ -68,3 +69,39 @@ class TestTodoListSingleInProgress:
         ))
         # May fail due to persistence, but should not raise
         assert result is not None
+
+
+class TestTodoCodeField:
+    def test_todo_with_code(self) -> None:
+        t = Todo(title="task", status="pending", code="print('hello')")
+        assert t.code == "print('hello')"
+
+    def test_todo_with_code_file_alias(self) -> None:
+        t = Todo(title="task", status="pending", code_file="print('alias')")
+        assert t.code == "print('alias')"
+
+    def test_todo_without_code(self) -> None:
+        t = Todo(title="task", status="pending")
+        assert t.code is None
+
+    def test_todo_empty_code(self) -> None:
+        t = Todo(title="task", status="pending", code="")
+        assert t.code == ""
+
+    def test_merge_preserves_code_when_new_omits(self) -> None:
+        old = Todo(title="task", status="pending", code="print('old')")
+        new = Todo(title="task", status="done")  # code omitted
+        merged = TodoList._merge_one(old, new)
+        assert merged.code == "print('old')"
+
+    def test_merge_updates_code_when_new_provides(self) -> None:
+        old = Todo(title="task", status="pending", code="print('old')")
+        new = Todo(title="task", status="done", code="print('new')")
+        merged = TodoList._merge_one(old, new)
+        assert merged.code == "print('new')"
+
+    def test_merge_clears_code_when_new_is_empty_string(self) -> None:
+        old = Todo(title="task", status="pending", code="print('old')")
+        new = Todo(title="task", status="done", code="")
+        merged = TodoList._merge_one(old, new)
+        assert merged.code == ""

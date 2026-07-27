@@ -124,7 +124,7 @@ async def _create_session_async(
             agent_role=agent_type,
             max_system_prompt_tokens=cfg.loop_control.max_system_prompt_tokens,
         )
-    if resume:
+    if resume and session_id is not None:
         session = await Session.resume(
             session_id=session_id,
             work_dir=work_dir,
