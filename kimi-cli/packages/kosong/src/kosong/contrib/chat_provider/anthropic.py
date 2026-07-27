@@ -425,6 +425,13 @@ class Anthropic:
             raise ValueError("max_tokens must be provided for Anthropic")
         _clamp_max_tokens(generation_kwargs, streaming=self._stream)
 
+        # The Anthropic Messages API only accepts ``max_tokens``.  Other token-limit
+        # keys (``max_output_tokens``, ``max_completion_tokens``) may leak in from
+        # callers (e.g. the soul retry logic in ``kimisoul.py``).  Strip them to
+        # avoid ``TypeError`` from the SDK.
+        generation_kwargs.pop("max_output_tokens", None)
+        generation_kwargs.pop("max_completion_tokens", None)
+
         betas = generation_kwargs.pop("beta_features", []) or []
         extra_headers = generation_kwargs.pop("extra_headers", {}) or {}
         extra_headers = {

@@ -1338,19 +1338,22 @@ class KimiSoul:
             if retry_state.outcome and retry_state.outcome.exception():
                 exc = retry_state.outcome.exception()
                 if isinstance(exc, APIEmptyResponseError):
-                    current = getattr(chat_provider, '_generation_kwargs', {}).get('max_tokens') or 8192
+                    # Only set the token-limit key the provider understands:
+                    # - openai-responses / google_genai -> max_output_tokens
+                    # - everything else                 -> max_tokens
+                    _output_token_providers = frozenset({"openai-responses", "google_genai"})
+                    _token_key = "max_output_tokens" if chat_provider.name in _output_token_providers else "max_tokens"
+                    current = getattr(chat_provider, '_generation_kwargs', {}).get(_token_key) or 8192
                     new_max = int(current * 1.5)
                     logger.info(
-                        "Think-only response (attempt {attempt}), increasing max_tokens "
+                        "Think-only response (attempt {attempt}), increasing {key} "
                         "from {old} to {new} for retry",
                         attempt=retry_state.attempt_number,
+                        key=_token_key,
                         old=current,
                         new=new_max,
                     )
-                    chat_provider._generation_kwargs['max_tokens'] = new_max
-                    # Also set max_output_tokens for providers that use the
-                    # OpenAI Responses API (which ignores max_tokens).
-                    chat_provider._generation_kwargs['max_output_tokens'] = new_max
+                    chat_provider._generation_kwargs[_token_key] = new_max
 
         @tenacity.retry(
             retry=retry_if_exception(self._is_retryable_error),

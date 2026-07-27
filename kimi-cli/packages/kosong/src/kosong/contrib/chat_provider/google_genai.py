@@ -148,7 +148,13 @@ class GoogleGenAI:
     ) -> "GoogleGenAIStreamedMessage":
         contents = messages_to_google_genai_contents(history)
 
-        config = GenerateContentConfig(**self._generation_kwargs)
+        # Google GenAI only accepts ``max_output_tokens``.  Strip other token-limit
+        # keys that may leak in from callers (e.g. the soul retry logic in
+        # ``kimisoul.py``).
+        generation_kwargs = dict(self._generation_kwargs)
+        generation_kwargs.pop("max_tokens", None)
+        generation_kwargs.pop("max_completion_tokens", None)
+        config = GenerateContentConfig(**generation_kwargs)
         config.system_instruction = system_prompt
         config.tools = [tool_to_google_genai(tool) for tool in tools]
 
