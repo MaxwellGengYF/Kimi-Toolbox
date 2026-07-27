@@ -9,10 +9,17 @@ Covers:
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# ``winreg``/``ctypes.windll`` only exist on Windows; tests below fake them,
+# so the ``patch(..., create=True)`` targets must be created on other platforms.
+_requires_win32 = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows-only registry behaviour"
+)
 
 
 # ============================================================================
@@ -81,8 +88,13 @@ def _make_fake_winreg(
 
 
 def _fake_expand(value: str, buf: Any, nchars: int) -> int:
-    """Simulate ``ExpandEnvironmentStringsW`` using ``os.path.expandvars``."""
-    expanded = os.path.expandvars(value)
+    """Simulate ``ExpandEnvironmentStringsW`` (expands ``%VAR%``, keeps unknown).
+
+    Implemented without ``os.path.expandvars`` so it behaves like the Windows
+    API on every platform (POSIX ``expandvars`` does not handle ``%VAR%``).
+    """
+    import regex as re
+    expanded = re.sub(r"%([^%]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), value)
     if buf is None:
         return len(expanded) + 1
     for i, ch in enumerate(expanded):
@@ -111,7 +123,7 @@ class TestRefreshEnvFromRegistry:
         )
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
         ):
             from kimix.utils.windows_env import refresh_env_from_registry
@@ -130,6 +142,7 @@ class TestExpandRegistryString:
         from kimi_cli.utils.environment import _expand_registry_string
         assert _expand_registry_string(r"C:\Windows\System32") == r"C:\Windows\System32"
 
+    @_requires_win32
     def test_percent_var_expanded_via_fallback(self) -> None:
         """Without Windows API available, falls back to ``os.path.expandvars``."""
         with patch.dict(os.environ, {"SYSTEMROOT": r"C:\WinNT"}):
@@ -137,6 +150,7 @@ class TestExpandRegistryString:
             result = _expand_registry_string(r"%SYSTEMROOT%\System32")
             assert result == r"C:\WinNT\System32"
 
+    @_requires_win32
     def test_multiple_percent_vars(self) -> None:
         with patch.dict(os.environ, {"A": "alpha", "B": "beta"}):
             from kimi_cli.utils.environment import _expand_registry_string
@@ -158,7 +172,7 @@ class TestReadRegistryValue:
 
     def test_reads_existing_value(self) -> None:
         fake_winreg = _make_fake_winreg(hklm_path=r"C:\Win")
-        with patch("kimi_cli.utils.environment.winreg", fake_winreg):
+        with patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True):
             from kimi_cli.utils.environment import _read_registry_value
             val, typ = _read_registry_value(
                 fake_winreg.HKEY_LOCAL_MACHINE,
@@ -170,7 +184,7 @@ class TestReadRegistryValue:
 
     def test_reads_expand_sz(self) -> None:
         fake_winreg = _make_fake_winreg(hklm_path=r"%S%\bin", hklm_type=REG_EXPAND_SZ)
-        with patch("kimi_cli.utils.environment.winreg", fake_winreg):
+        with patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True):
             from kimi_cli.utils.environment import _read_registry_value
             val, typ = _read_registry_value(
                 fake_winreg.HKEY_LOCAL_MACHINE,
@@ -182,7 +196,7 @@ class TestReadRegistryValue:
 
     def test_returns_none_for_missing_value(self) -> None:
         fake_winreg = _make_fake_winreg()
-        with patch("kimi_cli.utils.environment.winreg", fake_winreg):
+        with patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True):
             from kimi_cli.utils.environment import _read_registry_value
             val, typ = _read_registry_value(
                 fake_winreg.HKEY_CURRENT_USER, "Environment", "Path"
@@ -194,7 +208,7 @@ class TestReadRegistryValue:
         fake_winreg = MagicMock()
         fake_winreg.KEY_READ = 131097
         fake_winreg.OpenKey.side_effect = FileNotFoundError()
-        with patch("kimi_cli.utils.environment.winreg", fake_winreg):
+        with patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True):
             from kimi_cli.utils.environment import _read_registry_value
             val, typ = _read_registry_value(0x80000001, "Environment", "Path")
             assert val is None
@@ -212,7 +226,7 @@ class TestRefreshWindowsEnv:
         fake_winreg = _make_fake_winreg(hklm_pathext=".COM;.EXE", hkcu_pathext=".PS1")
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -224,7 +238,7 @@ class TestRefreshWindowsEnv:
         fake_winreg = _make_fake_winreg(hklm_path=r"C:\System", hkcu_path=r"C:\User")
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -233,18 +247,22 @@ class TestRefreshWindowsEnv:
             assert os.environ["PATH"] == r"C:\System;C:\User"
 
     def test_path_expanded(self) -> None:
+        import ctypes as real_ctypes
+
         fake_winreg = _make_fake_winreg(
             hklm_path=r"%SYS%\System32", hklm_type=REG_EXPAND_SZ
         )
+        # ``ctypes`` (and its ``windll``) are only imported/exist on Windows;
+        # build a fake module keeping the real (platform-independent)
+        # ``create_unicode_buffer`` so ``_expand_registry_string`` works here.
+        fake_ctypes = MagicMock()
+        fake_ctypes.create_unicode_buffer = real_ctypes.create_unicode_buffer
+        fake_ctypes.windll.kernel32.ExpandEnvironmentStringsW.side_effect = _fake_expand
         with (
             patch.dict(os.environ, {"SYS": r"C:\Win"}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
-            patch(
-                "ctypes.windll.kernel32.ExpandEnvironmentStringsW",
-                side_effect=_fake_expand,
-                create=True,
-            ),
+            patch("kimi_cli.utils.environment.ctypes", fake_ctypes, create=True),
         ):
             from kimi_cli.utils.environment import refresh_windows_env
             refresh_windows_env()
@@ -256,7 +274,7 @@ class TestRefreshWindowsEnv:
         )
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -270,7 +288,7 @@ class TestRefreshWindowsEnv:
         fake_winreg = _make_fake_winreg(hklm_pathext=".COM;.EXE")
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -283,7 +301,7 @@ class TestRefreshWindowsEnv:
         fake_winreg = _make_fake_winreg(hklm_path="", hkcu_path="")
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -295,7 +313,7 @@ class TestRefreshWindowsEnv:
         fake_winreg = _make_fake_winreg(hklm_path=r"C:\A;  ;C:\B")
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("kimi_cli.utils.environment.winreg", fake_winreg),
+            patch("kimi_cli.utils.environment.winreg", fake_winreg, create=True),
             patch("kimi_cli.utils.environment.sys.platform", "win32"),
             patch("ctypes.windll", create=True),
         ):
@@ -330,29 +348,37 @@ class TestRunToolCallsRefresh:
         # On Windows, Run.__init__ raises SkipThisTool when
         # USE_SYSTEM_PWSH_ON_WINDOWS is True.  Patch that flag so
         # we can instantiate Run and verify the refresh call.
-        with (
-            patch("kimix.tools.file.run.sys.platform", "win32"),
-            patch("kimix.tools.file.run.USE_SYSTEM_PWSH_ON_WINDOWS", False),
-            patch("kimix.tools.file.run.find_bash", return_value=None),
-        ):
-            from kimix.tools.file.run import Run, RunParams
-            tool = Run(mock_session)
+        import asyncio
 
-            with patch(
-                "kimix.utils.windows_env.refresh_env_from_registry"
-            ) as mock_refresh:
+        # Create the event loop BEFORE faking ``sys.platform``: asyncio picks
+        # its Windows event-loop policy when ``sys.platform == "win32"``,
+        # which cannot be imported on other platforms.
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("kimix.tools.file.run.sys.platform", "win32"),
+                patch("kimix.tools.file.run.USE_SYSTEM_PWSH_ON_WINDOWS", False),
+                patch("kimix.tools.file.run.find_bash", return_value=None),
+            ):
+                from kimix.tools.file.run import Run, RunParams
+                tool = Run(mock_session)
+
                 with patch(
-                    "kimix.tools.common.ProcessTask.start",
-                    side_effect=OSError("simulated"),
-                ):
-                    try:
-                        import asyncio
-                        asyncio.run(
-                            tool.__call__(RunParams(command="echo hello"))
-                        )
-                    except Exception:
-                        pass
-                    mock_refresh.assert_called_once()
+                    "kimix.utils.windows_env.refresh_env_from_registry"
+                ) as mock_refresh:
+                    with patch(
+                        "kimix.tools.common.ProcessTask.start",
+                        side_effect=OSError("simulated"),
+                    ):
+                        try:
+                            loop.run_until_complete(
+                                tool.__call__(RunParams(command="echo hello"))
+                            )
+                        except Exception:
+                            pass
+                        mock_refresh.assert_called_once()
+        finally:
+            loop.close()
 
     def test_run_skips_refresh_on_linux(self) -> None:
         """Run tool does NOT call refresh on Linux and skips via SkipThisTool."""
@@ -382,26 +408,41 @@ class TestPowershellToolCallsRefresh:
         mock_session.custom_config.get.return_value = {}
         mock_session.custom_data = {}
 
-        with patch("kimix.tools.file.bash.pwsh_tool.sys.platform", "win32"):
-            with patch("kimix.tools.file.bash.pwsh_tool._bash_tool.find_bash", return_value=None):
-                from kimix.tools.file.bash.pwsh_tool import Powershell, PowershellParams
+        import asyncio
+
+        from kimix.tools.file.bash.pwsh_tool import Powershell, PowershellParams
+
+        # Create the event loop BEFORE faking ``sys.platform``: asyncio picks
+        # its Windows event-loop policy when ``sys.platform == "win32"``,
+        # which cannot be imported on other platforms.  Also stub out
+        # ``_resolve_pwsh`` so no real PowerShell probe runs on this host.
+        loop = asyncio.new_event_loop()
+        try:
+            # Keep ``sys.platform`` patched for the ``__call__`` as well: the
+            # refresh inside ``Powershell.__call__`` is gated on win32 at call time.
+            with (
+                patch("kimix.tools.file.bash.pwsh_tool.sys.platform", "win32"),
+                patch("kimix.tools.file.bash.pwsh_tool._bash_tool.find_bash", return_value=None),
+                patch.object(Powershell, "_resolve_pwsh", lambda self: None),
+            ):
                 tool = Powershell(mock_session)
 
-            with patch(
-                "kimix.utils.windows_env.refresh_env_from_registry"
-            ) as mock_refresh:
                 with patch(
-                    "kimix.tools.common.ProcessTask.start",
-                    side_effect=OSError("simulated"),
-                ):
-                    try:
-                        import asyncio
-                        asyncio.run(
-                            tool.__call__(PowershellParams(cmd="echo hello"))
-                        )
-                    except Exception:
-                        pass
-                    mock_refresh.assert_called_once()
+                    "kimix.utils.windows_env.refresh_env_from_registry"
+                ) as mock_refresh:
+                    with patch(
+                        "kimix.tools.common.ProcessTask.start",
+                        side_effect=OSError("simulated"),
+                    ):
+                        try:
+                            loop.run_until_complete(
+                                tool.__call__(PowershellParams(cmd="echo hello"))
+                            )
+                        except Exception:
+                            pass
+                        mock_refresh.assert_called_once()
+        finally:
+            loop.close()
 
     def test_pwsh_skips_refresh_on_linux(self) -> None:
         mock_session = MagicMock()

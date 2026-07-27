@@ -30,6 +30,20 @@ def _pwsh_is_available() -> bool:
 PWSH_AVAILABLE = _pwsh_is_available()
 
 
+def _force_pwsh_enabled() -> Any:
+    """Patch the platform gate so mocked Powershell unit tests run anywhere.
+
+    ``Powershell.__init__`` raises ``SkipThisTool`` when
+    ``_should_enable_powershell()`` is False (non-Windows hosts).  The unit
+    tests below mock every real interaction (``find_pwsh``, ``ProcessTask``),
+    so the gate can be safely bypassed.
+    """
+    return patch(
+        "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
+        return_value=True,
+    )
+
+
 @pytest.fixture
 def mock_session() -> MagicMock:
     session = MagicMock(spec=Session)
@@ -157,6 +171,11 @@ class TestPowershellParamsFullCoverage:
 # ============================================================================
 
 class TestPowershellArgumentBuilding:
+    @pytest.fixture(autouse=True)
+    def _pwsh_enabled(self) -> Any:
+        with _force_pwsh_enabled():
+            yield
+
     @pytest.fixture
     def mock_session(self) -> MagicMock:
         session = MagicMock(spec=Session)
@@ -308,6 +327,11 @@ class TestProcessTaskAppendNewline:
 # ============================================================================
 
 class TestPowershellSessionContinuation:
+    @pytest.fixture(autouse=True)
+    def _pwsh_enabled(self) -> Any:
+        with _force_pwsh_enabled():
+            yield
+
     @pytest.fixture
     def pwsh_instance(self, mock_session: MagicMock) -> Powershell:
         with patch("kimix.tools.file.bash.pwsh_tool.find_pwsh", return_value=r"C:\pwsh\pwsh.exe"):
@@ -458,6 +482,11 @@ class TestPowershellInteractiveIntegration:
 # ============================================================================
 
 class TestPowershellRtkRewrite:
+    @pytest.fixture(autouse=True)
+    def _pwsh_enabled(self) -> Any:
+        with _force_pwsh_enabled():
+            yield
+
     @pytest.fixture
     def mock_session(self) -> MagicMock:
         session = MagicMock(spec=Session)

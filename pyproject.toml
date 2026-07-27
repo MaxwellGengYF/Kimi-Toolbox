@@ -140,8 +140,9 @@ ignore_missing_imports = true  # Skip when third-party libraries lack type stubs
 exclude = ["tests/", "scripts/"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
+  asyncio_mode = "auto"
+  testpaths = ["tests"]
+  pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]

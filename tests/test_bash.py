@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
@@ -119,6 +120,12 @@ class TestFindGitBashWindows:
         ), patch(
             "kimix.tools.file.bash.bash_tool.shutil.which",
             return_value=None,
+        ), patch(
+            # ``Path.resolve`` prefixes the CWD for drive-less paths on
+            # POSIX hosts; keep it an identity so Windows path strings
+            # round-trip unchanged on any platform.
+            "kimix.tools.file.bash.bash_tool.Path.resolve",
+            lambda self: self,
         ):
             assert _find_git_bash_windows() == r"C:\Custom\Git\bin\bash.exe"
 
@@ -136,6 +143,11 @@ class TestFindGitBashWindows:
         ), patch(
             "kimix.tools.file.bash.bash_tool.shutil.which",
             return_value=None,
+        ), patch(
+            # See test_honors_env_override: keep resolve() an identity so
+            # Windows path strings round-trip unchanged on any platform.
+            "kimix.tools.file.bash.bash_tool.Path.resolve",
+            lambda self: self,
         ):
             assert _find_git_bash_windows() == r"C:\Program Files\Git\bin\bash.exe"
 
@@ -787,6 +799,10 @@ class TestPrepareBashCmd:
     not BASH_AVAILABLE,
     reason="Bash tool is not available on this platform",
 )
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Backslash path handling targets Git Bash on Windows",
+)
 class TestBashBackslashPaths:
     async def test_cat_with_backslash_path(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -911,11 +927,10 @@ class TestBashCall:
         assert len(result.output) > 0
 
     async def test_empty_command(self, mock_session: MagicMock) -> None:
-        bash = Bash(session=mock_session)
-        params = BashParams(cmd="", timeout=5)
-        result = await bash(params)
-        assert isinstance(result, ToolError)
-        assert "Empty command" in result.output
+        # Empty commands in execute mode are rejected by the params model
+        # itself before the tool ever runs.
+        with pytest.raises(ValidationError, match="cmd cannot be empty"):
+            BashParams(cmd="", timeout=5)
 
     async def test_timeout(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -1054,6 +1069,10 @@ class TestPowershellParams:
             PowershellParams(cmd="ls", timeout=901)
 
 
+@pytest.mark.skipif(
+    not PWSH_AVAILABLE,
+    reason="PowerShell tool is not available on this platform",
+)
 class TestPowershellInactivityTimeout:
     async def test_pwsh_inactivity_timeout_returns_background_error(
         self, mock_session: MagicMock
@@ -1089,6 +1108,35 @@ class TestPowershellInactivityTimeout:
     reason="Bash tool is not available on this platform",
 )
 class TestComplexCommands:
+    @pytest.fixture(autouse=True)
+    def _raw_command_output(self) -> Any:
+        """These tests assert on raw command output; disable rtk rewriting
+        (which wraps output in a metadata envelope) regardless of whether
+        an rtk binary is installed on the host."""
+        with patch("kimix.tools.common._rtk_available", return_value=False):
+            yield
+
+    @staticmethod
+    def _cmd_output(result: ToolOk | ToolError) -> str:
+        """Extract the raw process output from the session output block.
+
+        The Bash tool wraps process output in a metadata envelope
+        (``task_id:``/``status:``/``output: |`` ...); these tests assert on
+        the raw command output inside it.
+        """
+        marker = "output: |\n"
+        text = result.output
+        if marker not in text:
+            return text
+        inner = text.split(marker, 1)[1]
+        lines: list[str] = []
+        for line in inner.splitlines():
+            if line.startswith("  "):
+                lines.append(line[2:])
+            else:
+                break
+        return "\n".join(lines)
+
     """Tests for complex bash commands: pipes, redirects, substitution, conditionals, etc."""
 
     # -- pipes ---------------------------------------------------------------
@@ -1144,7 +1192,7 @@ class TestComplexCommands:
         await bash(BashParams(cmd=f"echo line2 >> {posix}"))
         result = await bash(BashParams(cmd=f"cat {posix}"))
         assert isinstance(result, ToolOk)
-        lines = result.output.strip().splitlines()
+        lines = self._cmd_output(result).strip().splitlines()
         assert "line1" in lines[0]
         assert "line2" in lines[-1]
 
@@ -1303,7 +1351,7 @@ class TestComplexCommands:
         params = BashParams(cmd="(cd / && pwd)")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        assert result.output.strip() == "/"
+        assert self._cmd_output(result).strip() == "/"
 
     # -- process substitution -------------------------------------------------
 
@@ -1452,7 +1500,7 @@ class TestComplexCommands:
         params = BashParams(cmd="echo -e 'c\\na\\nb\\na' | sort | uniq")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        lines = result.output.strip().splitlines()
+        lines = self._cmd_output(result).strip().splitlines()
         assert lines == ["a", "b", "c"]
 
     # -- head / tail ---------------------------------------------------------
@@ -1462,7 +1510,7 @@ class TestComplexCommands:
         params = BashParams(cmd="seq 10 | head -3")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        lines = result.output.strip().splitlines()
+        lines = self._cmd_output(result).strip().splitlines()
         assert len(lines) == 3
 
     async def test_tail_n(self, mock_session: MagicMock) -> None:
@@ -1470,7 +1518,7 @@ class TestComplexCommands:
         params = BashParams(cmd="seq 10 | tail -3")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        lines = result.output.strip().splitlines()
+        lines = self._cmd_output(result).strip().splitlines()
         assert "8" in lines[0]
         assert "10" in lines[-1]
 

@@ -539,7 +539,9 @@ def test_prompt_plan_async_prompts_execution_agent(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(prompt_mod, "_create_default_session_async", fake_create_default_session_async)
     monkeypatch.setattr(prompt_mod, "close_session_async", fake_close_session_async)
     monkeypatch.setattr(prompt_mod, "prompt_async", fake_prompt_async)
-    monkeypatch.setattr(prompt_mod.os, "startfile", lambda _path: None)
+    # ``os.startfile`` only exists on Windows; create it so the code under
+    # test can be exercised on any platform.
+    monkeypatch.setattr(prompt_mod.os, "startfile", lambda _path: None, raising=False)
     monkeypatch.setattr("builtins.input", lambda _: "y")
 
     asyncio.run(prompt_mod.prompt_plan_async("test requirement", plan_file))
