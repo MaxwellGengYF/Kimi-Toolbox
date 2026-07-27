@@ -34,11 +34,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, override
+from typing import TYPE_CHECKING, Literal, override
 
 import pybase64
 from kaos.path import KaosPath
-from kosong.chat_provider.kimi import Kimi
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field, model_validator
 
@@ -70,6 +69,9 @@ from kimi_cli.utils.path import (
     kaos_path_from_user_input,
 )
 from kimi_cli.wire.types import ImageURLPart, TextPart, VideoURLPart
+
+if TYPE_CHECKING:
+    from kosong.chat_provider.kimi import Kimi
 
 MAX_MEDIA_MEGABYTES = 100
 
@@ -553,6 +555,8 @@ class ReadMediaFile(CallableTool2[Params]):
                         # dimensions are authoritative over the header sniff.
                         dimensions = (compressed.original_width, compressed.original_height)
         else:
+            from kosong.chat_provider.kimi import Kimi
+
             if (llm := self._runtime.llm) and isinstance(llm.chat_provider, Kimi):
                 part = await llm.chat_provider.files.upload_video(
                     data=data,

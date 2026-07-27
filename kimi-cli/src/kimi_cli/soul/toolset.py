@@ -39,10 +39,6 @@ from kosong.utils.typing import JsonType
 from kimi_cli import logger
 from kimi_cli.exception import InvalidToolError, MCPRuntimeError
 from kimi_cli.hooks.engine import HookEngine
-from kimi_cli.mcp.client import MCPClient
-from kimi_cli.mcp.prompts import MCPPromptManager
-from kimi_cli.mcp.resources import MCPResourceManager
-from kimi_cli.mcp.roots import MCPRootsHandler
 from kimi_cli.safety_check import sanitize_for_tokenizer
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.utils import repair_tool_arguments
@@ -67,6 +63,10 @@ if TYPE_CHECKING:
     from fastmcp.client.client import CallToolResult
     from fastmcp.mcp_config import MCPConfig
 
+    from kimi_cli.mcp.client import MCPClient
+    from kimi_cli.mcp.prompts import MCPPromptManager
+    from kimi_cli.mcp.resources import MCPResourceManager
+    from kimi_cli.mcp.roots import MCPRootsHandler
     from kimi_cli.soul.agent import Runtime
 
 current_tool_call = ContextVar[ToolCall | None]("current_tool_call", default=None)
@@ -1045,6 +1045,10 @@ class KimiToolset:
         """
         from fastmcp.mcp_config import MCPConfig, RemoteMCPServer
 
+        from kimi_cli.mcp.client import MCPClient
+        from kimi_cli.mcp.prompts import MCPPromptManager
+        from kimi_cli.mcp.resources import MCPResourceManager
+        from kimi_cli.mcp.roots import MCPRootsHandler
         from kimi_cli.mcp_oauth import create_mcp_oauth, has_mcp_oauth_tokens
 
         async def _check_oauth_tokens(server_url: str) -> bool:

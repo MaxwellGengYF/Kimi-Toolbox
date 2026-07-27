@@ -66,7 +66,8 @@ asyncio.run(main())
 
 from __future__ import annotations
 
-from fastmcp.mcp_config import MCPConfig
+from typing import TYPE_CHECKING, Any
+
 from kimi_cli.config import Config
 from kimi_cli.exception import (
     AgentSpecError,
@@ -200,3 +201,21 @@ __all__ = [
 ]
 
 type KimiAgentException = KimiCLIException
+
+
+if TYPE_CHECKING:
+    from fastmcp.mcp_config import MCPConfig
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily import heavy optional modules on first access.
+
+    ``fastmcp`` and its dependency tree cost several hundred milliseconds to
+    import, but are only needed when MCP servers are actually configured.
+    Deferring the import keeps CLI startup fast for the common case.
+    """
+    if name == "MCPConfig":
+        from fastmcp.mcp_config import MCPConfig
+
+        return MCPConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

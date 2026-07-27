@@ -108,23 +108,42 @@ def _common_fixed_pwsh_paths() -> list[str]:
     ]
 
 
+def _is_versioned_pwsh7_install(path: str) -> bool:
+    """Return True if *path* is a PowerShell 7 versioned install directory layout.
+
+    Microsoft always installs PowerShell 7.x into a ``PowerShell\\7`` (Windows)
+    or ``.../7/`` (POSIX) directory, so an executable at such a path is known
+    to be version 7+ without having to spawn a subprocess to ask it.
+    """
+    norm = os.path.normcase(os.path.normpath(path))
+    if sys.platform == "win32":
+        return norm.endswith(os.path.normcase(r"PowerShell\7\pwsh.exe"))
+    return norm.endswith("/7/pwsh")
+
+
 @functools.lru_cache(maxsize=1)
 def find_pwsh() -> str | None:
     """Find PowerShell 7.x on the current platform.
 
     Resolution order:
-      1. Common fixed installation paths (MSI install on Windows).
+      1. Common fixed installation paths (MSI install on Windows). These live
+         in a versioned ``7`` directory, so no version probe is needed — this
+         avoids spawning subprocesses in the common case (fast startup).
       2. ``pwsh`` / ``pwsh.exe`` on PATH (via ``shutil.which``).
       3. ``where.exe pwsh.exe`` on Windows (WindowsApps stubs filtered out).
 
     Returns the absolute path to a PowerShell 7+ executable, or ``None`` if
     only Windows PowerShell 5.1 (or no PowerShell) is available.
     """
-    candidates: list[str] = []
-
     # 1. Fixed common install locations (checked first so MSI install is
-    #    preferred over Store execution aliases on Windows).
-    candidates.extend(_common_fixed_pwsh_paths())
+    #    preferred over Store execution aliases on Windows). The versioned
+    #    install directory guarantees major version 7, so return immediately
+    #    without spawning a version-probe subprocess.
+    for candidate in _common_fixed_pwsh_paths():
+        if os.path.exists(candidate) and _is_versioned_pwsh7_install(candidate):
+            return candidate
+
+    candidates: list[str] = []
 
     # 2. PATH
     if sys.platform == "win32":
@@ -136,10 +155,12 @@ def find_pwsh() -> str | None:
         if resolved:
             candidates.append(resolved)
 
-    # 3. where.exe (Windows only) — WindowsApps stubs already filtered
-    if sys.platform == "win32":
-        for name in names:
-            candidates.extend(_where_candidates(name))
+    # 3. where.exe (Windows only) — WindowsApps stubs already filtered.
+    #    A single probe is enough: ``where.exe pwsh`` also matches pwsh.exe.
+    #    Skip the extra subprocess entirely when PATH lookup already found
+    #    candidates; where.exe is only a fallback for pwsh not on PATH.
+    if sys.platform == "win32" and not candidates:
+        candidates.extend(_where_candidates(names[0]))
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -150,6 +171,8 @@ def find_pwsh() -> str | None:
         if norm in seen:
             continue
         seen.add(norm)
+        if _is_versioned_pwsh7_install(candidate):
+            return candidate
         major = _pwsh_major_version(candidate)
         if major is not None and major >= 7:
             return candidate
@@ -253,16 +276,11 @@ class Powershell(CallableTool2[PowershellParams]):
                 " Windows paths must use backslashes (`\\`) instead of forward slashes (`/`)."
             )
 
-        self._pwsh_path = find_pwsh()
+        # PowerShell resolution (which may spawn version-probe subprocesses)
+        # is deferred to first use so tool loading stays fast at startup.
+        self._pwsh_path: str | None = None
         self._pwsh_fallback_path: str | None = None
-        if self._pwsh_path is None:
-            # Resolve Windows PowerShell fallback to a full path so that we
-            # avoid accidentally picking up a WindowsApps stub at runtime.
-            self._pwsh_fallback_path = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell"
-            _print_warning(
-                "PowerShell 7.x not found on this system; falling back to Windows PowerShell 5.1. "
-                "PowerShell 7 syntax will be downgraded automatically, which may change command behavior."
-            )
+        self._pwsh_resolved = False
 
         # Pre-normalize forbidden commands once at init time for O(1) per-call lookup.
         # PowerShell is case-insensitive; normalize to lowercase.
@@ -276,6 +294,21 @@ class Powershell(CallableTool2[PowershellParams]):
             if normalized not in seen:
                 seen.add(normalized)
                 self._forbidden_keywords.append(normalized)
+
+    def _resolve_pwsh(self) -> None:
+        """Resolve the PowerShell executable paths on first use."""
+        if self._pwsh_resolved:
+            return
+        self._pwsh_resolved = True
+        self._pwsh_path = find_pwsh()
+        if self._pwsh_path is None:
+            # Resolve Windows PowerShell fallback to a full path so that we
+            # avoid accidentally picking up a WindowsApps stub at runtime.
+            self._pwsh_fallback_path = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell"
+            _print_warning(
+                "PowerShell 7.x not found on this system; falling back to Windows PowerShell 5.1. "
+                "PowerShell 7 syntax will be downgraded automatically, which may change command behavior."
+            )
 
     async def __call__(self, params: PowershellParams) -> ToolReturnValue:
         """Execute the PowerShell command via the system PowerShell executable.
@@ -304,6 +337,7 @@ class Powershell(CallableTool2[PowershellParams]):
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
             params.cmd, params.deduplicate_output, pwsh=True
         )
+        self._resolve_pwsh()
         if self._pwsh_path is not None:
             # PowerShell 7 is available: run the command as-is without syntax transforms.
             cmd = rtk_cmd
@@ -555,6 +589,7 @@ class Powershell(CallableTool2[PowershellParams]):
     async def _execute_background(self, params: PowershellParams) -> ToolReturnValue:
         """Execute a PowerShell command in background and return immediately with task_id."""
         cmd = params.cmd
+        self._resolve_pwsh()
         executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
         raw_command = (
             _PWSH_CONSOLE_INIT

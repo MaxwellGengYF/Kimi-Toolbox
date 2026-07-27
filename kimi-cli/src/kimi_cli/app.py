@@ -20,7 +20,6 @@ from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.background.models import is_terminal_status
 from kimi_cli.config import Config, LLMModel, LLMProvider, load_config
 from kimi_cli.llm import LLM, augment_provider_with_env_vars, create_llm
-from kimi_cli.mcp.config import discover_mcp_configs
 from kimi_cli.session import Session
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul import RunCancelled, run_soul
@@ -35,6 +34,22 @@ from kimi_cli.wire.types import ApprovalRequest, ApprovalResponse, ContentPart, 
 
 if TYPE_CHECKING:
     from fastmcp.mcp_config import MCPConfig
+    from kimi_cli.mcp.config import discover_mcp_configs
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve heavy optional imports as module attributes.
+
+    ``kimi_cli.mcp.config`` pulls in ``fastmcp`` when MCP servers are actually
+    configured; importing it eagerly would slow down startup for the common
+    no-MCP case. Resolving through a module attribute keeps the name
+    monkeypatchable in tests.
+    """
+    if name == "discover_mcp_configs":
+        from kimi_cli.mcp.config import discover_mcp_configs
+
+        return discover_mcp_configs
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _patch_session_id(record: dict[str, Any]) -> None:
@@ -290,7 +305,10 @@ class KimiCLI:
         _phase_t = time.monotonic()
         discovered_mcp_configs = mcp_configs
         if discovered_mcp_configs is None:
-            discovered_mcp_configs = discover_mcp_configs(str(session.work_dir))
+            # Resolve through the module attribute (lazily imported, and
+            # monkeypatchable in tests).
+            _discover_mcp_configs = getattr(sys.modules[__name__], "discover_mcp_configs")
+            discovered_mcp_configs = _discover_mcp_configs(str(session.work_dir))
         agent = await load_agent(
             agent_file,
             runtime,

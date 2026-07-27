@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import os
-from typing import Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-import aiohttp
 from pydantic import BaseModel
 
 from kimi_cli.auth import KIMI_CODE_PLATFORM_ID
 from kimi_cli.config import Config, LLMModel, load_config, save_config
 from kimi_cli.llm import ModelCapability
-from kimi_cli.utils.aiohttp import new_client_session
 from kimi_cli.utils.logging import logger
+
+if TYPE_CHECKING:
+    import aiohttp
 
 
 class ModelInfo(BaseModel):
@@ -170,6 +171,8 @@ async def refresh_managed_models(config: Config) -> bool:
             provider=platform.id,
         )
         return False
+    import aiohttp
+
     try:
         models = await list_models(platform, api_key)
     except aiohttp.ClientResponseError as exc:
@@ -238,6 +241,8 @@ async def refresh_managed_models(config: Config) -> bool:
 
 
 async def list_models(platform: Platform, api_key: str) -> list[ModelInfo]:
+    from kimi_cli.utils.aiohttp import new_client_session
+
     async with new_client_session() as session:
         models = await _list_models(
             session,
@@ -256,6 +261,8 @@ async def _list_models(
     base_url: str,
     api_key: str,
 ) -> list[ModelInfo]:
+    import aiohttp
+
     models_url = f"{base_url.rstrip('/')}/models"
     try:
         async with session.get(

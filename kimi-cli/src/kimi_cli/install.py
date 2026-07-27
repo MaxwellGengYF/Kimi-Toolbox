@@ -11,8 +11,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import aiohttp
-
 import kimi_cli
 from kimi_cli._rtk_common import (
     RTK_BASE_URL,
@@ -24,7 +22,6 @@ from kimi_cli._rtk_common import (
     _rtk_download_url,
 )
 from kimi_cli.share import get_share_dir
-from kimi_cli.utils.aiohttp import new_client_session
 from kimi_cli.utils.logging import logger
 
 _RTK_DOWNLOAD_LOCK = asyncio.Lock()
@@ -58,6 +55,10 @@ async def _download_and_install_rtk(bin_name: str) -> Path:
     share_bin_dir = get_share_dir() / "bin"
     share_bin_dir.mkdir(parents=True, exist_ok=True)
     destination = share_bin_dir / bin_name
+
+    import aiohttp
+
+    from kimi_cli.utils.aiohttp import new_client_session
 
     download_timeout = aiohttp.ClientTimeout(total=600, sock_read=60, sock_connect=15)
     async with new_client_session(timeout=download_timeout) as session:

@@ -3,9 +3,7 @@ import regex as re
 import ssl
 
 import httpx
-from bs4 import BeautifulSoup
 from markdownify import markdownify as md
-from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
 
 _DESKTOP_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -36,6 +34,11 @@ _BROWSER_HEADERS = {
 
 
 async def _fetch_html(url: str, user_agent: str, viewport: dict, wait_until: str) -> str:
+    # Imported lazily: playwright is only needed when the HTTP fallback fails
+    # and a real browser has to be launched.
+    from playwright.async_api import TimeoutError as PWTimeoutError
+    from playwright.async_api import async_playwright
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -150,6 +153,8 @@ async def fetch_html_http_with_fallback(url: str, user_agent: str) -> str:
 
 
 def _html_to_markdown(html: str) -> str:
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "html.parser")
 
     for tag_name in [

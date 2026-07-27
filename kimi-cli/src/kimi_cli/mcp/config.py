@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import orjson
-from fastmcp.mcp_config import MCPConfig
 from pydantic import ValidationError
 
 from kimi_cli.share import get_share_dir
+
+if TYPE_CHECKING:
+    from fastmcp.mcp_config import MCPConfig
 
 GLOBAL_MCP_FILE_NAME = "mcp.json"
 PROJECT_MCP_DIR = ".kimix"
@@ -88,6 +90,8 @@ def discover_mcp_configs(
 
     explicit_dicts: list[dict[str, Any]] = []
     if explicit_configs:
+        from fastmcp.mcp_config import MCPConfig
+
         for cfg in explicit_configs:
             if isinstance(cfg, MCPConfig):
                 explicit_dicts.append(cfg.model_dump(mode="json"))
@@ -97,6 +101,10 @@ def discover_mcp_configs(
     merged = merge_mcp_configs(global_config, project_config, explicit_dicts)
     if not merged.get("mcpServers"):
         return []
+
+    # Only pay the (heavy) fastmcp import cost when MCP servers are actually
+    # configured and the merged config needs schema validation.
+    from fastmcp.mcp_config import MCPConfig
 
     try:
         validated = MCPConfig.model_validate(merged)
@@ -108,4 +116,6 @@ def discover_mcp_configs(
 
 def validate_mcp_config(config: dict[str, Any]) -> MCPConfig:
     """Validate a dict against fastmcp's ``MCPConfig`` schema."""
+    from fastmcp.mcp_config import MCPConfig
+
     return MCPConfig.model_validate(config)

@@ -1,6 +1,6 @@
-from typing import override
+import sys
+from typing import TYPE_CHECKING, Any, override
 
-import aiohttp
 from kosong.tooling import CallableTool2, ToolReturnValue
 from pydantic import BaseModel, Field, ValidationError
 
@@ -10,8 +10,19 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.toolset import get_current_tool_call_or_none
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.utils import ToolResultBuilder
-from kimi_cli.utils.aiohttp import new_client_session
 from kimi_cli.utils.logging import logger
+
+if TYPE_CHECKING:
+    from kimi_cli.utils.aiohttp import new_client_session
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve ``aiohttp``-based helpers (kept monkeypatchable in tests)."""
+    if name == "new_client_session":
+        from kimi_cli.utils.aiohttp import new_client_session
+
+        return new_client_session
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class Params(BaseModel):
@@ -45,6 +56,11 @@ class SearchWeb(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
+        import aiohttp
+
+        # Resolved through the module attribute so tests can monkeypatch it.
+        new_client_session = getattr(sys.modules[__name__], "new_client_session")
+
         builder = ToolResultBuilder(max_line_length=None)
 
         api_key = self._runtime.oauth.resolve_api_key(self._api_key, self._oauth_ref)

@@ -16,8 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-import aiohttp
-import keyring
 import orjson
 from pydantic import SecretStr
 
@@ -40,11 +38,22 @@ from kimi_cli.config import (
 )
 from kimi_cli.constant import VERSION
 from kimi_cli.share import get_share_dir
-from kimi_cli.utils.aiohttp import new_client_session
 from kimi_cli.utils.logging import logger
 
 if TYPE_CHECKING:
+    import aiohttp
+
     from kimi_cli.soul.agent import Runtime
+    from kimi_cli.utils.aiohttp import new_client_session
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve ``aiohttp``-based helpers (kept monkeypatchable in tests)."""
+    if name == "new_client_session":
+        from kimi_cli.utils.aiohttp import new_client_session
+
+        return new_client_session
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
@@ -349,6 +358,8 @@ class _CrossProcessLock:
 
 
 def _load_from_keyring(key: str) -> OAuthToken | None:
+    import keyring
+
     try:
         raw = keyring.get_password(KEYRING_SERVICE, key)
     except Exception as exc:
@@ -367,6 +378,8 @@ def _load_from_keyring(key: str) -> OAuthToken | None:
 
 
 def _delete_from_keyring(key: str) -> None:
+    import keyring
+
     try:
         keyring.delete_password(KEYRING_SERVICE, key)
     except Exception:
@@ -463,6 +476,9 @@ def delete_tokens(ref: OAuthRef) -> None:
 
 
 async def request_device_authorization() -> DeviceAuthorization:
+    # Resolved through the module attribute so tests can monkeypatch it.
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+
     async with (
         new_client_session() as session,
         session.post(
@@ -486,6 +502,10 @@ async def request_device_authorization() -> DeviceAuthorization:
 
 
 async def _request_device_token(auth: DeviceAuthorization) -> tuple[int, dict[str, Any]]:
+    import aiohttp
+
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+
     try:
         async with (
             new_client_session() as session,
@@ -512,6 +532,11 @@ async def _request_device_token(auth: DeviceAuthorization) -> tuple[int, dict[st
 
 
 async def refresh_token(refresh_token: str, *, max_retries: int = 3) -> OAuthToken:
+    import aiohttp
+
+    # Resolved through the module attribute so tests can monkeypatch it.
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:

@@ -1,6 +1,11 @@
-import mcp.types
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import kosong.message
+
+if TYPE_CHECKING:
+    import mcp.types
 
 
 def convert_mcp_content(part: mcp.types.ContentBlock) -> kosong.message.ContentPart:
@@ -9,6 +14,10 @@ def convert_mcp_content(part: mcp.types.ContentBlock) -> kosong.message.ContentP
     Raises:
         ValueError: If the content type or mime type is not supported.
     """
+    # Imported lazily: ``mcp`` pulls in a large dependency tree that is only
+    # needed when MCP tool results actually have to be converted.
+    import mcp.types
+
     match part:
         case mcp.types.TextContent(text=text):
             return kosong.message.TextPart(text=text)

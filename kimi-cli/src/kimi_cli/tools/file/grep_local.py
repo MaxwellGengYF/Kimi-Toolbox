@@ -18,7 +18,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, override
 
-import aiohttp
 from kaos.path import KaosPath
 from kosong.tooling import (
     FIELD_ALIASES_FILE,
@@ -44,7 +43,6 @@ from kimi_cli.install import _RTK_DOWNLOAD_LOCK, _download_and_install_rtk
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import ToolResultBuilder
-from kimi_cli.utils.aiohttp import new_client_session
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.path import (
     is_within_workspace,
@@ -228,6 +226,10 @@ def _find_existing_rg(bin_name: str) -> Path | None:
 
 
 async def _download_and_install_rg(bin_name: str) -> Path:
+    import aiohttp
+
+    from kimi_cli.utils.aiohttp import new_client_session
+
     target = _detect_rg_target()
     filename = _rg_archive_name(RG_VERSION, target)
     url = _rg_download_url(RG_VERSION, target)
