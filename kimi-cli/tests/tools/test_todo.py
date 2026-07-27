@@ -228,14 +228,18 @@ class TestTodoListActiveSummary:
         assert "Done task" not in result.output
 
     async def test_write_summary_omits_done_items(self, todo_list_tool: TodoList):
-        """When all todos are done, no active summary is emitted."""
+        """When all todos are done, no active summary is emitted but all-done reminder appears."""
         params = Params(todos=[Todo(title="Only done", status="done", notes="")])
         result = await todo_list_tool(params)
         assert not result.is_error
-        assert result.output == "Todo list appended (1 total: 1 done, 0 in progress, 0 pending)"
+        assert result.output.startswith(
+            "Todo list appended (1 total: 1 done, 0 in progress, 0 pending)"
+        )
+        assert "All todos are done." in result.output
+        assert "All todos are done." in result.message
 
     async def test_write_summary_preserved_when_all_done(self, todo_list_tool: TodoList):
-        """Marking all active todos as done removes the active summary."""
+        """Marking all active todos as done removes the active summary and shows all-done reminder."""
         await todo_list_tool(
             Params(
                 todos=[
@@ -254,7 +258,11 @@ class TestTodoListActiveSummary:
             )
         )
         assert not result.is_error
-        assert result.output == "Todo list appended (2 total: 2 done, 0 in progress, 0 pending)"
+        assert result.output.startswith(
+            "Todo list appended (2 total: 2 done, 0 in progress, 0 pending)"
+        )
+        assert "All todos are done." in result.output
+        assert "All todos are done." in result.message
 
     async def test_write_summary_with_overwrite_warning(self, todo_list_tool: TodoList):
         """Warning from mode='force_overwrite' is in message; active summary is in output."""
@@ -295,6 +303,43 @@ class TestTodoListActiveSummary:
             "- [pending] Third",
             "- [pending] Fifth",
         ]
+
+    async def test_read_mode_all_done_shows_reminder(self, todo_list_tool: TodoList):
+        """Read mode when all todos are done shows all-done reminder."""
+        await todo_list_tool(
+            Params(todos=[Todo(title="Task A", status="done", notes="")])
+        )
+        result = await todo_list_tool(Params(todos=None))
+        assert not result.is_error
+        assert "All todos are done." in result.output
+        assert result.message == (
+            "All todos are done. "
+            "Please review the requirements again to ensure nothing is left unfinished."
+        )
+
+    async def test_write_mode_all_done_shows_reminder(self, todo_list_tool: TodoList):
+        """Write mode when all todos are done shows all-done reminder."""
+        result = await todo_list_tool(
+            Params(todos=[Todo(title="Single done", status="done", notes="")])
+        )
+        assert not result.is_error
+        assert "All todos are done." in result.output
+        assert "All todos are done." in result.message
+
+    async def test_read_mode_not_all_done_no_reminder(self, todo_list_tool: TodoList):
+        """Read mode when not all todos are done does not show all-done reminder."""
+        await todo_list_tool(
+            Params(
+                todos=[
+                    Todo(title="Pending task", status="pending", notes=""),
+                    Todo(title="Done task", status="done", notes=""),
+                ]
+            )
+        )
+        result = await todo_list_tool(Params(todos=None))
+        assert not result.is_error
+        assert "All todos are done." not in result.output
+        assert "Current todo list displayed." in result.message
 
 
 class TestTodoListIncrementalUpdate:

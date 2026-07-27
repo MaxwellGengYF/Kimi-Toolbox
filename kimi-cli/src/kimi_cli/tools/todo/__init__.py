@@ -737,7 +737,18 @@ class TodoList(CallableTool2[Params]):
             output_lines.append(active_summary)
         output = "\n".join(output_lines)
 
+        # NEW: Append all-done reminder when all todos are done
+        ALL_DONE_REMINDER = (
+            "All todos are done. "
+            "Please review the requirements again to ensure nothing is left unfinished."
+        )
+        if counts["pending"] == 0 and counts["in_progress"] == 0 and len(todos) > 0:
+            output_lines.append(ALL_DONE_REMINDER)
+            output = "\n".join(output_lines)
+
         message_lines: list[str] = [f"Todo list {mode_msg}."]
+        if counts["pending"] == 0 and counts["in_progress"] == 0 and len(todos) > 0:
+            message_lines.append(ALL_DONE_REMINDER)
         if mode == "force_overwrite" and had_old_todos:
             message_lines.append(
                 "Warning: mode='force_overwrite' replaces the existing todo list and bypasses merge validation logic."
@@ -841,6 +852,9 @@ class TodoList(CallableTool2[Params]):
                 display=[],
             )
 
+        # NEW: Check if all todos are done
+        all_done = all(t.status == "done" for t in todos)
+
         shown = todos[:_MAX_READ_ITEMS]
         formatted = self._format_todos(
             shown,
@@ -864,10 +878,19 @@ class TodoList(CallableTool2[Params]):
             )
         if archived:
             output_lines.append(f"Archived: {len(archived)} completed todo(s).")
+
+        # NEW: Append all-done reminder
+        ALL_DONE_REMINDER = (
+            "All todos are done. "
+            "Please review the requirements again to ensure nothing is left unfinished."
+        )
+        if all_done:
+            output_lines.append(ALL_DONE_REMINDER)
+
         return ToolReturnValue(
             is_error=False,
             output="\n".join(output_lines),
-            message="Current todo list displayed.",
+            message=ALL_DONE_REMINDER if all_done else "Current todo list displayed.",
             display=[],
         )
 
