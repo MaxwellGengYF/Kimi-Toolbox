@@ -142,6 +142,41 @@ class TestRead:
         assert isinstance(result, ToolError)
         assert "ghost" in result.message
 
+    async def test_read_missing_topic_suggests_fuzzy_match(self, tool: Memory) -> None:
+        await tool(Params(action="write", topic="facts", content="some facts"))
+        await tool(Params(action="write", topic="decisions", content="some decisions"))
+        # "fact" is a close match to "facts" — should trigger suggestion
+        result = await tool(Params(action="read", topic="fact"))
+        assert isinstance(result, ToolError)
+        assert "Did you mean: 'facts'?" in result.message
+        # "decisions" is too far from "fact" phonetically — should not appear
+        assert "decisions" not in result.message
+
+    async def test_read_missing_topic_no_fuzzy_match(self, tool: Memory) -> None:
+        await tool(Params(action="write", topic="xyz", content="something"))
+        # "abcdef" shares no meaningful similarity with "xyz"
+        result = await tool(Params(action="read", topic="abcdef"))
+        assert isinstance(result, ToolError)
+        assert "Did you mean:" not in result.message
+        assert "Use action='list'" in result.message
+        assert "No memory topic named 'abcdef'" in result.message
+
+    async def test_read_missing_topic_empty_memory_dir(self, tool: Memory) -> None:
+        """No memory files exist at all — fall back to list hint."""
+        result = await tool(Params(action="read", topic="anything"))
+        assert isinstance(result, ToolError)
+        assert "Use action='list'" in result.message
+        assert "Did you mean:" not in result.message
+
+    async def test_read_exact_match_unaffected(self, tool: Memory) -> None:
+        """Exact topic match must still work — not fall through to fuzzy."""
+        await tool(Params(action="write", topic="fact", content="short name"))
+        await tool(Params(action="write", topic="facts", content="plural name"))
+        result = await tool(Params(action="read", topic="fact"))
+        assert isinstance(result, ToolOk)
+        assert "short name" in result.output
+        assert "plural name" not in result.output
+
     async def test_read_truncates_huge_files(self, tool: Memory, session_dir: Path) -> None:
         mem = session_dir / "memory"
         mem.mkdir(parents=True)

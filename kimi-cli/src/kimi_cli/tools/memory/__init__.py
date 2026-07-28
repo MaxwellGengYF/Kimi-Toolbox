@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Literal, override
 
 import regex as re
+from rapidfuzz import fuzz, process
+
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field, field_validator
 
@@ -55,6 +57,16 @@ _SEARCH_SNIPPET_RADIUS = 80
 
 _TOPIC_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 _QUERY_TERM_RE = re.compile(r"[\w-]+", re.UNICODE)
+
+_FUZZY_TOPIC_CUTOFF: float = 60.0
+"""Minimum rapidfuzz score (0-100) for topic name suggestions.
+
+60 catches minor typos (e.g., 'fact' \u2192 'facts') while avoiding suggestions
+that share only a few characters. Mirrors TodoList._FUZZY_TITLE_CUTOFF.
+"""
+
+_FUZZY_TOPIC_MAX_SUGGESTIONS: int = 3
+"""Maximum number of fuzzy topic suggestions to include in the error message."""
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +293,31 @@ class Memory(CallableTool2[Params]):
         super().__init__()
         self._memory_dir = memory_dir_for_session(runtime.session.dir)
 
+    def _get_topic_names(self) -> list[str]:
+        """Return a sorted list of existing topic names (file stems)."""
+        return sorted(p.stem for p in list_memory_files(self._memory_dir))
+
+    def _fuzzy_topic_suggestions(self, topic: str) -> list[str]:
+        """Return up to _FUZZY_TOPIC_MAX_SUGGESTIONS close topic names.
+
+        Uses rapidfuzz token_sort_ratio with a score cutoff so only
+        meaningful near-matches are returned. Returns an empty list when
+        no topics exist or no match clears the cutoff.
+        """
+        candidates = self._get_topic_names()
+        if not candidates:
+            return []
+
+        matches = process.extract(
+            topic,
+            candidates,
+            scorer=fuzz.token_sort_ratio,
+            limit=_FUZZY_TOPIC_MAX_SUGGESTIONS,
+            score_cutoff=_FUZZY_TOPIC_CUTOFF,
+        )
+        # rapidfuzz>=3 returns list of (choice, score, index) tuples
+        return [str(choice) for choice, _score, _index in matches]
+
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
         try:
@@ -347,8 +384,14 @@ class Memory(CallableTool2[Params]):
     def _read(self, topic: str) -> ToolReturnValue:
         path = _topic_path(self._memory_dir, topic)
         if not path.is_file():
+            suggestions = self._fuzzy_topic_suggestions(topic)
+            if suggestions:
+                quoted = [f"'{s}'" for s in suggestions]
+                hint = f" Did you mean: {', '.join(quoted)}?"
+            else:
+                hint = " Use action='list' to see all available topics."
             return ToolError(
-                message=f"No memory topic named '{path.stem}'. Use action='list' to see available topics.",
+                message=f"No memory topic named '{path.stem}'.{hint}",
                 brief="Topic not found",
             )
         text = path.read_text(encoding="utf-8")

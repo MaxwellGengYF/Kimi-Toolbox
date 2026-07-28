@@ -176,7 +176,8 @@ class TestMemorySurvivesCompaction:
                 [], _make_soul(runtime, 2, 30_000, max_tokens)
             )
             assert meter_injections
-            assert "30k/200k (15%)" in meter_injections[0].content
+            # ContextMeterProvider returns a generic reminder, not usage stats.
+            assert "Context is volatile" in meter_injections[0].content
 
         asyncio.run(_run())
 
