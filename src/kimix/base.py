@@ -582,6 +582,9 @@ _STREAM_TOOL_NAMES = frozenset({
     "Agent",
     "EditFile",
     "EditPlan",
+    "Run",
+    "Powershell",
+    "Bash",
     # "Goal" and "RunGoal" removed — both are deleted
 })
 
@@ -595,6 +598,18 @@ _STREAM_ARG_KEYS = frozenset({
     "prompt",        # Agent
     "old", "new",    # EditFile / EditPlan edit items
     "question", "context", "instruction",
+    "command",       # Run / Powershell / Bash
+})
+
+# Tool-call argument keys whose streamed string values are printed *inline*
+# after the tool header (space separator, no "key:\n" label).  Used so that
+# ``⚡ Powershell Get-Date`` stays on one line instead of breaking the
+# command onto a new ``command:\n`` line.
+#
+# Keys are canonical (resolved via _canonical_key()), so the "cmd" alias
+# is automatically covered — no need to list it separately.
+_INLINE_ARG_KEYS = frozenset({
+    "command",       # Run / Powershell / Bash (alias "cmd" also covered)
 })
 
 # Foreground color for the "⚡ ToolName" header printed when a tool call
@@ -744,6 +759,8 @@ def _format_tool_args(name: str, args: str | None) -> str | None:
                 return ""
             case "Compact":
                 return ", ".join(_collect("instruction", "mode"))
+            case "Memory":
+                return ", ".join(_collect("action", "topic", "query", "max_results", hide={"content"}))
             case _:
                 return orjson.dumps(parsed).decode("utf-8")
     except TypeError:
@@ -803,6 +820,7 @@ class _ToolCallStreamPrinter:
         "source_code": Color.BRIGHT_CYAN,
         "text": GRAY_LIGHT,
         "task": Color.BRIGHT_YELLOW,
+        "command": Color.BRIGHT_BLUE,
     }
 
     def __init__(self, tool_name: str, session: Session) -> None:
@@ -1080,9 +1098,14 @@ class _ToolCallStreamPrinter:
         self._state = self._IN_STRING
         if self._string_streamed:
             self._stream_color = self._stream_color_for_key(self._current_key)
-            _stream.colorful_print_word(
-                f"{self._separator()}{self._current_key}:\n",
-                fg=GRAY, require_new_line=False, flush=True)
+            if self._current_key in _INLINE_ARG_KEYS:
+                # Inline: print a space, no label — value follows on same line.
+                _stream.colorful_print_word(
+                    " ", fg=GRAY, require_new_line=False, flush=True)
+            else:
+                _stream.colorful_print_word(
+                    f"{self._separator()}{self._current_key}:\n",
+                    fg=GRAY, require_new_line=False, flush=True)
 
     def _end_string_value(self) -> None:
         if self._string_streamed:
@@ -1257,6 +1280,11 @@ def _handle_tool_call(
                 pass
             else:
                 # A new tool call supersedes any previous stream printer.
+                # Mark the header as printed *before* finishing any previous
+                # stream printer, so _finish_tool_call_stream does not attempt
+                # the compact path (which would print a second header).
+                session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
+                session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
                 _finish_tool_call_stream(session)
                 _stream.colorful_print_word(
                     f"⚡ {name}", fg=_tool_header_color(name), require_new_line=True, flush=True)
@@ -1265,8 +1293,6 @@ def _handle_tool_call(
                 session._tmp_data[_TOOL_CALL_STREAM_KEY] = printer
                 if args:
                     printer.feed(args)
-                session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
-                session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
                 if output_function:
                     output_function(
                         f"{name} {args or ''}", MessageType.ToolCalling)

@@ -93,11 +93,12 @@ async def test_print_agent_json_groups_tool_parts_before_tool_to_text_transition
 
     assert output.count("Context usage: 50.0% (4096 tokens)") == 1
     assert "\x1b[38;5;245m==================== Context usage: 50.0% (4096 tokens) ========================\n\x1b[0m" in output
-    # Complete-args ToolCall: header + compact segment printed via the stream
-    # printer, which finishes immediately; the stray ToolCallPart stays silent.
+    # Complete-args ToolCall: header + streamed inline command printed via the
+    # stream printer, which finishes immediately; the stray ToolCallPart stays silent.
     assert output.count("⚡ Run") == 1
     plain = _plain(chunks)
-    assert "command: pytest" in plain
+    # Command is inline after the header (no "command:" label): ``⚡ Run pytest``
+    assert "pytest" in plain
     assert "more" not in plain
     assert "done" in plain
 
@@ -318,7 +319,7 @@ async def test_print_agent_json_merged_tool_call_prints_full_content_once(monkey
 
 
 async def test_non_whitelisted_tool_uses_compact_format(monkeypatch: Any) -> None:
-    """Non-whitelisted tools (Grep, Powershell, Bash, etc.) should use the
+    """Non-whitelisted tools (Grep, etc.) should use the
     legacy compact ``_format_tool_args`` output even with ``stream_tool_args=True``."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
@@ -456,6 +457,7 @@ def test_stream_color_for_key_mapping_and_fallback() -> None:
     assert printer._stream_color_for_key("prompt") is base.Color.BRIGHT_YELLOW
     assert printer._stream_color_for_key("content") is base.Color.BRIGHT_BLACK
     assert printer._stream_color_for_key("context") is base.GRAY
+    assert printer._stream_color_for_key("command") is base.Color.BRIGHT_BLUE
     # Aliases are canonicalized before lookup, so the raw color dict
     # returns the fallback for alias keys.
     assert printer._stream_color_for_key("old_string") is base.GRAY_LIGHT
@@ -865,8 +867,9 @@ def test_format_tool_args_powershell_bash_prints_cmd_and_command_alias() -> None
 
 async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch: Any) -> None:
     """End-to-end: the printed ``⚡ Powershell`` / ``⚡ Bash`` tool-call header
-    must include the command regardless of whether the LLM sent it under the
-    advertised ``command`` alias or the ``cmd`` field name."""
+    must include the command **inline** (on the same line) regardless of whether
+    the LLM sent it under the advertised ``command`` alias or the ``cmd`` field
+    name.  Both forms produce identical inline output ``⚡ Name Get-Date``."""
     for tool_name in ("Powershell", "Bash"):
         for key in ("command", "cmd"):
             chunks = _capture_base_stream(monkeypatch)
@@ -882,17 +885,25 @@ async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch
                 session,
             )
             plain = _plain(chunks)
-            assert f"⚡ {tool_name}" in plain
+            # Header and command appear on the same line (inline).
+            # The output looks like: ⚡ Powershell Get-Date
+            assert f"\u26a1 {tool_name} " in plain, (
+                f"{tool_name}: inline header+command missing for {key!r} args: {plain!r}"
+            )
             assert "Get-Date" in plain, (
                 f"{tool_name}: header missing command for {key!r} args: {plain!r}"
+            )
+            # No "command:" label — command is inline.
+            assert "command:" not in plain, (
+                f"{tool_name}: unexpected 'command:' label for {key!r} args: {plain!r}"
             )
 
 
 async def test_powershell_bash_streamed_fragments_print_command_alias(monkeypatch: Any) -> None:
     """Anthropic/OpenAI-Responses style streaming: ToolCall with empty
-    arguments followed by ToolCallPart fragments. Once the fragments complete
-    the JSON, the compact header must still print the command sent via the
-    ``command`` alias."""
+    arguments followed by ToolCallPart fragments.  Since Powershell/Bash
+    are now in ``_STREAM_TOOL_NAMES``, the stream printer is created and
+    the command is printed **inline** after the header as fragments arrive."""
     for tool_name in ("Powershell", "Bash"):
         chunks = _capture_base_stream(monkeypatch)
         session = FakeSession()
@@ -900,12 +911,19 @@ async def test_powershell_bash_streamed_fragments_print_command_alias(monkeypatc
             ToolCall(id=f"call-{tool_name}", function=ToolCall.FunctionBody(name=tool_name, arguments="")),
             session,
         )
+        # Stream printer should have been created.
+        assert base._TOOL_CALL_STREAM_KEY in session._tmp_data
         await base.print_agent_json(ToolCallPart(arguments_part='{"command": "Get-Da'), session)
         await base.print_agent_json(ToolCallPart(arguments_part='te"}'), session)
         plain = _plain(chunks)
-        assert f"\u26a1 {tool_name}" in plain
+        # Header + inline command on the same line.
+        assert f"\u26a1 {tool_name} " in plain
         assert "Get-Date" in plain, (
             f"{tool_name}: streamed header missing command: {plain!r}"
+        )
+        # No "command:" label — command is inline.
+        assert "command:" not in plain, (
+            f"{tool_name}: unexpected 'command:' label in streamed output: {plain!r}"
         )
 
 
