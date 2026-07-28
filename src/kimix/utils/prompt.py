@@ -345,12 +345,21 @@ async def _run_single_prompt(
     info_print: bool,
     label: str = "Start...",
     format_output: bool = False,
+    timeout: float | None = None,
 ) -> bool:
-    """Send a single prompt to the session with retries and return True on success."""
+    """Send a single prompt to the session with retries and return True on success.
+
+    Args:
+        timeout: Maximum seconds for the entire prompt (including retries).
+                 None means no timeout. When reached, raises TimeoutError.
+    """
     if info_print:
         base._stream.colorful_print_word(f"{label}\n", fg=base.Color.BRIGHT_CYAN, require_new_line=True)
 
     max_retries = 3
+    deadline = None
+    if timeout is not None:
+        deadline = time.monotonic() + timeout
     for attempt in range(max_retries):
         if session._cancel_event is not None and session._cancel_event.is_set():
             return False
@@ -359,11 +368,24 @@ async def _run_single_prompt(
 
             start_time = time.time()
             base._stream._last_char_was_newline = True
-            async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
-                if cancel_callable is not None and cancel_callable():
-                    session.cancel()
-                    break
-                await print_agent_json(message, session, output_function, format_output=format_output)
+
+            # Wrap the prompt iteration with an optional timeout guard
+            async def _run_prompt_iter():
+                async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
+                    if cancel_callable is not None and cancel_callable():
+                        session.cancel()
+                        break
+                    await print_agent_json(message, session, output_function, format_output=format_output)
+
+            if timeout is not None:
+                # Compute remaining time for this attempt
+                remaining = deadline - time.monotonic() if deadline else timeout
+                if remaining <= 0:
+                    raise TimeoutError(f"Prompt timed out after {timeout}s")
+                await asyncio.wait_for(_run_prompt_iter(), timeout=remaining)
+            else:
+                await _run_prompt_iter()
+
             # After finishing, flush any remaining buffered text parts as formatted markdown.
             if format_output:
                 print_agent_json_flush_text()
@@ -379,6 +401,15 @@ async def _run_single_prompt(
             if session:
                 session.cancel()
             return False
+        except (asyncio.TimeoutError, TimeoutError) as te:
+            base._stream.colorful_print_word(
+                f"Prompt timed out: {te}",
+                fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True,
+            )
+            if session:
+                session.cancel()
+            # Timeout is not retried — propagate immediately
+            raise
         except Exception as e:
             base._stream.colorful_print_word(str(e), fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True)
             if session:
@@ -405,6 +436,7 @@ async def prompt_async(
     ensure_todo_finished: bool = True,
     export_todo_list_path: Path | None = None,
     format_output: bool = False,
+    timeout: float | None = None,
 ) -> None:
     from kimix.utils.prompt_str import escape_file_paths
 
@@ -426,16 +458,43 @@ async def prompt_async(
     if merge_wire_messages is None:
         merge_wire_messages = output_function is not None
     try:
-        prompt_success = await _run_single_prompt(
-            session,
-            prompt_str,
-            output_function,
-            cancel_callable,
-            merge_wire_messages,
-            info_print,
-            label="Start...",
-            format_output=format_output,
-        )
+        if ensure_todo_finished:
+            # When ensure_todo_finished=True, catch ALL exceptions from the
+            # main prompt so the caller never sees an unhandled exception.
+            # Errors are logged, and the todo-reminder loop still runs to
+            # salvage any unfinished items before graceful return.
+            try:
+                prompt_success = await _run_single_prompt(
+                    session,
+                    prompt_str,
+                    output_function,
+                    cancel_callable,
+                    merge_wire_messages,
+                    info_print,
+                    label="Start...",
+                    format_output=format_output,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                base._stream.colorful_print_word(
+                    f"Prompt error (gracefully handled): {exc}",
+                    fg=Color.BRIGHT_RED,
+                    styles=[Style.BOLD],
+                    require_new_line=True,
+                )
+                prompt_success = False
+        else:
+            prompt_success = await _run_single_prompt(
+                session,
+                prompt_str,
+                output_function,
+                cancel_callable,
+                merge_wire_messages,
+                info_print,
+                label="Start...",
+                format_output=format_output,
+                timeout=timeout,
+            )
         if prompt_success and ensure_todo_finished:
             max_todo_attempts = 2
             for attempt in range(max_todo_attempts):
@@ -502,13 +561,25 @@ async def prompt_async(
 
 
     finally:
-        if session:
-            if export_todo_list_path is not None:
-                await _export_session_todos(session, export_todo_list_path)
-            await _clear_session_todos(session)
-            # _clear_session_goal removed — code is part of todos now
-            if close_session_after_prompt:
-                await close_session_async(session)
+        try:
+            if session:
+                if export_todo_list_path is not None:
+                    try:
+                        await _export_session_todos(session, export_todo_list_path)
+                    except Exception as exc:
+                        base.print_error(f"Failed to export todos: {exc}")
+                try:
+                    await _clear_session_todos(session)
+                except Exception as exc:
+                    base.print_error(f"Failed to clear todos: {exc}")
+                if close_session_after_prompt:
+                    try:
+                        await close_session_async(session)
+                    except Exception as exc:
+                        base.print_error(f"Failed to close session: {exc}")
+        except Exception:
+            # Absolute last resort: never let cleanup exceptions escape
+            pass
         base._stream.print_word("", True)
 
 
@@ -524,6 +595,7 @@ def prompt(
     ensure_todo_finished: bool = True,
     export_todo_list_path: Path | None = None,
     format_output: bool = False,
+    timeout: float | None = None,
 ) -> None:
     asyncio.run(
         prompt_async(
@@ -538,6 +610,7 @@ def prompt(
             ensure_todo_finished=ensure_todo_finished,
             export_todo_list_path=export_todo_list_path,
             format_output=format_output,
+            timeout=timeout,
         ))
 
 
