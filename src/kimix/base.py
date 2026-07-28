@@ -601,15 +601,24 @@ _STREAM_ARG_KEYS = frozenset({
     "command",       # Run / Powershell / Bash
 })
 
-# Tool-call argument keys whose streamed string values are printed *inline*
-# after the tool header (space separator, no "key:\n" label).  Used so that
+# Tool-call argument keys whose values are printed *inline* after the tool
+# header (space separator, no "key:\n" label).  Used so that
 # ``⚡ Powershell Get-Date`` stays on one line instead of breaking the
-# command onto a new ``command:\n`` line.
+# command onto a new ``command:\n`` line.  Short scalar arguments (e.g.
+# ``timeout``) are printed inline as well — `` key: value`` on the header
+# line — instead of each occupying its own ``key:\nvalue`` line beneath it.
 #
 # Keys are canonical (resolved via _canonical_key()), so the "cmd" alias
 # is automatically covered — no need to list it separately.
 _INLINE_ARG_KEYS = frozenset({
     "command",       # Run / Powershell / Bash (alias "cmd" also covered)
+    "timeout",       # Run / Powershell / Bash / Python / TaskOutput / Glob
+    "max_lines",     # Run / Powershell / Bash / Python
+    "cwd",           # Run
+    "output_path",   # Run / Python
+    "task_id",       # Run / Powershell / Bash / Python
+    "interactive",   # Powershell / Bash
+    "mode",          # WriteFile / Powershell / Bash / Python / Run
 })
 
 # Foreground color for the "⚡ ToolName" header printed when a tool call
@@ -777,12 +786,15 @@ class _ToolCallStreamPrinter:
     non-``ToolCallPart`` wire message arrives (safety net for truncated or
     malformed JSON).
 
-    Each argument — streamed or compact — is printed on its own line beneath
-    the ``⚡ Name`` header. String values for keys in :data:`_STREAM_ARG_KEYS`
-    are printed decoded, fragment by fragment, each in a per-key color from
-    :attr:`_STREAM_KEY_COLORS` (fallback ``GRAY_LIGHT``). Other short scalar
-    values are buffered and printed as compact ``key: value`` lines on
-    completion.
+    Each argument is printed beneath the ``⚡ Name`` header. String values
+    for keys in :data:`_STREAM_ARG_KEYS` are printed decoded, fragment by
+    fragment, each in a per-key color from :attr:`_STREAM_KEY_COLORS`
+    (fallback ``GRAY_LIGHT``); keys in :data:`_INLINE_ARG_KEYS` follow the
+    header inline (space separator, no label) while the rest get a
+    ``key:\n`` label on their own line. Other short scalar values are
+    buffered and printed on completion — inline as `` key: value`` for
+    keys in :data:`_INLINE_ARG_KEYS`, otherwise as compact ``key:\nvalue``
+    lines.
     """
 
     # Lexer states.
@@ -1128,8 +1140,13 @@ class _ToolCallStreamPrinter:
         if len(text) > 60:
             text = text[:60] + "..."
         canonical_key = _canonical_key(self._current_key) if self._current_key else ""
-        segment = f"{self._separator()}{canonical_key}:\n{text}" if canonical_key \
-            else f"{self._separator()}{text}"
+        if canonical_key in _INLINE_ARG_KEYS:
+            # Inline: short scalars stay on the header line — " key: value".
+            segment = f" {canonical_key}: {text}" if canonical_key \
+                else f" {text}"
+        else:
+            segment = f"{self._separator()}{canonical_key}:\n{text}" if canonical_key \
+                else f"{self._separator()}{text}"
         _stream.colorful_print_word(
             segment, fg=Color.BRIGHT_MAGENTA, require_new_line=False, flush=True)
 

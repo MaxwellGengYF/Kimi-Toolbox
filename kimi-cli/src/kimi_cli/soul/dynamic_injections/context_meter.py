@@ -5,10 +5,10 @@ Research shows agents manage memory better when context pressure is
 checkpoint, flush durable memory, or start a fresh session — instead of the
 harness compacting at a bad time.
 
-This provider injects a one-line usage meter (``📊 Context: 72k/200k (36%)``)
-when usage has materially changed. It deliberately stays quiet in the high-usage
-region, which is owned by :class:`CompactReminderProvider` (actionable advice),
-so the two never double-inject.
+This provider injects a reminder to persist important facts with the ``Memory``
+tool when usage has materially changed. It deliberately stays quiet in the
+high-usage region, which is owned by :class:`CompactReminderProvider`
+(actionable advice), so the two never double-inject.
 """
 
 from __future__ import annotations
@@ -26,13 +26,8 @@ if TYPE_CHECKING:
 _CONTEXT_METER_TYPE = "context_meter"
 
 
-def _format_k(tokens: int) -> str:
-    """Compact token formatting: 72300 -> '72k', 1_500_000 -> '1500k'."""
-    return f"{round(tokens / 1000)}k"
-
-
 class ContextMeterProvider(DynamicInjectionProvider):
-    """Injects a token-usage status line when context usage materially changes."""
+    """Injects a reminder to use the ``Memory`` tool when context usage materially changes."""
 
     def __init__(
         self,
@@ -88,7 +83,6 @@ class ContextMeterProvider(DynamicInjectionProvider):
         self._last_injected_usage = usage
 
         content = (
-            f"📊 Context: {_format_k(tokens)}/{_format_k(max_tokens)} ({usage:.0%}). "
             "Context is volatile — persist important facts with the `Memory` tool; "
             "they survive compaction."
         )

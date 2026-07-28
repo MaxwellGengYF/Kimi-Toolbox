@@ -251,9 +251,33 @@ async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: 
     plain = _plain(chunks)
 
     assert "path:\nx.py" in plain
-    assert "mode:\noverwrite" in plain
-    assert "\nmode:\noverwrite" in plain
+    # Short scalar args (``mode``) print inline on the header line.
+    assert " mode: overwrite" in plain
+    assert "mode:\noverwrite" not in plain
     assert "body" in plain
+
+
+async def test_streamed_short_args_print_inline(monkeypatch: Any) -> None:
+    """Short scalar arguments (e.g. ``timeout``) print inline after the tool
+    header — ``⚡ Powershell Get-Date timeout: 30`` — instead of each
+    occupying its own ``timeout:\n30`` line beneath the header."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-inline-timeout",
+            function=ToolCall.FunctionBody(name="Powershell", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"command": "Get-Date", "timeout": 30}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "Get-Date timeout: 30" in plain
+    assert "timeout:\n30" not in plain
 
 
 async def test_print_agent_json_stream_finished_by_tool_result(monkeypatch: Any) -> None:

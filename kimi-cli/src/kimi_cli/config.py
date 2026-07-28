@@ -175,8 +175,8 @@ Default is 3."""
     the todo list has not changed. Default is 20."""
 
     context_meter_enabled: bool = Field(default=True)
-    """When true, inject a one-line token-usage status (e.g. 'Context: 72k/200k
-    (36%)') when usage materially changes, so the agent can self-regulate
+    """When true, inject a reminder to persist important facts with the `Memory`
+    tool when usage materially changes, so the agent can self-regulate
     (checkpoint, flush memory) before the harness compacts. Default is true."""
     context_meter_min_delta: float = Field(default=0.05, ge=0.0, le=0.5)
     """Minimum usage-ratio change since the last context-meter injection
