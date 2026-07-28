@@ -46,6 +46,7 @@ Kimi-CLI-X is a deep optimization of the original Kimi-CLI, focusing on **prompt
 | **Error logging** | Records tool-call errors for model backtracking and improvement. |
 | **Script system** | Combines prompts with Python logic to orchestrate complex tasks. |
 | **Enhanced web fetch (FetchURL)** | Headless-browser-based Markdown output (not plain text), supports `output_path` and auto-truncation for超长 content; zero external service dependency. |
+| **Best-of-N sampling (`AgentSwarm` `parallel_sample`)** | Run the SAME task N times in isolated workspaces (git worktree / temp copy), pick the winner via `self_eval` or `majority` selection, then apply and verify the winning diff — never a silent accept. |
 
 ### Scriptable Workflows (Core Advantage)
 
@@ -102,6 +103,33 @@ Triggered when context token ratio hits `compaction_trigger_ratio` or free space
        │              ContextRetrieval (agent主动recall)            │
        └────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### Agent Harness: Self-Regulation & Reminders
+
+The `KimiSoul` core loop actively keeps long runs on track — no manual babysitting. It works in CLI, server, and sub-agent sessions alike.
+
+- **Verification Gate** — a turn can't end while todos are unfinished, todo verification fails, or files were edited without running any check. Failing checks are fed back to the agent to fix.
+- **Anti-loop detection** — catches repeated edits to the same file across different tools, and the same error recurring without a root-cause fix; nudges the agent to change strategy.
+- **Todo reminders** — unfinished todos are periodically re-surfaced at the end of the context, so goals never drift out of attention.
+- **Compact reminders** — when context fills up (~70%), the agent is prompted to compact on its own terms before forced auto-compaction kicks in.
+- **Budget reminders** (opt-in) — wrap-up warnings as the per-turn step/time budget runs out, so the agent finishes gracefully instead of being cut off.
+- **Context meter** — when context usage shifts materially, the agent is reminded to persist key facts with the `Memory` tool.
+- **Decision-aware compaction** — compaction summaries preserve a `Decisions & Conclusions` and a `Verification Status` section, so early decisions and verified work survive.
+- **Context pruning** — stale tool outputs, thinking blocks, and near-duplicate content are automatically elided to reclaim context space.
+
+### TodoList with Executable Verification
+
+The `TodoList` tool tracks multi-step plans and *proves* they are done:
+
+- Attach verification `code` to any todo: inline Python, a `.py` file, a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file.
+- Marking a todo `done` automatically runs its verification — failures are returned as errors and block completion via the Verification Gate.
+- Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
+
+### Best-of-N Sampling
+
+`AgentSwarm`'s `parallel_sample` mode runs the **same task N times** in isolated workspaces (git worktree / temp copy), picks the winner by model self-evaluation or majority vote, then applies and verifies the winning diff. Failures are explicit errors — never silently accepted.
 
 ---
 
