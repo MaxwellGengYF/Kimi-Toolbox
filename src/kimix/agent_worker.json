@@ -8,6 +8,7 @@
       "kimix.tools.py:Python",
       "kimix.tools.background:TaskOutput",
       "kimi_cli.tools.todo:TodoList",
+      "kimi_cli.tools.memory:Memory",
       "kimi_cli.tools.file:ReadFile",
       "kimi_cli.tools.file:ReadMediaFile",
       "kimi_cli.tools.file:EditFile",

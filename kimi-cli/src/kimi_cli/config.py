@@ -163,6 +163,37 @@ Default is 3."""
     """Context usage ratio at which the compact reminder is injected.
     Should be lower than compaction_trigger_ratio to give the agent a heads-up.
     Default is 0.70 (70%)."""
+
+    # ── Recency-edge re-injection & memory durability ────────────────────────
+
+    todo_reminder_enabled: bool = Field(default=True)
+    """When true, periodically re-inject unfinished TodoList items at the end
+    of the context window, where model attention is strongest (recency edge).
+    Default is true."""
+    todo_reminder_interval_steps: int = Field(default=20, ge=1)
+    """Minimum number of steps between repeated todo reminder injections when
+    the todo list has not changed. Default is 20."""
+
+    context_meter_enabled: bool = Field(default=True)
+    """When true, inject a one-line token-usage status (e.g. 'Context: 72k/200k
+    (36%)') when usage materially changes, so the agent can self-regulate
+    (checkpoint, flush memory) before the harness compacts. Default is true."""
+    context_meter_min_delta: float = Field(default=0.05, ge=0.0, le=0.5)
+    """Minimum usage-ratio change since the last context-meter injection
+    required to inject again. Default is 0.05 (5%)."""
+    context_meter_cooldown_steps: int = Field(default=10, ge=0)
+    """Minimum number of steps between context-meter injections.
+    Default is 10."""
+
+    pre_compact_flush_enabled: bool = Field(default=True)
+    """When true, flush important agent state (unfinished todos, notes) to the
+    durable session memory directory before any compaction fires, so details
+    destroyed by summarization are recoverable from disk. Default is true."""
+    memory_restore_enabled: bool = Field(default=True)
+    """When true, append a memory-pointer message after compaction that
+    re-surfaces the durable memory directory (and the latest pre-compaction
+    flush excerpt) at the end of the rebuilt context. Default is true."""
+
     auto_retrieve_history: bool = Field(default=True)
     """When true, automatically search archived conversation history before each
     turn and inject the most relevant past turn if it exceeds the similarity

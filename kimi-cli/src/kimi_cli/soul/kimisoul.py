@@ -52,6 +52,7 @@ from kimi_cli.soul import (
     StatusSnapshot,
     wire_send,
 )
+from kimi_cli.session_state import TodoItemState
 from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.compaction import (
     CompactionOptions,
@@ -70,6 +71,8 @@ from kimi_cli.soul.dynamic_injection import (
     normalize_history,
 )
 from kimi_cli.soul.dynamic_injections.compact_reminder import CompactReminderProvider
+from kimi_cli.soul.dynamic_injections.context_meter import ContextMeterProvider
+from kimi_cli.soul.dynamic_injections.todo_reminder import TodoReminderProvider
 from kimi_cli.soul.llm_request_recorder import LLMRequestRecorder
 from kimi_cli.soul.message import (
     check_message,
@@ -81,6 +84,7 @@ from kimi_cli.soul.message import (
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
 from kimi_cli.tools.context_prune import ContextPrune
+from kimi_cli.tools.todo import TodoList
 from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.export import perform_export
 from kimi_cli.utils.logging import logger
@@ -298,6 +302,27 @@ class KimiSoul:
                     threshold=self._loop_control.compact_reminder_threshold,
                 )]
             ),
+            *(
+                []
+                if not self._loop_control.todo_reminder_enabled
+                else [TodoReminderProvider(
+                    self._load_todo_states_for_reminder,
+                    interval_steps=self._loop_control.todo_reminder_interval_steps,
+                )]
+            ),
+            *(
+                []
+                if not self._loop_control.context_meter_enabled
+                else [ContextMeterProvider(
+                    min_delta=self._loop_control.context_meter_min_delta,
+                    cooldown_steps=self._loop_control.context_meter_cooldown_steps,
+                    suppress_above=(
+                        self._loop_control.compact_reminder_threshold
+                        if self._loop_control.compact_reminder_enabled
+                        else None
+                    ),
+                )]
+            ),
         ]
         self._hook_engine: HookEngine = HookEngine()
         self._stop_hook_active: bool = False
@@ -393,6 +418,20 @@ class KimiSoul:
         self._hook_engine = engine
         if isinstance(self._agent.toolset, KimiToolset):
             self._agent.toolset.set_hook_engine(engine)
+
+    def _load_todo_states_for_reminder(self) -> list[TodoItemState]:
+        """Load current todo states (root or subagent scope) for the todo reminder.
+
+        Reuses the TodoList tool's loading logic so the reminder always agrees
+        with what the tool would report. Never raises — a broken state file
+        must not break the agent loop.
+        """
+        try:
+            todos = TodoList(self._runtime)._load_todos()
+            return [TodoItemState(**todo.model_dump()) for todo in todos]
+        except Exception:
+            logger.debug("Failed to load todos for reminder", exc_info=True)
+            return []
 
     def add_injection_provider(self, provider: DynamicInjectionProvider) -> None:
         """Register an additional dynamic injection provider."""
@@ -1592,6 +1631,30 @@ class KimiSoul:
             ),
         )
 
+        # --- Pre-compaction flush: persist important state to disk so details
+        # destroyed by summarization stay recoverable ("disk is source of truth").
+        # Failure-isolated: a flush error must never block compaction.
+        if self._loop_control.pre_compact_flush_enabled:
+            try:
+                from kimi_cli.tools.memory import flush_pre_compact_state
+
+                unfinished = [
+                    (t.status, t.title)
+                    for t in self._load_todo_states_for_reminder()
+                    if t.status != "done"
+                ]
+                flush_path = flush_pre_compact_state(
+                    self._runtime.session.dir,
+                    trigger_reason=trigger_reason,
+                    context_tokens=before_tokens,
+                    max_context_tokens=self.status.max_context_tokens,
+                    unfinished_todos=unfinished,
+                )
+                if flush_path is not None:
+                    logger.info("Pre-compaction state flushed to: {path}", path=flush_path)
+            except Exception:
+                logger.warning("Pre-compaction memory flush failed", exc_info=True)
+
         wire_send(CompactionBegin())
         try:
             compaction_result = await _compact_with_retry()
@@ -1648,6 +1711,21 @@ class KimiSoul:
                     ],
                 )
                 await self._context.append_message(active_task_message)
+
+        # --- Post-compaction memory restore: re-surface the durable memory
+        # directory at the end of the rebuilt context, where attention is
+        # strongest. Failure-isolated like the flush above.
+        if self._loop_control.memory_restore_enabled:
+            try:
+                from kimi_cli.tools.memory import build_memory_restore_text
+
+                restore_text = build_memory_restore_text(self._runtime.session.dir)
+                if restore_text is not None:
+                    await self._context.append_message(
+                        Message(role="user", content=[system(restore_text)])
+                    )
+            except Exception:
+                logger.warning("Post-compaction memory restore failed", exc_info=True)
 
         # Recompute the token estimate from the rebuilt context so it reflects
         # the checkpoint marker, preserved messages, compaction summary, and any

@@ -7,6 +7,7 @@
       "kimi_cli.tools.file:Glob",
       "kimi_cli.tools.file:Grep",
       "kimix.tools.web.fetch_url:FetchURL",
+      "kimi_cli.tools.memory:Memory",
       "kimix.tools.context:ContextUsage",
       "kimix.tools.context:Compact"
     ]
