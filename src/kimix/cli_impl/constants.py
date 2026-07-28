@@ -47,6 +47,7 @@ Available commands:
   {colorful_text('/swarm', fg=Color.YELLOW)}          - Start a swarm session with multi-line input text
   {colorful_text('/plan', fg=Color.YELLOW)}           - Plan a long-term task, step-by-step, then execute
   {colorful_text('/cmd:<command>', fg=Color.YELLOW)}  - Execute system command
+  {colorful_text('/code:<path> [args...]', fg=Color.YELLOW)}  - Run a script file with optional arguments
 
 Or enter any prompt to send to the agent.
 
