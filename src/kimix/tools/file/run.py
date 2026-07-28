@@ -408,13 +408,13 @@ class Run(CallableTool2[RunParams]):
                         return await self._format_session_result(
                             task_id, task.stream, params, output, "running",
                             wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
-                            message=(f"[rtk] `{display_cmd}` running in background. task_id: `{task_id}`." if rtk_rewritten else f"`{display_cmd}` running in background. task_id: `{task_id}`."),
+                            message=(f"[rtk] Running in background. task_id: `{task_id}`." if rtk_rewritten else f"Running in background. task_id: `{task_id}`."),
                             brief="Background task started",
                             rtk_rewritten=rtk_rewritten,
                         )
                     return ToolOk(
                         output="",
-                        message=(f"[rtk] `{display_cmd}` running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output." if rtk_rewritten else f"`{display_cmd}` running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output."),
+                        message=(f"[rtk] Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output." if rtk_rewritten else f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output."),
                         brief="Background task started",
                         display_block=ShellDisplayBlock(language="shell"),
                     )
@@ -428,7 +428,7 @@ class Run(CallableTool2[RunParams]):
                         return await self._format_session_result(
                             task_id, task.stream, params, output, "running",
                             wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
-                            message=(f"[rtk] `{display_cmd}` matched pattern and is still running." if rtk_rewritten else f"`{display_cmd}` matched pattern and is still running."),
+                            message=(f"[rtk] Matched pattern, still running" if rtk_rewritten else "Matched pattern, still running"),
                             brief="Pattern matched",
                             rtk_rewritten=rtk_rewritten,
                         )
@@ -441,7 +441,7 @@ class Run(CallableTool2[RunParams]):
                     output = await _maybe_export_output_async(output)
                     return ToolError(
                         output=output,
-                        message=f"`{display_cmd}` Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                        message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`",
                         brief="Timeout",
                     )
                 # Clean up foreground task registration
@@ -503,9 +503,7 @@ class Run(CallableTool2[RunParams]):
                         original_path=original_path,
                     )
                     elapsed = task.stream.process_elapsed if task.stream else None
-                    msg = (f"[rtk] `{display_cmd}` failed" if rtk_rewritten else f"`{display_cmd}` failed")
-                    if elapsed is not None:
-                        msg += f" ({elapsed:.1f}s)"
+                    msg = "[rtk] failed" if rtk_rewritten else "failed"
                     return ToolError(
                         output=block,
                         message=msg,
@@ -527,9 +525,7 @@ class Run(CallableTool2[RunParams]):
                     original_path=original_path,
                 )
                 elapsed = task.stream.process_elapsed if task.stream else None
-                msg = (f"[rtk] `{display_cmd}` success" if rtk_rewritten else f"`{display_cmd}` success")
-                if elapsed is not None:
-                    msg += f" ({elapsed:.1f}s)"
+                msg = "[rtk] success" if rtk_rewritten else "success"
                 return ToolOk(
                     output=block,
                     message=msg,

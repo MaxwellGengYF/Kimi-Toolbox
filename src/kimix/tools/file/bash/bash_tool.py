@@ -764,7 +764,7 @@ class Bash(CallableTool2[BashParams]):
                     return await self._format_session_result(
                         task_id, process_task.stream, params, output, "running",
                         wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
-                        message=f"`{params.cmd}` matched pattern and is still running.",
+                        message="Matched pattern, still running",
                         brief="Pattern matched",
                     )
             else:
@@ -781,7 +781,7 @@ class Bash(CallableTool2[BashParams]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                message=f"`{params.cmd}` was cancelled.",
+                message="Cancelled",
                 brief="Command cancelled",
             )
 
@@ -790,7 +790,7 @@ class Bash(CallableTool2[BashParams]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                                    message=f"`{params.cmd}` Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                                    message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`",
                 brief="Timeout",
             )
 
@@ -820,14 +820,10 @@ class Bash(CallableTool2[BashParams]):
         elapsed = stream.process_elapsed if stream else None
 
         if not success:
-            msg = f"`{params.cmd}` failed"
-            if elapsed is not None:
-                msg += f" ({elapsed:.1f}s)"
+            msg = "failed"
             return ToolError(output=block, message=msg, brief="Command execution failed")
 
-        msg = (f"[rtk] `{params.cmd}` success" if rtk_rewritten else f"`{params.cmd}` success")
-        if elapsed is not None:
-            msg += f" ({elapsed:.1f}s)"
+        msg = "[rtk] success" if rtk_rewritten else "success"
         return ToolOk(
             output=block,
             message=msg,

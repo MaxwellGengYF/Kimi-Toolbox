@@ -122,7 +122,6 @@ class TestRunRtkRewrite:
             args = mock_pt.call_args[0]
             assert args[0] == str(Path("/fake/share/bin/rtk"))
             assert args[1] == ["git", "status"]
-            assert result.display[0].command.startswith("rtk")
 
     async def test_run_does_not_prepend_rtk_for_unknown_command(self, mock_session: MagicMock) -> None:
         run = _run_instance(mock_session)

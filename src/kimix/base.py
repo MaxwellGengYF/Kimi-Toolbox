@@ -1402,53 +1402,61 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
     display_text = _format_display_blocks(rv.display)
     _stream.print_word(display_text, require_new_line=True)
     result_text = _format_tool_result(wire_msg)
-    flushed = False
-    if result_text:
-        prefix = ("✗ " if rv.is_error else "✓ ")
-        if display_text:
-            tc: ToolCall | None = _session._tmp_data.pop(wire_msg.tool_call_id, None)
-            # The tool call is finished: drop the stale "last tool call"
-            # reference (only if it still points to this call, so a newer
-            # in-flight call is not clobbered) together with the header flag.
-            # Otherwise the next non-toolcall wire message would make
-            # _finish_tool_call_stream re-print this call's header.
-            #
-            # Both pops are conditional on the id match: when the result
-            # belongs to an *earlier* call while a later one is still in
-            # flight, touching either entry corrupts the in-flight call's
-            # state — clearing the header flag makes _finish_tool_call_stream
-            # re-print the in-flight call's header once per arriving result.
-            last_tc: ToolCall | None = _session._tmp_data.get(_LAST_TOOL_CALL_KEY)
-            if last_tc is not None and last_tc.id == wire_msg.tool_call_id:
-                _session._tmp_data.pop(_LAST_TOOL_CALL_KEY, None)
-                _session._tmp_data.pop(_TOOL_HEADER_PRINTED_KEY, None)
-                _session._tmp_data.pop(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY, None)
-                _session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
-                if tc is None:
-                    tc = last_tc
-            # Safety: if the tool call was stored by id, it's done — clean up
-            # any stale merge target that might still point to this call.
-            if tc is not None:
-                _session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
-            if tc:
-                tool_name = tc.function.name if tc else "tool"
-                _stream.colorful_print_word(
-                    f"{prefix}{tool_name}",
-                    fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
-                    require_new_line=True,
-                    flush=True,
-                )
-                flushed = True
-        else:
+
+    prefix = ("✗ " if rv.is_error else "✓ ")
+    tc: ToolCall | None = _session._tmp_data.pop(wire_msg.tool_call_id, None)
+
+    # The tool call is finished: drop the stale "last tool call"
+    # reference (only if it still points to this call, so a newer
+    # in-flight call is not clobbered) together with the header flag.
+    # Otherwise the next non-toolcall wire message would make
+    # _finish_tool_call_stream re-print this call's header.
+    #
+    # Both pops are conditional on the id match: when the result
+    # belongs to an *earlier* call while a later one is still in
+    # flight, touching either entry corrupts the in-flight call's
+    # state — clearing the header flag makes _finish_tool_call_stream
+    # re-print the in-flight call's header once per arriving result.
+    last_tc: ToolCall | None = _session._tmp_data.get(_LAST_TOOL_CALL_KEY)
+    if last_tc is not None and last_tc.id == wire_msg.tool_call_id:
+        _session._tmp_data.pop(_LAST_TOOL_CALL_KEY, None)
+        _session._tmp_data.pop(_TOOL_HEADER_PRINTED_KEY, None)
+        _session._tmp_data.pop(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY, None)
+        _session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
+        if tc is None:
+            tc = last_tc
+    # Safety: if the tool call was stored by id, it's done — clean up
+    # any stale merge target that might still point to this call.
+    if tc is not None:
+        _session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
+
+    if tc:
+        # Primary: show "✓ ToolName" (or "✗ ToolName")
+        _stream.colorful_print_word(
+            f"{prefix}{tc.function.name}",
+            fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
+            require_new_line=True,
+            flush=True,
+        )
+        # Supplementary: show message detail in dim text if non-trivial
+        if result_text and result_text not in ("success", "failed", "[rtk] success", "[rtk] failed"):
             _stream.colorful_print_word(
-                f"{prefix}{result_text}",
-                fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
+                f"  {result_text}",
+                fg=Color.BRIGHT_BLACK,
                 require_new_line=True,
                 flush=True,
             )
-            flushed = True
-    if not flushed:
+    elif result_text:
+        # Fallback: no tool call available, show message directly
+        _stream.colorful_print_word(
+            f"{prefix}{result_text}",
+            fg=Color.BRIGHT_RED if rv.is_error else Color.BRIGHT_GREEN,
+            require_new_line=True,
+            flush=True,
+        )
+    else:
         _stream.print_word('', True, flush=True)
+
     _stream._state = StreamPrintState.Other
     if output_function:
         formatted = f"[ToolResult] {_format_tool_result(wire_msg)}"

@@ -456,7 +456,7 @@ class Powershell(CallableTool2[PowershellParams]):
                     return await self._format_session_result(
                         task_id, process_task.stream, params, output, "running",
                         wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
-                        message=f"`{cmd}` matched pattern and is still running." + transform_warning,
+                        message="Matched pattern, still running" + transform_warning,
                         brief="Pattern matched",
                     )
             else:
@@ -474,7 +474,7 @@ class Powershell(CallableTool2[PowershellParams]):
             transform_warning = transform_warning or ""
             return ToolError(
                 output=output,
-                message=f"`{cmd}` was cancelled." + transform_warning,
+                message="Cancelled" + transform_warning,
                 brief="Command cancelled",
             )
 
@@ -483,7 +483,7 @@ class Powershell(CallableTool2[PowershellParams]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                message=f"`{cmd}` Running in background. task_id: `{task_id}`. use `TaskOutput`." + transform_warning,
+                message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`." + transform_warning,
                 brief="Timeout",
             )
 
@@ -513,14 +513,10 @@ class Powershell(CallableTool2[PowershellParams]):
         elapsed = stream.process_elapsed if stream else None
 
         if not success:
-            msg = f"`{cmd}` failed."
-            if elapsed is not None:
-                msg += f" ({elapsed:.1f}s)"
+            msg = "failed"
             return ToolError(output=block, message=msg + transform_warning, brief="Command execution failed")
 
-        msg = (f"[rtk] `{cmd}` success." if rtk_rewritten else f"`{cmd}` success.")
-        if elapsed is not None:
-            msg += f" ({elapsed:.1f}s)"
+        msg = "[rtk] success" if rtk_rewritten else "success"
         return ToolOk(
             output=block,
             message=msg + transform_warning,
