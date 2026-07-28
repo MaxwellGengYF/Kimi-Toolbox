@@ -36,6 +36,7 @@ from kimix.base import (
     print_info,
     print_success,
     print_warning,
+    sync_all,
 )
 from kimix.utils import (
     SystemPromptType,
@@ -54,6 +55,8 @@ from kimix.utils import (
 )
 
 from .init import init
+
+exec_ctx: dict[str, Any] = {}
 
 
 def _cmd_help(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
@@ -659,6 +662,82 @@ def _cmd_todo(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
     return None, False
 
 
+def _cmd_code(task_split: list[str], text_arr: list[str]) -> tuple[str | None, bool]:
+    """Run a script file with optional arguments.
+
+    Usage: /code:<script_path> [arg1] [arg2] ...
+
+    For Python scripts (.py), runs with exec like core.py.
+    For other scripts, runs directly as an executable.
+    Supports both absolute and relative paths.
+    """
+    global exec_ctx
+    if len(task_split) < 2:
+        print_error("Command must be /code:<script_path> [args...]")
+        return None, False
+
+    cmd_part = ":".join(task_split[1:])
+    parts = cmd_part.split()
+    if not parts:
+        print_error("Script path is required.")
+        return None, False
+
+    script_path_str = parts[0]
+    script_args = parts[1:]
+
+    script_path = Path(script_path_str)
+    if not script_path.is_file():
+        # Try resolving relative to current directory
+        resolved = constants.curr_dir / script_path_str
+        if resolved.is_file():
+            script_path = resolved
+        else:
+            print_error(f"Script file not found: {script_path}")
+            return None, False
+
+    if script_path.suffix.lower() == ".py":
+        # Use exec like core.py does for .py files
+        import sys
+        with open(script_path, "r", encoding="utf-8", errors="replace") as f:
+            s = f.read()
+        # Temporarily replace sys.argv so argparse-based scripts see the right args
+        _old_argv = sys.argv
+        sys.argv = [str(script_path)] + script_args
+        print_info(f"Executing {script_path.name}", end="\n\n")
+        try:
+            exec_ctx["__file__"] = str(script_path)
+            exec(s, exec_ctx)
+            print_success(f"Done.")
+        except KeyboardInterrupt:
+            print_warning("Keyboard Interrupt.")
+        except Exception as e:
+            import traceback
+            print_error(str(e))
+            print_error(traceback.format_exc())
+        finally:
+            sys.argv = _old_argv
+            sync_all()
+    else:
+        import subprocess
+        import sys
+
+        try:
+            cmd = [str(script_path)] + script_args
+            print_info(f"Running: {' '.join(cmd)}")
+            # Let subprocess inherit stdout/stderr so output is displayed live
+            result = subprocess.run(cmd, capture_output=False, text=True)
+            if result.returncode == 0:
+                print_success(f"Done (exit code 0).")
+            else:
+                print_warning(f"Exited with code {result.returncode}.")
+        except FileNotFoundError:
+            print_error(f"Executable not found: {script_path}")
+        except Exception as e:
+            print_error(str(e))
+
+    return None, False
+
+
 def _cmd_unknown(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
     print_warning('Unrecognized command.')
     return None, False
@@ -684,7 +763,8 @@ _command_map = {
     'supervisor': _cmd_supervisor,
     'swarm': _cmd_swarm,
     'init': _cmd_init,
-    'todo': _cmd_todo
+    'todo': _cmd_todo,
+    'code': _cmd_code
 }
 _command_map_keys = set(_command_map.keys())
 
@@ -696,4 +776,5 @@ _command_arg_types: dict[str, str] = {
     "plan": "file",
     "ralph": "ralph",
     "swarm": "swarm",
+    "code": "file",
 }

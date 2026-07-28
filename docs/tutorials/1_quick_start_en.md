@@ -161,6 +161,7 @@ uv run kimix --config=<path>
 | `/supervisor` | Enter multi-line input mode to create a session with the Supervisor role and execute one task (end with `/end`, cancel with `/cancel`) |
 | `/plan` / `/plan:<file>` | Use the TodoMaker Agent to generate a task plan. Task requirements are provided via multi-line input (end with `/end`); `<file>` specifies the plan output file path, and will be overwritten if it already exists. After generation, you can review and modify the plan, then confirm to execute; a review prompt is appended after execution |
 | `/cmd:<command>` | Execute system command |
+| `/code:<path> [args...]` | Run a script file (`.py` or other executables) with optional arguments |
 
 
 ---
