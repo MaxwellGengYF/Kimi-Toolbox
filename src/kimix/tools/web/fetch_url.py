@@ -32,7 +32,7 @@ class FetchURL(CallableTool2[Params]):
             markdown = await fetch_to_markdown(params.url)
         except Exception as exc:
             return ToolError(
-                message=str(exc),
+                message=str(exc) or f"Failed to fetch {params.url}",
                 output="",
                 brief=f"Failed to fetch {params.url}"
             )
