@@ -416,8 +416,7 @@ class Run(CallableTool2[RunParams]):
                         output="",
                         message=(f"[rtk] `{display_cmd}` running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output." if rtk_rewritten else f"`{display_cmd}` running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output."),
                         brief="Background task started",
-                        display_block=ShellDisplayBlock(
-                            language="shell", command=display_cmd),
+                        display_block=ShellDisplayBlock(language="shell"),
                     )
 
                 # Wait for completion (or a pattern match) with timeout.
@@ -535,8 +534,7 @@ class Run(CallableTool2[RunParams]):
                     output=block,
                     message=msg,
                     brief="Command executed successfully",
-                    display_block=ShellDisplayBlock(
-                        language="shell", command=display_cmd),
+                    display_block=ShellDisplayBlock(language="shell"),
                 )
         except Exception as e:
             return ToolError(

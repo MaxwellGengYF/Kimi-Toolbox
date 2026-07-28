@@ -35,7 +35,6 @@ class ShellDisplayBlock(DisplayBlock):
 
     type: str = "shell"
     language: str
-    command: str
 
 
 class BackgroundTaskDisplayBlock(DisplayBlock):

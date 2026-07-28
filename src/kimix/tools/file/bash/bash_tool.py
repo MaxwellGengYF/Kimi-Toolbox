@@ -832,7 +832,7 @@ class Bash(CallableTool2[BashParams]):
             output=block,
             message=msg,
             brief="Command executed successfully",
-            display_block=ShellDisplayBlock(language="shell", command=params.cmd),
+            display_block=ShellDisplayBlock(language="shell"),
         )
 
     def _compile_pattern(self, wait_for_pattern: str | None) -> re.Pattern[str] | ToolError:

@@ -782,7 +782,7 @@ async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> 
             is_error=False,
             message="ok",
             output="",
-            display=[ShellDisplayBlock(command="git diff --stat", language="powershell")],
+            display=[ShellDisplayBlock(language="powershell")],
         ),
     )
     await base.print_agent_json(tool_result, session)
@@ -792,7 +792,7 @@ async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> 
 
     plain = _plain(chunks)
     assert plain.count("⚡ Powershell") == 1
-    assert "✓ Powershell" in plain
+    assert "✓ ok" in plain
 
 
 async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
@@ -829,7 +829,7 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
                 is_error=False,
                 message="ok",
                 output="",
-                display=[ShellDisplayBlock(command="glob", language="text")],
+                display=[ShellDisplayBlock(language="text")],
             ),
         )
 
@@ -840,7 +840,7 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
 
     plain = _plain(chunks)
     assert plain.count("⚡ Glob") == 2
-    assert plain.count("✓ Glob") == 2
+    assert plain.count("✓ ok") == 2
 
 
 async def test_tool_result_colors_success_green_error_red(monkeypatch: Any) -> None:

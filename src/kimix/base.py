@@ -480,8 +480,8 @@ def _format_display_blocks(display: list[Any]) -> str | None:
                     parts.append(colorful_text(
                         f"- {item.title}", fg=GRAY_LIGHT))
         elif isinstance(block, ShellDisplayBlock):
-            parts.append(colorful_text(
-                f"$ {block.command}", fg=Color.BRIGHT_BLUE))
+            # Command output is shown via the success/failure message
+            pass
         elif isinstance(block, BackgroundTaskDisplayBlock):
             parts.append(
                 colorful_text(

@@ -528,8 +528,6 @@ class TestPowershellRtkRewrite:
                 assert isinstance(result, ToolOk)
                 args = mock_pt.call_args
                 assert "& rtk git status" in args[0][1][-1]
-                assert "rtk" in result.display[0].command
-                assert str(_rtk_binary_path()) not in result.display[0].command
                 assert "rtk" in result.message
 
     async def test_pwsh_compound_command_rewrites_each_segment(
@@ -566,5 +564,4 @@ class TestPowershellRtkRewrite:
                 assert isinstance(result, ToolOk)
                 args = mock_pt.call_args
                 assert "& rtk git status; & rtk cargo test" in args[0][1][-1]
-                assert "rtk" in result.display[0].command
-                assert str(_rtk_binary_path()) not in result.display[0].command
+                assert "rtk" in result.message

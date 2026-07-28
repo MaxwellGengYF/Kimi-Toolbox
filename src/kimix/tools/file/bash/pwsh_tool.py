@@ -525,7 +525,7 @@ class Powershell(CallableTool2[PowershellParams]):
             output=block,
             message=msg + transform_warning,
             brief=f"Command executed successfully",
-            display_block=ShellDisplayBlock(language="powershell", command=cmd),
+            display_block=ShellDisplayBlock(language="powershell"),
         )
 
     @staticmethod
