@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import httpx
 
-from kimix.base import print  # noqa: F811 - use base.print for flush support
+from kimix.ui.printing import print  # noqa: F811 - use ui.printing.print for flush support
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ from kimi_cli.mcp.config import (
 from kimi_cli.mcp.server import serve_http, serve_stdio
 from kimi_cli.session import Session
 
-from kimix.base import print_debug, print_error, print_info, print_success
+from kimix.ui.printing import print_debug, print_error, print_info, print_success
 
 
 def run_mcp_subcommand(args: argparse.Namespace) -> None:

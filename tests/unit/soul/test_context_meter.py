@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from kimi_cli.soul.dynamic_injections.context_meter import (
     ContextMeterProvider,
-    _format_k,
 )
 
 
@@ -27,24 +26,13 @@ def _soul(
     )
 
 
-class TestFormatK:
-    def test_thousands(self) -> None:
-        assert _format_k(72_300) == "72k"
-
-    def test_millions(self) -> None:
-        assert _format_k(1_500_000) == "1500k"
-
-    def test_small(self) -> None:
-        assert _format_k(400) == "0k"
-
-
 class TestInjection:
     async def test_first_injection(self) -> None:
         provider = ContextMeterProvider()
         injections = await provider.get_injections([], _soul(1, 72_000))  # type: ignore[arg-type]
         assert len(injections) == 1
         assert injections[0].type == "context_meter"
-        assert "72k/200k (36%)" in injections[0].content
+        assert "Context is volatile" in injections[0].content
         assert "Memory" in injections[0].content
 
     async def test_subagent_skipped(self) -> None:
@@ -95,7 +83,7 @@ class TestThrottling:
         await provider.get_injections([], _soul(1, 100_000))  # type: ignore[arg-type]
         injections = await provider.get_injections([], _soul(2, 60_000))  # type: ignore[arg-type]
         assert injections
-        assert "60k/200k (30%)" in injections[0].content
+        assert "Context is volatile" in injections[0].content
 
     async def test_compaction_resets(self) -> None:
         provider = ContextMeterProvider(min_delta=0.5, cooldown_steps=100)

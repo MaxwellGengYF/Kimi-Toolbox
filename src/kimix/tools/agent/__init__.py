@@ -11,7 +11,7 @@ from typing import Any, Literal
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
 from kimi_cli.session import Session
-from kimix.base import MessageType
+from kimix.ui.printing import MessageType
 from kimix.utils import close_session_async, _create_session_async
 from kimix.utils.system_prompt import SystemPromptType
 import kimix.base as base

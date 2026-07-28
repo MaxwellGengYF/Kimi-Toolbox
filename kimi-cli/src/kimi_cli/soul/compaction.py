@@ -217,15 +217,30 @@ if TYPE_CHECKING:
         _: Compaction = simple
 
 
+_DECISION_SECTION_GUIDANCE = (
+    "\n\n**Required Summary Sections:**\n"
+    "Your summary MUST include these two sections with exact headings:\n"
+    "## Decisions & Conclusions\n"
+    "- Decisions already made and their rationale; approaches already "
+    "evaluated and rejected (with the rejection reason); assumptions "
+    "currently treated as valid.\n"
+    "## Verification Status\n"
+    "- What has been verified to work (and how it was verified); what "
+    "remains unverified."
+)
+
+
 class SimpleCompaction:
     def __init__(
         self,
         max_preserved_messages: int = 2,
         *,
         preserve_depth: int | Callable[[Sequence[Message]], int] | None = None,
+        decision_section_enabled: bool = False,
     ) -> None:
         self.max_preserved_messages = max_preserved_messages
         self.preserve_depth = preserve_depth
+        self.decision_section_enabled = decision_section_enabled
 
     def _resolve_preserve_depth(self, messages: Sequence[Message]) -> int:
         if self.preserve_depth is None:
@@ -361,6 +376,9 @@ class SimpleCompaction:
         mode_guidance = _MODE_GUIDANCE.get(options.mode)
         if mode_guidance:
             prompt_text += "\n\n" + mode_guidance
+
+        if self.decision_section_enabled:
+            prompt_text += _DECISION_SECTION_GUIDANCE
 
         if custom_instruction:
             prompt_text += (

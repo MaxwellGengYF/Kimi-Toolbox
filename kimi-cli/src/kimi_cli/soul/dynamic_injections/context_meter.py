@@ -35,6 +35,7 @@ class ContextMeterProvider(DynamicInjectionProvider):
         min_delta: float = 0.05,
         cooldown_steps: int = 5,
         suppress_above: float | None = 0.70,
+        min_usage: float = 0.20,
     ) -> None:
         """
         Args:
@@ -44,10 +45,14 @@ class ContextMeterProvider(DynamicInjectionProvider):
             suppress_above: Usage ratio at/above which this provider stays
                 silent (the compact reminder owns that region). ``None``
                 disables suppression.
+            min_usage: Usage ratio threshold for the very first injection.
+                Below this, the provider stays silent.
         """
         self._min_delta = min_delta
         self._cooldown_steps = max(0, cooldown_steps)
         self._suppress_above = suppress_above
+        self._min_usage = min_usage
+        self._has_injected_before: bool = False
         self._last_injected_step: int | None = None
         self._last_injected_usage: float | None = None
 
@@ -73,12 +78,19 @@ class ContextMeterProvider(DynamicInjectionProvider):
             return []
 
         step_no = soul._current_step_no
-        if self._last_injected_step is not None and self._last_injected_usage is not None:
-            steps_since = step_no - self._last_injected_step
-            usage_delta = abs(usage - self._last_injected_usage)
-            if steps_since < self._cooldown_steps or usage_delta < self._min_delta:
+        if self._has_injected_before:
+            # Normal cooldown / delta guard.
+            if self._last_injected_step is not None and self._last_injected_usage is not None:
+                steps_since = step_no - self._last_injected_step
+                usage_delta = abs(usage - self._last_injected_usage)
+                if steps_since < self._cooldown_steps or usage_delta < self._min_delta:
+                    return []
+        else:
+            # First-ever call — require minimum usage to avoid premature reminders.
+            if usage < self._min_usage:
                 return []
 
+        self._has_injected_before = True
         self._last_injected_step = step_no
         self._last_injected_usage = usage
 
@@ -95,5 +107,4 @@ class ContextMeterProvider(DynamicInjectionProvider):
 
     async def on_afk_changed(self, enabled: bool) -> None:
         _ = enabled
-        self._last_injected_step = None
-        self._last_injected_usage = None
+        # AFK mode does not change context pressure; no state reset needed.

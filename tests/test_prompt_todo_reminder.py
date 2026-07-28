@@ -34,8 +34,12 @@ class FakeAgent:
 
 
 class FakeSoul:
-    def __init__(self, has_set_todo: bool = True) -> None:
+    def __init__(self, has_set_todo: bool = True, closing_rounds: int | None = None) -> None:
         self.agent = FakeAgent(has_set_todo=has_set_todo)
+        if closing_rounds is not None:
+            from types import SimpleNamespace
+
+            self._loop_control = SimpleNamespace(cli_closing_reminder_rounds=closing_rounds)
 
 
 @dataclass
@@ -55,8 +59,8 @@ class FakeCLISession:
 
 
 class FakeCLI:
-    def __init__(self, has_set_todo: bool = True, todos: list[TodoItemState] | None = None) -> None:
-        self.soul = FakeSoul(has_set_todo=has_set_todo)
+    def __init__(self, has_set_todo: bool = True, todos: list[TodoItemState] | None = None, closing_rounds: int | None = None) -> None:
+        self.soul = FakeSoul(has_set_todo=has_set_todo, closing_rounds=closing_rounds)
         self.session = FakeCLISession(todos=todos)
 
 
@@ -78,8 +82,9 @@ class FakeSessionWithCLI:
         todos: list[TodoItemState] | None = None,
         context_usage: float = 0.125,
         context_tokens: int = 1024,
+        closing_rounds: int | None = None,
     ) -> None:
-        self._cli = FakeCLI(has_set_todo=has_set_todo, todos=todos)
+        self._cli = FakeCLI(has_set_todo=has_set_todo, todos=todos, closing_rounds=closing_rounds)
         self.status = FakeStatus(context_usage=context_usage, context_tokens=context_tokens)
         self.cancelled = False
         self._cancel_event = None
@@ -127,12 +132,13 @@ def test_reminder_injected_when_todos_unfinished(monkeypatch: Any) -> None:
             TodoItemState(title="Implement helper", status="in_progress"),
             TodoItemState(title="Run tests", status="done"),
         ],
+        closing_rounds=2,
     )
 
     asyncio.run(prompt_mod.prompt_async("hello", session=session, info_print=False))
 
     # The fake session never updates todo statuses, so both the regular and the
-    # strong follow-up reminder are injected before cleanup.
+    # strong follow-up reminder are injected before cleanup (2 rounds configured).
     assert len(session.prompts) == 3
     assert session.prompts[0] == "hello"
     reminder = session.prompts[1]

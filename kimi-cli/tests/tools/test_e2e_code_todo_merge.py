@@ -180,7 +180,7 @@ class TestE2ECodeTodo:
         # Should NOT contain old Goal reference
         assert "define the goal with the `Goal` tool" not in content
         # Should contain new code-todo reference
-        assert "attach executable `code` to todo items" in content
+        assert "attach verification `code`" in content
         assert "TodoList" in content
 
     def test_base_py_no_goal_run_goal(self) -> None:

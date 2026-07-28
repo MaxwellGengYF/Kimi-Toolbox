@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 
 import kimix.base as base
 import kimix.utils as utils
-from kimix.base import MessageType
+from kimix.ui.printing import MessageType
 from kimix.tools.agent import _AgentConversationCollector
 from kimix.utils.system_prompt import SystemPromptType
 
@@ -67,6 +67,20 @@ class AgentSwarmParams(BaseModel):
     """Parameters for the AgentSwarm tool."""
 
     description: str = Field(description="Short description of the whole swarm.")
+    mode: Literal["fanout", "parallel_sample"] = Field(
+        default="fanout",
+        description="'fanout': decompose into independent items (default). "
+        "'parallel_sample': run the SAME task N times in isolated workspaces, "
+        "then select and apply the best result (best-of-N).",
+    )
+    sample_n: int | None = Field(
+        default=None,
+        description="Number of parallel samples for mode='parallel_sample' (default 4).",
+    )
+    selector: Literal["self_eval", "majority"] | None = Field(
+        default=None,
+        description="Selection strategy for mode='parallel_sample' (default 'self_eval').",
+    )
     subagent_type: str = Field(
         default="coder",
         description="Type of sub-agent. Built-in: 'coder', 'explore', 'plan'. "
@@ -97,6 +111,19 @@ class AgentSwarmParams(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "AgentSwarmParams":
+        if self.mode == "parallel_sample":
+            if self.sample_n is not None and self.sample_n < 1:
+                raise ValueError("sample_n must be >= 1.")
+            uses_template = self.prompt_template is not None
+            uses_prefix = self.prompt_prefix is not None
+            if uses_template and uses_prefix:
+                raise ValueError("Use either prompt_template or prompt_prefix+suffix, not both.")
+            if not uses_template and not uses_prefix:
+                raise ValueError(
+                    "parallel_sample mode requires the task prompt via prompt_template "
+                    "or prompt_prefix (+prompt_suffix)."
+                )
+            return self
         resume_count = len(self.resume_agent_ids) if self.resume_agent_ids else 0
         if len(self.items) < 2 and resume_count == 0:
             raise ValueError("Provide at least 2 items or resume_agent_ids.")
@@ -191,6 +218,8 @@ class AgentSwarm(CallableTool2):
             self._session.custom_data.pop("agent_swarm_in_flight", None)
 
     async def _execute(self, params: AgentSwarmParams) -> ToolReturnValue:
+        if params.mode == "parallel_sample":
+            return await self._execute_parallel_sample(params)
         expanded_prompts = _expand_template(
             params.prompt_template, params.items,
             prefix=params.prompt_prefix, suffix=params.prompt_suffix,
@@ -213,6 +242,92 @@ class AgentSwarm(CallableTool2):
         results = await _run_swarm(tasks, params.subagent_type, self._session)
         results.sort(key=lambda r: r.index)
         return ToolOk(output=_render_results(results, params.description))
+
+    async def _execute_parallel_sample(self, params: AgentSwarmParams) -> ToolReturnValue:
+        """Best-of-N: sample the same task N times, select, apply, report."""
+        from kaos.path import KaosPath
+
+        from kimix.tools.swarm import best_of_n as bon
+
+        if params.prompt_template is not None:
+            task_prompt = params.prompt_template.replace("{{item}}", "").strip()
+        else:
+            task_prompt = f"{params.prompt_prefix or ''}{params.prompt_suffix or ''}".strip()
+
+        n = params.sample_n if params.sample_n is not None else 4
+        strategy = params.selector or "self_eval"
+        parent = self._session
+        subagent_type = params.subagent_type
+
+        async def _sample_runner(prompt: str, worker_dir: Path) -> tuple[str, int, int]:
+            """Run one sample as a sub-agent rooted in the worker workspace."""
+            task = SwarmTask(prompt=prompt, agent_id=None, index=0)
+            session, session_id, resolved_prompt = await _resolve_subagent_session(
+                task, subagent_type, parent
+            )
+            _ = session_id
+            collector = _AgentConversationCollector()
+            collector.finalize_user_turn(resolved_prompt)
+            try:
+                await utils.prompt_async(
+                    prompt_str=resolved_prompt,
+                    session=session,
+                    output_function=lambda text, msg_type: collector.consume(text, msg_type) if text else None,
+                    info_print=False,
+                    merge_wire_messages=True,
+                    format_output=True,
+                )
+                report = collector.finalize_assistant_turn() or "(no text output)"
+                return report, 0, 0
+            finally:
+                try:
+                    await utils.close_session_async(session)
+                except Exception:
+                    pass
+
+        async def _selector(prompt: str, review_text: str) -> int:
+            """Model self-evaluation: one review sub-agent picks a candidate index."""
+            review_prompt = (
+                "You are reviewing multiple candidate solutions for the same task.\n\n"
+                f"Task:\n{prompt}\n\n{review_text}\n\n"
+                "Reply with ONLY the integer index of the best candidate "
+                "(most correct, complete, and verified). No explanation."
+            )
+            report, _, _ = await _sample_runner(review_prompt, worker_dir=Path.cwd())
+            import regex as _re
+
+            match = _re.search(r"-?\d+", report)
+            return int(match.group(0)) if match else 0
+
+        work_dir = Path(str(KaosPath.cwd())) if hasattr(KaosPath, "cwd") else Path.cwd()
+        try:
+            result = await bon.best_of_n(
+                task_prompt,
+                work_dir,
+                _sample_runner,
+                _selector,
+                n=n,
+                strategy=strategy,
+            )
+        except bon.AllCandidatesFailedError as exc:
+            return ToolError(output="", message=str(exc), brief="all samples failed")
+        except bon.VerificationRejectedError as exc:
+            return ToolError(output="", message=str(exc), brief="selected sample failed verification")
+
+        lines = [
+            "<best_of_n_result>",
+            f"  <description>{_xml_escape(params.description)}</description>",
+            f"  <samples>{len(result.candidates)}</samples>",
+            f"  <winner>{result.winner_index}</winner>",
+            f"  <selection>{_xml_escape(result.selection_reason)}</selection>",
+        ]
+        for candidate in result.candidates:
+            status = "ok" if candidate.success else f"failed: {_xml_escape(candidate.error or '')}"
+            lines.append(
+                f'  <candidate index="{candidate.index}" status="{_xml_escape(status)}"/>'
+            )
+        lines.append("</best_of_n_result>")
+        return ToolOk(output="\n".join(lines))
 
 
 def _expand_template(template: str | None, items: list[str], prefix: str | None = None, suffix: str | None = None) -> list[str]:

@@ -174,6 +174,66 @@ Default is 3."""
     """Minimum number of steps between repeated todo reminder injections when
     the todo list has not changed. Default is 20."""
 
+    target_churn_enabled: bool = Field(default=True)
+    """When true, inject a reminder when the agent repeatedly modifies the same
+    file target (across different tools) or hits the same normalized error
+    repeatedly — loop shapes that per-call streak detection cannot catch.
+    Default is true."""
+    target_churn_file_warn: int = Field(default=8, ge=2)
+    """Number of edits to the same file target that triggers a churn reminder.
+    Default is 8."""
+    target_churn_file_strong: int = Field(default=15, ge=3)
+    """Number of edits to the same file target that triggers a strong
+    stop-patching reminder (once per file per turn). Default is 15."""
+    target_churn_error_warn: int = Field(default=5, ge=2)
+    """Consecutive identical (normalized) tool errors that trigger an
+    error-signature reminder. Default is 5."""
+    target_churn_cooldown_steps: int = Field(default=10, ge=0)
+    """Minimum number of steps to stay silent after any target-churn
+    injection. Default is 6."""
+
+    verification_gate_enabled: bool = Field(default=True)
+    """When true, a turn that ends with unfinished todos, failing todo
+    verification, or unverified code edits is nudged to continue instead of
+    finishing. Applies at the soul layer, so it covers CLI, server,
+    subagent, and DAG/flow sessions. Default is true."""
+    verification_gate_max_nudges: int = Field(default=2, ge=0, le=10)
+    """Maximum number of verification-gate nudges per turn before the gate
+    lets the turn finish anyway (deadlock prevention). Default is 2."""
+    cli_closing_reminder_rounds: int = Field(default=1, ge=0, le=5)
+    """Number of CLI-layer closing reminder rounds (todo + code-todo checks)
+    after a successful prompt. The soul-layer verification gate is the
+    primary mechanism; this is the CLI fallback. 0 disables the CLI
+    fallback. Default is 1."""
+
+    budget_reminder_enabled: bool = Field(default=False)
+    """When true, inject budget-awareness reminders as step (or wall-clock)
+    usage crosses ``budget_warn_ratios`` of the per-turn budget, so the
+    agent can plan its wrap-up. Default is true."""
+    budget_warn_ratios: tuple[float, ...] = Field(default=(0.7, 0.9))
+    """Ascending usage ratios of the per-turn budget that each trigger one
+    reminder per turn. The final ratio issues an urgent wrap-up reminder.
+    Default is (0.7, 0.9)."""
+    budget_wall_clock_seconds: int = Field(default=0, ge=0)
+    """Optional per-turn wall-clock budget in seconds. 0 disables the
+    wall-clock dimension (step budget only). Default is 0."""
+
+    compaction_decision_section_enabled: bool = Field(default=True)
+    """When true, compaction summaries must include `## Decisions &
+    Conclusions` and `## Verification Status` sections, so early-task
+    decisions and verification state survive compaction. Default is true."""
+
+    best_of_n_enabled: bool = Field(default=False)
+    """When true, enable best-of-N sampling (same task sampled N times in
+    isolated workspaces, then selected and applied). Default is false —
+    enable after single-sample A/B results converge (P5)."""
+    best_of_n: int = Field(default=4, ge=1, le=16)
+    """Default number of parallel samples for best-of-N mode. Default is 4."""
+    best_of_n_selector: str = Field(default="self_eval", pattern="^(self_eval|majority)$")
+    """Default candidate selection strategy for best-of-N mode:
+    'self_eval' (one model review call) or 'majority' (pairwise votes).
+    Default is 'self_eval'."""
+
     context_meter_enabled: bool = Field(default=True)
     """When true, inject a reminder to persist important facts with the `Memory`
     tool when usage materially changes, so the agent can self-regulate

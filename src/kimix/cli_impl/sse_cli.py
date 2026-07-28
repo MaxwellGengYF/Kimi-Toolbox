@@ -9,7 +9,7 @@ import pendulum
 from pathlib import Path
 from typing import Any, TextIO
 
-from kimix.base import print_error, print  # noqa: F811 - use base.print for flush support
+from kimix.ui.printing import print_error, print  # noqa: F811 - use ui.printing.print for flush support
 from kimix.server.client import KimixAsyncClient, MessagePart, parse_event, EventType, SSEEvent
 
 def _fmt_arg(s: str, max_len: int = 120) -> str:
@@ -30,7 +30,7 @@ def _fmt_ts(unix_t: float) -> str:
 def _print_message_part(part: MessagePart) -> None:
     """Print a single MessagePart with formatting similar to print_agent_json."""
     from kimix.server.client import MessagePartType
-    from kimix.base import colorful_text, Color
+    from kimix.ui.printing import colorful_text, Color
 
     if part.type == MessagePartType.TEXT:
         if part.text:

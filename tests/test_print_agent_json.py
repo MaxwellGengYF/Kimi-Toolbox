@@ -16,6 +16,7 @@ from kimi_cli.wire.types import (
 from kosong.tooling import ToolReturnValue
 
 import kimix.base as base
+import kimix.ui.stream as stream_mod
 
 prompt_mod = importlib.import_module("kimix.utils.prompt")
 
@@ -47,8 +48,11 @@ def _capture_base_stream(monkeypatch: Any) -> list[str]:
     def print_func(*values: object, sep: str = " ", end: str = "\n", **_kwargs: Any) -> None:
         chunks.append(sep.join(str(value) for value in values) + end)
 
-    monkeypatch.setattr(base, "_stream", base.PrintStream(print_func=print_func))
+    new_stream = base.PrintStream(print_func=print_func)
+    monkeypatch.setattr(base, "_stream", new_stream)
+    monkeypatch.setattr(stream_mod, "_stream", new_stream)
     monkeypatch.setattr(base, "_text_buffer", None)
+    monkeypatch.setattr(stream_mod, "_text_buffer", None)
     monkeypatch.setattr(base, "_quiet", False)
     monkeypatch.setattr(base, "_colorful_print", True)
     return chunks
@@ -302,7 +306,9 @@ async def test_print_agent_json_stream_finished_by_tool_result(monkeypatch: Any)
     assert "partial" in plain
     # The truncated stream line is terminated before the tool result prints.
     assert "partial\n" in plain
-    assert "\n✓ ok" in plain
+    # Tracked tool call renders as `✓ {ToolName}` header + dim `  {message}`.
+    assert "\n✓ WriteFile" in plain
+    assert "\n  ok" in plain
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
 
@@ -792,7 +798,9 @@ async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> 
 
     plain = _plain(chunks)
     assert plain.count("⚡ Powershell") == 1
-    assert "✓ ok" in plain
+    # Result renders as `✓ {ToolName}` (tracked call) + dim `  {message}`.
+    assert "✓ Powershell" in plain
+    assert "\n  ok" in plain
 
 
 async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
@@ -840,7 +848,9 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
 
     plain = _plain(chunks)
     assert plain.count("⚡ Glob") == 2
-    assert plain.count("✓ ok") == 2
+    # Each tracked result renders as `✓ Glob` header + dim `  ok` line.
+    assert plain.count("✓ Glob") == 2
+    assert plain.count("\n  ok") == 2
 
 
 async def test_tool_result_colors_success_green_error_red(monkeypatch: Any) -> None:
@@ -972,8 +982,11 @@ def _capture_base_stream_with_flush(monkeypatch: Any) -> tuple[list[str], list[b
         chunks.append(sep.join(str(value) for value in values) + end)
         flush_flags.append(flush)
 
-    monkeypatch.setattr(base, "_stream", base.PrintStream(print_func=print_func))
+    new_stream = base.PrintStream(print_func=print_func)
+    monkeypatch.setattr(base, "_stream", new_stream)
+    monkeypatch.setattr(stream_mod, "_stream", new_stream)
     monkeypatch.setattr(base, "_text_buffer", None)
+    monkeypatch.setattr(stream_mod, "_text_buffer", None)
     monkeypatch.setattr(base, "_quiet", False)
     monkeypatch.setattr(base, "_colorful_print", True)
     return chunks, flush_flags

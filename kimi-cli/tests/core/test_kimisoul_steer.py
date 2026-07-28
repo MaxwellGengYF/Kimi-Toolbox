@@ -415,6 +415,10 @@ async def test_run_soul_emits_steer_input_and_continues_same_turn(
     tmp_path: Path,
 ) -> None:
     assert runtime.llm is not None
+    # Disable context-meter injection so the history assertion stays
+    # deterministic (must be set before KimiSoul construction — providers
+    # register at init).
+    runtime.config.loop_control.context_meter_enabled = False
     llm = LLM(
         chat_provider=_SequenceChatProvider(
             [

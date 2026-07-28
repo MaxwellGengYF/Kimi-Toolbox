@@ -70,8 +70,11 @@ from kimi_cli.soul.dynamic_injection import (
     DynamicInjectionProvider,
     normalize_history,
 )
+from kimi_cli.soul.dynamic_injections.budget_reminder import BudgetReminderProvider
 from kimi_cli.soul.dynamic_injections.compact_reminder import CompactReminderProvider
 from kimi_cli.soul.dynamic_injections.context_meter import ContextMeterProvider
+from kimi_cli.soul.dynamic_injections.target_churn import TargetChurnProvider
+from kimi_cli.soul.verification_gate import VerificationGate
 from kimi_cli.soul.dynamic_injections.todo_reminder import TodoReminderProvider
 from kimi_cli.soul.llm_request_recorder import LLMRequestRecorder
 from kimi_cli.soul.message import (
@@ -272,10 +275,12 @@ class KimiSoul:
                     min_preserved=self._loop_control.min_preserved_messages,
                     max_preserved=self._loop_control.max_preserved_messages,
                 ),
+                decision_section_enabled=self._loop_control.compaction_decision_section_enabled,
             )
         else:
             self._compaction = SimpleCompaction(
                 max_preserved_messages=self._loop_control.max_preserved_messages,
+                decision_section_enabled=self._loop_control.compaction_decision_section_enabled,
             )
 
         # Register context-management tools if the toolset supports it
@@ -312,6 +317,24 @@ class KimiSoul:
             ),
             *(
                 []
+                if not self._loop_control.target_churn_enabled
+                else [TargetChurnProvider(
+                    file_warn=self._loop_control.target_churn_file_warn,
+                    file_strong=self._loop_control.target_churn_file_strong,
+                    error_warn=self._loop_control.target_churn_error_warn,
+                    cooldown_steps=self._loop_control.target_churn_cooldown_steps,
+                )]
+            ),
+            *(
+                []
+                if not self._loop_control.budget_reminder_enabled
+                else [BudgetReminderProvider(
+                    warn_ratios=tuple(self._loop_control.budget_warn_ratios),
+                    wall_clock_seconds=self._loop_control.budget_wall_clock_seconds,
+                )]
+            ),
+            *(
+                []
                 if not self._loop_control.context_meter_enabled
                 else [ContextMeterProvider(
                     min_delta=self._loop_control.context_meter_min_delta,
@@ -326,6 +349,9 @@ class KimiSoul:
         ]
         self._hook_engine: HookEngine = HookEngine()
         self._stop_hook_active: bool = False
+        self._verification_gate = VerificationGate(
+            max_nudges=self._loop_control.verification_gate_max_nudges,
+        )
         if self.is_root:
             self._runtime.notifications.ack_ids("llm", extract_notification_ids(context.history))
 
@@ -1179,6 +1205,23 @@ class KimiSoul:
                 has_steers = await self._consume_pending_steers()
                 if has_steers:
                     continue  # steers injected, force another LLM step
+
+                # ── 2h. Verification Gate (P2, B-3) ────────────────────────────
+                # Before ending the turn on no_tool_calls, check whether the
+                # turn is actually finished (todos done, verifications run).
+                if (
+                    step_outcome.stop_reason == "no_tool_calls"
+                    and self._loop_control.verification_gate_enabled
+                ):
+                    gate_msg = await self._verification_gate.check(self)
+                    if gate_msg is not None:
+                        await self._context.append_message(
+                            Message(
+                                role="user",
+                                content=[TextPart(text=system_reminder(gate_msg).text)],
+                            )
+                        )
+                        continue  # do not end the turn; force another step
 
                 # ═══════════════════════════════════════════════════════════════
                 # 3. TURN RESOLUTION

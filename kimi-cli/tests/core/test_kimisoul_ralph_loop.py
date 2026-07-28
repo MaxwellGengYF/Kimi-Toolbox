@@ -131,6 +131,9 @@ def _runtime_with_llm(runtime: Runtime, llm: LLM) -> Runtime:
 def _make_soul(
     runtime: Runtime, llm: LLM, toolset: Toolset, tmp_path: Path
 ) -> tuple[KimiSoul, Context]:
+    # Disable context-meter injection so snapshots stay deterministic
+    # (must be set before KimiSoul construction — providers register at init).
+    runtime.config.loop_control.context_meter_enabled = False
     agent = Agent(
         name="Test Agent",
         system_prompt="Test system prompt.",

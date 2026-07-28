@@ -28,7 +28,8 @@ def _read_multi_line(text_arr: list[str], *, allow_cancel: bool = True) -> tuple
 import asyncio
 
 import kimix.utils._globals as _globals
-from kimix.base import (
+from kimix.base import sync_all
+from kimix.ui.printing import (
     Color,
     colorful_text,
     print_debug,
@@ -36,7 +37,6 @@ from kimix.base import (
     print_info,
     print_success,
     print_warning,
-    sync_all,
 )
 from kimix.utils import (
     SystemPromptType,

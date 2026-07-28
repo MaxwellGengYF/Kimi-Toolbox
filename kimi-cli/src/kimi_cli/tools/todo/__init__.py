@@ -88,7 +88,9 @@ class Todo(BaseModel):
         default=None,
         validation_alias=AliasChoices("code", "code_file"),
         description=(
-            "Python code inline or a `.py` file path. "
+            "Verification code: inline Python, a `.py` file path, a shell command "
+            "prefixed with `!` (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
+            "Todos involving code changes should attach verification code. "
             "Omit if this todo has no executable code. "
             "Pass empty string to clear previously set code. "
             "Accepts `code` or `code_file`."
@@ -251,7 +253,9 @@ class TodoList(CallableTool2[Params]):
         "mode='overwrite' replaces the list only when every existing todo is done; "
         "use mode='force_overwrite' to intentionally discard unfinished items.\n"
         "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
-        "Each todo may include a `code` field with inline Python or a `.py` file path.\n"
+        "Each todo may include a `code` field with inline Python, a `.py` file path, "
+        "a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
+        "Todos involving code changes should attach verification `code`.\n"
         "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
         "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors."
     )
@@ -441,8 +445,14 @@ class TodoList(CallableTool2[Params]):
         for t in selected:
             todo = f"- [{display_status[t.status]}] {t.title}"
             if t.code:
-                is_file = t.code.endswith(".py")
-                todo += f"  `[code: {'file' if is_file else 'inline'}]`"
+                stripped = t.code.strip()
+                if stripped.startswith("!"):
+                    kind_label = "shell"
+                elif stripped.lower().endswith((".py", ".sh", ".ps1")) and Path(stripped).is_file():
+                    kind_label = "file"
+                else:
+                    kind_label = "inline"
+                todo += f"  `[code: {kind_label}]`"
             if t.status == "in_progress" and t.notes:
                 todo += f"  Notes: {t.notes}"
             lines.append(todo)
@@ -450,82 +460,153 @@ class TodoList(CallableTool2[Params]):
         return "\n".join(lines)
 
     @staticmethod
-    def _resolve_code_executable(code: str) -> str | None:
-        """Resolve the executable file path from a todo's code string.
+    def _resolve_code_executable(code: str) -> tuple[str, str] | None:
+        """Resolve how to execute a todo's code string.
 
-        Returns the path to a ``.py`` file that can be run, or ``None`` if
-        the code has no runnable content.
+        Returns a ``(kind, payload)`` tuple, or ``None`` when the code has
+        no runnable content. Kinds:
+
+        - ``("shell", command)`` — code starts with ``!`` (shell command);
+        - ``("shell_file", path)`` — code points to a ``.sh``/``.ps1`` file;
+        - ``("python", path)`` — code points to an existing ``.py`` file;
+        - ``("python_inline", temp_path)`` — inline Python written to a temp file.
         """
         if not code:
             return None
+        stripped = code.strip()
+        if stripped.startswith("!"):
+            command = stripped[1:].strip()
+            return ("shell", command) if command else None
         fp = Path(code)
         if fp.is_file():
-            if code.endswith(".py"):
-                return str(fp)
+            lowered = code.lower()
+            if lowered.endswith(".py"):
+                return ("python", str(fp))
+            if lowered.endswith((".sh", ".ps1")):
+                return ("shell_file", str(fp))
             return None
-        # Inline code — write to temp file
+        # Inline Python code — write to temp file
         import tempfile as _tf
         fd, path = _tf.mkstemp(suffix=".py", prefix="run_todo_code_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(code)
-        return path
+        return ("python_inline", path)
+
+    @staticmethod
+    async def _run_process(
+        argv: list[str],
+        timeout: int,
+        *,
+        not_found_hint: str,
+    ) -> tuple[bool, str]:
+        """Run a subprocess with timeout, returning ``(success, output)``."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return False, not_found_hint
+        except Exception as exc:
+            return False, f"Code execution error: {exc}"
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"Code execution timed out after {timeout}s."
+
+        output = stdout.decode("utf-8", errors="replace")
+        if stderr:
+            error_text = stderr.decode("utf-8", errors="replace")
+            if output:
+                output += "\n" + error_text
+            else:
+                output = error_text
+
+        if proc.returncode == 0:
+            return True, output or "Code executed successfully (no output)."
+        return False, f"Code failed (exit code {proc.returncode}):\n{output}"
+
+    @staticmethod
+    def _shell_argv(command: str) -> tuple[list[str], str]:
+        """Build the argv for a shell command, plus a not-found hint."""
+        if sys.platform == "win32":
+            import shutil
+
+            shell_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+            return (
+                [shell_exe, "-NoProfile", "-NonInteractive", "-Command", command],
+                f"Shell executable not found: {shell_exe}",
+            )
+        return (["bash", "-l", "-c", command], "bash executable not found")
 
     @staticmethod
     async def _run_code(
         code: str,
         timeout: int = 30,
         python_exe: str | None = None,
-        executable: str | None = None,
+        executable: tuple[str, str] | str | None = None,
     ) -> tuple[bool, str]:
         """Execute a todo's code and return ``(success, output_or_error)``.
 
-        If ``executable`` is provided it is used directly; otherwise the
-        executable path is resolved via ``_resolve_code_executable``.
+        ``executable`` may be a ``(kind, payload)`` tuple as returned by
+        ``_resolve_code_executable``, or a legacy plain ``.py`` path string.
+        When omitted, the executable is resolved from ``code``.
         """
         if executable is None:
-            executable = TodoList._resolve_code_executable(code)
-        if executable is None:
+            resolved = TodoList._resolve_code_executable(code)
+        elif isinstance(executable, tuple):
+            resolved = executable
+        else:
+            resolved = ("python", executable)  # legacy plain path
+        if resolved is None:
             return False, "Todo has no runnable code."
+        kind, payload = resolved
 
+        if kind == "shell":
+            argv, hint = TodoList._shell_argv(payload)
+            return await TodoList._run_process(argv, timeout, not_found_hint=hint)
+        if kind == "shell_file":
+            if payload.lower().endswith(".ps1"):
+                import shutil
+
+                shell_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+                argv = [shell_exe, "-NoProfile", "-NonInteractive", "-File", payload]
+                hint = f"Shell executable not found: {shell_exe}"
+            else:
+                argv = ["bash", "-l", payload]
+                hint = "bash executable not found"
+            return await TodoList._run_process(argv, timeout, not_found_hint=hint)
+
+        # python / python_inline
         if python_exe is None:
             python_exe = sys.executable
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                python_exe,
-                executable,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return False, f"Code execution timed out after {timeout}s."
-
-            output = stdout.decode("utf-8", errors="replace")
-            if stderr:
-                error_text = stderr.decode("utf-8", errors="replace")
-                if output:
-                    output += "\n" + error_text
-                else:
-                    output = error_text
-
-            if proc.returncode == 0:
-                return True, output or "Code executed successfully (no output)."
-            else:
-                return False, f"Code failed (exit code {proc.returncode}):\n{output}"
-        except FileNotFoundError:
-            return False, f"Python executable not found: {python_exe}"
-        except Exception as exc:
-            return False, f"Code execution error: {exc}"
+        return await TodoList._run_process(
+            [python_exe, payload],
+            timeout,
+            not_found_hint=f"Python executable not found: {python_exe}",
+        )
 
     @staticmethod
-    def _cleanup_code_tempfile(temp_file_path: str | None) -> None:
-        """Clean up a temp file created for inline code execution."""
+    def _cleanup_code_tempfile(executable: tuple[str, str] | str | None) -> None:
+        """Clean up a temp file created for inline code execution.
+
+        Accepts either a ``(kind, payload)`` tuple (only ``python_inline``
+        payloads are removed) or a legacy plain path string.
+        """
+        if executable is None:
+            return
+        if isinstance(executable, tuple):
+            kind, payload = executable
+            if kind != "python_inline":
+                return
+            temp_file_path: str | None = payload
+        else:
+            temp_file_path = executable
         if temp_file_path:
             try:
                 Path(temp_file_path).unlink(missing_ok=True)
@@ -822,6 +903,7 @@ class TodoList(CallableTool2[Params]):
                             success, output = False, str(exc)
                         finally:
                             TodoList._cleanup_code_tempfile(executable)
+
                         if not success:
                             err_msg = f"Todo '{t.title}' verification failed: {output}"
                             errors.append(err_msg)

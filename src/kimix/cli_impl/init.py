@@ -8,7 +8,7 @@ from typing import Any
 
 import orjson
 
-from kimix.base import print_info, print_success, print_warning
+from kimix.ui.printing import print_info, print_success, print_warning
 deepseek_default_config = '''
 {
     "model": "deepseek-v4-pro",

@@ -1,6 +1,7 @@
 from typing import Optional, Any, Callable
 from kimi_agent_sdk import Session
-from kimix.base import MessageType, print_success, run_process_with_error_async, run_thread
+from kimix.base import run_process_with_error_async, run_thread
+from kimix.ui.printing import MessageType, print_success
 from .prompt import prompt, prompt_async
 from .session import _create_default_session
 import asyncio

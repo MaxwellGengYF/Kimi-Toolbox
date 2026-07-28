@@ -383,7 +383,7 @@ async def _summarize_long_output_async(session: Session, command: str, output: s
         sub-agent could not be used.
     """
     import kimix.base as base
-    from kimix.base import MessageType
+    from kimix.ui.printing import MessageType
     from kimix.utils import close_session_async, _create_session_async, prompt_async
     from kimix.utils.system_prompt import SystemPromptType
 

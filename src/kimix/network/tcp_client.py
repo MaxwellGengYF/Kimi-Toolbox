@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional, Callable
 
-from kimix.base import print  # noqa: F811 - use base.print for flush support
+from kimix.ui.printing import print  # noqa: F811 - use ui.printing.print for flush support
 
 
 class TCPClient:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from kimi_agent_sdk import Session
-from kimix.base import MessageType
+from kimix.ui.printing import MessageType
 from kimix.utils import (
     _create_session_async,
     create_session,

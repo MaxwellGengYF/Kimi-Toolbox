@@ -71,7 +71,7 @@ def _normalize_sub_providers(
     Each entry is validated to be a dict with required provider keys.
     Missing or empty ``role`` defaults to ``sub_agent``.
     """
-    from kimix.base import print_debug, print_warning
+    from kimix.ui.printing import print_debug, print_warning
 
     raw_entries: list[Any] = []
     for src in (sub_provider, sub_providers):
@@ -122,7 +122,7 @@ def _pick_main_from_sub_providers(
 
     Mutates ``config_data`` in place by copying all non-``role`` keys from the winner.
     """
-    from kimix.base import print_debug
+    from kimix.ui.printing import print_debug
 
     if "model" in config_data:
         return
@@ -176,7 +176,7 @@ def _load_config_file(config_path: Path) -> dict[str, Any]:
       3. Parent directories of this file (``config.py``)
       4. ``PATH`` environment variable directories
     """
-    from kimix.base import print_error
+    from kimix.ui.printing import print_error
 
     found = False
     path = config_path
@@ -219,10 +219,10 @@ def _load_config_file(config_path: Path) -> dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
             return orjson.loads(f.read())
     except orjson.JSONDecodeError as e:
-        from kimix.base import print_warning
+        from kimix.ui.printing import print_warning
         print_warning(f"Invalid JSON in config file: {str(path)} ({e})")
     except Exception as e:
-        from kimix.base import print_warning
+        from kimix.ui.printing import print_warning
         print_warning(f"Failed to load config file: {str(path)} ({e})")
     return {}
 
@@ -232,7 +232,7 @@ def _load_config_file(config_path: Path) -> dict[str, Any]:
 
 def _load_skill_json() -> None:
     """Auto-load skill directories from ``.kimix/skill.json`` in CWD."""
-    from kimix.base import print_debug, print_warning
+    from kimix.ui.printing import print_debug, print_warning
     from kaos.path import KaosPath
 
     config_json_path = Path(".kimix/skill.json")
@@ -275,7 +275,7 @@ def _load_and_set_provider(config_data: dict[str, Any]) -> None:
 
     Mutates ``config_data`` in place (pops ``sub_provider``/``sub_providers``).
     """
-    from kimix.base import print_debug
+    from kimix.ui.printing import print_debug
 
     sub_provider = config_data.pop("sub_provider", None)
     sub_providers = config_data.pop("sub_providers", None)
@@ -323,7 +323,7 @@ def init(
     #   so we import session internals only inside this function body.
     from kimix.utils.session import close_session
     from kimix.cli_impl import constants
-    from kimix.base import print_debug, print_warning
+    from kimix.ui.printing import print_debug, print_warning
     from kaos.path import KaosPath
 
     # 1. Dispose existing default session (if any)
@@ -334,6 +334,9 @@ def init(
 
     # 2. Reset / set base globals
     base._colorful_print = colorful_print
+    import kimix.ui.printing as _printing
+
+    _printing._colorful_print = colorful_print
     base.set_default_thinking(think)
     base.set_default_yolo(yolo)
     base.set_default_manually_cot(manually_cot)
@@ -378,11 +381,11 @@ def init(
                 raise ValueError("config_json must parse to a JSON object")
             _load_and_set_provider(config_data)
         except orjson.JSONDecodeError as e:
-            from kimix.base import print_error
+            from kimix.ui.printing import print_error
             print_error(f"Invalid config JSON: {e}")
             sys.exit(1)
         except ValueError as e:
-            from kimix.base import print_error
+            from kimix.ui.printing import print_error
             print_error(str(e))
             sys.exit(1)
     else:
@@ -409,7 +412,7 @@ def init(
 
 def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config, dict[str, Any] | None]:
     from kimi_cli.config import LLMModel, LLMProvider
-    from kimix.base import print_debug, print_warning
+    from kimix.ui.printing import print_debug, print_warning
 
     provider_dict = provider_dict if provider_dict is not None else base._default_provider
     cfg = Config()

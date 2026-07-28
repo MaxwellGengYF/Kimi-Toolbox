@@ -1,94 +1,33 @@
-"""JSON file validator tool."""
-import xml.etree.ElementTree as ET
-import orjson
+"""Compatibility shim for JSON/XML validation helpers (P9).
 
+The canonical implementations now live in
+:mod:`kimi_cli.tools.file.check_fmt`. This module re-exports them for
+backward compatibility and will be removed in the next minor release
+(see ``ChangeLog.md``).
+"""
 
-def check_json(file_path: str, json_callback = None) -> str | None:
-    """Validate the format of a JSON file.
+from __future__ import annotations
 
-    Args:
-        file_path: Path to the JSON file to validate.
+import warnings
 
-    Returns:
-        None if the JSON file is valid, error message string otherwise.
-    """
-    try:
-        js = None
-        with open(file_path, 'r', encoding='utf-8') as f:
-            js = orjson.loads(f.read())
-        if json_callback:
-            json_callback(js)
-        return None
+from kimi_cli.tools.file.check_fmt import (
+    check_json,
+    check_json_str,
+    check_xml,
+    check_xml_str,
+)
 
-    except orjson.JSONDecodeError as exc:
-        return f"JSON decode error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
-    except Exception as exc:
-        return f"Failed to validate JSON file: {str(exc)}"
+warnings.warn(
+    "kimix.tools.check_fmt is deprecated; import from "
+    "kimi_cli.tools.file.check_fmt instead. This shim will be removed "
+    "in the next minor release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-
-"""XML file validator tool."""
-
-
-def check_xml(file_path: str, xml_callback = None) -> str | None:
-    """Validate the format of an XML file.
-
-    Args:
-        file_path: Path to the XML file to validate.
-
-    Returns:
-        None if the XML file is valid, error message string otherwise.
-    """
-    try:
-        tree = ET.parse(file_path)
-        if xml_callback:
-            xml_callback(tree)
-        return None
-
-    except ET.ParseError as exc:
-        return f"XML parse error: {str(exc)}"
-    except Exception as exc:
-        return f"Failed to validate XML file: {str(exc)}"
-
-
-def check_json_str(content: str, json_callback=None) -> str | None:
-    """Validate the format of a JSON string.
-
-    Args:
-        content: JSON string content to validate.
-        json_callback: Optional callback function to process the parsed JSON object.
-
-    Returns:
-        None if the JSON string is valid, error message string otherwise.
-    """
-    try:
-        js = orjson.loads(content)
-        if json_callback:
-            json_callback(js)
-        return None
-
-    except orjson.JSONDecodeError as exc:
-        return f"JSON decode error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
-    except Exception as exc:
-        return f"Failed to validate JSON content: {str(exc)}"
-
-
-def check_xml_str(content: str, xml_callback=None) -> str | None:
-    """Validate the format of an XML string.
-
-    Args:
-        content: XML string content to validate.
-        xml_callback: Optional callback function to process the parsed XML ElementTree.
-
-    Returns:
-        None if the XML string is valid, error message string otherwise.
-    """
-    try:
-        root = ET.fromstring(content)
-        if xml_callback:
-            xml_callback(root)
-        return None
-
-    except ET.ParseError as exc:
-        return f"XML parse error: {str(exc)}"
-    except Exception as exc:
-        return f"Failed to validate XML content: {str(exc)}"
+__all__ = [
+    "check_json",
+    "check_json_str",
+    "check_xml",
+    "check_xml_str",
+]

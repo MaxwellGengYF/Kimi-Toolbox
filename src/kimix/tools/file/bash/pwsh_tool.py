@@ -19,7 +19,7 @@ from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.tools.display import ShellDisplayBlock
 from kimix.tools.file.bash import bash_tool as _bash_tool
-from kimix.tools.file.bash.proccess_pwsh import pwsh_transform
+from kimix.tools.file.bash.process_pwsh import pwsh_transform
 from kimix.tools.common import (
     _build_session_output_block,
     _env_with_rg_bin_path,

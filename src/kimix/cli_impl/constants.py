@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from kimix.base import Color, colorful_text
+from kimix.ui.printing import Color, colorful_text
 
 curr_dir = Path(os.curdir)
 if not curr_dir.is_absolute():

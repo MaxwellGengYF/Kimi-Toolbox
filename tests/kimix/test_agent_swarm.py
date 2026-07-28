@@ -315,3 +315,62 @@ async def test_resume_agent_ids(mock_session: MagicMock, monkeypatch):
     resumed_kwargs = [c for c in created if c.get("session_id") == "agent-old"]
     assert len(resumed_kwargs) == 1
     assert resumed_kwargs[0].get("resume") is True
+
+
+# ---------------------------------------------------------------------------
+# parallel_sample mode (P7 best-of-N) validation
+# ---------------------------------------------------------------------------
+
+
+def test_params_parallel_sample_accepts_single_task_prompt():
+    """parallel_sample runs ONE task N times — no items list required."""
+    params = AgentSwarmParams(
+        description="sample",
+        mode="parallel_sample",
+        prompt_template="Refactor the parser module for clarity.",
+        sample_n=4,
+    )
+    assert params.mode == "parallel_sample"
+    assert params.sample_n == 4
+
+
+def test_params_parallel_sample_defaults():
+    params = AgentSwarmParams(
+        description="sample",
+        mode="parallel_sample",
+        prompt_prefix="Fix the bug in the auth flow",
+    )
+    assert params.sample_n is None  # resolved to 4 at execution time
+    assert params.selector is None  # resolved to 'self_eval'
+
+
+def test_params_parallel_sample_rejects_invalid_sample_n():
+    with pytest.raises(ValueError, match="sample_n must be >= 1"):
+        AgentSwarmParams(
+            description="sample",
+            mode="parallel_sample",
+            prompt_template="do it",
+            sample_n=0,
+        )
+
+
+def test_params_parallel_sample_requires_task_prompt():
+    with pytest.raises(ValueError, match="requires the task prompt"):
+        AgentSwarmParams(description="sample", mode="parallel_sample", items=["a", "b"])
+
+
+def test_params_parallel_sample_rejects_template_and_prefix():
+    with pytest.raises(ValueError, match="not both"):
+        AgentSwarmParams(
+            description="sample",
+            mode="parallel_sample",
+            prompt_template="do it",
+            prompt_prefix="prefix",
+        )
+
+
+def test_params_default_mode_is_fanout():
+    params = AgentSwarmParams(
+        description="test", prompt_template="do {{item}}", items=["a", "b"]
+    )
+    assert params.mode == "fanout"

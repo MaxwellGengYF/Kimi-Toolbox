@@ -422,3 +422,40 @@ class TestDetectCascadeDepth:
         from kimi_cli.soul.compaction import _detect_cascade_depth
 
         assert _detect_cascade_depth(msgs) == 3
+
+
+# ---------------------------------------------------------------------------
+# P4: decision & verification summary sections
+# ---------------------------------------------------------------------------
+
+
+def _compaction_messages() -> list[Message]:
+    return [
+        Message(role="system", content=[TextPart(text="System note")]),
+        Message(role="user", content=[TextPart(text="Old question")]),
+        Message(role="assistant", content=[TextPart(text="Old answer")]),
+        Message(role="user", content=[TextPart(text="Older question 2")]),
+        Message(role="assistant", content=[TextPart(text="Older answer 2")]),
+        Message(role="user", content=[TextPart(text="Latest question")]),
+        Message(role="assistant", content=[TextPart(text="Latest answer")]),
+    ]
+
+
+def test_prepare_includes_decision_sections_when_enabled():
+    result = SimpleCompaction(
+        max_preserved_messages=2, decision_section_enabled=True
+    ).prepare(_compaction_messages())
+
+    assert result.compact_message is not None
+    prompt_text = result.compact_message.extract_text(" ")
+    assert "## Decisions & Conclusions" in prompt_text
+    assert "## Verification Status" in prompt_text
+
+
+def test_prepare_omits_decision_sections_by_default():
+    result = SimpleCompaction(max_preserved_messages=2).prepare(_compaction_messages())
+
+    assert result.compact_message is not None
+    prompt_text = result.compact_message.extract_text(" ")
+    assert "## Decisions & Conclusions" not in prompt_text
+    assert "## Verification Status" not in prompt_text

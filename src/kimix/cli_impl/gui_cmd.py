@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kimix.base import print_error, print_info, print_warning
+from kimix.ui.printing import print_error, print_info, print_warning
 from kimix.utils.windows_env import refresh_env_from_registry
 
 DEFAULT_HOST = "127.0.0.1"

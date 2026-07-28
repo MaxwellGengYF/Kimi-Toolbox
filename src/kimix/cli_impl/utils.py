@@ -4,7 +4,7 @@ import regex as re
 import textwrap
 from typing import Any, Iterator
 
-from kimix.base import (
+from kimix.ui.printing import (
     BgColor,
     BgColor256,
     Color,

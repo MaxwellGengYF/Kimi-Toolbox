@@ -86,7 +86,7 @@ def test_todo_list_params_schema(todo_list_tool: TodoList):
     assert props["match_mode"]["default"] == "exact"
     # Verify auto_fix type
     assert props["auto_fix"]["type"] == "boolean"
-    assert props["auto_fix"]["default"] is False
+    assert props["auto_fix"]["default"] is True
     # Verify todos (advertised as 'items') has Todo structure (may be $ref or inlined)
     todos_props = str(props["items"])
     assert "title" in todos_props and "status" in todos_props

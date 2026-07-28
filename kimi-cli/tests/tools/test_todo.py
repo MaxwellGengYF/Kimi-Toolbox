@@ -1777,16 +1777,20 @@ class TestTodoCodeExecution:
 
     def test_resolve_code_executable_inline(self) -> None:
         """Inline code produces a temp file."""
-        path = TodoList._resolve_code_executable("print('hello')")
-        assert path is not None
+        resolved = TodoList._resolve_code_executable("print('hello')")
+        assert resolved is not None
+        kind, path = resolved
+        assert kind == "python_inline"
         assert path.endswith(".py")
         assert Path(path).exists()
         Path(path).unlink(missing_ok=True)
 
     def test_resolve_code_executable_nonexistent(self) -> None:
         """Non-existent .py file is treated as inline code (temp file)."""
-        path = TodoList._resolve_code_executable("nonexistent.py")
-        assert path is not None
+        resolved = TodoList._resolve_code_executable("nonexistent.py")
+        assert resolved is not None
+        kind, path = resolved
+        assert kind == "python_inline"
         assert path.endswith(".py")
         Path(path).unlink(missing_ok=True)
 
@@ -1794,6 +1798,76 @@ class TestTodoCodeExecution:
         """Empty string returns None."""
         path = TodoList._resolve_code_executable("")
         assert path is None
+
+    def test_resolve_code_executable_shell(self) -> None:
+        """`!`-prefixed code resolves to a shell command."""
+        resolved = TodoList._resolve_code_executable("!pytest tests/ -x -q")
+        assert resolved == ("shell", "pytest tests/ -x -q")
+
+    def test_resolve_code_executable_shell_empty(self) -> None:
+        """A bare `!` has no runnable content."""
+        assert TodoList._resolve_code_executable("!") is None
+
+    def test_resolve_code_executable_shell_file(self, tmp_path: Path) -> None:
+        """A .sh/.ps1 file path resolves to shell_file."""
+        sh = tmp_path / "check.sh"
+        sh.write_text("exit 0\n", encoding="utf-8")
+        resolved = TodoList._resolve_code_executable(str(sh))
+        assert resolved == ("shell_file", str(sh))
+        ps1 = tmp_path / "check.ps1"
+        ps1.write_text("exit 0\n", encoding="utf-8")
+        resolved_ps1 = TodoList._resolve_code_executable(str(ps1))
+        assert resolved_ps1 == ("shell_file", str(ps1))
+
+    def test_resolve_code_executable_py_file(self, tmp_path: Path) -> None:
+        """A .py file path resolves to python."""
+        py = tmp_path / "check.py"
+        py.write_text("print('ok')\n", encoding="utf-8")
+        resolved = TodoList._resolve_code_executable(str(py))
+        assert resolved == ("python", str(py))
+
+    def test_cleanup_code_tempfile_tuple(self) -> None:
+        """Cleanup removes only python_inline temp files from tuples."""
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_")
+        with os.fdopen(fd, "w") as f:
+            f.write("print('x')")
+        TodoList._cleanup_code_tempfile(("python_inline", path))
+        assert not Path(path).exists()
+        # Non-temp kinds are left alone.
+        fd2, path2 = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_keep_")
+        with os.fdopen(fd2, "w") as f:
+            f.write("print('y')")
+        TodoList._cleanup_code_tempfile(("python", path2))
+        assert Path(path2).exists()
+        Path(path2).unlink(missing_ok=True)
+
+    async def test_run_code_shell_success(self) -> None:
+        """`!`-prefixed shell command runs and succeeds."""
+        success, output = await TodoList._run_code("!echo shell_ok_marker")
+        assert success
+        assert "shell_ok_marker" in output
+
+    async def test_run_code_shell_failure(self) -> None:
+        """Shell command with non-zero exit code fails verification."""
+        success, output = await TodoList._run_code("!exit 1")
+        assert not success
+        assert "exit code 1" in output
+
+    async def test_run_code_shell_file(self, tmp_path: Path) -> None:
+        """A shell script file is executed via the platform shell."""
+        import sys as _sys
+
+        if _sys.platform == "win32":
+            script = tmp_path / "check.ps1"
+            script.write_text("Write-Output 'script_ok_marker'\n", encoding="utf-8")
+        else:
+            script = tmp_path / "check.sh"
+            script.write_text("echo script_ok_marker\n", encoding="utf-8")
+        success, output = await TodoList._run_code(str(script))
+        assert success
+        assert "script_ok_marker" in output
 
     def test_cleanup_code_tempfile_removes_file(self) -> None:
         """Cleanup removes the temp file."""

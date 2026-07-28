@@ -9,7 +9,7 @@ import orjson
 from kaos.path import KaosPath
 
 import kimix.base as base
-from kimix.base import print_debug, print_error, print_warning
+from kimix.ui.printing import print_debug, print_error, print_warning
 
 from . import constants, utils  # noqa: F401
 

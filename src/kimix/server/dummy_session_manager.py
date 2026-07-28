@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from kimi_agent_sdk import Session
-from kimix.base import MessageType, _default_agent_file_dir, _format_tool_args
+from kimix.base import _default_agent_file_dir
+from kimix.ui.printing import MessageType
+from kimix.ui.stream import _format_tool_args
 from kimix.server.bus import bus, BusEvent
 from kimix.utils.session import _create_session_async
 from kimix.utils.system_prompt import SystemPromptType

@@ -2,13 +2,13 @@ from pathlib import Path
 from typing import Any
 
 import kimix.base as base
-from kimix.base import (
+from kimix.base import sync_all
+from kimix.ui.printing import (
     print_debug,
     print_error,
     print_info,
     print_success,
     print_warning,
-    sync_all,
 )
 from kimix.cot import cot_prompt
 import kimix.utils._globals as _globals

@@ -10,7 +10,8 @@ from kosong.chat_provider import ChatProvider
 
 import kimix.base as base
 from kimi_agent_sdk import Session
-from kimix.base import Color, Style, percentage_and_token
+from kimix.ui.printing import Color, Style
+from kimix.ui.stream import percentage_and_token
 
 from . import _globals
 from .config import _create_config

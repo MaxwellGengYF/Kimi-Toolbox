@@ -40,8 +40,7 @@ def test_default_config_dump():
                 "min_preserved_messages": 1,
                 "adaptive_preserve_enabled": True,
                 "compact_reminder_enabled": True,
-                "compact_reminder_threshold": 0.7,
-                "auto_retrieve_history": True,
+                "compact_reminder_threshold": 0.7, 'todo_reminder_enabled': True, 'todo_reminder_interval_steps': 20, 'target_churn_enabled': True, 'target_churn_file_warn': 8, 'target_churn_file_strong': 15, 'target_churn_error_warn': 5, 'target_churn_cooldown_steps': 10, 'verification_gate_enabled': True, 'verification_gate_max_nudges': 2, 'cli_closing_reminder_rounds': 1, 'budget_reminder_enabled': False, 'budget_warn_ratios': (0.7, 0.9), 'budget_wall_clock_seconds': 0, 'compaction_decision_section_enabled': True, 'best_of_n_enabled': False, 'best_of_n': 4, 'best_of_n_selector': 'self_eval', 'context_meter_enabled': True, 'context_meter_min_delta': 0.05, 'context_meter_cooldown_steps': 10, 'pre_compact_flush_enabled': True, 'memory_restore_enabled': True, "auto_retrieve_history": True,
                 "auto_retrieve_history_threshold": 5.0,
                 "auto_retrieve_working_memory": True,
                 "auto_retrieve_working_memory_threshold": 5.0,
@@ -233,3 +232,51 @@ def test_load_config_prune_ratios_invalid_trigger_gte_compaction():
         load_config_from_string(
             '{"loop_control": {"prune_trigger_ratio": 0.85, "compaction_trigger_ratio": 0.75}}'
         )
+
+
+def test_loop_control_new_feature_defaults():
+    """Default values for the P1-P7 feature keys (plan v2 §14)."""
+    from kimi_cli.config import LoopControl
+
+    lc = LoopControl()
+
+    # P1: target churn
+    assert lc.target_churn_enabled is True
+    assert lc.target_churn_file_warn == 8
+    assert lc.target_churn_file_strong == 15
+    assert lc.target_churn_error_warn == 5
+    assert lc.target_churn_cooldown_steps == 10
+
+    # P2: verification gate + CLI closing loop
+    assert lc.verification_gate_enabled is True
+    assert lc.verification_gate_max_nudges == 2
+    assert lc.cli_closing_reminder_rounds == 1
+
+    # P3: budget reminder
+    assert lc.budget_reminder_enabled is False
+    assert lc.budget_warn_ratios == (0.7, 0.9)
+    assert lc.budget_wall_clock_seconds == 0
+
+    # P4: compaction decision sections
+    assert lc.compaction_decision_section_enabled is True
+
+    # P7: best-of-N (default off until A/B conclusions)
+    assert lc.best_of_n_enabled is False
+    assert lc.best_of_n == 4
+    assert lc.best_of_n_selector == "self_eval"
+
+
+def test_loop_control_new_feature_validation():
+    """Field constraints on the new keys are enforced."""
+    from pydantic import ValidationError
+
+    from kimi_cli.config import LoopControl
+
+    with pytest.raises(ValidationError):
+        LoopControl(target_churn_file_warn=1)  # ge=2
+    with pytest.raises(ValidationError):
+        LoopControl(verification_gate_max_nudges=11)  # le=10
+    with pytest.raises(ValidationError):
+        LoopControl(best_of_n=0)  # ge=1
+    with pytest.raises(ValidationError):
+        LoopControl(best_of_n_selector="external_verifier")  # pattern

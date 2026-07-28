@@ -11,7 +11,8 @@ import orjson
 import kimix.base as base
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
-from kimix.base import Color, MessageType, Style, print_agent_json, print_agent_json_flush_text
+from kimix.ui.printing import Color, MessageType, Style
+from kimix.ui.stream import print_agent_json, print_agent_json_flush_text
 from kimix.tools.common import _export_to_temp_file
 from kimix.utils.session import (
     _create_default_session,
@@ -133,15 +134,11 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
 async def _maybe_build_code_todo_reminder(session: Session, *, strong: bool = False) -> str | None:
     """Check todos with code: run pending/in_progress code for verification.
 
-    For each todo that has `code` and is not done:
-    - Execute the code via TodoList._run_code.
-    - If successful: mark the todo `done` via _verify_and_set_todo_status
-      (the method itself will NOT re-run since status is already being set to done).
-    - If failed: collect the error message.
-
-    Returns a reminder string listing failures (or None if all code passed or no code todos).
+    Delegates to the shared ``kimi_cli.tools.todo.verify.verify_code_todos``
+    (B-4): code todos that pass are auto-marked done; failures are collected
+    into a reminder string (or None if all code passed or no code todos).
     """
-    from kimi_cli.tools.todo import TodoList
+    from kimi_cli.tools.todo.verify import verify_code_todos
 
     cli = getattr(session, "_cli", None)
     if cli is None:
@@ -172,53 +169,24 @@ async def _maybe_build_code_todo_reminder(session: Session, *, strong: bool = Fa
         data = _read_subagent_state(state_file)
         todos_raw = data.get("todos", []) if isinstance(data.get("todos"), list) else []
 
-    # Iterate todos that have code and are not done; run each for verification
-    failures: list[str] = []
-    for t in todos_raw:
-        code = t.get("code") if isinstance(t, dict) else getattr(t, "code", None)
-        status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
-        title = t.get("title") if isinstance(t, dict) else getattr(t, "title", "")
-
-        if not code or status == "done":
-            continue
-
-        # Execute the code for verification
-        executable = TodoList._resolve_code_executable(code)
-        if executable is None:
-            failures.append(f"  - [{status}] {title}: code not runnable")
-            continue
-
-        try:
-            success, output = await TodoList._run_code(code, executable=executable)
-        except Exception as exc:
-            success, output = False, str(exc)
-        finally:
-            TodoList._cleanup_code_tempfile(executable)
-
-        if success:
-            # Mark done via the tool instance (avoids re-running code)
-            await todo_tool._verify_and_set_todo_status(title, "done")
-        else:
-            failures.append(f"  - [{status}] {title}: verification failed — {output[:500]}")
-
-    if not failures:
+    try:
+        return await verify_code_todos(todo_tool, list(todos_raw), strong=strong)
+    except Exception:
         return None
 
-    lines: list[str] = []
-    if strong:
-        lines.append(
-            "CRITICAL: The following todo items have code that failed verification:\n"
-        )
-    else:
-        lines.append(
-            "The following todo items have code that failed verification:\n"
-        )
-    lines.extend(failures)
-    lines.append(
-        "\nFix the errors and mark the todos `done` via `TodoList` "
-        "to re-trigger automatic code verification."
-    )
-    return "\n".join(lines)
+
+def _get_cli_closing_reminder_rounds(session: Session) -> int:
+    """Read ``cli_closing_reminder_rounds`` from the session's loop control.
+
+    Defaults to 1 (soul gate is primary; CLI loop is the fallback).
+    """
+    cli = getattr(session, "_cli", None)
+    soul = getattr(cli, "soul", None) if cli is not None else None
+    loop_control = getattr(soul, "_loop_control", None)
+    rounds = getattr(loop_control, "cli_closing_reminder_rounds", None)
+    if not isinstance(rounds, int) or rounds < 0:
+        return 1
+    return rounds
 
 
 async def _clear_session_todos(session: Session) -> None:
@@ -496,7 +464,8 @@ async def prompt_async(
                 timeout=timeout,
             )
         if prompt_success and ensure_todo_finished:
-            max_todo_attempts = 2
+            closing_rounds = _get_cli_closing_reminder_rounds(session)
+            max_todo_attempts = closing_rounds
             for attempt in range(max_todo_attempts):
                 todo_reminder = await _maybe_build_todo_reminder(session, strong=(attempt > 0))
                 if todo_reminder is None:
@@ -528,7 +497,7 @@ async def prompt_async(
             # Code-todo reminder loop (replaces old goal enforcement loop)
             # Auto-verification happens inside _verify_and_set_todo_status
             # when a todo is marked `done`. This loop only provides reminders.
-            max_code_attempts = 2
+            max_code_attempts = closing_rounds
             for attempt in range(max_code_attempts):
                 code_reminder = await _maybe_build_code_todo_reminder(session, strong=(attempt > 0))
                 if code_reminder is None:
