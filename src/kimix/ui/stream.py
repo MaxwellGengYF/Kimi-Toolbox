@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import orjson
+from kosong.tooling import (
+    TOOL_NAME_REDIRECTS,
+    normalize_tool_name,
+    resolve_tool_name,
+)
 from kimi_cli.wire.types import (
     ApprovalRequest,
     BackgroundTaskDisplayBlock,
@@ -194,9 +199,22 @@ def _flush_tool_call_part_output(
     output_function(payload, MessageType.ToolCallingPart)
     tmp_data[_TOOL_CALL_PART_EMITTED_LEN_KEY] = len(payload)
 
-# Mapping from argument-key aliases (pydantic Field(alias=...)) to the
-# canonical key used for streaming decisions, color lookup, and display.
+# Mapping from argument-key aliases to the canonical key used for
+# streaming decisions, color lookup, and display.
+#
+# This must stay in parity with the execution-side key repair in
+# ``kosong.tooling`` (the pydantic ``Field(alias=...)`` declarations plus
+# the ``FIELD_ALIASES_*`` tables applied by ``_repair_dict_for_model``):
+# the toolset repairs hallucinated keys at execution time, but the wire
+# messages shown here still carry the *raw* keys the model sent.  Keys
+# that kosong repairs but this map misses would silently lose the live
+# decoded streaming display (they fall back to a truncated 60-char
+# compact line).  Only alias targets relevant to the streaming display
+# are listed — kosong's tables contain conflicting entries for other
+# tools (e.g. ``text -> title``, ``path -> directory``) that must NOT be
+# applied here.
 _ARG_KEY_ALIASES: dict[str, str] = {
+    # pydantic Field(alias=...) declarations.
     "old_string": "old",
     "new_string": "new",
     "text": "content",
@@ -210,12 +228,35 @@ _ARG_KEY_ALIASES: dict[str, str] = {
     "items": "todos",
     "block": "wait",
     "token_kill": "deduplicate_output",
+    # kosong FIELD_ALIASES_FILE parity (common LLM key substitutions,
+    # frequent with kimi/anthropic providers — e.g. Claude's native editor
+    # uses ``old_str`` / ``new_str``).
+    "old_str": "old",
+    "new_str": "new",
+    "old_content": "old",
+    "new_content": "new",
+    "original": "old",
+    "replace_with": "new",
+    "data": "content",
+    "body": "content",
+    "file": "path",
+    "filepath": "path",
+    "filename": "path",
+    "file_name": "path",
+    "changes": "edit",
+    "modifications": "edit",
 }
 
 
 def _canonical_key(key: str) -> str:
-    """Return the canonical form of *key*, resolving pydantic Field aliases."""
-    return _ARG_KEY_ALIASES.get(key, key)
+    """Return the canonical form of *key*, resolving known LLM aliases.
+
+    Case-insensitive fallback mirrors the case-insensitive fuzzy key
+    matching applied by kosong at execution time."""
+    canonical = _ARG_KEY_ALIASES.get(key)
+    if canonical is not None:
+        return canonical
+    return _ARG_KEY_ALIASES.get(key.lower(), key)
 
 
 # Tool names eligible for streaming argument display.
@@ -234,6 +275,36 @@ _STREAM_TOOL_NAMES = frozenset({
     "Bash",
     # "Goal" and "RunGoal" removed — both are deleted
 })
+
+# Pre-normalized redirect map for tool-name resolution, mirroring
+# ``kosong.tooling._TOOL_NAME_REDIRECTS_NORMALIZED`` (built here from the
+# public table to avoid relying on a private name).
+_TOOL_NAME_REDIRECTS_NORM: dict[str, str] = {
+    normalize_tool_name(k): v for k, v in TOOL_NAME_REDIRECTS.items() if k != v
+}
+
+
+def _resolve_stream_tool_name(name: str) -> str | None:
+    """Resolve a (possibly hallucinated) tool name to a streamable tool.
+
+    Mirrors the execution-side resolution in ``kosong.tooling``
+    (``resolve_tool_name`` + ``TOOL_NAME_REDIRECTS``, applied by
+    ``KimiToolset.handle``): a model that sends ``write_file`` or
+    ``AppendFile`` has its call auto-corrected to ``WriteFile`` at
+    execution time, but the wire message shown here still carries the
+    raw name.  Without the same resolution the streaming display would
+    silently fall back to the legacy compact format for exactly those
+    calls (frequent with kimi/anthropic providers).
+
+    Returns the canonical streamable name, or ``None`` when the name
+    does not resolve to a tool in :data:`_STREAM_TOOL_NAMES`.
+    """
+    if name in _STREAM_TOOL_NAMES:
+        return name
+    resolution = resolve_tool_name(
+        name, _STREAM_TOOL_NAMES, redirects=_TOOL_NAME_REDIRECTS_NORM
+    )
+    return resolution.name
 
 # Tool-call argument keys whose (potentially very long) string values are
 # printed decoded, token by token, as they stream in from the LLM.
@@ -930,7 +1001,8 @@ def _handle_tool_call(
         else:
             session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
         if stream_tool_args:
-            if name not in _STREAM_TOOL_NAMES:
+            resolved_name = _resolve_stream_tool_name(name)
+            if resolved_name is None:
                 # Non-streamable tool: fall through to the legacy compact
                 # format path.
                 # NOTE: empty initial arguments (``args == ""``) must NOT take
@@ -950,10 +1022,14 @@ def _handle_tool_call(
                 session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
                 session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
                 _finish_tool_call_stream(session)
+                # Header shows the resolved canonical name — the name the
+                # toolset will actually execute after its own auto-correction
+                # (the raw wire name may be a hallucination such as
+                # ``write_file`` or ``AppendFile``).
                 _stream.colorful_print_word(
-                    f"⚡ {name}", fg=_tool_header_color(name), require_new_line=True, flush=True)
+                    f"⚡ {resolved_name}", fg=_tool_header_color(resolved_name), require_new_line=True, flush=True)
                 _stream._state = StreamPrintState.Other
-                printer = _ToolCallStreamPrinter(name, session)
+                printer = _ToolCallStreamPrinter(resolved_name, session)
                 session._tmp_data[_TOOL_CALL_STREAM_KEY] = printer
                 if args:
                     printer.feed(args)

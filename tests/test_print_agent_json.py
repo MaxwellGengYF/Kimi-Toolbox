@@ -1084,3 +1084,220 @@ async def test_tool_result_flushes(monkeypatch: Any) -> None:
     assert any(flush_flags), (
         "No flush=True found — tool result did not flush"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy-matching parity tests (kimi / anthropic provider policy).
+#
+# Commit e673243 ("Add fuzzy tool argument call matching to defeat
+# hallucination") made the *execution* layer (kosong.tooling) tolerate
+# hallucinated tool names (auto-correct / TOOL_NAME_REDIRECTS) and a wide
+# set of argument-key aliases (FIELD_ALIASES_FILE: old_str, new_str, data,
+# file, changes, ...).  The streaming printer in kimix/ui/stream.py still
+# only recognizes the exact names in _STREAM_TOOL_NAMES and its small
+# _ARG_KEY_ALIASES map, so calls that execute fine (after kosong repairs
+# them) silently lose the live decoded streaming display.  Kimi/Anthropic
+# models hit this frequently — e.g. Claude's native editor keys are
+# ``old_str``/``new_str`` and snake_case tool names like ``write_file``
+# are common.
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_fuzzy_alias_old_str_new_str(monkeypatch: Any) -> None:
+    """Anthropic-style EditFile: Claude's native editor uses ``old_str`` /
+    ``new_str``.  kosong's FIELD_ALIASES_FILE repairs them to ``old`` /
+    ``new`` at execution, so the streamed display must show the canonical
+    ``old:`` / ``new:`` labels with live red/green values — not a truncated
+    60-char compact fallback."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"path": "f.py", "edit": [{"old_str": "aaa", "new_str": "bbb"}]}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi(output)
+
+    assert "\nold:\n" in plain, "alias 'old_str' should display as canonical 'old:'"
+    assert "\nnew:\n" in plain, "alias 'new_str' should display as canonical 'new:'"
+    # Values streamed live with correct colors (not compact/truncated).
+    assert "\x1b[91maaa\x1b[0m" in output
+    assert "\x1b[92mbbb\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_fuzzy_alias_data_maps_to_content(monkeypatch: Any) -> None:
+    """kimi-style WriteFile: models frequently emit ``data`` (or ``body``)
+    instead of ``content``; kosong repairs it, so the display must stream it
+    under the canonical ``content:`` label."""
+    for key in ("data", "body"):
+        chunks = _capture_base_stream(monkeypatch)
+        session = FakeSession()
+        tool_call = ToolCall(
+            id=f"call-{key}",
+            function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        )
+
+        await base.print_agent_json(tool_call, session)
+        await base.print_agent_json(
+            ToolCallPart(arguments_part='{"path": "x.py", "%s": "hello world"}' % key),
+            session,
+        )
+
+        output = "".join(chunks)
+        plain = base._strip_ansi(output)
+
+        assert "\ncontent:\n" in plain, (
+            f"alias {key!r} should display as canonical 'content:': {plain!r}"
+        )
+        assert "\x1b[90mhello world\x1b[0m" in output
+        assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
+    """Models often emit ``file`` instead of ``path``; kosong repairs it.
+    The path must not be mislabeled — it stays a compact ``path:`` line."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"file": "x.py", "content": "hello"}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "\npath:\nx.py" in plain, (
+        f"alias 'file' should display as canonical 'path:': {plain!r}"
+    )
+    assert "\ncontent:\nhello" in plain
+
+
+async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
+    """kimi-style hallucinated tool name ``write_file``: kosong's
+    normalize_tool_name auto-correct resolves it to ``WriteFile`` at
+    execution, so the streaming display must kick in too — previously the
+    raw name missed ``_STREAM_TOOL_NAMES`` and the whole call fell back to
+    the legacy compact one-line format with no live streaming."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="write_file", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    # Stream printer must be created for the resolved tool.
+    assert base._TOOL_CALL_STREAM_KEY in session._tmp_data, (
+        "no stream printer for resolved name 'write_file' -> 'WriteFile'"
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"path": "x.py", "content": "hello world"}'),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi(output)
+
+    # Header shows the resolved canonical name.
+    assert "\x1b[95m\u26a1 WriteFile\x1b[0m" in output
+    assert "\ncontent:\n" in plain
+    assert "\x1b[90mhello world\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
+    """kosong's TOOL_NAME_REDIRECTS maps common wrong names onto real tools
+    (AppendFile -> WriteFile, ReplaceFile -> EditFile).  The streaming
+    display must follow the same redirect so these calls stream live."""
+    # AppendFile -> WriteFile: content streams.
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-append",
+            function=ToolCall.FunctionBody(name="AppendFile", arguments=None),
+        ),
+        session,
+    )
+    assert base._TOOL_CALL_STREAM_KEY in session._tmp_data, (
+        "no stream printer for redirected name 'AppendFile' -> 'WriteFile'"
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"path": "x.py", "content": "appended"}'),
+        session,
+    )
+    output = "".join(chunks)
+    plain = base._strip_ansi(output)
+    assert "\x1b[95m\u26a1 WriteFile\x1b[0m" in output
+    assert "\ncontent:\n" in plain
+    assert "\x1b[90mappended\x1b[0m" in output
+
+    # ReplaceFile -> EditFile: old/new stream with colors.
+    chunks2 = _capture_base_stream(monkeypatch)
+    session2 = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-replace",
+            function=ToolCall.FunctionBody(name="ReplaceFile", arguments=None),
+        ),
+        session2,
+    )
+    assert base._TOOL_CALL_STREAM_KEY in session2._tmp_data, (
+        "no stream printer for redirected name 'ReplaceFile' -> 'EditFile'"
+    )
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"path": "f.py", "edit": [{"old": "aaa", "new": "bbb"}]}'
+        ),
+        session2,
+    )
+    output2 = "".join(chunks2)
+    plain2 = base._strip_ansi(output2)
+    assert "\x1b[95m\u26a1 EditFile\x1b[0m" in output2
+    assert "\nold:\n" in plain2
+    assert "\nnew:\n" in plain2
+    assert "\x1b[91maaa\x1b[0m" in output2
+    assert "\x1b[92mbbb\x1b[0m" in output2
+
+
+async def test_stream_fuzzy_alias_changes_maps_to_edit(monkeypatch: Any) -> None:
+    """Models sometimes emit ``changes`` instead of ``edit``/``edits`` for
+    EditFile; kosong repairs the key.  The nested old/new values must still
+    stream under the canonical labels."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolCallPart(
+            arguments_part='{"path": "f.py", "changes": [{"old": "aaa", "new": "bbb"}]}'
+        ),
+        session,
+    )
+
+    output = "".join(chunks)
+    plain = base._strip_ansi(output)
+
+    assert "\nold:\n" in plain, "nested 'old' under 'changes' should still stream"
+    assert "\nnew:\n" in plain
+    assert "\x1b[91maaa\x1b[0m" in output
+    assert "\x1b[92mbbb\x1b[0m" in output
+    assert base._stream._last_char_was_newline is True
