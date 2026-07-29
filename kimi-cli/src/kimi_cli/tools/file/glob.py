@@ -275,7 +275,7 @@ def _get_gitignore_rules(root: Path) -> list[_GitignoreRule]:
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    pattern: str = Field(description="Glob pattern.")
+    pattern: str = Field(description="Glob pattern. Unsafe recursive patterns (``**``, ``**/*``, ``**/**``, etc.) are forbidden.")
     directory: str | None = Field(
         alias="path",  # common LLM variant
         description="Absolute search path. Defaults to working directory. "
