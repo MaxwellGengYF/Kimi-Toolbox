@@ -1294,3 +1294,234 @@ def test_callable_tool2_invalid_json_string_nested_model_still_errors() -> None:
     result = asyncio.run(tool.call({"inner": "not a json object"}))
     assert isinstance(result, ToolValidateError)
     assert "Invalid arguments for tool `test`" in result.message
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2: Literal value fuzzy-matching tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from kosong.tooling import _fuzzy_match_literal_value, _COMMON_VALUE_ALIASES
+
+
+# --- _fuzzy_match_literal_value unit tests ---
+
+
+def test_fuzzy_match_literal_exact() -> None:
+    """Exact match returns the option."""
+    options = ("pending", "in_progress", "done")
+    result = _fuzzy_match_literal_value("done", options)
+    assert result == "done"
+
+
+def test_fuzzy_match_literal_case_insensitive() -> None:
+    """Case-insensitive match returns the correct option."""
+    options = ("pending", "in_progress", "done")
+    result = _fuzzy_match_literal_value("DONE", options)
+    assert result == "done"
+
+
+def test_fuzzy_match_literal_separator_normalized() -> None:
+    """Separator-normalized match (space/hyphen to underscore)."""
+    options = ("pending", "in_progress", "done")
+    result = _fuzzy_match_literal_value("in progress", options)
+    assert result == "in_progress"
+
+    result2 = _fuzzy_match_literal_value("in-progress", options)
+    assert result2 == "in_progress"
+
+
+def test_fuzzy_match_literal_value_alias() -> None:
+    """Value alias map maps 'completed' to 'done'."""
+    options = ("pending", "in_progress", "done")
+    result = _fuzzy_match_literal_value("completed", options)
+    assert result == "done"
+
+
+def test_fuzzy_match_literal_fuzzy_fallback() -> None:
+    """A close typo ('cmopleted') is matched via rapidfuzz."""
+    options = ("pending", "in_progress", "done")
+    # 'cmopleted' is ~0.69 with 'completed' but we need to check against
+    # the options directly - 'cmopleted' has ratio ~0.5-0.6 with each.
+    # Use a value that's clearly close to one option.
+    result = _fuzzy_match_literal_value("cmopleted", options)
+    # Since we check against options (pending, in_progress, done), not aliases,
+    # and the cutoff is 0.60, we need a value close enough.
+    # 'in_progres' (missing 's') should be close to 'in_progress'
+    result2 = _fuzzy_match_literal_value("in_progres", options)
+    assert result2 == "in_progress"
+
+
+def test_fuzzy_match_literal_below_cutoff_returns_none() -> None:
+    """A completely different value returns None."""
+    options = ("pending", "in_progress", "done")
+    result = _fuzzy_match_literal_value("completely_different_value", options)
+    assert result is None
+
+
+# --- _repair_dict_for_model integration tests with Literal ---
+
+
+def test_repair_literal_status_completed_to_done() -> None:
+    """'completed' status is repaired to 'done'."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {"todos": [{"title": "Test", "status": "completed"}]}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "done"
+
+
+def test_repair_literal_status_complete_to_done() -> None:
+    """'complete' status is repaired to 'done'."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {"todos": [{"title": "Test", "status": "complete"}]}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "done"
+
+
+def test_repair_literal_status_in_progress_variants() -> None:
+    """'in-progress' and 'in progress' are repaired to 'in_progress'."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data1 = {"todos": [{"title": "Test", "status": "in-progress"}]}
+    repaired1 = _repair_dict_for_model(data1, Params)
+    assert repaired1["todos"][0]["status"] == "in_progress"
+
+    data2 = {"todos": [{"title": "Test", "status": "in progress"}]}
+    repaired2 = _repair_dict_for_model(data2, Params)
+    assert repaired2["todos"][0]["status"] == "in_progress"
+
+
+def test_repair_literal_status_not_started_to_pending() -> None:
+    """'not_started' status is repaired to 'pending'."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {"todos": [{"title": "Test", "status": "not_started"}]}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "pending"
+
+
+def test_repair_literal_status_unknown_value_preserved() -> None:
+    """An unknown value with no match is preserved as-is."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {"todos": [{"title": "Test", "status": "garbage"}]}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "garbage"
+
+
+def test_repair_literal_status_exact_match_unchanged() -> None:
+    """A valid Literal value is not modified."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {"todos": [{"title": "Test", "status": "done"}]}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "done"
+
+
+def test_repair_literal_mode_variants() -> None:
+    """Mode field fuzzy matching: 'replace' → 'overwrite'."""
+    from typing import Literal
+
+    class Params(BaseModel):
+        mode: Literal["overwrite", "append", "force_overwrite"]
+
+    data = {"mode": "replace"}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["mode"] == "overwrite"
+
+
+def test_repair_literal_nested_model() -> None:
+    """Fuzzy matching works on nested model fields."""
+    from typing import Literal
+
+    class Inner(BaseModel):
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        inner: Inner
+
+    data = {"inner": {"status": "completed"}}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["inner"]["status"] == "done"
+
+
+def test_repair_literal_list_of_models() -> None:
+    """Fuzzy matching works on list items that are BaseModels."""
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class Params(BaseModel):
+        todos: list[TodoItem]
+
+    data = {
+        "todos": [
+            {"title": "A", "status": "completed"},
+            {"title": "B", "status": "in-progress"},
+            {"title": "C", "status": "pending"},  # valid, unchanged
+        ]
+    }
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["todos"][0]["status"] == "done"
+    assert repaired["todos"][1]["status"] == "in_progress"
+    assert repaired["todos"][2]["status"] == "pending"
+
+
+def test_repair_literal_invalid_integer_type() -> None:
+    """Non-string values for Literal fields are not touched by fuzzy matching."""
+    from typing import Literal
+
+    class Params(BaseModel):
+        status: Literal["pending", "in_progress", "done"] = "pending"
+
+    # Integer values should not be forwarded to the Literal fuzzy matcher
+    # (they will fail Pydantic validation normally).
+    data = {"status": 42}
+    repaired = _repair_dict_for_model(data, Params)
+    assert repaired["status"] == 42

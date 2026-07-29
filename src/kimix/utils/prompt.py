@@ -622,6 +622,13 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
 
     try:
         planner_provider = base.get_default_sub_provider("planner")
+        # Deep-copy so we don't mutate the shared default provider dict
+        import copy
+        planner_provider = copy.deepcopy(planner_provider) if planner_provider else {}
+        planner_provider.setdefault("loop_control", {})
+        planner_provider["loop_control"]["compact_reminder_enabled"] = False
+        planner_provider["loop_control"]["todo_reminder_enabled"] = False
+        planner_provider["loop_control"]["target_churn_enabled"] = False
         planner_session = await _create_session_async(
             agent_type=SystemPromptType.TodoMaker,
             agent_file='agent_planner.json',

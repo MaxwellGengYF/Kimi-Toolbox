@@ -836,3 +836,42 @@ def test_repair_dict_empty_input():
 
     assert _repair_dict_for_model({}, Params) == {}
     assert _repair_dict_for_model(None, Params) == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests for Phase 1: Literal value validation (currently expected to fail)
+# ---------------------------------------------------------------------------
+
+
+def test_callable_tool2_rejects_invalid_literal_value():
+    """When a Literal field receives an invalid value, CallableTool2.call()
+    should fuzzy-match it to the closest valid option.
+
+    "completed" should be normalized to "done" via value-level fuzzy matching.
+    """
+    from typing import Literal
+
+    class TodoItem(BaseModel):
+        title: str
+        status: Literal["pending", "in_progress", "done"]
+
+    class TodoParams(BaseModel):
+        todos: list[TodoItem]
+
+    class TestTodoTool(CallableTool2[TodoParams]):
+        name: str = "TestTodo"
+        description: str = "Test todo tool"
+        params: type[TodoParams] = TodoParams
+
+        @override
+        async def __call__(self, params: TodoParams) -> ToolReturnValue:
+            return ToolOk(output="ok")
+
+    tool = TestTodoTool()
+    result = asyncio.run(tool.call({"todos": [{"title": "Test", "status": "completed"}]}))
+
+    # After Phase 2's value-level fuzzy matching, "completed" should be
+    # normalized to "done" and the call should succeed.
+    assert result == ToolOk(output="ok"), (
+        f"Expected ToolOk for 'completed' status, got {result}"
+    )

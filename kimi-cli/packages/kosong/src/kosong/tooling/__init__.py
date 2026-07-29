@@ -538,6 +538,497 @@ FIELD_ALIASES_SUBAGENT: dict[str, str] = {
     "ctx": "context",
 }
 
+# ── Common LLM value substitutions for enum/literal fields ──────────
+# Maps the *wrong* value the LLM often sends → the *correct* canonical value.
+# Applied during _repair_dict_for_model for string fields whose annotation
+# is a Literal type, as a first-pass before fuzzy matching.
+
+
+# --- TodoList status (Literal["pending", "in_progress", "done"]) ---
+# source: kimi_cli/tools/todo/__init__.py:46
+VALUE_ALIASES_STATUS: dict[str, str] = {
+    # "done" synonyms
+    "completed": "done",
+    "complete": "done",
+    "finished": "done",
+    "finished.": "done",
+    "resolved": "done",
+    "closed": "done",
+    "success": "done",
+    # "in_progress" synonyms
+    "started": "in_progress",
+    "in-progress": "in_progress",
+    "in progress": "in_progress",
+    "active": "in_progress",
+    "working": "in_progress",
+    # "pending" synonyms
+    "todo": "pending",
+    "to-do": "pending",
+    "not_started": "pending",
+    "not-started": "pending",
+    "waiting": "pending",
+    "queued": "pending",
+    "open": "pending",
+}
+
+# --- Agent store state (Literal["running", "awaiting_response", "completed"]) ---
+# source: src/kimix/tools/agent/store.py:31
+VALUE_ALIASES_AGENT_STATE: dict[str, str] = {
+    # "running" synonyms
+    "active": "running",
+    "started": "running",
+    "in_progress": "running",
+    "in-progress": "running",
+    # "awaiting_response" synonyms
+    "waiting": "awaiting_response",
+    "waiting_response": "awaiting_response",
+    "awaiting": "awaiting_response",
+    "awaiting-reply": "awaiting_response",
+    "pending_response": "awaiting_response",
+    # "completed" synonyms
+    "done": "completed",
+    "finished": "completed",
+    "complete": "completed",
+    "closed": "completed",
+}
+
+# --- Chat role (Literal["user", "assistant", "system", "tool", "error"]) ---
+# source: src/kimix/tools/agent/store.py:14
+VALUE_ALIASES_CHAT_ROLE: dict[str, str] = {
+    "human": "user",
+    "ai": "assistant",
+    "bot": "assistant",
+    "agent": "assistant",
+    "model": "assistant",
+    "llm": "assistant",
+    "sys": "system",
+    "tools": "tool",
+    "tool_call": "tool",
+    "function": "tool",
+    "err": "error",
+    "exception": "error",
+    "fail": "error",
+}
+
+# --- Mode: overwrite / append / force_overwrite ---
+# sources:
+#   kimi_cli/tools/todo/__init__.py:147 (Literal["overwrite", "append", "force_overwrite"])
+#   src/kimix/tools/note/__init__.py:36 (Literal["overwrite", "append"])
+#   kimi_cli/tools/file/write.py:73 (Literal["overwrite", "append"])
+VALUE_ALIASES_OVERWRITE_MODE: dict[str, str] = {
+    # overwrite synonyms
+    "replace": "overwrite",
+    "override": "overwrite",
+    "write": "overwrite",
+    "create": "overwrite",
+    "new": "overwrite",
+    # append synonyms
+    "merge": "append",
+    "add": "append",
+    "update": "append",
+    "extend": "append",
+    # force_overwrite synonyms
+    "force_overwrite": "force_overwrite",
+    "force": "force_overwrite",
+    "force-overwrite": "force_overwrite",
+    "force_override": "force_overwrite",
+    "forceoverride": "force_overwrite",
+    "forcewrite": "force_overwrite",
+}
+
+# --- Match mode (Literal["exact", "fuzzy"]) ---
+# sources: kimi_cli/tools/todo/__init__.py:155, kimi_cli/tools/file/replace.py:60
+VALUE_ALIASES_MATCH_MODE: dict[str, str] = {
+    "exact": "exact",
+    "strict": "exact",
+    "precise": "exact",
+    "literal": "exact",
+    "fuzzy": "fuzzy",
+    "approximate": "fuzzy",
+    "similar": "fuzzy",
+    "loose": "fuzzy",
+}
+
+# --- Process execution mode (Literal["execute", "send", "interactive"]) ---
+# sources:
+#   src/kimix/tools/py/__init__.py:51
+#   src/kimix/tools/file/bash/bash_tool.py:566
+#   src/kimix/tools/file/bash/pwsh_tool.py:193
+VALUE_ALIASES_EXEC_MODE: dict[str, str] = {
+    # execute synonyms
+    "run": "execute",
+    "exec": "execute",
+    "start": "execute",
+    "launch": "execute",
+    # send synonyms
+    "background": "send",
+    "bg": "send",
+    "async": "send",
+    "detach": "send",
+    # interactive synonyms
+    "interact": "interactive",
+    "repl": "interactive",
+    "shell": "interactive",
+}
+
+# --- Run mode (Literal["execute", "send"]) ---
+# source: src/kimix/tools/file/run.py:89
+VALUE_ALIASES_RUN_MODE: dict[str, str] = {
+    # execute synonyms
+    "run": "execute",
+    "exec": "execute",
+    "start": "execute",
+    # send synonyms
+    "background": "send",
+    "bg": "send",
+    "async": "send",
+    "detach": "send",
+}
+
+# --- Compact mode (str: auto/retentive/balanced/aggressive/technical) ---
+# source: src/kimix/tools/context/__init__.py:54
+VALUE_ALIASES_COMPACT_MODE: dict[str, str] = {
+    "auto": "auto",
+    "automatic": "auto",
+    "default": "auto",
+    # retentive synonyms
+    "retentive": "retentive",
+    "retain": "retentive",
+    "keep": "retentive",
+    "detailed": "retentive",
+    "full": "retentive",
+    # balanced synonyms
+    "balanced": "balanced",
+    "balance": "balanced",
+    "medium": "balanced",
+    "normal": "balanced",
+    "moderate": "balanced",
+    # aggressive synonyms
+    "aggressive": "aggressive",
+    "short": "aggressive",
+    "minimal": "aggressive",
+    "compact": "aggressive",
+    "tiny": "aggressive",
+    # technical synonyms
+    "technical": "technical",
+    "tech": "technical",
+    "code": "technical",
+    "detail": "technical",
+}
+
+# --- ContextPrune mode (Literal["prune", "compact", "strip_reasoning"]) ---
+# source: kimi_cli/tools/context_prune.py:38
+VALUE_ALIASES_PRUNE_MODE: dict[str, str] = {
+    "prune": "prune",
+    "trim": "prune",
+    "clean": "prune",
+    "shrink": "prune",
+    "remove": "prune",
+    # compact synonyms
+    "compact": "compact",
+    "compress": "compact",
+    "summarize": "compact",
+    "reduce": "compact",
+    # strip_reasoning synonyms
+    "strip_reasoning": "strip_reasoning",
+    "strip": "strip_reasoning",
+    "reasoning": "strip_reasoning",
+    "thinking": "strip_reasoning",
+    "strip-thinking": "strip_reasoning",
+}
+
+# --- Swarm mode (Literal["fanout", "parallel_sample"]) ---
+# source: src/kimix/tools/swarm/__init__.py:70
+VALUE_ALIASES_SWARM_MODE: dict[str, str] = {
+    "fanout": "fanout",
+    "fan": "fanout",
+    "fan_out": "fanout",
+    "fan-out": "fanout",
+    "decompose": "fanout",
+    "split": "fanout",
+    # parallel_sample synonyms
+    "parallel_sample": "parallel_sample",
+    "parallel": "parallel_sample",
+    "sample": "parallel_sample",
+    "best_of_n": "parallel_sample",
+    "best-of-n": "parallel_sample",
+    "bestofn": "parallel_sample",
+    "bonsai": "parallel_sample",
+}
+
+# --- Swarm selector (Literal["self_eval", "majority"]) ---
+# source: src/kimix/tools/swarm/__init__.py:80
+VALUE_ALIASES_SWARM_SELECTOR: dict[str, str] = {
+    "self_eval": "self_eval",
+    "self": "self_eval",
+    "self-eval": "self_eval",
+    "selfeval": "self_eval",
+    "auto": "self_eval",
+    "model": "self_eval",
+    # majority synonyms
+    "majority": "majority",
+    "major": "majority",
+    "vote": "majority",
+    "voting": "majority",
+    "consensus": "majority",
+}
+
+# --- history_format (Literal["json", "markdown", "summary"]) ---
+# source: src/kimix/tools/agent/__init__.py:59
+VALUE_ALIASES_HISTORY_FORMAT: dict[str, str] = {
+    "json": "json",
+    "raw": "json",
+    "dict": "json",
+    # markdown synonyms
+    "markdown": "markdown",
+    "md": "markdown",
+    "markup": "markdown",
+    "rich": "markdown",
+    "formatted": "markdown",
+    # summary synonyms
+    "summary": "summary",
+    "summarize": "summary",
+    "summ": "summary",
+    "brief": "summary",
+    "concise": "summary",
+    "short": "summary",
+}
+
+# --- TaskOutput action (Literal["get", "list", "kill"]) ---
+# source: src/kimix/tools/background/__init__.py:23
+VALUE_ALIASES_TASK_ACTION: dict[str, str] = {
+    "get": "get",
+    "fetch": "get",
+    "retrieve": "get",
+    "show": "get",
+    "output": "get",
+    "read": "get",
+    # list synonyms
+    "list": "list",
+    "ls": "list",
+    "all": "list",
+    "tasks": "list",
+    "status": "list",
+    # kill synonyms
+    "kill": "kill",
+    "stop": "kill",
+    "terminate": "kill",
+    "force": "kill",
+    "cancel": "kill",
+    "end": "kill",
+}
+
+# --- Memory action (Literal["write", "append", "read", "list", "search"]) ---
+# source: kimi_cli/tools/memory/__init__.py:237
+VALUE_ALIASES_MEMORY_ACTION: dict[str, str] = {
+    "write": "write",
+    "set": "write",
+    "put": "write",
+    "create": "write",
+    "save": "write",
+    "store": "write",
+    # append synonyms
+    "append": "append",
+    "add": "append",
+    "push": "append",
+    "patch": "append",
+    "extend": "append",
+    # read synonyms
+    "read": "read",
+    "get": "read",
+    "fetch": "read",
+    "retrieve": "read",
+    "load": "read",
+    "view": "read",
+    # list synonyms
+    "list": "list",
+    "ls": "list",
+    "all": "list",
+    "topics": "list",
+    "keys": "list",
+    # search synonyms
+    "search": "search",
+    "query": "search",
+    "find": "search",
+    "lookup": "search",
+    "filter": "search",
+}
+
+# --- HTTP method (Literal["GET", "POST"]) ---
+# source: kimi_cli/tools/web/fetch.py:23
+VALUE_ALIASES_HTTP_METHOD: dict[str, str] = {
+    "GET": "GET",
+    "get": "GET",
+    "fetch": "GET",
+    "download": "GET",
+    # POST synonyms
+    "POST": "POST",
+    "post": "POST",
+    "send": "POST",
+    "submit": "POST",
+    "upload": "POST",
+    "put": "POST",
+    "patch": "POST",
+}
+
+# --- Grep output_mode (Literal["files_with_matches", "count_matches", "content"]) ---
+# source: kimi_cli/tools/file/grep_local.py:76
+VALUE_ALIASES_GREP_OUTPUT: dict[str, str] = {
+    "files_with_matches": "files_with_matches",
+    "files": "files_with_matches",
+    "file": "files_with_matches",
+    "filenames": "files_with_matches",
+    # count_matches synonyms
+    "count_matches": "count_matches",
+    "count": "count_matches",
+    "matches": "count_matches",
+    "stats": "count_matches",
+    # content synonyms
+    "content": "content",
+    "body": "content",
+    "full": "content",
+    "text": "content",
+    "lines": "content",
+    "detail": "content",
+}
+
+# --- HashLine op (Literal["replace", "append", "prepend", "delete"]) ---
+# source: kimi_cli/tools/file/hash_line.py:126-145
+VALUE_ALIASES_HASHLINE_OP: dict[str, str] = {
+    "replace": "replace",
+    "change": "replace",
+    "edit": "replace",
+    "set": "replace",
+    "update": "replace",
+    "modify": "replace",
+    # append synonyms
+    "append": "append",
+    "add": "append",
+    "insert_after": "append",
+    # prepend synonyms
+    "prepend": "prepend",
+    "insert": "prepend",
+    "before": "prepend",
+    "insert_before": "prepend",
+    # delete synonyms
+    "delete": "delete",
+    "remove": "delete",
+    "del": "delete",
+    "erase": "delete",
+    "drop": "delete",
+}
+
+# --- read_media kind (Literal["untouched", "downsampled", "crop", "full"]) ---
+# source: kimi_cli/tools/file/read_media.py:232
+VALUE_ALIASES_MEDIA_KIND: dict[str, str] = {
+    "untouched": "untouched",
+    "original": "untouched",
+    "raw": "untouched",
+    "passthrough": "untouched",
+    "none": "untouched",
+    # downsampled synonyms
+    "downsampled": "downsampled",
+    "downsample": "downsampled",
+    "down": "downsampled",
+    "small": "downsampled",
+    "reduced": "downsampled",
+    "lowres": "downsampled",
+    # crop synonyms
+    "crop": "crop",
+    "cropped": "crop",
+    "trim": "crop",
+    "region": "crop",
+    # full synonyms
+    "full": "full",
+    "complete": "full",
+    "entire": "full",
+    "highres": "full",
+    "maximum": "full",
+}
+
+# --- read_media file type (Literal["image", "video"]) ---
+# source: kimi_cli/tools/file/read_media.py:250
+VALUE_ALIASES_MEDIA_TYPE: dict[str, str] = {
+    "image": "image",
+    "img": "image",
+    "picture": "image",
+    "photo": "image",
+    # video synonyms
+    "video": "video",
+    "vid": "video",
+    "movie": "video",
+    "clip": "video",
+}
+
+# --- file utils kind (Literal["text", "image", "video", "unknown"]) ---
+# source: kimi_cli/tools/file/utils.py:179
+VALUE_ALIASES_FILE_KIND: dict[str, str] = {
+    "text": "text",
+    "txt": "text",
+    "string": "text",
+    # image synonyms
+    "image": "image",
+    "img": "image",
+    "picture": "image",
+    # video synonyms
+    "video": "video",
+    "vid": "video",
+    "movie": "video",
+    # unknown synonyms
+    "unknown": "unknown",
+    "other": "unknown",
+    "binary": "unknown",
+    "data": "unknown",
+}
+
+# --- boolean value aliases (general-purpose) ---
+VALUE_ALIASES_BOOL_STR: dict[str, str] = {
+    "true": "true",
+    "True": "true",
+    "yes": "true",
+    "on": "true",
+    "1": "true",
+    "enable": "true",
+    "enabled": "true",
+    "false": "false",
+    "False": "false",
+    "no": "false",
+    "off": "false",
+    "0": "false",
+    "disable": "false",
+    "disabled": "false",
+}
+
+# Merged common value aliases for general use
+# NOTE: Put STATUS last to override overlapping keys from AGENT_STATE
+# (e.g. "complete" → "done" for status, not "completed" for agent state).
+# The _fuzzy_match_literal_value function validates candidates against the
+# actual Literal options, so the correct option is selected per context.
+_COMMON_VALUE_ALIASES: dict[str, str] = {
+    **VALUE_ALIASES_AGENT_STATE,
+    **VALUE_ALIASES_BOOL_STR,
+    **VALUE_ALIASES_CHAT_ROLE,
+    **VALUE_ALIASES_COMPACT_MODE,
+    **VALUE_ALIASES_EXEC_MODE,
+    **VALUE_ALIASES_FILE_KIND,
+    **VALUE_ALIASES_GREP_OUTPUT,
+    **VALUE_ALIASES_HASHLINE_OP,
+    **VALUE_ALIASES_HISTORY_FORMAT,
+    **VALUE_ALIASES_HTTP_METHOD,
+    **VALUE_ALIASES_MATCH_MODE,
+    **VALUE_ALIASES_MEDIA_KIND,
+    **VALUE_ALIASES_MEDIA_TYPE,
+    **VALUE_ALIASES_MEMORY_ACTION,
+    **VALUE_ALIASES_OVERWRITE_MODE,
+    **VALUE_ALIASES_PRUNE_MODE,
+    **VALUE_ALIASES_RUN_MODE,
+    **VALUE_ALIASES_SWARM_MODE,
+    **VALUE_ALIASES_SWARM_SELECTOR,
+    **VALUE_ALIASES_TASK_ACTION,
+    **VALUE_ALIASES_STATUS,  # last so it overrides overlapping generic keys
+}
+
+
 # Merge all categories into the common set for backward compatibility.
 _COMMON_FIELD_ALIASES: dict[str, str] = {
     **FIELD_ALIASES_GENERAL,
@@ -667,6 +1158,40 @@ def _apply_constraints(value: Any, constraints: tuple[float | int | None, float 
     return clamped if clamped != value else None
 
 
+def _resolve_literal_options(annotation: Any) -> tuple[str, ...] | None:
+    """Extract string literal values from a Literal type annotation.
+
+    Returns a tuple of allowed string values if the annotation is a
+    ``Literal["a", "b", ...]``, otherwise returns ``None``.
+    Supports generic originals like ``typing.Literal``, plain
+    ``Literal`` (Python 3.8+), and nested Optional/Union wrappers.
+    """
+    origin = typing.get_origin(annotation)
+    if origin is None:
+        return None
+    origin_name = getattr(origin, "__name__", getattr(origin, "_name", ""))
+
+    # Handle Literal directly
+    if origin_name == "Literal":
+        args = typing.get_args(annotation)
+        if not args:
+            return None
+        # Only return string literals
+        options = tuple(a for a in args if isinstance(a, str))
+        return options if options else None
+
+    # Handle Union / Optional wrappers: unwrap and check inner type
+    if origin_name in ("Union", "Optional"):
+        args = typing.get_args(annotation)
+        for arg in args:
+            if arg is not type(None):
+                result = _resolve_literal_options(arg)
+                if result is not None:
+                    return result
+
+    return None
+
+
 @lru_cache(maxsize=512)
 def _cached_model_field_info(model: type[BaseModel]) -> tuple[
     dict[str, str],
@@ -676,6 +1201,7 @@ def _cached_model_field_info(model: type[BaseModel]) -> tuple[
         tuple[float | int | None, float | int | None, bool, bool] | None,
         bool,
         type | None,
+        tuple[str, ...] | None,  # literal_options (added for value-level fuzzy matching)
     ]],
     bool,
     frozenset[str],
@@ -684,7 +1210,7 @@ def _cached_model_field_info(model: type[BaseModel]) -> tuple[
 
     Returns ``(known, field_meta, extra_forbid, valid_names)`` where
     ``field_meta`` tuples contain:
-    ``(field_name, nested_model, constraints, is_list, scalar_type)``.
+    ``(field_name, nested_model, constraints, is_list, scalar_type, literal_options)``.
     """
     known: dict[str, str] = {}
     field_meta: list[tuple[
@@ -693,6 +1219,7 @@ def _cached_model_field_info(model: type[BaseModel]) -> tuple[
         tuple[float | int | None, float | int | None, bool, bool] | None,
         bool,
         type | None,
+        tuple[str, ...] | None,
     ]] = []
     extra_forbid = model.model_config.get("extra") == "forbid"
 
@@ -710,7 +1237,8 @@ def _cached_model_field_info(model: type[BaseModel]) -> tuple[
         origin_name = getattr(origin, "__name__", "") if origin is not None else ""
         is_list = origin_name == "list"
         scalar_type = _resolve_scalar_type(finfo.annotation)
-        field_meta.append((fname, nested, constraints, is_list, scalar_type))
+        literal_options = _resolve_literal_options(finfo.annotation)
+        field_meta.append((fname, nested, constraints, is_list, scalar_type, literal_options))
 
     return known, field_meta, extra_forbid, frozenset(model.model_fields.keys())
 
@@ -787,6 +1315,57 @@ def _fuzzy_match_keys(
         used.add(matched_key)
         result[missing_field] = matched_key
     return result
+
+
+@lru_cache(maxsize=2048)
+def _fuzzy_match_literal_value(
+    value: str,
+    options: tuple[str, ...],
+) -> str | None:
+    """Attempt to fuzzy-match a string value to a set of Literal options.
+
+    1. Try exact match (case-insensitive, separator-normalized).
+    2. Try the ``_COMMON_VALUE_ALIASES`` map.
+    3. Try rapidfuzz fuzzy matching against each option.
+
+    Returns the matched canonical option, or ``None`` if no match found.
+    """
+    from kosong.tooling import _COMMON_VALUE_ALIASES
+
+    # Normalize: strip, lowercase, normalize separators.
+    norm_val = value.strip().lower().replace("-", "_").replace(" ", "_")
+
+    # 1. Direct match (case-insensitive, separator-normalized) against options.
+    for opt in options:
+        norm_opt = opt.lower().replace("-", "_").replace(" ", "_")
+        if norm_val == norm_opt:
+            return opt
+
+    # 2. Try the value aliases map.
+    if norm_val in _COMMON_VALUE_ALIASES:
+        candidate = _COMMON_VALUE_ALIASES[norm_val]
+        # Verify the alias target is actually one of the valid options.
+        if candidate in options or candidate.lower() in (o.lower() for o in options):
+            return candidate
+
+    # Also try the raw (un-normalized) value in the alias map.
+    raw_val = value.strip()
+    if raw_val in _COMMON_VALUE_ALIASES:
+        candidate = _COMMON_VALUE_ALIASES[raw_val]
+        if candidate in options or candidate.lower() in (o.lower() for o in options):
+            return candidate
+
+    # 3. Fuzzy match via rapidfuzz.
+    best_score = 0.60  # cutoff
+    best_match: str | None = None
+    for opt in options:
+        # Use cached ratio for repeated comparisons.
+        ratio = _sequence_ratio(norm_val, opt.lower().replace("-", "_").replace(" ", "_"))
+        if ratio > best_score:
+            best_score = ratio
+            best_match = opt
+
+    return best_match
 
 
 @lru_cache(maxsize=2048)
@@ -1489,7 +2068,7 @@ def _repair_dict_for_model(
         mapped[missing_field] = mapped.pop(matched_key)
 
     # Fourth pass: recurse, clamp, fix list/scalar, coerce, all in one loop.
-    for fname, nested, constraints, is_list, scalar_type in field_meta:
+    for fname, nested, constraints, is_list, scalar_type, literal_options in field_meta:
         if fname not in mapped:
             continue
         val = mapped[fname]
@@ -1532,6 +2111,15 @@ def _repair_dict_for_model(
             coerced = _coerce_value(val, scalar_type)
             if coerced is not None:
                 mapped[fname] = coerced
+
+        # Fuzzy-match Literal string values to valid options.
+        # Always attempt fuzzy matching so that separator-normalized values
+        # (e.g. "in-progress" → "in_progress") and aliases (e.g. "completed" →
+        # "done") are corrected before Pydantic validation.
+        if literal_options is not None and isinstance(val, str):
+            matched = _fuzzy_match_literal_value(val, literal_options)
+            if matched is not None and matched != val:
+                mapped[fname] = matched
 
     # Fifth pass: strip unmapped keys for "extra=forbid" models.
     if extra_forbid:
