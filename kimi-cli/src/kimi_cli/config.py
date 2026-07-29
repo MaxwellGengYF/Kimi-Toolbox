@@ -174,7 +174,7 @@ Default is 3."""
     """Minimum number of steps between repeated todo reminder injections when
     the todo list has not changed. Default is 20."""
 
-    target_churn_enabled: bool = Field(default=True)
+    target_churn_enabled: bool = Field(default=False)
     """When true, inject a reminder when the agent repeatedly modifies the same
     file target (across different tools) or hits the same normalized error
     repeatedly — loop shapes that per-call streak detection cannot catch.
