@@ -522,6 +522,32 @@ def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config,
                 if hasattr(bc, key):
                     setattr(bc, key, value)
             cfg.background = bc
+        # Set services (moonshot_search, moonshot_fetch)
+        services = provider_dict.get('services')
+        if services and isinstance(services, dict):
+            from kimi_cli.config import MoonshotSearchConfig, MoonshotFetchConfig
+            search_cfg = services.get('moonshot_search')
+            if search_cfg and isinstance(search_cfg, dict):
+                cfg.services.moonshot_search = MoonshotSearchConfig(
+                    base_url=search_cfg.get('base_url', ''),
+                    api_key=SecretStr(search_cfg.get('api_key', '')),
+                    custom_headers=search_cfg.get('custom_headers'),
+                    oauth=(
+                        OAuthRef(key=search_cfg['oauth'].get('key', ''), storage=search_cfg['oauth'].get('storage', 'file'))
+                        if isinstance(search_cfg.get('oauth'), dict) else None
+                    ),
+                )
+            fetch_cfg = services.get('moonshot_fetch')
+            if fetch_cfg and isinstance(fetch_cfg, dict):
+                cfg.services.moonshot_fetch = MoonshotFetchConfig(
+                    base_url=fetch_cfg.get('base_url', ''),
+                    api_key=SecretStr(fetch_cfg.get('api_key', '')),
+                    custom_headers=fetch_cfg.get('custom_headers'),
+                    oauth=(
+                        OAuthRef(key=fetch_cfg['oauth'].get('key', ''), storage=fetch_cfg['oauth'].get('storage', 'file'))
+                        if isinstance(fetch_cfg.get('oauth'), dict) else None
+                    ),
+                )
         # Warn about unrecognized keys in provider_dict.
         # recognized_keys must contain every key that is explicitly consumed above
         # this point (including nested-dict keys handled via getattr checks), plus
@@ -532,6 +558,7 @@ def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config,
             "api_key", "oauth", "openai_settings", "custom_headers", "loop_control",
             "show_thinking_stream", "notifications", "mcp", "max_tokens",
             "thinking_effort", "temperature", "top_p", "top_k", "background",
+            "services",
             "model_name", "name", "role", 
         }
         unrecognized_keys = [k for k in provider_dict if k not in recognized_keys]

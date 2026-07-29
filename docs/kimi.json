@@ -13,6 +13,16 @@
         "key": "my-key"
     },
     "env": {},
+    "services": {
+        "moonshot_search": {
+            "base_url": "https://api.moonshot.cn/v1/search",
+            "api_key": "sk-xxx"
+        },
+        "moonshot_fetch": {
+            "base_url": "https://api.moonshot.cn/v1/fetch",
+            "api_key": "sk-xxx"
+        }
+    },
     "max_tokens": 65536,
     "thinking_effort": "max",
     "show_thinking_stream": true,

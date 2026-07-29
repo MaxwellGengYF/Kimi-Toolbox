@@ -20,6 +20,7 @@
       "kimi_cli.tools.file:Glob",
       "kimi_cli.tools.file:Grep",
       "kimix.tools.web.fetch_url:FetchURL",
+      "kimi_cli.tools.web:SearchWeb",
       "kimix.tools.context:ContextUsage",
       "kimix.tools.context:Compact"
     ]
