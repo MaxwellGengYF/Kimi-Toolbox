@@ -52,7 +52,7 @@ class FetchURL(CallableTool2[Params]):
     def __init__(self, config: Config, runtime: Runtime):
         super().__init__()
         self._runtime = runtime
-        self._service_config = config.services.moonshot_fetch
+        self._service_config = config.services.fetch
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:

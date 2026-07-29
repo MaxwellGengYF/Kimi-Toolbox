@@ -522,13 +522,13 @@ def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config,
                 if hasattr(bc, key):
                     setattr(bc, key, value)
             cfg.background = bc
-        # Set services (moonshot_search, moonshot_fetch)
+        # Set services (search, fetch)
         services = provider_dict.get('services')
         if services and isinstance(services, dict):
-            from kimi_cli.config import MoonshotSearchConfig, MoonshotFetchConfig
-            search_cfg = services.get('moonshot_search')
+            from kimi_cli.config import SearchConfig, FetchConfig
+            search_cfg = services.get('search')
             if search_cfg and isinstance(search_cfg, dict):
-                cfg.services.moonshot_search = MoonshotSearchConfig(
+                cfg.services.search = SearchConfig(
                     base_url=search_cfg.get('base_url', ''),
                     api_key=SecretStr(search_cfg.get('api_key', '')),
                     custom_headers=search_cfg.get('custom_headers'),
@@ -537,9 +537,9 @@ def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config,
                         if isinstance(search_cfg.get('oauth'), dict) else None
                     ),
                 )
-            fetch_cfg = services.get('moonshot_fetch')
+            fetch_cfg = services.get('fetch')
             if fetch_cfg and isinstance(fetch_cfg, dict):
-                cfg.services.moonshot_fetch = MoonshotFetchConfig(
+                cfg.services.fetch = FetchConfig(
                     base_url=fetch_cfg.get('base_url', ''),
                     api_key=SecretStr(fetch_cfg.get('api_key', '')),
                     custom_headers=fetch_cfg.get('custom_headers'),

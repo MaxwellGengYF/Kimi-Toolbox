@@ -408,13 +408,13 @@ class NotificationConfig(BaseModel):
     claim_stale_after_ms: int = Field(default=15_000, ge=1000)
 
 
-class MoonshotSearchConfig(BaseModel):
-    """Moonshot Search configuration."""
+class SearchConfig(BaseModel):
+    """Search service configuration."""
 
     base_url: str
-    """Base URL for Moonshot Search service."""
+    """Base URL for the search service."""
     api_key: SecretStr
-    """API key for Moonshot Search service."""
+    """API key for the search service."""
     custom_headers: dict[str, str] | None = None
     """Custom headers to include in API requests."""
     oauth: OAuthRef | None = None
@@ -425,13 +425,13 @@ class MoonshotSearchConfig(BaseModel):
         return v.get_secret_value()
 
 
-class MoonshotFetchConfig(BaseModel):
-    """Moonshot Fetch configuration."""
+class FetchConfig(BaseModel):
+    """Fetch service configuration."""
 
     base_url: str
-    """Base URL for Moonshot Fetch service."""
+    """Base URL for the fetch service."""
     api_key: SecretStr
-    """API key for Moonshot Fetch service."""
+    """API key for the fetch service."""
     custom_headers: dict[str, str] | None = None
     """Custom headers to include in API requests."""
     oauth: OAuthRef | None = None
@@ -445,10 +445,10 @@ class MoonshotFetchConfig(BaseModel):
 class Services(BaseModel):
     """Services configuration."""
 
-    moonshot_search: MoonshotSearchConfig | None = None
-    """Moonshot Search configuration."""
-    moonshot_fetch: MoonshotFetchConfig | None = None
-    """Moonshot Fetch configuration."""
+    search: SearchConfig | None = None
+    """Search service configuration."""
+    fetch: FetchConfig | None = None
+    """Fetch service configuration."""
 
 
 class MCPClientConfig(BaseModel):

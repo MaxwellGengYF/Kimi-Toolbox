@@ -19,7 +19,7 @@ from pydantic import SecretStr
 
 from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.background import BackgroundTaskManager
-from kimi_cli.config import Config, MoonshotSearchConfig, get_default_config
+from kimi_cli.config import Config, SearchConfig, get_default_config
 from kimi_cli.llm import ALL_MODEL_CAPABILITIES, LLM
 from kimi_cli.metadata import WorkDirMeta
 from kimi_cli.notifications import NotificationManager
@@ -49,7 +49,7 @@ from kimi_cli.wire.file import WireFile
 def config() -> Config:
     """Create a Config instance."""
     conf = get_default_config()
-    conf.services.moonshot_search = MoonshotSearchConfig(
+    conf.services.search = SearchConfig(
         base_url="https://api.kimi.com/coding/v1/search",
         api_key=SecretStr("test-api-key"),
     )

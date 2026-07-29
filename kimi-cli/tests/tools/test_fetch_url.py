@@ -220,8 +220,8 @@ This is a markdown document.
 
 
 async def test_fetch_url_with_service(runtime) -> None:
-    """Test fetching using the moonshot_fetch service."""
-    from kimi_cli.config import Config, MoonshotFetchConfig, Services
+    """Test fetching using the fetch service."""
+    from kimi_cli.config import Config, FetchConfig, Services
     from pydantic import SecretStr
 
     # Setup mock service response
@@ -253,7 +253,7 @@ async def test_fetch_url_with_service(runtime) -> None:
         # Configure tool with service
         config = Config(
             services=Services(
-                moonshot_fetch=MoonshotFetchConfig(
+                fetch=FetchConfig(
                     base_url=service_url,
                     api_key=SecretStr("test-key"),
                     custom_headers={"X-Custom-Header": "custom-value"},

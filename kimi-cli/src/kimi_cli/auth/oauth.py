@@ -31,8 +31,8 @@ from kimi_cli.config import (
     Config,
     LLMModel,
     LLMProvider,
-    MoonshotFetchConfig,
-    MoonshotSearchConfig,
+    FetchConfig,
+    SearchConfig,
     OAuthRef,
     save_config,
 )
@@ -620,14 +620,14 @@ def _apply_kimi_code_config(
     config.default_thinking = thinking
 
     if platform.search_url:
-        config.services.moonshot_search = MoonshotSearchConfig(
+        config.services.search = SearchConfig(
             base_url=platform.search_url,
             api_key=SecretStr(""),
             oauth=oauth_ref,
         )
 
     if platform.fetch_url:
-        config.services.moonshot_fetch = MoonshotFetchConfig(
+        config.services.fetch = FetchConfig(
             base_url=platform.fetch_url,
             api_key=SecretStr(""),
             oauth=oauth_ref,
@@ -756,8 +756,8 @@ async def logout_kimi_code(config: Config) -> AsyncIterator[OAuthEvent]:
         config.provider = None
         config.model = None
 
-    config.services.moonshot_search = None
-    config.services.moonshot_fetch = None
+    config.services.search = None
+    config.services.fetch = None
 
     save_config(config)
     yield OAuthEvent("success", "Logged out successfully.")
@@ -779,8 +779,8 @@ class OAuthManager:
         if provider is not None and provider.oauth:
             refs.append(provider.oauth)
         for service in (
-            self._config.services.moonshot_search,
-            self._config.services.moonshot_fetch,
+            self._config.services.search,
+            self._config.services.fetch,
         ):
             if service and service.oauth:
                 refs.append(service.oauth)
@@ -805,8 +805,8 @@ class OAuthManager:
             provider.oauth = _migrate_ref(provider.oauth)
 
         for service in (
-            self._config.services.moonshot_search,
-            self._config.services.moonshot_fetch,
+            self._config.services.search,
+            self._config.services.fetch,
         ):
             if service and service.oauth:
                 service.oauth = _migrate_ref(service.oauth)
@@ -884,8 +884,8 @@ class OAuthManager:
         if provider is not None and provider.oauth:
             return provider.oauth
         for service in (
-            self._config.services.moonshot_search,
-            self._config.services.moonshot_fetch,
+            self._config.services.search,
+            self._config.services.fetch,
         ):
             if service and service.oauth and service.oauth.key == KIMI_CODE_OAUTH_KEY:
                 return service.oauth

@@ -14,11 +14,11 @@
     },
     "env": {},
     "services": {
-        "moonshot_search": {
+        "search": {
             "base_url": "https://api.moonshot.cn/v1/search",
             "api_key": "sk-xxx"
         },
-        "moonshot_fetch": {
+        "fetch": {
             "base_url": "https://api.moonshot.cn/v1/fetch",
             "api_key": "sk-xxx"
         }

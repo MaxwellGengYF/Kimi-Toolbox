@@ -86,7 +86,7 @@ def test_default_config_dump():
             "notifications": {
                 "claim_stale_after_ms": 15000,
             },
-            "services": {"moonshot_search": None, "moonshot_fetch": None},
+            "services": {"search": None, "fetch": None},
             "mcp": {"client": {"tool_call_timeout_ms": 60000}},
             "hooks": [],
             "merge_all_available_skills": True,
