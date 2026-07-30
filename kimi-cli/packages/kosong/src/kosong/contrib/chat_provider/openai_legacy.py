@@ -47,13 +47,25 @@ if TYPE_CHECKING:
 
 
 def _reasoning_effort_to_extra_body_level(reasoning_effort: ReasoningEffort | Omit | None) -> str:
-    """Map ReasoningEffort to the three-level effort string for extra_body.reasoning.effort."""
+    """Map ReasoningEffort to the three-level effort string for extra_body.reasoning.effort.
+
+    Standard ``ReasoningEffort`` values (``low``, ``medium``, ``high``) are
+    preserved.  Non-standard values (``max``, ``xhigh``, …) are passed through
+    as-is so that all ``extra_body`` fields that encode effort remain
+    consistent with each other.
+    """
     if reasoning_effort is None or reasoning_effort is omit:
         return "no_think"
     if reasoning_effort in ("low", "minimal"):
         return "low"
-    # medium, high, xhigh → high
-    return "high"
+    if reasoning_effort == "medium":
+        return "medium"
+    if reasoning_effort == "high":
+        return "high"
+    # Non-standard values (max, xhigh, …) – pass through unchanged
+    # so that extra_body.reasoning.effort, chat_template_kwargs.reasoning_effort,
+    # and extra_body.reasoning_effort all carry the same value.
+    return cast(str, reasoning_effort)
 
 
 class OpenAILegacy(OpenAICompatibleProviderMixin):
@@ -220,7 +232,6 @@ class OpenAILegacy(OpenAICompatibleProviderMixin):
         if reasoning_effort is not omit:
             extra_body = generation_kwargs.setdefault("extra_body", {})
             extra_body["reasoning_effort"] = reasoning_effort
-            reasoning_effort = omit
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
