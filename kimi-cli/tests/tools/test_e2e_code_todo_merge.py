@@ -174,8 +174,9 @@ class TestE2ECodeTodo:
         """system_prompt.py no longer mentions Goal/RunGoal tools."""
         import ast
         import sys
-        sys.path.insert(0, "src")
-        with open("src/kimix/utils/system_prompt.py", encoding="utf-8") as f:
+        root = Path(__file__).parent.parent.parent.parent
+        sys.path.insert(0, str(root / "src"))
+        with open(root / "src/kimix/utils/system_prompt.py", encoding="utf-8") as f:
             content = f.read()
         # Should NOT contain old Goal reference
         assert "define the goal with the `Goal` tool" not in content
@@ -185,7 +186,8 @@ class TestE2ECodeTodo:
 
     def test_base_py_no_goal_run_goal(self) -> None:
         """base.py no longer handles Goal/RunGoal in format_tool_args."""
-        with open("src/kimix/base.py", encoding="utf-8") as f:
+        root = Path(__file__).parent.parent.parent.parent
+        with open(root / "src/kimix/base.py", encoding="utf-8") as f:
             content = f.read()
         # Check _format_tool_args no longer has Goal/RunGoal cases
         assert 'case "Goal":' not in content, "base.py still has case 'Goal' in _format_tool_args"

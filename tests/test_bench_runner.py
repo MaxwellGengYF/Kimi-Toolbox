@@ -8,6 +8,8 @@ from pathlib import Path
 import orjson
 import pytest
 
+pytest.importorskip("tools.bench")
+
 from tools.bench.attribute_failures import (
     attribute_runs,
     build_attribution_report,

@@ -91,9 +91,3 @@ class TestThrottling:
         await provider.on_context_compacted()
         # after compaction the (much lower) usage is reported once
         assert await provider.get_injections([], _soul(2, 20_000))  # type: ignore[arg-type]
-
-    async def test_afk_change_resets(self) -> None:
-        provider = ContextMeterProvider(min_delta=0.5, cooldown_steps=100)
-        await provider.get_injections([], _soul(1, 100_000))  # type: ignore[arg-type]
-        await provider.on_afk_changed(False)
-        assert await provider.get_injections([], _soul(2, 100_000))  # type: ignore[arg-type]

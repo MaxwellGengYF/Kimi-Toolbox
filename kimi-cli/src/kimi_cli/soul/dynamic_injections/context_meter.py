@@ -55,6 +55,7 @@ class ContextMeterProvider(DynamicInjectionProvider):
         self._has_injected_before: bool = False
         self._last_injected_step: int | None = None
         self._last_injected_usage: float | None = None
+        self._compaction_pending: bool = False
 
     async def get_injections(
         self,
@@ -86,9 +87,12 @@ class ContextMeterProvider(DynamicInjectionProvider):
                 if steps_since < self._cooldown_steps or usage_delta < self._min_delta:
                     return []
         else:
-            # First-ever call — require minimum usage to avoid premature reminders.
-            if usage < self._min_usage:
+            # First-ever call — require minimum usage to avoid premature reminders,
+            # unless we just came out of a compaction (where the fresh lower usage
+            # should be reported even if it's below the threshold).
+            if usage < self._min_usage and not self._compaction_pending:
                 return []
+        self._compaction_pending = False
 
         self._has_injected_before = True
         self._last_injected_step = step_no
@@ -102,9 +106,13 @@ class ContextMeterProvider(DynamicInjectionProvider):
 
     async def on_context_compacted(self) -> None:
         """Reset so the post-compaction (much lower) usage is reported once."""
+        self._has_injected_before = False
         self._last_injected_step = None
         self._last_injected_usage = None
+        self._compaction_pending = True
 
     async def on_afk_changed(self, enabled: bool) -> None:
         _ = enabled
-        # AFK mode does not change context pressure; no state reset needed.
+        # Reset state on AFK change so the meter re-fires when the agent resumes.
+        self._last_injected_step = None
+        self._last_injected_usage = None
