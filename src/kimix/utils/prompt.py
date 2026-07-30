@@ -645,6 +645,8 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
         import copy
         planner_provider = copy.deepcopy(planner_provider) if planner_provider else {}
         planner_provider.setdefault("loop_control", {})
+        planner_provider["loop_control"]["budget_reminder_enabled"] = False
+        planner_provider["loop_control"]["context_meter_enabled"] = False
         planner_provider["loop_control"]["compact_reminder_enabled"] = False
         planner_provider["loop_control"]["todo_reminder_enabled"] = False
         planner_provider["loop_control"]["target_churn_enabled"] = False
@@ -654,6 +656,13 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
             provider_dict=planner_provider,
         )
         planner_session.get_custom_data()["plan_writing_path"] = plan_file
+
+        # Lock the planner session to read-only so it cannot write to the filesystem
+        # or modify external state — its sole job is to generate a plan via WritePlan.
+        if hasattr(planner_session, '_cli') and planner_session._cli is not None:
+            _runtime = getattr(planner_session._cli, '_runtime', None)
+            if _runtime is not None:
+                _runtime.read_only = True
 
         reminder = (
             "read the following requirement carefully and generate a comprehensive plan. "

@@ -99,7 +99,7 @@ class Todo(BaseModel):
     status: TodoStatus = Field(description="Status")
     notes: str | None = Field(
         default=None,
-        description="Notes.",
+        description="Notes. MUST write, be comprehensively, detailed.",
         max_length=65536,
     )
     code: str | None = Field(
@@ -285,8 +285,34 @@ class TodoList(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
+        # Read-only mode: strip code fields and warn
+        code_warning: str | None = None
+        if self._runtime.read_only and params.todos is not None:
+            todos_list: list[Todo] = [params.todos] if isinstance(params.todos, Todo) else list(params.todos)
+            stripped_count = 0
+            stripped_todos: list[Todo] = []
+            for t in todos_list:
+                if t.code:
+                    stripped_count += 1
+                    stripped_todos.append(t.model_copy(update={"code": None}))
+                else:
+                    stripped_todos.append(t)
+            if stripped_count > 0:
+                code_warning = (
+                    "\n\n<system-warning>\n"
+                    "In read-only mode, `code` is forbidden and will be ignored. "
+                    f"No code will be executed. ({stripped_count} todo(s) affected.)\n"
+                    "</system-warning>"
+                )
+                params = params.model_copy(update={"todos": stripped_todos})
+
         if params.todos is not None:
-            return self._write_todos(params.todos, params)
+            result = self._write_todos(params.todos, params)
+            if code_warning:
+                # Append warning to output
+                if isinstance(result.output, str):
+                    result = result.model_copy(update={"output": result.output + code_warning})
+            return result
         return self._read_todos()
 
     # ---- Write mode --------------------------------------------------------

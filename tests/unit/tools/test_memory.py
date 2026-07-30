@@ -30,7 +30,7 @@ def session_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def tool(session_dir: Path) -> Memory:
-    runtime = SimpleNamespace(session=SimpleNamespace(dir=session_dir))
+    runtime = SimpleNamespace(session=SimpleNamespace(dir=session_dir), read_only=False)
     return Memory(runtime)  # type: ignore[arg-type]
 
 

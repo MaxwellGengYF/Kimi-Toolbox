@@ -81,6 +81,20 @@ _TOOL_OUTPUT_CONTEXT_FRACTION = 1.0  # budget derived from total context size
 _TOOL_OUTPUT_REMAINING_FRACTION = 0.9  # must stay strictly below remaining context
 _TOOL_OUTPUT_ABS_MAX_BYTES = 1 << 20  # 1 MiB hard ceiling
 
+_READ_ONLY_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "Bash",
+    "Powershell",
+    "Run",
+    "Python",
+    "EditFile",
+    "WriteFile",
+    "Agent",
+    "AgentClose",
+    "AgentSwarm",
+    "TaskOutput",
+})
+"""Tools that are forbidden when read_only=True."""
+
 # High similarity threshold for auto-correcting a mistyped tool name.
 # Only matches at or above this cutoff will be automatically redirected
 # to the real tool (with a warning appended to the output).
@@ -713,6 +727,23 @@ class KimiToolset:
                 reminder_text = diff_args_reminder_text
 
             tool = self._tool_dict[tool_name]
+
+            # --- Read-only mode guard ---
+            if (
+                self._runtime is not None
+                and self._runtime.read_only
+                and tool_name in _READ_ONLY_BLOCKED_TOOLS
+            ):
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    return_value=ToolError(
+                        message=(
+                            f"Tool '{tool_name}' is forbidden in read-only mode. "
+                            "The agent should quit the conversation immediately."
+                        ),
+                        brief="Forbidden in read-only mode",
+                    ),
+                )
 
             async def _call():
                 tool_input_dict = arguments if isinstance(arguments, dict) else {}

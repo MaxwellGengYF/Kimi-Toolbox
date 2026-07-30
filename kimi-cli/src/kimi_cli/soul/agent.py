@@ -197,6 +197,8 @@ class Runtime:
     role: Literal["root", "subagent"] = "root"
     ui_mode: str = "shell"
     resumed: bool = False
+    read_only: bool = False
+    """When True, the agent is restricted to read-only tools. Write tools are blocked."""
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
 
@@ -374,6 +376,7 @@ class Runtime:
             subagent_id=agent_id,
             subagent_type=subagent_type,
             role="subagent",
+            read_only=self.read_only,
         )
 
 

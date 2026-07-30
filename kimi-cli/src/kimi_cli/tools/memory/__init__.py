@@ -291,6 +291,7 @@ class Memory(CallableTool2[Params]):
 
     def __init__(self, runtime: Runtime) -> None:
         super().__init__()
+        self._runtime = runtime
         self._memory_dir = memory_dir_for_session(runtime.session.dir)
 
     def _get_topic_names(self) -> list[str]:
@@ -320,6 +321,17 @@ class Memory(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
+        # Read-only mode: block write/append actions
+        if self._runtime.read_only and params.action in ("write", "append"):
+            return ToolError(
+                message=(
+                    f"Memory '{params.action}' is forbidden in read-only mode. "
+                    "The agent should quit the conversation immediately. "
+                    "Use 'read', 'list', or 'search' actions instead."
+                ),
+                brief="Forbidden in read-only mode",
+            )
+
         try:
             if params.action == "write":
                 return self._write(params.topic, params.content, append=False)
