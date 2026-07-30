@@ -158,16 +158,9 @@ def _format_tool_result(result: ToolResult) -> str:
 
 _LAST_TOOL_CALL_KEY = "_kimix_last_tool_call"
 _TOOL_CALL_STREAM_KEY = "_kimix_tool_call_stream"
-_TOOL_HEADER_PRINTED_KEY = "_kimix_tool_header_printed"
 _TOOL_CALL_PART_PENDING_KEY = "_kimix_tool_call_part_pending"
 _TOOL_CALL_PART_EMITTED_LEN_KEY = "_kimix_tool_call_part_emitted_len"
 _TOOL_CALL_MERGE_TARGET_KEY = "_kimix_tool_call_merge_target"
-# The id of the tool call whose header was last printed (paired with
-# _TOOL_HEADER_PRINTED_KEY).  This makes the header-printed gate work
-# per-call, which is essential when parallel tool calls are in flight:
-# finishing one call's arguments and printing its header must not prevent
-# the next call's header from being printed.
-_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY = "_kimix_tool_call_header_printed_tc_id"
 
 # Minimum payload size before a cumulative ``ToolCallingPart`` snapshot is
 # emitted to ``output_function``; afterwards the emission threshold doubles
@@ -245,6 +238,12 @@ _ARG_KEY_ALIASES: dict[str, str] = {
     "file_name": "path",
     "changes": "edit",
     "modifications": "edit",
+    # Grep CLI-style flag aliases (parity with Grep.field_aliases).
+    "-A": "after_context",
+    "-B": "before_context",
+    "-C": "context",
+    "-n": "line_number",
+    "-i": "ignore_case",
 }
 
 
@@ -259,23 +258,6 @@ def _canonical_key(key: str) -> str:
     return _ARG_KEY_ALIASES.get(key.lower(), key)
 
 
-# Tool names eligible for streaming argument display.
-# Only these tools benefit from the incremental decoded output;
-# all other tools (e.g. Grep, Powershell, Bash) use the legacy
-# compact one-line format regardless of the stream_tool_args flag.
-_STREAM_TOOL_NAMES = frozenset({
-    "WriteFile",
-    "WritePlan",
-    "Python",
-    "Agent",
-    "EditFile",
-    "EditPlan",
-    "Run",
-    "Powershell",
-    "Bash",
-    # "Goal" and "RunGoal" removed — both are deleted
-})
-
 # Pre-normalized redirect map for tool-name resolution, mirroring
 # ``kosong.tooling._TOOL_NAME_REDIRECTS_NORMALIZED`` (built here from the
 # public table to avoid relying on a private name).
@@ -284,27 +266,42 @@ _TOOL_NAME_REDIRECTS_NORM: dict[str, str] = {
 }
 
 
-def _resolve_stream_tool_name(name: str) -> str | None:
-    """Resolve a (possibly hallucinated) tool name to a streamable tool.
+def _session_tool_names(session: Session) -> tuple[str, ...]:
+    """Names of the tools registered in the session's live toolset.
 
-    Mirrors the execution-side resolution in ``kosong.tooling``
-    (``resolve_tool_name`` + ``TOOL_NAME_REDIRECTS``, applied by
-    ``KimiToolset.handle``): a model that sends ``write_file`` or
-    ``AppendFile`` has its call auto-corrected to ``WriteFile`` at
-    execution time, but the wire message shown here still carries the
-    raw name.  Without the same resolution the streaming display would
-    silently fall back to the legacy compact format for exactly those
-    calls (frequent with kimi/anthropic providers).
-
-    Returns the canonical streamable name, or ``None`` when the name
-    does not resolve to a tool in :data:`_STREAM_TOOL_NAMES`.
+    Returns an empty tuple when the toolset is not reachable (tests,
+    custom session implementations); name resolution then falls back to
+    the redirect table only.
     """
-    if name in _STREAM_TOOL_NAMES:
-        return name
+    try:
+        toolset = session._cli.soul.agent.toolset  # type: ignore[attr-defined]
+        return tuple(tool.name for tool in toolset.tools)
+    except AttributeError:
+        return ()
+
+
+def _resolve_display_tool_name(name: str, session: Session) -> str:
+    """Resolve a (possibly hallucinated) tool name for the header display.
+
+    Every tool is streamable — there is no whitelist.  This only picks the
+    *canonical name* shown in the ``⚡ Name`` header, mirroring the
+    execution-side resolution in ``kosong.tooling`` (``resolve_tool_name``
+    + ``TOOL_NAME_REDIRECTS``, applied by ``KimiToolset.handle``): a model
+    that sends ``write_file`` or ``AppendFile`` has its call auto-corrected
+    to ``WriteFile`` at execution time, but the wire message shown here
+    still carries the raw name.
+
+    Future-compatible: the candidate names come from the session's live
+    toolset, so newly registered tools resolve with no code change here.
+    Falls back to the raw wire name when nothing matches.
+    """
+    candidates = _session_tool_names(session)
+    if not candidates:
+        return _TOOL_NAME_REDIRECTS_NORM.get(normalize_tool_name(name), name)
     resolution = resolve_tool_name(
-        name, _STREAM_TOOL_NAMES, redirects=_TOOL_NAME_REDIRECTS_NORM
+        name, candidates, redirects=_TOOL_NAME_REDIRECTS_NORM
     )
-    return resolution.name
+    return resolution.name if resolution.name is not None else name
 
 # Tool-call argument keys whose (potentially very long) string values are
 # printed decoded, token by token, as they stream in from the LLM.
@@ -319,24 +316,18 @@ _STREAM_ARG_KEYS = frozenset({
     "command",       # Run / Powershell / Bash
 })
 
-# Tool-call argument keys whose values are printed *inline* after the tool
-# header (space separator, no "key:\n" label).  Used so that
-# ``⚡ Powershell Get-Date`` stays on one line instead of breaking the
-# command onto a new ``command:\n`` line.  Short scalar arguments (e.g.
-# ``timeout``) are printed inline as well — `` key: value`` on the header
-# line — instead of each occupying its own ``key:\nvalue`` line beneath it.
+# Streamed argument keys (a subset of :data:`_STREAM_ARG_KEYS`) whose values
+# are printed *inline* after the tool header (space separator, no "key:\n"
+# label).  Used so that ``⚡ Powershell Get-Date`` stays on one line instead
+# of breaking the command onto a new ``command:\n`` line.
 #
 # Keys are canonical (resolved via _canonical_key()), so the "cmd" alias
 # is automatically covered — no need to list it separately.
+#
+# All other (short) argument values are printed inline as `` key:value``
+# on the header line — see ``_ToolCallStreamPrinter._emit_compact``.
 _INLINE_ARG_KEYS = frozenset({
     "command",       # Run / Powershell / Bash (alias "cmd" also covered)
-    "timeout",       # Run / Powershell / Bash / Python / TaskOutput / Glob
-    "max_lines",     # Run / Powershell / Bash / Python
-    "cwd",           # Run
-    "output_path",   # Run / Python
-    "task_id",       # Run / Powershell / Bash / Python
-    "interactive",   # Powershell / Bash
-    "mode",          # WriteFile / Powershell / Bash / Python / Run
 })
 
 # Foreground color for the "⚡ ToolName" header printed when a tool call
@@ -354,8 +345,24 @@ def _tool_header_color(name: str) -> Color:
     return _TOOL_HEADER_COLOR
 
 
-def _format_tool_args(name: str, args: str | None) -> str | None:
-    """Format tool arguments into a friendly one-line sentence."""
+# Maximum length of a single argument value in the compact one-line
+# summary produced by :func:`format_tool_args` (and in the inline
+# `` key:value`` segments printed by the stream printer).
+_COMPACT_VALUE_MAX_LEN = 60
+
+
+def format_tool_args(args: str | None) -> str | None:
+    """Format raw tool-call arguments JSON as a compact one-line summary.
+
+    Fully generic — every argument renders as ``key:value`` separated by
+    spaces, so new tools need no per-tool display code.  Keys are
+    canonicalized via :func:`_canonical_key` (alias spellings such as
+    ``cmd`` or ``file_path`` display under their canonical name); values
+    longer than :data:`_COMPACT_VALUE_MAX_LEN` characters are truncated.
+
+    Returns ``None`` when *args* is ``None`` or not valid JSON, ``""`` for
+    empty arguments.
+    """
     if args is None:
         return None
     if args == "":
@@ -364,134 +371,15 @@ def _format_tool_args(name: str, args: str | None) -> str | None:
         parsed = orjson.loads(args)
     except (orjson.JSONDecodeError, TypeError):
         return None
-
-    try:
-        if not isinstance(parsed, dict):
-            return orjson.dumps(parsed).decode("utf-8")
-
-        def _fmt(v: Any, max_len: int = 60) -> str:
-            if v is None:
-                return "None"
-            s = str(v)
-            if len(s) > max_len:
-                return s[:max_len] + "..."
-            return s
-
-        def _collect(*keys: str | tuple[str, ...], hide: set[str] | None = None) -> list[str]:
-            hide = hide or set()
-            parts: list[str] = []
-            for key in keys:
-                if isinstance(key, str):
-                    # Single key lookup.
-                    if key in parsed:
-                        display = key
-                        if key in hide:
-                            parts.append(f"{display}: ...")
-                        else:
-                            parts.append(f"{display}: {_fmt(parsed[key])}")
-                else:
-                    # Tuple of alternative keys — use the first one present.
-                    found_key = None
-                    for alt in key:
-                        if alt in parsed:
-                            found_key = alt
-                            break
-                    if found_key is not None:
-                        display = key[0]  # Use first alias as display name
-                        if found_key in hide:
-                            parts.append(f"{display}: ...")
-                        else:
-                            parts.append(f"{display}: {_fmt(parsed[found_key])}")
-            return parts
-
-        match name:
-            case "Bash":
-                return ", ".join(_collect(("command", "cmd"), "mode", "timeout", "interactive", "task_id", "wait_for_pattern", "max_lines", ("deduplicate_output", "token_kill")))
-            case "Powershell":
-                return ", ".join(_collect(("command", "cmd"), "mode", "timeout", "interactive", "task_id", "wait_for_pattern", "max_lines", ("deduplicate_output", "token_kill")))
-            case "Run":
-                return ", ".join(_collect(("command", "cmd"), "cwd", "timeout", "output_path", "env", "mode", "shell", "run_in_background", "task_id", "wait_for_pattern", "max_lines", ("deduplicate_output", "token_kill")))
-            case "Python":
-                return ", ".join(_collect(("code", "source_code"), "file", "output_path", "timeout", "mode", "run_in_background", "task_id", "wait_for_pattern", "max_lines", ("deduplicate_output", "token_kill"), hide={"code", "source_code"}))
-            case "TaskOutput":
-                return ", ".join(_collect("task_id", "action", ("wait", "block"), "timeout", "output_path", "kill"))
-            case "TodoList":
-                parts: list[str] = []
-                if "todos" in parsed or "items" in parsed:
-                    todos = parsed.get("todos", parsed.get("items"))
-                    if todos is None:
-                        parts.append("todos=None")
-                    elif isinstance(todos, list):
-                        parts.append(f"todos=[{len(todos)} items]")
-                    else:
-                        parts.append("todos=[1 item]")
-                if parsed.get("mode") and parsed.get("mode") != "append":
-                    parts.append(f"mode={parsed['mode']}")
-                return ", ".join(parts)
-            case "ReadFile":
-                return ", ".join(_collect(("path", "file_path"), "line_offset", "n_lines", "max_char", "char_offset", "glob", "show_line_numbers"))
-            case "EditFile":
-                parts = []
-                _path = parsed.get("path", parsed.get("file_path"))
-                if _path is not None:
-                    parts.append(f"path={_fmt(_path)}")
-                if "edit" in parsed or "edits" in parsed:
-                    edit = parsed.get("edit", parsed.get("edits"))
-                    if edit is None:
-                        parts.append("edit=None")
-                    elif isinstance(edit, list):
-                        parts.append(f"edit=[{len(edit)} edit(s)]")
-                    else:
-                        parts.append("edit=[1 edit]")
-                return ", ".join(parts)
-            case "WriteFile":
-                return ", ".join(_collect(("path", "file_path"), ("content", "text"), "mode", "auto_fix_json", "mkdir", "show_diff", hide={"content", "text"}))
-            case "Glob":
-                return ", ".join(_collect("pattern", ("directory", "path"), "include_dirs", "respect_gitignore", "include_ignored", "verbose", "timeout"))
-            case "Grep":
-                return ", ".join(
-                    _collect(
-                        "pattern", "path", "glob", "output_mode",
-                        ("before_context", "-B"), ("after_context", "-A"), ("context", "-C"),
-                        ("line_number", "-n"), ("ignore_case", "-i"),
-                        "type", "head_limit", "offset", "multiline", "include_ignored",
-                    )
-                )
-            case "FetchURL":
-                return ", ".join(_collect("url", "output_path"))
-            case "Agent":
-                return ", ".join(_collect(("prompt", "task"), ("session_id", "session"), "close_session", "history_format", "context_files"))
-            case "AgentList":
-                return ""
-            case "AgentClose":
-                return ", ".join(_collect(("session_id", "session")))
-            case "WritePlan":
-                return ", ".join(_collect(("content", "text"), "mode", hide={"content", "text"}))
-            case "ReadPlan":
-                return ", ".join(_collect("line_offset", "n_lines", "max_char", "char_offset"))
-            case "EditPlan":
-                parts = []
-                if "edit" in parsed or "edits" in parsed:
-                    edit = parsed.get("edit", parsed.get("edits"))
-                    if edit is None:
-                        parts.append("edit=None")
-                    elif isinstance(edit, list):
-                        parts.append(f"edit=[{len(edit)} edit(s)]")
-                    else:
-                        parts.append("edit=[1 edit]")
-                return ", ".join(parts)
-            case "AskParent":
-                return ", ".join(_collect("question", "context"))
-            case "ContextUsage":
-                return ""
-            case "Compact":
-                return ", ".join(_collect("instruction", "mode"))
-            case "Memory":
-                return ", ".join(_collect("action", "topic", "query", "max_results", hide={"content"}))
-            case _:
-                return orjson.dumps(parsed).decode("utf-8")
-    except TypeError:
-        return None
+    if not isinstance(parsed, dict):
+        return orjson.dumps(parsed).decode("utf-8")
+    parts: list[str] = []
+    for key, value in parsed.items():
+        text = str(value)
+        if len(text) > _COMPACT_VALUE_MAX_LEN:
+            text = text[:_COMPACT_VALUE_MAX_LEN] + "..."
+        parts.append(f"{_canonical_key(key)}:{text}")
+    return " ".join(parts)
 
 
 class _ToolCallStreamPrinter:
@@ -855,16 +743,22 @@ class _ToolCallStreamPrinter:
         self._state = self._AFTER_VALUE
 
     def _emit_compact(self, text: str) -> None:
-        if len(text) > 60:
-            text = text[:60] + "..."
+        """Print a short (non-streamed) argument value.
+
+        Short arguments never get their own line: they stay inline on the
+        header line as `` key:value`` segments, e.g.::
+
+            ⚡ EditFile path:C:/dev/x.py line_offset:1125 max_char:15000
+
+        Only values whose keys are in :data:`_STREAM_ARG_KEYS` are printed
+        on a new line (decoded, token by token) — see
+        :meth:`_begin_string_value`.
+        """
+        if len(text) > _COMPACT_VALUE_MAX_LEN:
+            text = text[:_COMPACT_VALUE_MAX_LEN] + "..."
         canonical_key = _canonical_key(self._current_key) if self._current_key else ""
-        if canonical_key in _INLINE_ARG_KEYS:
-            # Inline: short scalars stay on the header line — " key: value".
-            segment = f" {canonical_key}: {text}" if canonical_key \
-                else f" {text}"
-        else:
-            segment = f"{self._separator()}{canonical_key}:\n{text}" if canonical_key \
-                else f"{self._separator()}{text}"
+        segment = f" {canonical_key}:{text}" if canonical_key \
+            else f" {text}"
         _stream.colorful_print_word(
             segment, fg=Color.BRIGHT_MAGENTA, require_new_line=False, flush=True)
 
@@ -916,31 +810,6 @@ def _json_tail_may_complete(args: str) -> bool:
     return bool(tail) and tail[-1] in '}]"'
 
 
-def _print_compact_tool_header(session: Session, last_tc: ToolCall) -> bool:
-    """Print the legacy compact ``⚡ name args`` header once the accumulated
-    arguments parse as complete JSON. No-op if already printed (for this
-    specific tool call) or the arguments are still incomplete/invalid.
-
-    Returns ``True`` if the header was actually printed, ``False`` otherwise.
-    """
-    tmp_data = session._tmp_data
-    # Per-call gate: only skip if the flag is set AND it belongs to THIS call.
-    if tmp_data.get(_TOOL_HEADER_PRINTED_KEY) and tmp_data.get(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY) == last_tc.id:
-        return False
-    args = last_tc.function.arguments
-    if not args:
-        return False
-    formatted = _format_tool_args(last_tc.function.name, args)
-    if formatted:
-        _stream.colorful_print_word(
-            f"⚡ {last_tc.function.name} {formatted}",
-            fg=_tool_header_color(last_tc.function.name), require_new_line=True, flush=True)
-        tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
-        tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = last_tc.id
-        return True
-    return False
-
-
 def _finish_tool_call_stream(session: Session) -> None:
     """Finish and remove any active tool-call stream printer for the session."""
     tmp_data = getattr(session, "_tmp_data", None)
@@ -949,25 +818,6 @@ def _finish_tool_call_stream(session: Session) -> None:
     printer = tmp_data.pop(_TOOL_CALL_STREAM_KEY, None)
     if printer is not None:
         printer.finish()
-    # Compact path: if the per-fragment gate never saw a completable tail
-    # (e.g. exotic non-object arguments), make one final parse attempt now
-    # that no more fragments can arrive for this tool call.
-    last_tc: ToolCall | None = tmp_data.get(_LAST_TOOL_CALL_KEY)
-    if last_tc is not None:
-        already_printed = (
-            tmp_data.get(_TOOL_HEADER_PRINTED_KEY)
-            and tmp_data.get(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY) == last_tc.id
-        )
-        if not already_printed:
-            printed = _print_compact_tool_header(session, last_tc)
-            # No more fragments can arrive for this tool call; don't re-attempt
-            # the (failed) parse on every later non-toolcall message.
-            tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
-            # Only remember the call id when the header actually printed;
-            # otherwise a subsequent ToolCallPart for a different call
-            # would be falsely gated.
-            if printed:
-                tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = last_tc.id
     # Clear any stale merge target (safety net for truncated streams).
     tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
 
@@ -977,15 +827,12 @@ def _handle_tool_call(
     output_function: Callable[[str, MessageType], Any] | None,
     session: Session,
     format_output: bool = False,
-    stream_tool_args: bool = False,
 ) -> None:
     if isinstance(wire_msg, ToolCall):
         # A new tool call supersedes any previous one: flush its pending
         # coalesced output first so callbacks stay in wire order.
         _flush_tool_call_part_output(session, output_function)
         session._tmp_data.pop(_TOOL_CALL_PART_EMITTED_LEN_KEY, None)
-        # Clear previous header-printed flag for the new tool call.
-        session._tmp_data.pop(_TOOL_HEADER_PRINTED_KEY, None)
         session._tmp_data[_LAST_TOOL_CALL_KEY] = wire_msg
         session._tmp_data[wire_msg.id] = wire_msg
         name = wire_msg.function.name
@@ -1000,56 +847,30 @@ def _handle_tool_call(
                 session._tmp_data[_TOOL_CALL_MERGE_TARGET_KEY] = wire_msg
         else:
             session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
-        if stream_tool_args:
-            resolved_name = _resolve_stream_tool_name(name)
-            if resolved_name is None:
-                # Non-streamable tool: fall through to the legacy compact
-                # format path.
-                # NOTE: empty initial arguments (``args == ""``) must NOT take
-                # this path for streamable tools. Anthropic-protocol and
-                # OpenAI-Responses providers emit the streamed call header as
-                # ``ToolCall(arguments="")`` and deliver the arguments via
-                # subsequent ``ToolCallPart`` fragments; treating the empty
-                # header as "compact" left no stream printer behind, so the
-                # terminal showed nothing until the whole arguments JSON had
-                # finished streaming (the WritePlan stall).
-                pass
-            else:
-                # A new tool call supersedes any previous stream printer.
-                # Mark the header as printed *before* finishing any previous
-                # stream printer, so _finish_tool_call_stream does not attempt
-                # the compact path (which would print a second header).
-                session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
-                session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
-                _finish_tool_call_stream(session)
-                # Header shows the resolved canonical name — the name the
-                # toolset will actually execute after its own auto-correction
-                # (the raw wire name may be a hallucination such as
-                # ``write_file`` or ``AppendFile``).
-                _stream.colorful_print_word(
-                    f"⚡ {resolved_name}", fg=_tool_header_color(resolved_name), require_new_line=True, flush=True)
-                _stream._state = StreamPrintState.Other
-                printer = _ToolCallStreamPrinter(resolved_name, session)
-                session._tmp_data[_TOOL_CALL_STREAM_KEY] = printer
-                if args:
-                    printer.feed(args)
-                if output_function:
-                    output_function(
-                        f"{name} {args or ''}", MessageType.ToolCalling)
-                return
-        formatted = _format_tool_args(name, args)
-        if formatted:
-            header = f"⚡ {name} {formatted}"
-        else:
-            return
+        # Every tool call streams — there is no whitelist and no legacy
+        # compact path.  A new tool call supersedes any previous stream
+        # printer.
+        _finish_tool_call_stream(session)
+        # The header shows the resolved canonical name — the name the
+        # toolset will actually execute after its own auto-correction (the
+        # raw wire name may be a hallucination such as ``write_file`` or
+        # ``AppendFile``).
+        resolved_name = _resolve_display_tool_name(name, session)
         _stream.colorful_print_word(
-            header, fg=_tool_header_color(name), require_new_line=True, flush=True)
+            f"⚡ {resolved_name}", fg=_tool_header_color(resolved_name), require_new_line=True, flush=True)
         _stream._state = StreamPrintState.Other
-        session._tmp_data[_TOOL_HEADER_PRINTED_KEY] = True
-        session._tmp_data[_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY] = wire_msg.id
+        # NOTE: empty initial arguments (``args == ""`` or ``None``) must NOT
+        # skip the stream printer. Anthropic-protocol and OpenAI-Responses
+        # providers emit the streamed call header as ``ToolCall(arguments="")``
+        # and deliver the arguments via subsequent ``ToolCallPart`` fragments.
+        printer = _ToolCallStreamPrinter(resolved_name, session)
+        session._tmp_data[_TOOL_CALL_STREAM_KEY] = printer
+        if args:
+            printer.feed(args)
         if output_function:
             output_function(
                 f"{name} {args or ''}", MessageType.ToolCalling)
+        return
     else:  # ToolCallPart
         # Route the fragment to the correct pending call.  When multiple
         # parallel tool calls are in flight, ``_LAST_TOOL_CALL_KEY`` may
@@ -1074,22 +895,9 @@ def _handle_tool_call(
                     session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
                 except (orjson.JSONDecodeError, TypeError, ValueError):
                     pass
-        printer: _ToolCallStreamPrinter | None = None
-        if stream_tool_args:
-            printer = session._tmp_data.get(_TOOL_CALL_STREAM_KEY)
+        printer: _ToolCallStreamPrinter | None = session._tmp_data.get(_TOOL_CALL_STREAM_KEY)
         if printer is not None:
             printer.feed(wire_msg.arguments_part or "")
-        elif last_tc is not None:
-            # Per-call gate: only skip printing if the header was already
-            # printed for THIS specific tool call.
-            _printed_id = session._tmp_data.get(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY)
-            if not session._tmp_data.get(_TOOL_HEADER_PRINTED_KEY) or _printed_id != last_tc.id:
-                args = last_tc.function.arguments
-                # Only attempt the full parse when the accumulated string
-                # may actually be complete; otherwise orjson scans (and
-                # fails on) the whole growing string per fragment — O(N^2).
-                if args and _json_tail_may_complete(args):
-                    _print_compact_tool_header(session, last_tc)
         if last_tc is not None:
             if output_function:
                 # Coalesce cumulative snapshots: building and emitting the
@@ -1131,20 +939,15 @@ def _handle_tool_result(wire_msg: ToolResult, output_function: Callable[[str, Me
 
     # The tool call is finished: drop the stale "last tool call"
     # reference (only if it still points to this call, so a newer
-    # in-flight call is not clobbered) together with the header flag.
-    # Otherwise the next non-toolcall wire message would make
-    # _finish_tool_call_stream re-print this call's header.
+    # in-flight call is not clobbered) together with the merge target.
     #
-    # Both pops are conditional on the id match: when the result
+    # The pops are conditional on the id match: when the result
     # belongs to an *earlier* call while a later one is still in
     # flight, touching either entry corrupts the in-flight call's
-    # state — clearing the header flag makes _finish_tool_call_stream
-    # re-print the in-flight call's header once per arriving result.
+    # state.
     last_tc: ToolCall | None = _session._tmp_data.get(_LAST_TOOL_CALL_KEY)
     if last_tc is not None and last_tc.id == wire_msg.tool_call_id:
         _session._tmp_data.pop(_LAST_TOOL_CALL_KEY, None)
-        _session._tmp_data.pop(_TOOL_HEADER_PRINTED_KEY, None)
-        _session._tmp_data.pop(_TOOL_CALL_HEADER_PRINTED_TC_ID_KEY, None)
         _session._tmp_data.pop(_TOOL_CALL_MERGE_TARGET_KEY, None)
         if tc is None:
             tc = last_tc
@@ -1270,23 +1073,23 @@ async def print_agent_json(
     session: Session,
     output_function: Callable[[str, MessageType], Any] | None = None,
     format_output: bool = False,
-    stream_tool_args: bool = True,
 ) -> None:
     """Pretty-print a streaming wire message from an agent session.
 
     Awaitable; the internal handlers are synchronous (printing is sync I/O).
 
-    When ``stream_tool_args`` is True (default), each tool argument starts on
-    its own line beneath the tool header; long whitelisted string values
-    (e.g. the ``content`` parameter of ``WriteFile``) are streamed decoded
-    token by token as ``ToolCallPart`` fragments arrive from the LLM, and
-    short scalar arguments print as compact ``key: value`` lines. Pass
-    ``stream_tool_args=False`` to restore the legacy compact output (which
-    hides long values such as ``content``) byte-for-byte.
+    Every tool call is printed via the incremental stream printer: the
+    ``⚡ Name`` header appears as soon as the ``ToolCall`` arrives, long
+    string values whose keys are in ``_STREAM_ARG_KEYS`` (e.g. the
+    ``content`` parameter of ``WriteFile``) are streamed decoded token by
+    token as ``ToolCallPart`` fragments arrive from the LLM, each on its
+    own ``key:\n`` line, while short arguments print inline on the header
+    line as `` key:value`` segments.  The design is fully generic — new
+    tools need no per-tool display code.
 
     With ``merge_wire_messages=True`` a single complete ``ToolCall`` arrives,
-    so the full decoded value is printed in one go; pass
-    ``stream_tool_args=False`` for the old compact, hidden-content output.
+    so the full decoded value is printed in one go by the same stream
+    printer.
     """
     if format_output and _stream._state == StreamPrintState.Text and not isinstance(wire_msg, TextPart):
         _flush_agent_json_text()
@@ -1300,8 +1103,7 @@ async def print_agent_json(
         _flush_tool_call_part_output(session, output_function)
     _print_transition_usage(session, _message_transition_type(wire_msg))
     if isinstance(wire_msg, (ToolCall, ToolCallPart)):
-        _handle_tool_call(wire_msg, output_function, session, format_output,
-                          stream_tool_args=stream_tool_args)
+        _handle_tool_call(wire_msg, output_function, session, format_output)
         return
     handler = _PRINT_AGENT_JSON_DISPATCH.get(type(wire_msg))
     if handler is not None:

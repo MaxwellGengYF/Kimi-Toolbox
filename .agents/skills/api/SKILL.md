@@ -281,24 +281,25 @@ from kimix.base import print_agent_json
 # - CompactionBegin: prints "Compacting..." info message
 # - ThinkPart: prints thinking content in cyan (suppressed if _quiet)
 # - TextPart: prints text chunks directly
-# - ToolCall, ToolCallPart: prints "⚡ <name>" header, then streams long argument
-#   values (e.g. WriteFile `content`) decoded, token by token, as fragments arrive;
-#   each argument starts on its own line beneath the header, short scalar args
-#   print as compact `key: value` lines
+# - ToolCall, ToolCallPart: prints "⚡ <name>" header (name resolved against the
+#   session's live toolset — future-compatible, no hardcoded tool list), then
+#   streams long argument values (keys in _STREAM_ARG_KEYS, e.g. WriteFile
+#   `content`) decoded, token by token, as fragments arrive, each on its own
+#   `key:\n` line; short arguments print inline on the header line as
+#   ` key:value` segments. Every tool streams — there is no whitelist and no
+#   legacy compact path; new tools need no per-tool display code.
 # - ToolResult: prints ✓/✗ result line; calls output_function with MessageType.ToolResult
 # - Type transitions: prints black context usage/token count using the provided session
 await print_agent_json(
     wire_msg=message,
     session=session,
     output_function=custom_handler,  # Optional: callback(text, MessageType) for text/think/tool content
-    stream_tool_args=True,           # Default: stream long tool args token by token.
-                                     # Pass False for legacy compact output (hides
-                                     # WriteFile `content` as `content: ...`).
 )
 
 # Note: with merge_wire_messages=True a single complete ToolCall arrives, so the
-# full decoded content prints in one go; use stream_tool_args=False to keep the
-# old compact, hidden-content output in that mode.
+# full decoded content prints in one go via the same stream printer.
+# For a compact one-line `key:value` summary of raw arguments JSON (e.g. for
+# the web frontend), use kimix.ui.stream.format_tool_args(args).
 ```
 
 ## Threading (kimix.base)

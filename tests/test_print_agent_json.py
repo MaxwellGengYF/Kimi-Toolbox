@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
@@ -27,12 +28,43 @@ class FakeStatus:
     context_tokens: int
 
 
+# Default tool names exposed by FakeSession's stub toolset, mirroring the
+# real kimix toolset so display-name resolution (write_file -> WriteFile,
+# AppendFile -> WriteFile, ...) works exactly as in production.
+_DEFAULT_TOOL_NAMES = (
+    "WriteFile", "WritePlan", "ReadFile", "ReadPlan", "EditFile", "EditPlan",
+    "Python", "Agent", "AgentList", "AgentClose", "Run", "Powershell",
+    "Bash", "Grep", "Glob", "FetchURL", "TodoList", "TaskOutput",
+    "Compact", "ContextUsage", "Memory",
+)
+
+
 class FakeSession:
-    def __init__(self, context_usage: float = 0.125, context_tokens: int = 1024) -> None:
+    def __init__(
+        self,
+        context_usage: float = 0.125,
+        context_tokens: int = 1024,
+        tool_names: tuple[str, ...] | None = _DEFAULT_TOOL_NAMES,
+    ) -> None:
         self.status = FakeStatus(context_usage=context_usage, context_tokens=context_tokens)
         self.cancelled = False
         self._cancel_event = None
         self._tmp_data = {}
+        if tool_names is not None:
+            # Stub the session._cli.soul.agent.toolset.tools chain used by
+            # kimix.ui.stream._session_tool_names for display-name resolution.
+            # ``find`` is stubbed too: kimix.utils.prompt looks up the
+            # TodoList tool instance via toolset.find("TodoList").
+            self._cli = SimpleNamespace(
+                soul=SimpleNamespace(
+                    agent=SimpleNamespace(
+                        toolset=SimpleNamespace(
+                            tools=[SimpleNamespace(name=n) for n in tool_names],
+                            find=lambda *a, **k: None,
+                        )
+                    )
+                )
+            )
 
     async def prompt(self, _prompt: str, *, merge_wire_messages: bool = False) -> Any:
         del merge_wire_messages
@@ -187,8 +219,8 @@ async def test_print_agent_json_streams_writefile_content_token_by_token(monkeyp
 
     # Header printed exactly once when the ToolCall arrives.
     assert output.count("⚡ WriteFile") == 1
-    # Non-whitelisted short values print as compact segments.
-    assert "path:\nx.py" in plain
+    # Short arguments print inline on the header line (key:value).
+    assert " path:x.py" in plain
     # The long content value is printed decoded, across fragments.
     assert "hello world" in plain
     # No stray JSON quotes/braces leak into the streamed content.
@@ -254,16 +286,16 @@ async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: 
 
     plain = _plain(chunks)
 
-    assert "path:\nx.py" in plain
+    assert " path:x.py" in plain
     # Short scalar args (``mode``) print inline on the header line.
-    assert " mode: overwrite" in plain
+    assert " mode:overwrite" in plain
     assert "mode:\noverwrite" not in plain
     assert "body" in plain
 
 
 async def test_streamed_short_args_print_inline(monkeypatch: Any) -> None:
     """Short scalar arguments (e.g. ``timeout``) print inline after the tool
-    header — ``⚡ Powershell Get-Date timeout: 30`` — instead of each
+    header — ``⚡ Powershell Get-Date timeout:30`` — instead of each
     occupying its own ``timeout:\n30`` line beneath the header."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
@@ -280,7 +312,7 @@ async def test_streamed_short_args_print_inline(monkeypatch: Any) -> None:
     )
 
     plain = _plain(chunks)
-    assert "Get-Date timeout: 30" in plain
+    assert "Get-Date timeout:30" in plain
     assert "timeout:\n30" not in plain
 
 
@@ -312,23 +344,6 @@ async def test_print_agent_json_stream_finished_by_tool_result(monkeypatch: Any)
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
 
-async def test_print_agent_json_stream_opt_out_restores_compact_output(monkeypatch: Any) -> None:
-    chunks = _capture_base_stream(monkeypatch)
-    session = FakeSession()
-    tool_call = ToolCall(
-        id="call-1",
-        function=ToolCall.FunctionBody(
-            name="WriteFile",
-            arguments='{"path": "x.py", "content": "secret body"}'),
-    )
-
-    await base.print_agent_json(tool_call, session, stream_tool_args=False)
-
-    plain = _plain(chunks)
-    assert "⚡ WriteFile path: x.py, content: ..." in plain
-    assert "secret body" not in plain
-
-
 async def test_print_agent_json_merged_tool_call_prints_full_content_once(monkeypatch: Any) -> None:
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
@@ -342,19 +357,18 @@ async def test_print_agent_json_merged_tool_call_prints_full_content_once(monkey
 
     plain = _plain(chunks)
     assert plain.count("full body here") == 1
-    assert "path:\nbig.py" in plain
+    assert " path:big.py" in plain
     assert base._stream._last_char_was_newline is True
 
 
 
 
-async def test_non_whitelisted_tool_uses_compact_format(monkeypatch: Any) -> None:
-    """Non-whitelisted tools (Grep, etc.) should use the
-    legacy compact ``_format_tool_args`` output even with ``stream_tool_args=True``."""
+async def test_any_tool_streams_short_args_inline(monkeypatch: Any) -> None:
+    """Every tool streams — there is no whitelist.  A complete ToolCall for
+    Grep prints the header plus all short arguments inline on one line."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
 
-    # A complete ToolCall for Grep (not in _STREAM_TOOL_NAMES).
     tool_call = ToolCall(
         id="call-1",
         function=ToolCall.FunctionBody(
@@ -363,22 +377,25 @@ async def test_non_whitelisted_tool_uses_compact_format(monkeypatch: Any) -> Non
         ),
     )
 
-    await base.print_agent_json(tool_call, session)  # stream_tool_args=True by default
+    await base.print_agent_json(tool_call, session)
 
     output = "".join(chunks)
     plain = _plain(chunks)
 
-    # Header printed exactly once via _format_tool_args compact format.
+    # Header printed exactly once, with all short args inline (key:value).
     assert output.count("⚡ Grep") == 1
-    assert "pattern: def " in plain
-    assert "path: ." in plain
-    # No streaming artifacts.
+    assert "⚡ Grep pattern:def " in plain
+    assert " path:." in plain
+    # The Grep CLI-flag alias ``-n`` displays under its canonical name.
+    assert " line_number:True" in plain
+    # Stream finished (complete JSON): no printer left behind.
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
 
-async def test_non_whitelisted_tool_streaming_fragments_still_compact(monkeypatch: Any) -> None:
-    """Non-whitelisted tool with ToolCall(arguments=None) + fragments should
-    still use the legacy compact format, not the stream printer."""
+async def test_any_tool_streams_fragmented_args(monkeypatch: Any) -> None:
+    """A tool with ToolCall(arguments=None) + fragments streams live via the
+    stream printer — the header prints at ToolCall time, args appear as the
+    fragments complete."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
 
@@ -388,8 +405,9 @@ async def test_non_whitelisted_tool_streaming_fragments_still_compact(monkeypatc
     )
 
     await base.print_agent_json(tool_call, session)
-    # No stream printer was created.
-    assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
+    # Header printed immediately; stream printer was created.
+    assert "⚡ Grep" in _plain(chunks)
+    assert base._TOOL_CALL_STREAM_KEY in session._tmp_data
 
     # Send fragments that build up complete JSON.
     await base.print_agent_json(ToolCallPart(arguments_part='{"pattern": "def ", "path": "'), session)
@@ -397,10 +415,8 @@ async def test_non_whitelisted_tool_streaming_fragments_still_compact(monkeypatc
 
     plain = _plain(chunks)
 
-    # The legacy format path prints the compact summary.
-    assert "⚡ Grep" in plain
-    assert "pattern: def " in plain
-    assert "path: ." in plain
+    assert "⚡ Grep pattern:def " in plain
+    assert " path:." in plain
     # Only one header.
     assert plain.count("⚡ Grep") == 1
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
@@ -449,9 +465,10 @@ async def test_whitelisted_tool_empty_initial_args_streams_live(monkeypatch: Any
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
 
-async def test_non_whitelisted_tool_unknown_no_stream(monkeypatch: Any) -> None:
-    """An unknown tool (not in whitelist) with partial JSON produces no output
-    via the legacy path and doesn't break when fragments arrive."""
+async def test_unknown_tool_truncated_stream_recovers(monkeypatch: Any) -> None:
+    """An unknown tool (not in the session toolset) still prints its header
+    and streams generically; a truncated argument stream is terminated
+    cleanly when a non-part message arrives — must not raise."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
 
@@ -466,6 +483,9 @@ async def test_non_whitelisted_tool_unknown_no_stream(monkeypatch: Any) -> None:
     await base.print_agent_json(TextPart(text="next"), session)
 
     plain = _plain(chunks)
+    # Header printed once with the raw name; short args streamed inline.
+    assert plain.count("⚡ UnknownTool") == 1
+    assert " a:x" in plain
     # The truncated line is terminated before the text prints.
     assert "\nnext" in plain
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
@@ -658,9 +678,8 @@ async def test_stream_colors_writefile_header_and_content_white(monkeypatch: Any
     assert "\x1b[95m⚡ WriteFile\x1b[0m" in output
     # Streamed content value color-coded bright black.
     assert "\x1b[90mhello\x1b[0m" in output
-    # Non-streamed compact segments keep the legacy magenta and start on
-    # their own line (newline prefix).
-    assert "\x1b[95m\npath:\nx.py\x1b[0m" in output
+    # Short args stay inline on the header line (magenta, space prefix).
+    assert "\x1b[95m path:x.py\x1b[0m" in output
 
 
 async def test_stream_colors_editfile_old_red_new_green(monkeypatch: Any) -> None:
@@ -683,8 +702,9 @@ async def test_stream_colors_editfile_old_red_new_green(monkeypatch: Any) -> Non
     assert "\x1b[92mbbb\x1b[0m" in output            # new -> bright green
 
 
-async def test_stream_prints_each_argument_on_new_line(monkeypatch: Any) -> None:
-    """Each streamed tool argument starts on its own line (no ", " joins)."""
+async def test_stream_prints_only_stream_keys_on_new_line(monkeypatch: Any) -> None:
+    """Short args stay inline on the header line; only ``_STREAM_ARG_KEYS``
+    values (old/new here) start on their own ``key:\\n`` line."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(
@@ -700,15 +720,13 @@ async def test_stream_prints_each_argument_on_new_line(monkeypatch: Any) -> None
 
     plain = _plain(chunks)
 
-    # Header on its own line, then exactly one argument per line.
-    assert "⚡ EditFile\n" in plain
-    assert "\npath:\nf.py" in plain
+    # Short arg (path) is inline on the header line.
+    assert "⚡ EditFile path:f.py" in plain
+    # Streamed old/new values get their own labeled lines.
     assert "\nold:\naaa" in plain
     assert "\nnew:\nbbb" in plain
-    # No comma-separated arguments remain.
-    assert ", old:" not in plain
-    assert ", new:" not in plain
-    assert ", path:" not in plain
+    # No per-line short-argument formatting remains.
+    assert "\npath:" not in plain
     # Stream is still terminated cleanly.
     assert base._stream._last_char_was_newline is True
 
@@ -766,13 +784,12 @@ async def test_tool_header_color_compact_path_and_fallback(monkeypatch: Any) -> 
 
 
 async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> None:
-    """Regression: the compact tool header must not be printed again after
-    the tool result arrives.
+    """Regression: the tool header must not be printed again after the tool
+    result arrives.
 
-    _handle_tool_result clears _TOOL_HEADER_PRINTED_KEY but (when the tool
-    call is found by id) left the stale _LAST_TOOL_CALL_KEY behind. The next
-    non-toolcall wire message then triggered _finish_tool_call_stream, whose
-    final parse attempt re-printed the header a second time."""
+    _handle_tool_result must drop the stale _LAST_TOOL_CALL_KEY (when the
+    tool call is found by id); otherwise the next non-toolcall wire message
+    would trigger _finish_tool_call_stream on the finished call."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(
@@ -809,12 +826,11 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
     """Regression: while the last streamed tool call is still in flight,
     results of earlier parallel calls must not re-print its header.
 
-    _handle_tool_result used to clear _TOOL_HEADER_PRINTED_KEY for *any*
-    result with display blocks. With parallel tool calls (the OpenAI
-    Responses wire format: ``ToolCall(args='')`` + one ``ToolCallPart`` per
-    call), the results of earlier calls then cleared the flag of the last,
-    still-pending call, so each arriving result made
-    _finish_tool_call_stream re-print the pending call's ``⚡`` header."""
+    _handle_tool_result must only touch the state of the call the result
+    belongs to. With parallel tool calls (the OpenAI Responses wire format:
+    ``ToolCall(args='')`` + one ``ToolCallPart`` per call), clearing the
+    last, still-pending call's state for an earlier result corrupted the
+    in-flight call's display."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
 
@@ -879,24 +895,36 @@ async def test_tool_result_colors_success_green_error_red(monkeypatch: Any) -> N
     assert "\x1b[91m✗ boom\x1b[0m" in "".join(chunks2)
 
 
-def test_format_tool_args_powershell_bash_prints_cmd_and_command_alias() -> None:
+def test_format_tool_args_cmd_and_command_alias() -> None:
     """Regression: ``PowershellParams``/``BashParams`` (pwsh_tool.py /
     bash_tool.py) declare ``cmd`` with the pydantic alias ``command``, so the
     JSON schema advertised to the LLM names the field ``command`` and models
-    typically send ``{"command": ...}``. The compact ``_format_tool_args``
-    header must print the command for both the ``command`` alias and the
-    ``cmd`` field name — previously only ``cmd`` was looked up, so the header
-    showed no command at all when the LLM used the advertised alias."""
-    for tool_name in ("Powershell", "Bash"):
-        for key in ("command", "cmd"):
-            formatted = base._format_tool_args(
-                tool_name, orjson.dumps({key: "Get-Date", "timeout": 30}).decode("utf-8")
-            )
-            assert formatted is not None, f"{tool_name}: no formatted output for {key!r}"
-            assert "Get-Date" in formatted, (
-                f"{tool_name}: command missing from header for {key!r} args: {formatted!r}"
-            )
-            assert "timeout: 30" in formatted
+    typically send ``{"command": ...}``. The generic ``format_tool_args``
+    summary must print the command under its canonical key for both the
+    ``command`` alias and the ``cmd`` field name — previously only ``cmd``
+    was looked up, so the header showed no command at all when the LLM used
+    the advertised alias."""
+    for key in ("command", "cmd"):
+        formatted = stream_mod.format_tool_args(
+            orjson.dumps({key: "Get-Date", "timeout": 30}).decode("utf-8")
+        )
+        assert formatted == "command:Get-Date timeout:30", (
+            f"unexpected summary for {key!r} args: {formatted!r}"
+        )
+
+
+def test_format_tool_args_generic_new_tool() -> None:
+    """Future-compatible: a brand-new tool name needs no display code — the
+    generic formatter summarizes any arguments dict as ``key:value`` pairs."""
+    formatted = stream_mod.format_tool_args(
+        orjson.dumps({"query": "abc", "limit": 5, "verbose": True}).decode("utf-8")
+    )
+    assert formatted == "query:abc limit:5 verbose:True"
+    # Non-dict / invalid inputs behave like before.
+    assert stream_mod.format_tool_args(None) is None
+    assert stream_mod.format_tool_args("") == ""
+    assert stream_mod.format_tool_args("not json") is None
+    assert stream_mod.format_tool_args('[1, 2]') == "[1,2]"
 
 
 async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch: Any) -> None:
@@ -935,9 +963,9 @@ async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch
 
 async def test_powershell_bash_streamed_fragments_print_command_alias(monkeypatch: Any) -> None:
     """Anthropic/OpenAI-Responses style streaming: ToolCall with empty
-    arguments followed by ToolCallPart fragments.  Since Powershell/Bash
-    are now in ``_STREAM_TOOL_NAMES``, the stream printer is created and
-    the command is printed **inline** after the header as fragments arrive."""
+    arguments followed by ToolCallPart fragments.  The stream printer is
+    created for every tool and the command is printed **inline** after the
+    header as fragments arrive."""
     for tool_name in ("Powershell", "Bash"):
         chunks = _capture_base_stream(monkeypatch)
         session = FakeSession()
@@ -1093,14 +1121,79 @@ async def test_tool_result_flushes(monkeypatch: Any) -> None:
 # hallucination") made the *execution* layer (kosong.tooling) tolerate
 # hallucinated tool names (auto-correct / TOOL_NAME_REDIRECTS) and a wide
 # set of argument-key aliases (FIELD_ALIASES_FILE: old_str, new_str, data,
-# file, changes, ...).  The streaming printer in kimix/ui/stream.py still
-# only recognizes the exact names in _STREAM_TOOL_NAMES and its small
-# _ARG_KEY_ALIASES map, so calls that execute fine (after kosong repairs
-# them) silently lose the live decoded streaming display.  Kimi/Anthropic
-# models hit this frequently — e.g. Claude's native editor keys are
+# file, changes, ...).  The streaming display in kimix/ui/stream.py mirrors
+# the same resolution — names resolve against the session's live toolset
+# (future-compatible: no hardcoded tool list) and keys canonicalize via
+# _ARG_KEY_ALIASES — so calls that execute fine (after kosong repairs
+# them) keep the live decoded streaming display.  Kimi/Anthropic models
+# hit this frequently — e.g. Claude's native editor keys are
 # ``old_str``/``new_str`` and snake_case tool names like ``write_file``
 # are common.
 # ---------------------------------------------------------------------------
+
+
+async def test_short_args_print_on_one_header_line(monkeypatch: Any) -> None:
+    """Short arguments never break onto their own lines — the whole call
+    renders as a single ``⚡ Name key:value key:value`` line::
+
+        ⚡ EditFile path:C:\\dev\\kimi-agent\\src\\kimix\\ui\\stream.py line_offset:1125 max_char:15000
+    """
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    path = "C:\\dev\\kimi-agent\\src\\kimix\\ui\\stream.py"
+
+    await base.print_agent_json(
+        ToolCall(
+            id="call-short-args",
+            function=ToolCall.FunctionBody(
+                name="EditFile",
+                arguments=orjson.dumps(
+                    {"path": path, "line_offset": 1125, "max_char": 15000}
+                ).decode("utf-8"),
+            ),
+        ),
+        session,
+    )
+
+    plain = _plain(chunks)
+    expected = f"⚡ EditFile path:{path} line_offset:1125 max_char:15000"
+    assert expected in plain, f"one-line header+args missing: {plain!r}"
+    # The header line is a single line: no newline between header and args.
+    header_line = next(
+        line for line in plain.splitlines() if line.startswith("⚡ EditFile")
+    )
+    assert header_line == expected
+
+
+async def test_new_tool_streams_without_code_change(monkeypatch: Any) -> None:
+    """Future-compatible: a tool name this codebase has never heard of still
+    streams generically — header + inline short args, long whitelisted keys
+    on their own line — and hallucinated spellings of newly registered
+    tools resolve via the session's live toolset."""
+    # Brand-new tool registered in the session toolset; the model sends a
+    # snake_case hallucination of it.
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession(tool_names=("MyCustomTool",))
+
+    await base.print_agent_json(
+        ToolCall(
+            id="call-new",
+            function=ToolCall.FunctionBody(name="my_custom_tool", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"query": "abc", "limit": 5}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    # Header shows the resolved canonical name from the live toolset.
+    assert "⚡ MyCustomTool" in plain
+    # Generic inline short args, no per-tool code required.
+    assert " query:abc" in plain
+    assert " limit:5" in plain
+    assert base._stream._last_char_was_newline is True
 
 
 async def test_stream_fuzzy_alias_old_str_new_str(monkeypatch: Any) -> None:
@@ -1165,7 +1258,8 @@ async def test_stream_fuzzy_alias_data_maps_to_content(monkeypatch: Any) -> None
 
 async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
     """Models often emit ``file`` instead of ``path``; kosong repairs it.
-    The path must not be mislabeled — it stays a compact ``path:`` line."""
+    The path must not be mislabeled — it displays under the canonical
+    ``path:`` key, inline on the header line."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(
@@ -1180,7 +1274,7 @@ async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
     )
 
     plain = _plain(chunks)
-    assert "\npath:\nx.py" in plain, (
+    assert " path:x.py" in plain, (
         f"alias 'file' should display as canonical 'path:': {plain!r}"
     )
     assert "\ncontent:\nhello" in plain
@@ -1189,9 +1283,9 @@ async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
 async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
     """kimi-style hallucinated tool name ``write_file``: kosong's
     normalize_tool_name auto-correct resolves it to ``WriteFile`` at
-    execution, so the streaming display must kick in too — previously the
-    raw name missed ``_STREAM_TOOL_NAMES`` and the whole call fell back to
-    the legacy compact one-line format with no live streaming."""
+    execution, so the display must resolve it too — the header shows the
+    canonical name resolved against the session's live toolset and the
+    content streams live."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(
