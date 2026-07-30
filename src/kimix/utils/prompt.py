@@ -97,6 +97,15 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         return None
 
     lines = []
+    # Inject the original user request as context so the agent remembers
+    # what it was working on when it reviews unfinished todos.
+    current_prompt = getattr(runtime, "current_prompt", None) if runtime is not None else None
+    if current_prompt:
+        # Truncate long prompts to avoid flooding the reminder with raw content.
+        if len(current_prompt) > 200:
+            current_prompt = current_prompt[:100] + "..." + current_prompt[-100:]
+        lines.append(f"Original request: {current_prompt}")
+        lines.append("")
     if strong:
         lines.append(
             "CRITICAL: Unfinished `TodoList` tasks remain. Mark every remaining item `done` with `TodoList` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[done]`."
@@ -425,6 +434,16 @@ async def prompt_async(
         prompt_str = f"read and execute: `{name}`"
     if merge_wire_messages is None:
         merge_wire_messages = output_function is not None
+
+    # Store the (possibly transformed) prompt_str on the runtime so that
+    # TodoList and _maybe_build_todo_reminder can inject it into their
+    # ALL_DONE_REMINDER / reminder messages.
+    cli = getattr(session, "_cli", None)
+    if cli is not None:
+        runtime = getattr(cli, "_runtime", None)
+        if runtime is not None:
+            runtime.current_prompt = prompt_str
+
     try:
         if ensure_todo_finished:
             # When ensure_todo_finished=True, catch ALL exceptions from the

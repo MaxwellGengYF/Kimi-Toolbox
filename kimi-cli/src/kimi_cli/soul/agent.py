@@ -200,6 +200,13 @@ class Runtime:
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
 
+    current_prompt: str | None = None
+    """The current user prompt string, set by prompt_async before each prompt.
+
+    Consumed by TodoList (ALL_DONE_REMINDER) and _maybe_build_todo_reminder
+    to inject the original request into reminders.
+    """
+
     def __post_init__(self) -> None:
         if self.subagent_store is None:
             self.subagent_store = SubagentStore(self.session)

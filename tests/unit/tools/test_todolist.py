@@ -105,3 +105,221 @@ class TestTodoCodeField:
         new = Todo(title="task", status="done", code="")
         merged = TodoList._merge_one(old, new)
         assert merged.code == ""
+
+
+class TestAllDoneReminderWrite:
+    """Verify ALL_DONE_REMINDER in _build_success_response uses current_prompt."""
+
+    async def test_uses_current_prompt_when_all_done(self, mock_runtime: MagicMock) -> None:
+        """When runtime.current_prompt is set, it is appended after the reminder."""
+        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+
+        mock_runtime.current_prompt = "my original request"
+        tl = TodoList(runtime=mock_runtime)
+
+        # Mock persistence so _write_todos -> _build_success_response works
+        tl._load_todos = MagicMock(return_value=[])
+        tl._load_archived_todos = MagicMock(return_value=[])
+        tl._save_todos = MagicMock(return_value=None)
+
+        result = await tl(TodoListParams(
+            todos=[Todo(title="task", status="done")],
+            mode="append",
+        ))
+        # Both the hardcoded reminder AND the appended prompt should be present
+        assert "All todos are done." in result.output
+        assert "Original prompt:" in result.output
+        assert "my original request" in result.output
+        assert "All todos are done." in result.message
+        assert "Original prompt:" in result.message
+        assert "my original request" in result.message
+
+    async def test_fallback_when_current_prompt_not_set(self, mock_runtime: MagicMock) -> None:
+        """When runtime has no current_prompt, use the generic fallback."""
+        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+
+        # MagicMock getattr returns MagicMock, which is truthy.
+        # Explicitly set current_prompt to None to test fallback.
+        mock_runtime.current_prompt = None
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[])
+        tl._load_archived_todos = MagicMock(return_value=[])
+        tl._save_todos = MagicMock(return_value=None)
+
+        result = await tl(TodoListParams(
+            todos=[Todo(title="task", status="done")],
+            mode="append",
+        ))
+        assert "All todos are done." in result.output
+        assert "nothing is left unfinished" in result.output
+        assert "my original request" not in result.output
+
+
+class TestAllDoneReminderRead:
+    """Verify ALL_DONE_REMINDER in _read_todos uses current_prompt."""
+
+    async def test_read_todos_all_done_with_current_prompt(self, mock_runtime: MagicMock) -> None:
+        """When reading and all todos done, current_prompt is appended after the reminder."""
+        from kimi_cli.tools.todo import TodoList
+
+        mock_runtime.current_prompt = "my request"
+        tl = TodoList(runtime=mock_runtime)
+
+        # Mock internal state: all todos done, no archived
+        tl._load_todos = MagicMock(return_value=[
+            MagicMock(status="done", title="task", notes=None, code=None)
+        ])
+        tl._load_archived_todos = MagicMock(return_value=[])
+
+        result = tl._read_todos()
+        # Both the hardcoded reminder AND the appended prompt should be present
+        assert "All todos are done." in result.output
+        assert "Original prompt:" in result.output
+        assert "my request" in result.output
+        assert "All todos are done." in result.message
+        assert "Original prompt:" in result.message
+        assert "my request" in result.message
+
+    async def test_read_todos_all_done_fallback(self, mock_runtime: MagicMock) -> None:
+        """Generic fallback when current_prompt is None."""
+        from kimi_cli.tools.todo import TodoList
+
+        mock_runtime.current_prompt = None
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[
+            MagicMock(status="done", title="task", notes=None, code=None)
+        ])
+        tl._load_archived_todos = MagicMock(return_value=[])
+
+        result = tl._read_todos()
+        assert "All todos are done." in result.output
+        assert "nothing is left unfinished" in result.output
+
+class TestTruncatePrompt:
+    """Verify _truncate_prompt helper function."""
+
+    def test_short_prompt_not_truncated(self) -> None:
+        from kimi_cli.tools.todo import _truncate_prompt
+        text = "short request"
+        assert _truncate_prompt(text) == text
+
+    def test_exactly_200_chars(self) -> None:
+        from kimi_cli.tools.todo import _truncate_prompt
+        text = "a" * 200
+        assert _truncate_prompt(text) == text
+        assert len(_truncate_prompt(text)) == 200
+
+    def test_long_prompt_truncated_head_tail(self) -> None:
+        from kimi_cli.tools.todo import _truncate_prompt
+        # Build a 250-char string: "HEAD..." + pad + "...TAIL"
+        head = "X" * 100
+        tail = "Y" * 100
+        middle = "Z" * 50  # total 250 chars
+        text = head + middle + tail
+        result = _truncate_prompt(text)
+        assert result == head + "..." + tail
+        assert "..." in result
+        assert len(result) == 100 + 3 + 100  # 203 chars
+        assert result.startswith("X" * 100)
+        assert result.endswith("Y" * 100)
+        # The middle Z's are replaced by "..."
+        assert "Z" not in result
+
+    def test_long_prompt_uses_200_threshold_by_default(self) -> None:
+        from kimi_cli.tools.todo import _truncate_prompt
+        # 201 chars — exceeds 200
+        text = "a" * 101 + "b" * 100
+        result = _truncate_prompt(text)
+        assert "..." in result
+        assert len(result) == 203
+
+
+class TestAllDoneReminderWriteTruncation:
+    """Verify truncation in _build_success_response."""
+
+    async def test_long_current_prompt_truncated_in_output(self, mock_runtime: MagicMock) -> None:
+        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+
+        # Build a prompt > 200 chars
+        long_prompt = "A" * 150 + "B" * 150  # 300 chars
+        mock_runtime.current_prompt = long_prompt
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[])
+        tl._load_archived_todos = MagicMock(return_value=[])
+        tl._save_todos = MagicMock(return_value=None)
+
+        result = await tl(TodoListParams(
+            todos=[Todo(title="task", status="done")],
+            mode="append",
+        ))
+        # Hardcoded reminder is always present
+        assert "All todos are done." in result.output
+        # Should have "..." truncation marker
+        assert "..." in result.output
+        # Should contain the original head (100 As)
+        assert "A" * 100 in result.output
+        # Should contain the original tail (100 Bs)
+        assert "B" * 100 in result.output
+        # The middle chars (the 150th A etc.) should be replaced by ...
+        assert "A" * 150 not in result.output
+
+    async def test_short_current_prompt_not_truncated(self, mock_runtime: MagicMock) -> None:
+        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+
+        mock_runtime.current_prompt = "short request"
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[])
+        tl._load_archived_todos = MagicMock(return_value=[])
+        tl._save_todos = MagicMock(return_value=None)
+
+        result = await tl(TodoListParams(
+            todos=[Todo(title="task", status="done")],
+            mode="append",
+        ))
+        assert "All todos are done." in result.output
+        assert "Original prompt:" in result.output
+        assert "short request" in result.output
+        assert "..." not in result.output
+
+
+class TestAllDoneReminderReadTruncation:
+    """Verify truncation in _read_todos."""
+
+    async def test_long_current_prompt_truncated_in_read(self, mock_runtime: MagicMock) -> None:
+        from kimi_cli.tools.todo import TodoList
+
+        long_prompt = "X" * 150 + "Y" * 150  # 300 chars
+        mock_runtime.current_prompt = long_prompt
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[
+            MagicMock(status="done", title="task", notes=None, code=None)
+        ])
+        tl._load_archived_todos = MagicMock(return_value=[])
+
+        result = tl._read_todos()
+        assert "All todos are done." in result.output
+        assert "..." in result.output
+        assert "X" * 100 in result.output
+        assert "Y" * 100 in result.output
+
+    async def test_short_current_prompt_not_truncated_in_read(self, mock_runtime: MagicMock) -> None:
+        from kimi_cli.tools.todo import TodoList
+
+        mock_runtime.current_prompt = "short request"
+        tl = TodoList(runtime=mock_runtime)
+
+        tl._load_todos = MagicMock(return_value=[
+            MagicMock(status="done", title="task", notes=None, code=None)
+        ])
+        tl._load_archived_todos = MagicMock(return_value=[])
+
+        result = tl._read_todos()
+        assert "All todos are done." in result.output
+        assert "Original prompt:" in result.output
+        assert "short request" in result.output
+        assert "..." not in result.output

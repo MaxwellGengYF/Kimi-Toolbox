@@ -25,6 +25,24 @@ from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
 
 
+def _truncate_prompt(text: str, max_len: int = 200) -> str:
+    """Truncate long text, keeping head and tail.
+
+    When ``len(text) > max_len``, keeps the first 100 chars and the last
+    100 chars with ``...`` in between. Otherwise returns the text as-is.
+    """
+    if len(text) > max_len:
+        return text[:100] + "..." + text[-100:]
+    return text
+
+
+_ALL_DONE_REMINDER = (
+    "All todos are done. "
+    "Please review the requirements again to ensure nothing is left unfinished."
+)
+"""Default reminder shown when all todos are done."""
+
+
 # Hard limits for harness safety.
 _MAX_TODOS = 4096
 # Maximum number of archived todos kept in state (oldest are dropped first).
@@ -818,18 +836,19 @@ class TodoList(CallableTool2[Params]):
             output_lines.append(active_summary)
         output = "\n".join(output_lines)
 
-        # NEW: Append all-done reminder when all todos are done
-        ALL_DONE_REMINDER = (
-            "All todos are done. "
-            "Please review the requirements again to ensure nothing is left unfinished."
-        )
+        # Append all-done reminder when all todos are done.
+        all_done_reminder = _ALL_DONE_REMINDER
+        # Append the original user prompt as context when available.
+        current_prompt = getattr(self._runtime, "current_prompt", None)
+        if current_prompt:
+            all_done_reminder += "\nOriginal prompt:\n\n" + _truncate_prompt(current_prompt)
         if counts["pending"] == 0 and counts["in_progress"] == 0 and len(todos) > 0:
-            output_lines.append(ALL_DONE_REMINDER)
+            output_lines.append(all_done_reminder)
             output = "\n".join(output_lines)
 
         message_lines: list[str] = [f"Todo list {mode_msg}."]
         if counts["pending"] == 0 and counts["in_progress"] == 0 and len(todos) > 0:
-            message_lines.append(ALL_DONE_REMINDER)
+            message_lines.append(all_done_reminder)
         if mode == "force_overwrite" and had_old_todos:
             message_lines.append(
                 "Warning: mode='force_overwrite' replaces the existing todo list and bypasses merge validation logic."
@@ -961,18 +980,19 @@ class TodoList(CallableTool2[Params]):
         if archived:
             output_lines.append(f"Archived: {len(archived)} completed todo(s).")
 
-        # NEW: Append all-done reminder
-        ALL_DONE_REMINDER = (
-            "All todos are done. "
-            "Please review the requirements again to ensure nothing is left unfinished."
-        )
+        # Append all-done reminder.
+        all_done_reminder = _ALL_DONE_REMINDER
+        # Append the original user prompt as context when available.
+        current_prompt = getattr(self._runtime, "current_prompt", None)
+        if current_prompt:
+            all_done_reminder += "\nOriginal prompt:\n\n" + _truncate_prompt(current_prompt)
         if all_done:
-            output_lines.append(ALL_DONE_REMINDER)
+            output_lines.append(all_done_reminder)
 
         return ToolReturnValue(
             is_error=False,
             output="\n".join(output_lines),
-            message=ALL_DONE_REMINDER if all_done else "Current todo list displayed.",
+            message=all_done_reminder if all_done else "Current todo list displayed.",
             display=[],
         )
 

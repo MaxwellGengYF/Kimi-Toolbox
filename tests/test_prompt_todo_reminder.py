@@ -59,9 +59,10 @@ class FakeCLISession:
 
 
 class FakeCLI:
-    def __init__(self, has_set_todo: bool = True, todos: list[TodoItemState] | None = None, closing_rounds: int | None = None) -> None:
+    def __init__(self, has_set_todo: bool = True, todos: list[TodoItemState] | None = None, closing_rounds: int | None = None, current_prompt: str | None = None) -> None:
         self.soul = FakeSoul(has_set_todo=has_set_todo, closing_rounds=closing_rounds)
         self.session = FakeCLISession(todos=todos)
+        self._runtime = type("FakeRuntime", (), {"role": "root", "current_prompt": current_prompt})()
 
 
 class FakeSubTodoItemState:
@@ -83,8 +84,9 @@ class FakeSessionWithCLI:
         context_usage: float = 0.125,
         context_tokens: int = 1024,
         closing_rounds: int | None = None,
+        current_prompt: str | None = None,
     ) -> None:
-        self._cli = FakeCLI(has_set_todo=has_set_todo, todos=todos, closing_rounds=closing_rounds)
+        self._cli = FakeCLI(has_set_todo=has_set_todo, todos=todos, closing_rounds=closing_rounds, current_prompt=current_prompt)
         self.status = FakeStatus(context_usage=context_usage, context_tokens=context_tokens)
         self.cancelled = False
         self._cancel_event = None
@@ -565,3 +567,109 @@ def test_prompt_plan_async_prompts_execution_agent(tmp_path: Path, monkeypatch: 
     # Execution prompts should implement and review the plan.
     assert any("implement the plan" in p for p in execution_session.prompts)
     assert any("Review this plan" in p for p in execution_session.prompts)
+
+
+class TestCurrentPromptInReminder:
+    """Verify _maybe_build_todo_reminder prepends current_prompt."""
+
+    def test_reminder_includes_current_prompt(self) -> None:
+        """When runtime.current_prompt is set, it appears in the reminder."""
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos, current_prompt="user request")
+
+        reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+        assert reminder is not None
+        assert "Original request: user request" in reminder
+        assert "You have unfinished" in reminder
+
+    def test_reminder_no_current_prompt_no_prefix(self) -> None:
+        """When runtime has no current_prompt, no prefix is injected."""
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos)
+
+        reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+        assert reminder is not None
+        assert "Original request:" not in reminder
+        assert "You have unfinished" in reminder
+
+    def test_reminder_no_runtime_no_prefix(self) -> None:
+        """When runtime has no current_prompt attribute, no prefix."""
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos)
+        # Remove the _runtime attribute to test defensive code path
+        del session._cli._runtime
+
+        reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+        assert reminder is not None
+        assert "Original request:" not in reminder
+        assert "You have unfinished" in reminder
+
+
+class TestPromptAsyncSetsCurrentPrompt:
+    """Verify prompt_async stores current_prompt on the runtime."""
+
+    def test_sets_current_prompt_on_runtime(self, monkeypatch: Any) -> None:
+        """After prompt_async, runtime.current_prompt equals the prompt_str."""
+        _suppress_stream(monkeypatch)
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos)
+
+        asyncio.run(prompt_mod.prompt_async("hello world", session=session, info_print=False))
+
+        assert getattr(session._cli._runtime, "current_prompt", None) == "hello world"
+
+    def test_current_prompt_persists_through_prompt_flow(self, monkeypatch: Any) -> None:
+        """current_prompt is set before the main prompt runs."""
+        _suppress_stream(monkeypatch)
+
+        captured_prompt_during_run: list[str] = []
+        original_prompt = FakeSessionWithCLI.prompt
+
+        async def intercept_prompt(self: Any, prompt: str, **kwargs: Any) -> Any:
+            rt = getattr(self._cli, "_runtime", None)
+            cp = getattr(rt, "current_prompt", None) if rt is not None else None
+            captured_prompt_during_run.append(cp or "")
+            async for msg in original_prompt(self, prompt, **kwargs):
+                yield msg
+
+        monkeypatch.setattr(FakeSessionWithCLI, "prompt", intercept_prompt)
+
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos)
+
+        asyncio.run(prompt_mod.prompt_async("my prompt", session=session, info_print=False))
+
+        assert any("my prompt" == cp for cp in captured_prompt_during_run), \
+            f"current_prompt should be set before prompt runs, got: {captured_prompt_during_run}"
+
+
+class TestCurrentPromptTruncation:
+    """Verify current_prompt is truncated when too long."""
+
+    def test_short_prompt_not_truncated(self) -> None:
+        """Short prompts are not truncated."""
+        todos = [TodoItemState(title="task", status="pending")]
+        session = FakeSessionWithCLI(todos=todos, current_prompt="short request")
+
+        reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+        assert reminder is not None
+        assert "Original request: short request" in reminder
+        assert "..." not in reminder
+
+    def test_long_prompt_truncated(self) -> None:
+        """Long prompts (>200 chars) are truncated with head+tail."""
+        todos = [TodoItemState(title="task", status="pending")]
+        long_prompt = "A" * 150 + "B" * 150  # 300 chars
+        session = FakeSessionWithCLI(todos=todos, current_prompt=long_prompt)
+
+        reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+        assert reminder is not None
+        assert "Original request: " in reminder
+        # Should have truncation marker
+        assert "..." in reminder
+        # Should contain head
+        assert "A" * 100 in reminder
+        # Should contain tail
+        assert "B" * 100 in reminder
+        # Should NOT contain the full original
+        assert "A" * 150 not in reminder
