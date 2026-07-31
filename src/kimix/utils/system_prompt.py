@@ -85,7 +85,7 @@ def get_system_prompt(
             items.append(f'For long commands, use `Python` instead of `{shell_tool}`.')
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
-            items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, check `ContextUsage`; if usage is high, call `Compact` before the next step.')
+            items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, call `Compact` before the next step.')
             items.append('Multi-step: use `TodoList`. Finish all before ending. For any todo involving code changes, attach verification `code` — prefer the project\'s own tests in `!shell` form (e.g. `!pytest ...`); if none exist, write a minimal reproduction script. Never declare completion from reading code alone: all verification must actually run and pass before the todo is marked `done`.')
             if not is_sub_agent:
                 if yolo:

@@ -27,7 +27,7 @@ from pathlib import Path
 # ============================================================
 # Global configuration -- change these to pin version / path
 # ============================================================
-GIT_VERSION: str = "2.54.0"
+GIT_VERSION: str = "2.55.0"
 """Git for Windows version to install when using the direct-download strategy."""
 
 INSTALL_DIR = Path.home() / ".kimi" / "git"

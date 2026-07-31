@@ -569,6 +569,108 @@ def test_prompt_plan_async_prompts_execution_agent(tmp_path: Path, monkeypatch: 
     assert any("Review this plan" in p for p in execution_session.prompts)
 
 
+def test_prompt_plan_async_falls_back_to_main_provider_without_sub_providers(tmp_path: Path, monkeypatch: Any) -> None:
+    """When no `sub_providers` are configured, the planner session falls back
+    to the main provider settings instead of failing with an empty provider dict.
+    """
+    _suppress_stream(monkeypatch)
+    plan_file = tmp_path / "plan.md"
+    planner_session = FakePlannerSessionForPlan(plan_file)
+    execution_session = FakeExecutionSessionForPlan()
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_create_session_async(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return planner_session
+
+    async def fake_create_default_session_async(*args: Any, **kwargs: Any) -> Any:
+        return execution_session
+
+    async def fake_close_session_async(session: Any) -> None:
+        pass
+
+    async def fake_prompt_async(prompt_str: str, session: Any, **kwargs: Any) -> None:
+        session.prompts.append(prompt_str)
+
+    monkeypatch.setattr(prompt_mod, "_create_session_async", fake_create_session_async)
+    monkeypatch.setattr(prompt_mod, "_create_default_session_async", fake_create_default_session_async)
+    monkeypatch.setattr(prompt_mod, "close_session_async", fake_close_session_async)
+    monkeypatch.setattr(prompt_mod, "prompt_async", fake_prompt_async)
+    monkeypatch.setattr(prompt_mod.os, "startfile", lambda _path: None, raising=False)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+
+    # No sub-providers configured at all — only a main provider.
+    main_provider = {
+        "model": "deepseek-v4-flash-official",
+        "max_context_size": 1048576,
+        "url": "http://v2.open.venus.oa.com/llmproxy",
+        "type": "openai_legacy",
+        "api_key": "key",
+    }
+    monkeypatch.setattr(prompt_mod.base, "_default_sub_providers", [])
+    monkeypatch.setattr(prompt_mod.base, "_default_provider", dict(main_provider))
+
+    asyncio.run(prompt_mod.prompt_plan_async("test requirement", plan_file))
+
+    provider_dict = captured_kwargs.get("provider_dict", {})
+    # The planner session must inherit the main provider settings.
+    assert provider_dict.get("type") == "openai_legacy"
+    assert provider_dict.get("model") == "deepseek-v4-flash-official"
+    assert provider_dict.get("url") == "http://v2.open.venus.oa.com/llmproxy"
+    # Loop-control overrides are still applied on top of the fallback.
+    assert provider_dict.get("loop_control", {}).get("budget_reminder_enabled") is False
+
+
+def test_prompt_plan_async_uses_planner_sub_provider_when_present(tmp_path: Path, monkeypatch: Any) -> None:
+    """A configured planner sub-provider still wins over the main provider."""
+    _suppress_stream(monkeypatch)
+    plan_file = tmp_path / "plan.md"
+    planner_session = FakePlannerSessionForPlan(plan_file)
+    execution_session = FakeExecutionSessionForPlan()
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_create_session_async(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return planner_session
+
+    async def fake_create_default_session_async(*args: Any, **kwargs: Any) -> Any:
+        return execution_session
+
+    async def fake_close_session_async(session: Any) -> None:
+        pass
+
+    async def fake_prompt_async(prompt_str: str, session: Any, **kwargs: Any) -> None:
+        session.prompts.append(prompt_str)
+
+    monkeypatch.setattr(prompt_mod, "_create_session_async", fake_create_session_async)
+    monkeypatch.setattr(prompt_mod, "_create_default_session_async", fake_create_default_session_async)
+    monkeypatch.setattr(prompt_mod, "close_session_async", fake_close_session_async)
+    monkeypatch.setattr(prompt_mod, "prompt_async", fake_prompt_async)
+    monkeypatch.setattr(prompt_mod.os, "startfile", lambda _path: None, raising=False)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+
+    planner_provider = {
+        "model": "planner-model",
+        "max_context_size": 65536,
+        "url": "http://planner.example.com",
+        "type": "openai_legacy",
+        "role": "planner",
+    }
+    monkeypatch.setattr(prompt_mod.base, "_default_sub_providers", [dict(planner_provider)])
+    monkeypatch.setattr(
+        prompt_mod.base, "_default_provider",
+        {"model": "main-model", "max_context_size": 1048576, "url": "http://main.example.com", "type": "openai_legacy"},
+    )
+
+    asyncio.run(prompt_mod.prompt_plan_async("test requirement", plan_file))
+
+    provider_dict = captured_kwargs.get("provider_dict", {})
+    assert provider_dict.get("model") == "planner-model"
+    assert provider_dict.get("url") == "http://planner.example.com"
+
+
 class TestCurrentPromptInReminder:
     """Verify _maybe_build_todo_reminder prepends current_prompt."""
 

@@ -346,17 +346,6 @@ class Memory(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        # Read-only mode: block write/append actions
-        if self._runtime.read_only and params.action in ("write", "append"):
-            return ToolError(
-                message=(
-                    f"Memory '{params.action}' is forbidden in read-only mode. "
-                    "The agent should quit the conversation immediately. "
-                    "Use 'read', 'list', 'search', or 'retrieve' actions instead."
-                ),
-                brief="Forbidden in read-only mode",
-            )
-
         try:
             if params.action == "write":
                 return self._write(params.topic, params.content, append=False)

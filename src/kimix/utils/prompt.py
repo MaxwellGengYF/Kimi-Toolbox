@@ -640,9 +640,14 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
     planner_session: Session | None = None
 
     try:
-        planner_provider = base.get_default_sub_provider("planner")
-        # Deep-copy so we don't mutate the shared default provider dict
         import copy
+        planner_provider = base.get_default_sub_provider("planner")
+        if planner_provider is None or not planner_provider.get("type"):
+            # No usable planner sub-provider configured (e.g. the config has
+            # no `sub_providers` key): fall back to the main provider settings
+            # so the planner session can still be created.
+            planner_provider = base._default_provider
+        # Deep-copy so we don't mutate the shared default provider dict
         planner_provider = copy.deepcopy(planner_provider) if planner_provider else {}
         planner_provider.setdefault("loop_control", {})
         planner_provider["loop_control"]["budget_reminder_enabled"] = False
