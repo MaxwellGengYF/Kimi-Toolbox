@@ -20,6 +20,7 @@ from kimi_cli.tools.utils import load_desc
 from kimi_cli.tools.display import ShellDisplayBlock
 from kimix.tools.file.bash import bash_tool as _bash_tool
 from kimix.tools.file.bash.process_pwsh import pwsh_transform
+from kimix.tools.file.bash.pwsh_fix import fix_pwsh_command
 from kimix.tools.common import (
     _build_session_output_block,
     _env_with_rg_bin_path,
@@ -357,12 +358,37 @@ class Powershell(CallableTool2[PowershellParams]):
         # (empty cmd is valid in that case — just starts a shell).
         if cmd:
             validation_error = self._validate_command_for_ps(cmd)
-            if validation_error:
+            # The naive parity check rejects many *valid* commands (e.g. a
+            # double quote inside a single-quoted string, a here-string, a
+            # comment or a backtick-escaped quote).  Run the PowerShell-aware
+            # parser: it either verifies the command is legal, repairs it by
+            # appending the missing closing token (warning instead of error),
+            # or reports it as unrepairable.
+            fix = fix_pwsh_command(cmd)
+            if fix is None:
                 return ToolError(
                     output="",
-                    message=validation_error + transform_warning,
+                    message=(validation_error or "Invalid PowerShell command.") + transform_warning,
                     brief="Invalid PowerShell command",
                 )
+            if validation_error:
+                # The naive check flagged the command; the parser verified or
+                # repaired it — proceed with a warning instead of an error.
+                cmd = fix.command
+                if fix.warning:
+                    transform_warning += "\n[WARNING] " + fix.warning
+                else:
+                    transform_warning += (
+                        "\n[WARNING] Command has an apparently unbalanced quote, "
+                        "but the PowerShell-aware parser verified it is valid; "
+                        "executing as-is."
+                    )
+            elif fix.changed:
+                # Validation passed, but the parser made the command safe for
+                # the try/catch wrapper (trailing comment, `--%` marker, or an
+                # unclosed string the parity check cannot see).
+                cmd = fix.command
+                transform_warning += "\n[WARNING] " + fix.warning
 
         pattern = self._compile_pattern(params.wait_for_pattern)
         if isinstance(pattern, ToolError):
@@ -534,7 +560,10 @@ class Powershell(CallableTool2[PowershellParams]):
         * Command strings that are empty or whitespace-only.
         * Unbalanced double quotes ``"`` (odd count of ``"`` outside of safe
           contexts).  This is a best-effort heuristic — it does not account
-          for escaped quotes or nested strings.
+          for escaped quotes or nested strings, so ``__call__`` hands the
+          command to :func:`kimix.tools.file.bash.pwsh_fix.fix_pwsh_command`
+          which follows PowerShell's real quoting rules and either verifies
+          the command is legal, repairs it, or keeps this error.
 
         Returns ``None`` when the command passes validation, or an error
         message string explaining the problem.
@@ -585,6 +614,21 @@ class Powershell(CallableTool2[PowershellParams]):
     async def _execute_background(self, params: PowershellParams) -> ToolReturnValue:
         """Execute a PowerShell command in background and return immediately with task_id."""
         cmd = params.cmd
+        note = ""
+        if cmd:
+            # Same PowerShell-aware parser as the foreground path: repair
+            # unclosed quotes/here-strings/comments and protect the try/catch
+            # wrapper, reporting a warning instead of failing.
+            fix = fix_pwsh_command(cmd)
+            if fix is None:
+                return ToolError(
+                    output="",
+                    message="Invalid PowerShell command.",
+                    brief="Invalid PowerShell command",
+                )
+            if fix.changed:
+                cmd = fix.command
+                note = "\n[WARNING] " + fix.warning
         self._resolve_pwsh()
         executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
         raw_command = (
@@ -603,7 +647,7 @@ class Powershell(CallableTool2[PowershellParams]):
 
         return ToolOk(
             output=f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
-            message=f"Command started in background. task_id: `{task_id}`",
+            message=f"Command started in background. task_id: `{task_id}`" + note,
             brief="Background task started",
         )
 
