@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -68,3 +69,58 @@ class TestSystemPromptAgentsMd:
 
         assert content in prompt
         assert "read AGENTS.md before work" not in prompt
+
+
+class TestSystemPromptShellTool:
+    """The system prompt names the shell tool selected by agent config."""
+
+    def _prompt(self, tmp_path: Path) -> str:
+        runtime = _make_runtime(tmp_path)
+        prompt_func = get_system_prompt(work_dir=tmp_path, agent_role=SystemPromptType.Worker)
+        return prompt_func(runtime)
+
+    def test_powershell_enabled_names_powershell(self, tmp_path: Path) -> None:
+        with patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_powershell", return_value=True
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash", return_value=False
+        ):
+            assert "instead of `Powershell`" in self._prompt(tmp_path)
+
+    def test_bash_enabled_names_bash(self, tmp_path: Path) -> None:
+        with patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_powershell", return_value=False
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash", return_value=True
+        ):
+            assert "instead of `Bash`" in self._prompt(tmp_path)
+
+    def test_config_powershell_on_windows_names_powershell(self, tmp_path: Path) -> None:
+        # Integration: `agent.shell: powershell` in the agent file selects the
+        # Powershell tool, and the prompt follows the enablement logic.
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="powershell"
+        ):
+            assert "instead of `Powershell`" in self._prompt(tmp_path)
+
+    def test_config_powershell_on_linux_falls_back_to_bash(self, tmp_path: Path) -> None:
+        # Powershell is a Windows-only tool; on Linux the config falls back to
+        # Bash, and the prompt must match the tool that is actually loaded.
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "linux"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="powershell"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.find_bash", return_value="/bin/bash"
+        ):
+            assert "instead of `Bash`" in self._prompt(tmp_path)
+            assert "instead of `Powershell`" not in self._prompt(tmp_path)
+
+    def test_config_bash_on_windows_names_bash(self, tmp_path: Path) -> None:
+        # Integration: `agent.shell: bash` in the agent file selects the Bash
+        # tool on Windows (Git Bash available), and the prompt follows.
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="bash"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.find_bash", return_value=r"C:\Git\bin\bash.exe"
+        ):
+            assert "instead of `Bash`" in self._prompt(tmp_path)
+            assert "instead of `Powershell`" not in self._prompt(tmp_path)

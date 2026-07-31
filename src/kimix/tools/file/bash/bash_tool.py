@@ -6,6 +6,7 @@ import contextlib
 import functools
 import ntpath
 import os
+import orjson
 import regex as re
 import shutil
 import subprocess
@@ -211,19 +212,71 @@ def find_bash() -> str | None:
     return None
 
 
+def _configured_shell() -> str | None:
+    """Return the shell tool chosen by agent config, or ``None``.
+
+    Reads the ``agent.shell`` key (``"bash"`` or ``"powershell"``) from the
+    agent file used to build sessions (``kimix.base._default_agent_file``,
+    i.e. ``src/kimix/agent_worker.json`` by default).  Returns ``None`` when
+    the key is absent, holds an unknown value, or the file cannot be read —
+    callers then fall back to the legacy platform-based heuristics.
+    """
+    try:
+        from kimix.base import _default_agent_file
+        data = orjson.loads(_default_agent_file.read_text(encoding="utf-8"))
+        shell = data.get("agent", {}).get("shell")
+    except (OSError, ValueError, AttributeError):
+        return 'bash'
+    if not isinstance(shell, str):
+        return 'bash'
+    shell = shell.strip().lower()
+    if shell in ("powershell", "pwsh"):
+        return "powershell"
+    return None
+
+
 def _should_enable_bash() -> bool:
-    """Return True when the Bash tool should be enabled on this platform."""
+    """Return True when the Bash tool should be enabled on this platform.
+
+    The ``agent.shell`` config key (e.g. ``"shell": "bash"`` in
+    ``agent_worker.json``) takes precedence over the platform heuristics:
+    ``"bash"`` enables Bash wherever it is installed; ``"powershell"``
+    disables Bash on Windows (on non-Windows platforms the Powershell tool is
+    unavailable, so Bash remains the fallback).
+    """
     if not USE_SYSTEM_SHELL:
         return False
+    configured = _configured_shell()
+    if configured == "powershell":
+        if sys.platform == "win32":
+            return False
+        return find_bash() is not None
+    if configured == "bash":
+        return find_bash() is not None
+    # No explicit config: legacy platform-based behavior.
     if sys.platform == "win32" and USE_SYSTEM_PWSH_ON_WINDOWS:
         return False
     return find_bash() is not None
 
 
 def _should_enable_powershell() -> bool:
-    """Return True when the Powershell tool should be enabled on this platform."""
+    """Return True when the Powershell tool should be enabled on this platform.
+
+    The ``agent.shell`` config key (e.g. ``"shell": "bash"`` in
+    ``agent_worker.json``) takes precedence over the platform heuristics:
+    ``"bash"`` disables the tool unless Bash is unavailable (e.g. Windows
+    without Git Bash), in which case PowerShell is the fallback shell;
+    ``"powershell"`` forces the tool on Windows.
+    """
     if sys.platform != "win32":
         return False
+    configured = _configured_shell()
+    if configured == "bash":
+        # Bash is preferred but not installed here — fall back to PowerShell.
+        return find_bash() is None
+    if configured == "powershell":
+        return True
+    # No explicit config: legacy platform-based behavior.
     if USE_SYSTEM_PWSH_ON_WINDOWS:
         return True
     return find_bash() is None
@@ -645,6 +698,14 @@ class Bash(CallableTool2[BashParams]):
             raise SkipThisTool()
         self._session = session
         self._bash = find_bash()
+
+        # Windows-specific experience (verified by TestPrepareBashCmd and
+        # TestBashBackslashPaths): unquoted backslash paths are auto-converted.
+        if sys.platform == "win32":
+            self.description += (
+                " On Windows, unquoted backslash paths are auto-converted to forward slashes "
+                "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
+            )
 
         # Pre-normalize forbidden commands once at init time for O(1) per-call lookup.
         raw_forbidden = self._session.custom_config.get("config_json", {}).get("forbidden_commands", [])

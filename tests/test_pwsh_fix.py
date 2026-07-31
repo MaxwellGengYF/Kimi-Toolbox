@@ -696,6 +696,14 @@ class TestPwshToolValidationFlow:
 class TestPwshToolEndToEnd:
     """Real pwsh: the tool must succeed where the old validator failed."""
 
+    @pytest.fixture(autouse=True)
+    def _pwsh_enabled(self) -> Any:
+        # The shipped agent_worker.json selects `bash`, so the Powershell
+        # enable gate is off whenever Git Bash is installed; these tests run
+        # against a real pwsh, so the gate is bypassed.
+        with _force_pwsh_enabled():
+            yield
+
     @pytest.fixture
     def real_tool(self, mock_session: MagicMock) -> Powershell:
         return Powershell(session=mock_session)

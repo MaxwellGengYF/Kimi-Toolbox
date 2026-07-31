@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 import sys
 from contextlib import ExitStack
 from pathlib import Path
@@ -20,9 +21,10 @@ from kimix.tools.file.bash import (
     BashParams,
     Powershell,
 )
-from kimix.tools.file.bash.pwsh_tool import PowershellParams
+from kimix.tools.file.bash.pwsh_tool import PowershellParams, find_pwsh
 from kimix.tools.file.bash.bash_tool import (
     find_bash,
+    _configured_shell,
     _prepare_bash_cmd,
     _find_git_bash_windows,
     _git_bash_candidate_from_git_path,
@@ -35,26 +37,33 @@ from kimix.tools.background.utils import TaskData, _pop_task_data
 
 
 def _bash_is_available() -> bool:
-    """Return True when Bash can be instantiated on this platform."""
-    try:
-        Bash(session=MagicMock(spec=Session))
-        return True
-    except SkipThisTool:
-        return False
+    """Return True when a real bash executable exists on this host.
 
-
-BASH_AVAILABLE = _bash_is_available()
+    Host-capability probe: the agent config's ``shell`` selection is ignored
+    so the result depends only on whether bash is actually installed (the
+    shipped agent_worker.json selects ``bash``, so real sessions enable the
+    Bash tool wherever this probe is True).
+    """
+    return find_bash() is not None
 
 
 def _pwsh_is_available() -> bool:
-    """Return True when Powershell can be instantiated on this platform."""
-    try:
-        Powershell(session=MagicMock(spec=Session))
-        return True
-    except SkipThisTool:
+    """Return True when a real PowerShell can run on this host.
+
+    Host-capability probe (Windows only, mirroring the tool's platform gate):
+    PowerShell 7 via ``find_pwsh`` or the Windows PowerShell fallback.
+    """
+    if sys.platform != "win32":
         return False
+    if find_pwsh() is not None:
+        return True
+    return (
+        shutil.which("powershell.exe") is not None
+        or shutil.which("powershell") is not None
+    )
 
 
+BASH_AVAILABLE = _bash_is_available()
 PWSH_AVAILABLE = _pwsh_is_available()
 
 
@@ -172,6 +181,8 @@ class TestWindowsShellExclusion:
                 "kimix.tools.file.bash.bash_tool.find_bash",
                 return_value=(r"C:\Git\bin\bash.exe" if bash_available else None),
             ),
+            # No `agent.shell` config: exercise the legacy platform heuristics.
+            patch("kimix.tools.file.bash.bash_tool._configured_shell", return_value=None),
         ]
 
     def _with_platform(self, bash_available: bool, pwsh_preferred: bool) -> ExitStack:
@@ -200,6 +211,155 @@ class TestWindowsShellExclusion:
         self, mock_session: MagicMock
     ) -> None:
         with self._with_platform(bash_available=True, pwsh_preferred=True):
+            Powershell(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Bash(mock_session)
+
+
+# ============================================================================
+# _configured_shell — reading agent.shell from the agent config file
+# ============================================================================
+
+class TestConfiguredShellConfigRead:
+    """Unit tests for reading the `agent.shell` config key."""
+
+    def _patch_agent_file(self, tmp_path: Path, content: str) -> Any:
+        agent_file = tmp_path / "agent.json"
+        agent_file.write_text(content, encoding="utf-8")
+        return patch("kimix.base._default_agent_file", agent_file)
+
+    def test_reads_powershell_value(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": "powershell"}}'):
+            assert _configured_shell() == "powershell"
+
+    def test_reads_bash_value(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": "bash"}}'):
+            assert _configured_shell() == "bash"
+
+    def test_pwsh_alias_normalized(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": "pwsh"}}'):
+            assert _configured_shell() == "powershell"
+
+    def test_value_is_case_insensitive(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": "PowerShell"}}'):
+            assert _configured_shell() == "powershell"
+
+    def test_missing_key_returns_none(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {}}'):
+            assert _configured_shell() is None
+
+    def test_unknown_value_returns_none(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": "cmd"}}'):
+            assert _configured_shell() is None
+
+    def test_non_string_value_returns_none(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, '{"agent": {"shell": 42}}'):
+            assert _configured_shell() is None
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.json"
+        with patch("kimix.base._default_agent_file", missing):
+            assert _configured_shell() is None
+
+    def test_invalid_json_returns_none(self, tmp_path: Path) -> None:
+        with self._patch_agent_file(tmp_path, "not json"):
+            assert _configured_shell() is None
+
+
+# ============================================================================
+# Config-driven shell selection (agent.shell key)
+# ============================================================================
+
+class TestConfiguredShellSelection:
+    """The `agent.shell` config key selects Bash or Powershell over the legacy
+    platform heuristics."""
+
+    @pytest.fixture
+    def mock_session(self) -> MagicMock:
+        session = MagicMock()
+        session.custom_config.get.return_value = {}
+        session.custom_data = {}
+        return session
+
+    def _with_platform(self, platform: str, bash_path: str | None) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(patch("kimix.tools.file.bash.bash_tool.sys.platform", platform))
+        stack.enter_context(
+            patch("kimix.tools.file.bash.bash_tool.find_bash", return_value=bash_path)
+        )
+        return stack
+
+    def test_windows_config_powershell_enables_pwsh_disables_bash(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("win32", r"C:\Git\bin\bash.exe"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="powershell"
+        ):
+            Powershell(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Bash(mock_session)
+
+    def test_windows_config_bash_enables_bash_disables_pwsh(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("win32", r"C:\Git\bin\bash.exe"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="bash"
+        ):
+            Bash(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Powershell(mock_session)
+
+    def test_windows_config_bash_overrides_pwsh_preferred_flag(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("win32", r"C:\Git\bin\bash.exe"), patch(
+            "kimix.tools.file.bash.bash_tool.USE_SYSTEM_PWSH_ON_WINDOWS", True
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="bash"
+        ):
+            Bash(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Powershell(mock_session)
+
+    def test_non_windows_config_powershell_falls_back_to_bash(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("linux", "/bin/bash"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="powershell"
+        ):
+            # Powershell is a Windows-only tool: Bash remains the fallback.
+            Bash(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Powershell(mock_session)
+
+    def test_non_windows_config_bash_enables_bash(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("linux", "/bin/bash"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="bash"
+        ):
+            Bash(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Powershell(mock_session)
+
+    def test_windows_config_powershell_without_bash_installed(
+        self, mock_session: MagicMock
+    ) -> None:
+        with self._with_platform("win32", None), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="powershell"
+        ):
+            Powershell(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Bash(mock_session)
+
+    def test_windows_config_bash_without_bash_falls_back_to_pwsh(
+        self, mock_session: MagicMock
+    ) -> None:
+        # Bash is configured but not installed (e.g. no Git Bash): PowerShell
+        # becomes the fallback shell tool on Windows.
+        with self._with_platform("win32", None), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value="bash"
+        ):
             Powershell(mock_session)  # does not raise
             with pytest.raises(SkipThisTool):
                 Bash(mock_session)
@@ -790,6 +950,19 @@ class TestPrepareBashCmd:
             expected = r'echo "$(echo "$(echo src/foo)" `echo src/bar`)"'
             assert _prepare_bash_cmd(cmd) == expected
 
+    def test_unc_path_converted_on_windows(self) -> None:
+        r"""UNC path \\server\share\file.txt → //server/share/file.txt."""
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"):
+            cmd = r"cat \\server\share\file.txt"
+            assert _prepare_bash_cmd(cmd) == "cat //server/share/file.txt"
+
+    def test_dq_command_subst_with_backslashes_converted_on_windows(self) -> None:
+        r"""$(...) nested in double quotes: its content is parsed unquoted, so
+        backslash paths inside are converted."""
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"):
+            cmd = r'echo "$(cat C:\a\b.txt)"'
+            assert _prepare_bash_cmd(cmd) == 'echo "$(cat C:/a/b.txt)"'
+
 
 # ============================================================================
 # Bash.__call__ — integration tests with backslash paths on Windows
@@ -804,12 +977,15 @@ class TestPrepareBashCmd:
     reason="Backslash path handling targets Git Bash on Windows",
 )
 class TestBashBackslashPaths:
-    async def test_cat_with_backslash_path(self, mock_session: MagicMock) -> None:
+    async def test_cat_with_backslash_path(self, mock_session: MagicMock, tmp_path: Path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("hello slash", encoding="utf-8")
         bash = Bash(session=mock_session)
-        params = BashParams(cmd=r"cat src\kimix\tools\file\bash\bash_tool.py")
+        # Unquoted Windows backslash path is auto-converted to forward slashes.
+        params = BashParams(cmd=f"cat {f}")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        assert "find_bash" in result.output
+        assert "hello slash" in result.output
 
     async def test_ls_with_backslash_path(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -825,26 +1001,73 @@ class TestBashBackslashPaths:
         assert isinstance(result, ToolOk)
         assert "bash" in result.output
 
-    async def test_multiple_backslash_paths(self, mock_session: MagicMock) -> None:
+    async def test_multiple_backslash_paths(self, mock_session: MagicMock, tmp_path: Path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("hello slash", encoding="utf-8")
         bash = Bash(session=mock_session)
-        params = BashParams(cmd=r"echo src\kimix\tools > nul && cat src\kimix\tools\file\bash\bash_tool.py")
+        params = BashParams(cmd=f"echo {tmp_path} && cat {f}")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        assert "find_bash" in result.output
+        assert "hello slash" in result.output
 
-    async def test_quoted_backslash_path_preserved(self, mock_session: MagicMock) -> None:
+    async def test_quoted_backslash_path_preserved(self, mock_session: MagicMock, tmp_path: Path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("hello slash", encoding="utf-8")
         bash = Bash(session=mock_session)
-        params = BashParams(cmd=r"cat 'src\kimix\tools\file\bash\bash_tool.py'")
+        # Backslashes inside single quotes are preserved; Git Bash resolves them.
+        params = BashParams(cmd=f"cat '{f}'")
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        assert "find_bash" in result.output
+        assert "hello slash" in result.output
 
-    async def test_double_quoted_backslash_path_preserved(self, mock_session: MagicMock) -> None:
+    async def test_double_quoted_backslash_path_preserved(self, mock_session: MagicMock, tmp_path: Path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("hello slash", encoding="utf-8")
         bash = Bash(session=mock_session)
-        params = BashParams(cmd=r'cat "src\kimix\tools\file\bash\bash_tool.py"')
+        # Backslashes inside double quotes are preserved; Git Bash resolves them.
+        params = BashParams(cmd=f'cat "{f}"')
         result = await bash(params)
         assert isinstance(result, ToolOk)
-        assert "find_bash" in result.output
+        assert "hello slash" in result.output
+
+
+# ============================================================================
+# Bash.description — Windows-specific experience text
+# ============================================================================
+
+class TestBashDescription:
+    """The Bash tool description carries the verified Windows slash rules."""
+
+    @pytest.fixture
+    def mock_session(self) -> MagicMock:
+        session = MagicMock()
+        session.custom_config.get.return_value = {}
+        session.custom_data = {}
+        return session
+
+    def _make_tool(self, platform: str, mock_session: MagicMock) -> Bash:
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", platform), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash", return_value=True
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=(r"C:\Git\bin\bash.exe" if platform == "win32" else "/bin/bash"),
+        ):
+            return Bash(session=mock_session)
+
+    def test_win32_description_mentions_slash_conversion(
+        self, mock_session: MagicMock
+    ) -> None:
+        tool = self._make_tool("win32", mock_session)
+        assert "auto-converted to forward slashes" in tool.description
+        assert "backslashes inside quotes are preserved" in tool.description
+        assert "`cat src\\a.py` → `cat src/a.py`" in tool.description
+
+    def test_non_windows_description_has_no_windows_rule(
+        self, mock_session: MagicMock
+    ) -> None:
+        tool = self._make_tool("linux", mock_session)
+        assert "auto-converted to forward slashes" not in tool.description
+        assert "backslashes inside quotes are preserved" not in tool.description
 
 
 # ============================================================================
@@ -1074,6 +1297,21 @@ class TestPowershellParams:
     reason="PowerShell tool is not available on this platform",
 )
 class TestPowershellInactivityTimeout:
+    @pytest.fixture(autouse=True)
+    def _force_pwsh_enabled(self) -> Any:
+        """Force-enable the Powershell tool for these integration tests.
+
+        With the shipped agent_worker.json selecting ``bash``, the gate
+        ``_should_enable_powershell()`` is False whenever Git Bash is
+        installed on Windows; these tests execute real pwsh commands, so the
+        gate is bypassed.
+        """
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
+            return_value=True,
+        ):
+            yield
+
     async def test_pwsh_inactivity_timeout_returns_background_error(
         self, mock_session: MagicMock
     ) -> None:
