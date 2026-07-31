@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, override
+from typing import TYPE_CHECKING, Any, Literal, override
 
 import regex as re
 from rapidfuzz import fuzz, process
@@ -23,6 +23,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from kimi_cli import logger
 from kimi_cli.soul.agent import Runtime
+
+if TYPE_CHECKING:
+    from kimi_cli.soul.history_index import HistoryIndex
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -85,7 +88,7 @@ def memory_dir_for_session(session_dir: Path) -> Path:
     return session_dir / MEMORY_DIR_NAME
 
 
-def _topic_path(memory_dir: Path, topic: str) -> Path:
+def topic_path(memory_dir: Path, topic: str) -> Path:
     return memory_dir / f"{sanitize_topic(topic)}.md"
 
 
@@ -186,20 +189,20 @@ def build_memory_restore_text(session_dir: Path, *, max_excerpt_chars: int = 600
 
 
 @dataclass(frozen=True, slots=True)
-class _SearchHit:
+class SearchHit:
     topic: str
     line_no: int
     snippet: str
     score: int
 
 
-def _search_files(memory_dir: Path, query: str, max_results: int) -> list[_SearchHit]:
+def search_memory_files(memory_dir: Path, query: str, max_results: int) -> list[SearchHit]:
     """Keyword search over all memory files, rebuilt from disk every call."""
     terms = [t.lower() for t in _QUERY_TERM_RE.findall(query) if t.strip()]
     if not terms:
         return []
 
-    hits: list[_SearchHit] = []
+    hits: list[SearchHit] = []
     for path in list_memory_files(memory_dir):
         try:
             text = path.read_text(encoding="utf-8")
@@ -222,7 +225,7 @@ def _search_files(memory_dir: Path, query: str, max_results: int) -> list[_Searc
                 start = max(0, pos - _SEARCH_SNIPPET_RADIUS)
                 end = min(len(line), pos + _SEARCH_SNIPPET_RADIUS)
                 line = ("…" if start else "") + line[start:end] + ("…" if end < len(raw_lines[idx].strip()) else "")
-            hits.append(_SearchHit(topic=topic, line_no=idx + 1, snippet=line, score=score))
+            hits.append(SearchHit(topic=topic, line_no=idx + 1, snippet=line, score=score))
 
     hits.sort(key=lambda h: (-h.score, h.topic, h.line_no))
     return hits[: min(max_results, _MAX_SEARCH_RESULTS_CAP)]
@@ -234,14 +237,16 @@ def _search_files(memory_dir: Path, query: str, max_results: int) -> list[_Searc
 
 
 class Params(BaseModel):
-    action: Literal["write", "append", "read", "list", "search"] = Field(
-        default="read",
+    action: Literal["write", "append", "read", "list", "search", "retrieve"] = Field(
+        default="retrieve",
         description=(
+            "'retrieve': search conversation history AND durable memory with `query`, "
+            "or fetch by `id` (a history turn id or 'memory:<topic>') (default)."
             "'write': overwrite a memory topic with `content`. "
             "'append': add `content` to the end of a topic. "
-            "'read': read a topic (default). "
+            "'read': read a topic. "
             "'list': list all memory topics. "
-            "'search': keyword-search all memory topics with `query`."
+            "'search': keyword-search all memory topics with `query`. "
         ),
     )
     topic: str = Field(
@@ -257,7 +262,20 @@ class Params(BaseModel):
     )
     query: str = Field(
         default="",
-        description="Search query for the 'search' action (keywords or phrase).",
+        description="Search query for the 'search'/'retrieve' actions (keywords or phrase).",
+    )
+    id: str | None = Field(
+        default=None,
+        description=(
+            "For 'retrieve': stable reference ID — a history turn id "
+            "(e.g. '0' or 'prune_0') or a memory topic via 'memory:<topic>'."
+        ),
+    )
+    k: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="For 'retrieve': max results per source (conversation history + durable memory).",
     )
     max_results: int = Field(
         default=5,
@@ -285,7 +303,9 @@ class Memory(CallableTool2[Params]):
         "'search' rebuilds its index from disk on every call, so recall works "
         "no matter what happened to the conversation context.\n"
         "Use 'write'/'append' to persist facts, 'read' to recall a topic, "
-        "'search' to find facts across all topics, 'list' to see what you have stored."
+        "'search' to find facts across all topics, 'list' to see what you have stored, "
+        "and 'retrieve' to search both past conversation turns AND durable memory "
+        "(or fetch by id: a history turn id or 'memory:<topic>')."
     )
     params: type[Params] = Params
 
@@ -293,6 +313,11 @@ class Memory(CallableTool2[Params]):
         super().__init__()
         self._runtime = runtime
         self._memory_dir = memory_dir_for_session(runtime.session.dir)
+        self._history_index: HistoryIndex | None = None
+
+    def attach_history_index(self, history_index: HistoryIndex | None) -> None:
+        """Attach the session HistoryIndex so 'retrieve' can search past turns."""
+        self._history_index = history_index
 
     def _get_topic_names(self) -> list[str]:
         """Return a sorted list of existing topic names (file stems)."""
@@ -327,7 +352,7 @@ class Memory(CallableTool2[Params]):
                 message=(
                     f"Memory '{params.action}' is forbidden in read-only mode. "
                     "The agent should quit the conversation immediately. "
-                    "Use 'read', 'list', or 'search' actions instead."
+                    "Use 'read', 'list', 'search', or 'retrieve' actions instead."
                 ),
                 brief="Forbidden in read-only mode",
             )
@@ -341,6 +366,8 @@ class Memory(CallableTool2[Params]):
                 return self._read(params.topic)
             if params.action == "list":
                 return self._list()
+            if params.action == "retrieve":
+                return self._retrieve(params)
             return self._search(params.query, params.max_results)
         except OSError as exc:
             logger.warning("Memory tool I/O failure: {error}", error=exc)
@@ -368,7 +395,7 @@ class Memory(CallableTool2[Params]):
             )
 
         self._memory_dir.mkdir(parents=True, exist_ok=True)
-        path = _topic_path(self._memory_dir, topic)
+        path = topic_path(self._memory_dir, topic)
         if not path.exists() and len(list_memory_files(self._memory_dir)) >= _MAX_TOPICS:
             return ToolError(
                 message=f"Memory topic limit reached ({_MAX_TOPICS}). Reuse or consolidate topics.",
@@ -394,7 +421,7 @@ class Memory(CallableTool2[Params]):
         )
 
     def _read(self, topic: str) -> ToolReturnValue:
-        path = _topic_path(self._memory_dir, topic)
+        path = topic_path(self._memory_dir, topic)
         if not path.is_file():
             suggestions = self._fuzzy_topic_suggestions(topic)
             if suggestions:
@@ -434,7 +461,7 @@ class Memory(CallableTool2[Params]):
                 message="'search' requires a non-empty `query`.",
                 brief="Missing query",
             )
-        hits = _search_files(self._memory_dir, query, max_results)
+        hits = search_memory_files(self._memory_dir, query, max_results)
         if not hits:
             return ToolOk(
                 output=f"No memory entries match {query!r}.",
@@ -444,3 +471,110 @@ class Memory(CallableTool2[Params]):
         for hit in hits:
             lines.append(f"- [{hit.topic}:{hit.line_no}] {hit.snippet}")
         return ToolOk(output="\n".join(lines), message=f"{len(hits)} hit(s)")
+
+    # ---- retrieve (history + durable memory search) -----------------------
+
+    def _retrieve(self, params: Params) -> ToolReturnValue:
+        """Search conversation history AND durable memory, or fetch by id."""
+        # If an explicit id is given, retrieve by reference
+        if params.id is not None:
+            return self._retrieve_by_id(params.id)
+
+        # Otherwise search by query
+        if not params.query.strip():
+            return ToolOk(
+                output="No query provided. Pass a ``query`` string or an ``id``.",
+                message="No query",
+            )
+
+        history_results: list[dict[str, Any]] = []
+        if self._history_index is not None:
+            history_results = self._history_index.search_with_recency(
+                params.query,
+                top_k=params.k,
+                recency_weight=1.0,
+            )
+        memory_results = search_memory_files(self._memory_dir, params.query, params.k)
+
+        if not history_results and not memory_results:
+            return ToolOk(
+                output="No matching results found in conversation history or durable memory.",
+                message="No results",
+            )
+
+        total = len(history_results) + len(memory_results)
+        lines: list[str] = [f"Retrieved {total} result(s):"]
+
+        if history_results:
+            lines.append("")
+            lines.append("[Conversation history]")
+            for r in history_results:
+                role = r["role"]
+                text = r["text"]
+                score = r.get("score", 0.0)
+                marker = " [compacted]" if r.get("is_compacted") else " [current]"
+                lines.append(
+                    f"> **{role}**{marker} (relevance: {score:.2f})\n"
+                    f"> {text.replace(chr(10), chr(10) + '> ')}"
+                )
+
+        if memory_results:
+            lines.append("")
+            lines.append("[Durable memory]")
+            for hit in memory_results:
+                lines.append(f"- [{hit.topic}:{hit.line_no}] [memory] {hit.snippet}")
+
+        return ToolOk(
+            output="\n".join(lines),
+            message=f"Found {total} result(s)",
+        )
+
+    def _retrieve_by_id(self, ref_id: str) -> ToolReturnValue:
+        """Retrieve a history turn by id, or a memory topic by 'memory:<topic>'."""
+        # Check for memory topic reference
+        if ref_id.startswith("memory:"):
+            topic = ref_id[len("memory:"):]
+            path = topic_path(self._memory_dir, sanitize_topic(topic))
+            if not path.is_file():
+                return ToolOk(
+                    output=f"No memory topic found with name {topic!r}.",
+                    message="No results",
+                )
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                return ToolOk(
+                    output=f"Could not read memory topic {topic!r}.",
+                    message="Read error",
+                )
+            return ToolOk(
+                output=(
+                    f"Retrieved memory topic {topic!r}:\n"
+                    f"> {text.replace(chr(10), chr(10) + '> ')}"
+                ),
+                message=f"Found memory topic {topic!r}",
+            )
+
+        # Fall through to HistoryIndex lookup
+        if self._history_index is None:
+            return ToolOk(
+                output=f"No history index attached. Cannot retrieve turn id={ref_id!r}.",
+                message="No history index",
+            )
+        turn = self._history_index.get_by_id(ref_id)
+        if turn is None:
+            return ToolOk(
+                output=f"No turn found with id={ref_id!r}.",
+                message="No results",
+            )
+        role = turn["role"]
+        text = turn["text"]
+        marker = " [compacted]" if turn.get("is_compacted") else " [current]"
+        return ToolOk(
+            output=(
+                f"Retrieved turn id={ref_id!r}:\n"
+                f"> **{role}**{marker}\n"
+                f"> {text.replace(chr(10), chr(10) + '> ')}"
+            ),
+            message=f"Found turn id={ref_id!r}",
+        )

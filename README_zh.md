@@ -93,7 +93,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 #### 3. 自动历史检索 + 按需召回
 
 - **自动检索**（`_maybe_auto_retrieve_history`）：每轮第一步，若用户输入 ≥10 字符，自动在 HistoryIndex 中 BM25 搜索匹配的已压缩轮次，得分超过 `auto_retrieve_history_threshold` 时以 `[Auto-retrieved from past conversation]` 形式注入上下文。
-- **ContextRetrieval 工具**：Agent 可主动调用，按自然语言查询搜索全部归档历史（含已压缩轮次），返回原文摘录及相关性得分。
+- **Memory 工具（action='retrieve'）**：Agent 可主动调用，按自然语言查询搜索全部归档历史（含已压缩轮次）和持久记忆，返回原文摘录及相关性得分。
 
 ```
 ┌──────────────┐    append     ┌──────────────┐    overflow    ┌──────────────────┐
@@ -103,7 +103,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
        ▲                            │                               │
        │       auto-retrieve        │                               │
        └────────────────────────────┘                               │
-       │              ContextRetrieval (Agent 主动召回)              │
+       │              Memory (Agent 主动召回)                       │
        └────────────────────────────────────────────────────────────┘
 ```
 

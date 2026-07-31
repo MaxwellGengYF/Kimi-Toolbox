@@ -251,7 +251,6 @@ class KimiSoul:
         # Lazy import to avoid circular dependency with kimix.retrieval
         from kimi_cli.soul.history_index import HistoryIndex
         from kimi_cli.tools.context_prune import ContextPrune
-        from kimi_cli.tools.context_retrieval import ContextRetrieval
 
         history_index_path = (
             agent.runtime.session.dir / "history_index" / f"{agent.runtime.session.id}.json"
@@ -285,7 +284,15 @@ class KimiSoul:
 
         # Register context-management tools if the toolset supports it
         if isinstance(agent.toolset, KimiToolset):
-            agent.toolset.add(ContextRetrieval(self._history_index))
+            # Attach the history index to the Memory tool so its 'retrieve'
+            # action can search past conversation turns (previously a separate
+            # retrieval tool).
+            from kimi_cli.tools.memory import Memory
+            memory_tool = agent.toolset.find("Memory")
+            if not isinstance(memory_tool, Memory):
+                memory_tool = Memory(self._runtime)
+                agent.toolset.add(memory_tool)
+            memory_tool.attach_history_index(self._history_index)
             agent.toolset.add(ContextPrune(self))
 
         self._checkpoint_with_user_message = False

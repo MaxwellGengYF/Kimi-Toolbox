@@ -185,10 +185,16 @@ class TestRead:
         assert isinstance(result, ToolOk)
         assert "Truncated" in result.output
         assert len(result.output) < _MAX_READ_CHARS + 500
-
-    async def test_default_action_is_read(self, tool: Memory) -> None:
-        await tool(Params(action="write", topic="memory", content="default topic"))
+    async def test_default_action_is_retrieve(self, tool: Memory) -> None:
+        """Default action is 'retrieve'; with no query/id it returns guidance."""
         result = await tool(Params())
+        assert isinstance(result, ToolOk)
+        assert "No query provided" in result.output
+
+    async def test_read_default_topic_explicit_action(self, tool: Memory) -> None:
+        """Explicit action='read' still reads the default 'memory' topic."""
+        await tool(Params(action="write", topic="memory", content="default topic"))
+        result = await tool(Params(action="read", topic="memory"))
         assert isinstance(result, ToolOk)
         assert "default topic" in result.output
 

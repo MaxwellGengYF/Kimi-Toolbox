@@ -662,7 +662,7 @@ class ContextPruner:
                     stub_text = (
                         f"<system>[context-elided: {kind} — content elided. "
                         f"~{savings} tokens freed. "
-                        f"Retrieve full content with ContextRetrieval(id={ref})]</system>"
+                        f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
                     )
 
                     elided_records.append(

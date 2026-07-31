@@ -90,7 +90,7 @@ Triggered when context token ratio hits `compaction_trigger_ratio` or free space
 #### 3. Auto History Retrieval + On-Demand Recall
 
 - **Auto retrieval** (`_maybe_auto_retrieve_history`): Each round, if user input ≥10 chars, BM25-searches HistoryIndex for matching compacted rounds; injects matches above `auto_retrieve_history_threshold` as `[Auto-retrieved from past conversation]`.
-- **ContextRetrieval tool**: Agent can actively search all archived history (including compacted rounds) by natural-language query, returning verbatim excerpts with relevance scores.
+- **Memory tool (action='retrieve')**: Agent can actively search all archived history (including compacted rounds) AND durable memory by natural-language query, returning verbatim excerpts with relevance scores.
 
 ```
 ┌──────────────┐    append     ┌──────────────┐    overflow    ┌──────────────────┐
@@ -100,7 +100,7 @@ Triggered when context token ratio hits `compaction_trigger_ratio` or free space
        ▲                            │                               │
        │       auto-retrieve        │                               │
        └────────────────────────────┘                               │
-       │              ContextRetrieval (agent主动recall)            │
+       │              Memory (agent主动recall)                       │
        └────────────────────────────────────────────────────────────┘
 ```
 

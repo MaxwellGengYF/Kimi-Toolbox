@@ -1682,7 +1682,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "LookupWeb": "SearchWeb",
     "FindOnline": "SearchWeb",
     # ── Context management hallucinations ──
-    # ContextUsage, Compact, ContextPrune, ContextRetrieval are canonical
+    # ContextUsage, Compact, ContextPrune, Memory are canonical
     "PruneContext": "ContextPrune",
     "CompactContext": "Compact",
     "Summarize": "Compact",
@@ -1690,10 +1690,10 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "ContextSummary": "Compact",
     "ContextTrim": "ContextPrune",
     "TrimContext": "ContextPrune",
-    "Recall": "ContextRetrieval",
-    "RetrieveContext": "ContextRetrieval",
-    "SearchHistory": "ContextRetrieval",
-    "HistorySearch": "ContextRetrieval",
+    "Recall": "Memory",
+    "RetrieveContext": "Memory",
+    "SearchHistory": "Memory",
+    "HistorySearch": "Memory",
     "GetContext": "ContextUsage",
     "ContextInfo": "ContextUsage",
     # ── Agent/Subagent hallucinations ──
