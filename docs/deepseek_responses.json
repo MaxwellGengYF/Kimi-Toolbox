@@ -1,0 +1,13 @@
+{
+    "model": "deepseek-v4-flash",
+    "max_context_size": 1048576,
+    "capabilities": [
+        "thinking"
+    ],
+    "url": "https://api.deepseek.com",
+    "type": "openai_responses",
+    "api_key": "sk-xxx",
+    "env": {},
+    "max_tokens": 384000,
+    "thinking_effort": "max"
+}

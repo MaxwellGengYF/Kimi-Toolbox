@@ -13,6 +13,7 @@ Because the offending blob sits in the conversation history, every retry
 recover by stripping the unverifiable blobs and retrying once.
 """
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ import kosong
 from kosong.chat_provider import APIStatusError
 from kosong.contrib.chat_provider.openai_responses import (
     OpenAIResponses,
+    OpenAIResponsesStreamedMessage,
     _is_invalid_encrypted_content_error,
     _strip_reasoning_encrypted_content,
 )
@@ -403,3 +405,188 @@ class TestReasoningItemConversion:
         reasoning = _reasoning_items(items)
         assert len(reasoning) == 1
         assert reasoning[0]["encrypted_content"] == "blob"
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek Responses API: raw chain-of-thought (``reasoning_text``) events
+# ---------------------------------------------------------------------------
+#
+# DeepSeek's Responses implementation does not generate OpenAI-style reasoning
+# ``summary`` events.  It streams the raw chain of thought as
+# ``response.reasoning_text.delta`` / ``response.reasoning_text.done`` and
+# attaches the full text to the reasoning item's ``content`` (``reasoning_text``
+# parts) with ``summary=[]`` and ``encrypted_content=None``.  These tests
+# reproduce that wire format (see https://api-docs.deepseek.com/zh-cn/guides/responses_api).
+
+
+def _deepseek_reasoning_delta(item_id: str, delta: str) -> SimpleNamespace:
+    return SimpleNamespace(type="response.reasoning_text.delta", item_id=item_id, delta=delta)
+
+
+def _deepseek_reasoning_done(item_id: str, text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="response.reasoning_text.done", item_id=item_id, text=text)
+
+
+def _deepseek_reasoning_item_done(item_id: str, text: str = "full text") -> SimpleNamespace:
+    return SimpleNamespace(
+        type="response.output_item.done",
+        item=SimpleNamespace(
+            id=item_id,
+            type="reasoning",
+            summary=[],
+            content=[SimpleNamespace(type="reasoning_text", text=text)],
+            encrypted_content=None,
+        ),
+    )
+
+
+def _output_text_delta(delta: str) -> SimpleNamespace:
+    return SimpleNamespace(type="response.output_text.delta", delta=delta)
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_deepseek_reasoning_text_deltas() -> None:
+    """DeepSeek streams CoT via ``response.reasoning_text.delta`` events; the
+    provider must surface them as ThinkParts (and not emit an empty trailing
+    block from ``output_item.done``)."""
+    provider = _make_provider()
+
+    async def gen():
+        yield _deepseek_reasoning_delta("rs_1", "Step one. ")
+        yield _deepseek_reasoning_delta("rs_1", "Step two.")
+        yield _deepseek_reasoning_done("rs_1", "Step one. Step two.")
+        yield _deepseek_reasoning_item_done("rs_1")
+        yield _output_text_delta("Answer")
+        yield _completed()
+
+    provider.client.responses.create = AsyncMock(return_value=gen())  # type: ignore[method-assign]
+
+    result = await kosong.generate(
+        provider, "You are helpful.", [], [Message(role="user", content="Hi")]
+    )
+
+    think_parts = [p for p in result.message.content if isinstance(p, ThinkPart)]
+    assert len(think_parts) == 1
+    assert think_parts[0].think == "Step one. Step two."
+    assert think_parts[0].encrypted is None
+    assert [p.text for p in result.message.content if isinstance(p, TextPart)] == ["Answer"]
+
+
+@pytest.mark.asyncio
+async def test_stream_reasoning_text_done_fallback_not_duplicated() -> None:
+    """A backend that only emits ``response.reasoning_text.done`` (full text)
+    must yield the text exactly once — the subsequent ``output_item.done`` must
+    not duplicate it."""
+    provider = _make_provider()
+
+    async def gen():
+        yield _deepseek_reasoning_done("rs_1", "Only full text")
+        yield _deepseek_reasoning_item_done("rs_1", "Only full text")
+        yield _output_text_delta("Answer")
+        yield _completed()
+
+    provider.client.responses.create = AsyncMock(return_value=gen())  # type: ignore[method-assign]
+
+    result = await kosong.generate(
+        provider, "You are helpful.", [], [Message(role="user", content="Hi")]
+    )
+
+    think_parts = [p for p in result.message.content if isinstance(p, ThinkPart)]
+    assert len(think_parts) == 1
+    assert think_parts[0].think == "Only full text"
+
+
+@pytest.mark.asyncio
+async def test_stream_reasoning_item_done_content_fallback() -> None:
+    """Backends that attach the reasoning text only to the completed reasoning
+    item (no delta events) still yield a ThinkPart from ``output_item.done``."""
+    provider = _make_provider()
+
+    async def gen():
+        yield _deepseek_reasoning_item_done("rs_1", "Attached at done")
+        yield _output_text_delta("Answer")
+        yield _completed()
+
+    provider.client.responses.create = AsyncMock(return_value=gen())  # type: ignore[method-assign]
+
+    result = await kosong.generate(
+        provider, "You are helpful.", [], [Message(role="user", content="Hi")]
+    )
+
+    think_parts = [p for p in result.message.content if isinstance(p, ThinkPart)]
+    assert len(think_parts) == 1
+    assert think_parts[0].think == "Attached at done"
+
+
+def test_non_stream_reads_reasoning_content() -> None:
+    """Non-streaming responses carry the CoT in ``content`` (``reasoning_text``)
+    with an empty ``summary`` for DeepSeek; the provider must read it."""
+
+    async def collect(agen: Any) -> list[Any]:
+        return [part async for part in agen]
+
+    msg = object.__new__(OpenAIResponsesStreamedMessage)
+    fake_response = SimpleNamespace(
+        id="resp_1",
+        usage=None,
+        output=[
+            SimpleNamespace(
+                type="reasoning",
+                summary=[],
+                content=[SimpleNamespace(type="reasoning_text", text="Chain of thought")],
+                encrypted_content=None,
+            ),
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text="Visible")],
+            ),
+        ],
+    )
+    parts = asyncio.run(collect(msg._convert_non_stream_response(fake_response)))
+    thinks = [p for p in parts if isinstance(p, ThinkPart)]
+    assert [t.think for t in thinks] == ["Chain of thought"]
+    assert [p.text for p in parts if isinstance(p, TextPart)] == ["Visible"]
+
+
+def test_deepseek_round_trip_uses_content_not_summary() -> None:
+    """ThinkParts in history must round-trip as plaintext ``content``
+    (``reasoning_text``) for DeepSeek — ``summary`` / ``encrypted_content`` are
+    unsupported there and would be silently dropped."""
+    provider = OpenAIResponses(model="deepseek-v4-flash", api_key="test-key")
+    message = Message(
+        role="assistant",
+        content=[ThinkPart(think="hidden reasoning", encrypted="blob")],
+    )
+    items = provider._convert_message(message)
+    reasoning = _reasoning_items(items)
+    assert len(reasoning) == 1
+    item = reasoning[0]
+    assert "summary" not in item
+    assert "encrypted_content" not in item
+    assert item["content"] == [{"type": "reasoning_text", "text": "hidden reasoning"}]
+
+
+def test_openai_round_trip_keeps_summary_and_encrypted() -> None:
+    """Non-DeepSeek backends keep the summary + encrypted_content round-trip."""
+    provider = _make_provider()
+    message = Message(
+        role="assistant",
+        content=[ThinkPart(think="summary text", encrypted="blob")],
+    )
+    items = provider._convert_message(message)
+    reasoning = _reasoning_items(items)
+    assert len(reasoning) == 1
+    assert reasoning[0]["summary"] == [{"type": "summary_text", "text": "summary text"}]
+    assert reasoning[0]["encrypted_content"] == "blob"
+    assert "content" not in reasoning[0]
+
+
+def test_deepseek_backend_detection() -> None:
+    assert OpenAIResponses(model="deepseek-v4-flash", api_key="k")._is_deepseek_backend() is True
+    assert (
+        OpenAIResponses(
+            model="gpt-5-codex", api_key="k", base_url="https://api.deepseek.com"
+        )._is_deepseek_backend()
+        is True
+    )
+    assert OpenAIResponses(model="gpt-5-codex", api_key="k")._is_deepseek_backend() is False

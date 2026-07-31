@@ -154,6 +154,20 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
     def model_name(self) -> str:
         return self._model
 
+    def _is_deepseek_backend(self) -> bool:
+        """Detect the DeepSeek Responses API backend.
+
+        DeepSeek's implementation does not generate reasoning ``summary`` parts
+        and does not support ``encrypted_content``: the chain of thought is
+        delivered as plaintext ``content`` (``reasoning_text`` parts) instead,
+        both in stream events and on reasoning items.
+        """
+        model = (self.model_name or "").lower()
+        if model.startswith("deepseek"):
+            return True
+        base_url = (self._base_url or str(self.client.base_url)).lower()
+        return "deepseek" in base_url
+
     @property
     def thinking_effort(self) -> ThinkingEffort | None:
         reasoning_effort = self._generation_kwargs.get("reasoning_effort")
@@ -359,7 +373,8 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
                     flush_pending_parts()
                     # Aggregate consecutive ThinkPart items with the same `encrypted` value
                     encrypted_value = part.encrypted
-                    summaries = [{"type": "summary_text", "text": part.think or ""}]
+                    deepseek_backend = self._is_deepseek_backend()
+                    texts = [part.think or ""]
                     i += 1
                     while i < n:
                         next_part = message.content[i]
@@ -367,16 +382,26 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
                             break
                         if next_part.encrypted != encrypted_value:
                             break
-                        summaries.append({"type": "summary_text", "text": next_part.think or ""})
+                        texts.append(next_part.think or "")
                         i += 1
                     reasoning_item: dict[str, Any] = {
-                        "summary": summaries,
                         "type": "reasoning",
                     }
-                    # Omit the key entirely when no encrypted content is
-                    # available: some backends reject an explicit null.
-                    if encrypted_value is not None:
-                        reasoning_item["encrypted_content"] = encrypted_value
+                    if deepseek_backend:
+                        # DeepSeek merges plaintext reasoning ``content`` into
+                        # the adjacent assistant message; ``summary`` and
+                        # ``encrypted_content`` are unsupported there.
+                        reasoning_item["content"] = [
+                            {"type": "reasoning_text", "text": text} for text in texts
+                        ]
+                    else:
+                        reasoning_item["summary"] = [
+                            {"type": "summary_text", "text": text} for text in texts
+                        ]
+                        # Omit the key entirely when no encrypted content is
+                        # available: some backends reject an explicit null.
+                        if encrypted_value is not None:
+                            reasoning_item["encrypted_content"] = encrypted_value
                     result.append(cast(ResponseReasoningItemParam, reasoning_item))
                 else:
                     pending_parts.append(part)
@@ -566,6 +591,20 @@ def _map_audio_url_to_file_content(url: str) -> ResponseInputFileContentParam | 
     return None
 
 
+def _reasoning_item_text(item: Any) -> str:
+    """Concatenate the visible reasoning text from a completed reasoning item.
+
+    Prefers the raw ``content`` (``reasoning_text`` parts) used by backends
+    that expose the full chain of thought (e.g. DeepSeek), falling back to
+    the OpenAI-style ``summary`` parts.
+    """
+    content = getattr(item, "content", None) or []
+    if content:
+        return "".join(getattr(part, "text", "") or "" for part in content)
+    summary = getattr(item, "summary", None) or []
+    return "".join(getattr(part, "text", "") or "" for part in summary)
+
+
 class OpenAIResponsesStreamedMessage(BaseStreamedMessage):
     def __init__(self, response: Response | AsyncStream[ResponseStreamEvent]):
         super().__init__()
@@ -574,6 +613,10 @@ class OpenAIResponsesStreamedMessage(BaseStreamedMessage):
         else:
             self._iter = self._convert_stream_response(response)
         self._usage: ResponseUsage | None = None
+        # Reasoning item ids whose raw chain-of-thought text was already
+        # streamed via ``response.reasoning_text.delta`` events, so the
+        # ``.done`` / ``output_item.done`` events don't duplicate it.
+        self._streamed_reasoning_item_ids: set[str] = set()
 
     @property
     def usage(self) -> TokenUsage | None:
@@ -614,11 +657,19 @@ class OpenAIResponsesStreamedMessage(BaseStreamedMessage):
                     ),
                 )
             elif item.type == "reasoning":
-                for summary in item.summary:
-                    yield ThinkPart(
-                        think=summary.text,
-                        encrypted=item.encrypted_content,
-                    )
+                # OpenAI delivers ``summary`` parts; some Responses-compatible
+                # backends (e.g. DeepSeek) deliver the raw chain of thought as
+                # ``content`` (``reasoning_text`` parts) instead.  Support both.
+                reasoning_parts = [*(item.summary or []), *(item.content or [])]
+                if reasoning_parts:
+                    for reasoning_part in reasoning_parts:
+                        yield ThinkPart(
+                            think=reasoning_part.text,
+                            encrypted=item.encrypted_content,
+                        )
+                elif item.encrypted_content is not None:
+                    # Keep the encrypted blob for history round-tripping.
+                    yield ThinkPart(think="", encrypted=item.encrypted_content)
 
     async def _convert_stream_response(
         self, response: AsyncStream[ResponseStreamEvent]
@@ -643,13 +694,31 @@ class OpenAIResponsesStreamedMessage(BaseStreamedMessage):
                     item = chunk.item
                     self._id = item.id
                     if item.type == "reasoning":
-                        yield ThinkPart(think="", encrypted=item.encrypted_content)
+                        if item.encrypted_content is not None:
+                            # Keep the encrypted blob for history round-tripping.
+                            yield ThinkPart(think="", encrypted=item.encrypted_content)
+                        elif item.id not in self._streamed_reasoning_item_ids:
+                            # Fallback: backends that only attach the reasoning
+                            # text to the completed item (no delta events).
+                            text = _reasoning_item_text(item)
+                            if text:
+                                yield ThinkPart(think=text, encrypted=None)
                 elif chunk.type == "response.function_call_arguments.delta":
                     yield ToolCallPart(arguments_part=chunk.delta)
                 elif chunk.type == "response.reasoning_summary_part.added":
                     yield ThinkPart(think="")
                 elif chunk.type == "response.reasoning_summary_text.delta":
                     yield ThinkPart(think=chunk.delta)
+                elif chunk.type == "response.reasoning_text.delta":
+                    # Raw chain-of-thought deltas (e.g. DeepSeek Responses API).
+                    self._streamed_reasoning_item_ids.add(chunk.item_id)
+                    yield ThinkPart(think=chunk.delta)
+                elif chunk.type == "response.reasoning_text.done":
+                    # Full reasoning text; normally the deltas already streamed
+                    # it.  Only emit when this is the sole delivery channel.
+                    if chunk.item_id not in self._streamed_reasoning_item_ids:
+                        self._streamed_reasoning_item_ids.add(chunk.item_id)
+                        yield ThinkPart(think=chunk.text)
                 elif chunk.type == "response.completed":
                     self._usage = chunk.response.usage
         except (OpenAIError, httpx.HTTPError) as e:
