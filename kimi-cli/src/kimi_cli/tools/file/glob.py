@@ -12,6 +12,7 @@ from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
 
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.file.output_utils import fold_lines, truncate_line
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.path import kaos_path_from_tool_input
@@ -124,8 +125,26 @@ def _parse_gitignore(content: str, source_dir: Path) -> list[_GitignoreRule]:
 
 
 def _gitignore_match(path: Path, rel_path: str, is_dir: bool, rule: _GitignoreRule) -> bool:
-    """Check if a path matches a single gitignore rule."""
+    """Check if a path matches a single gitignore rule.
+
+    A dir-only rule (trailing ``/``, e.g. ``.venv/``) matches the directory
+    itself **and every descendant**: when *is_dir* is False the rule pattern
+    is matched against every ancestor prefix of *rel_path* (``.venv/``
+    excludes ``.venv/a.py`` as well as ``a/b/.venv/c/d.py``).  The same
+    applies to ``!``-negated dir-only rules, which un-ignore the directory
+    and its contents.
+    """
+    # Normalize to forward slashes so prefix matching works on Windows too.
+    rel_path = rel_path.replace("\\", "/")
+
     if rule.is_dir_only and not is_dir:
+        # Check every ancestor directory prefix of the file: a dir-only rule
+        # excludes descendants, not just the directory entry itself.
+        parts = rel_path.split("/")
+        for i in range(1, len(parts)):
+            prefix = "/".join(parts[:i])
+            if _gitignore_match(path, prefix, True, rule):
+                return True
         return False
 
     pattern = rule.pattern
@@ -201,6 +220,30 @@ def _safe_getmtime(path: str) -> float:
         return os.path.getmtime(path)
     except (OSError, ValueError):
         return 0.0
+
+
+def _top_dirs_summary(
+    matches: list[KaosPath], dir_path: KaosPath, top: int = 3
+) -> str:
+    """Summarize the match set by top-level directory (no extra I/O).
+
+    Helps the agent avoid re-globbing junk directories when results were
+    folded, e.g. ``top dirs: .venv (900), src (40), tests (27)``.  Files at
+    the search root itself are not counted (they have no top-level dir).
+    """
+    counts: dict[str, int] = {}
+    for p in matches:
+        try:
+            rel = str(p.relative_to(dir_path)).replace("\\", "/")
+        except ValueError:
+            continue
+        parts = rel.split("/")
+        if len(parts) > 1 and parts[0]:
+            counts[parts[0]] = counts.get(parts[0], 0) + 1
+    top_entries = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+    if not top_entries:
+        return ""
+    return "top dirs: " + ", ".join(f"{name} ({n})" for name, n in top_entries)
 
 
 def _find_gitignore_files(root: Path) -> list[Path]:
@@ -304,6 +347,17 @@ class Params(BaseModel):
         default=10,
         ge=1,
     )
+    max_results: int = Field(
+        default=500,
+        alias="fold",
+        ge=0,
+        description=(
+            "Maximum number of result lines in the output. Longer results "
+            "are head+tail folded with an omitted-count marker and the total "
+            "is reported in `message`. 0 = unlimited (the MAX_MATCHES "
+            "collection cap still applies)."
+        ),
+    )
 
 
 class Glob(CallableTool2[Params]):
@@ -402,9 +456,21 @@ class Glob(CallableTool2[Params]):
                         # Apply gitignore filtering
                         if gitignore_rules:
                             try:
-                                match_resolved = Path(str(match)).resolve()
+                                match_path = Path(str(match))
+                                match_resolved = match_path.resolve()
                                 if _is_ignored_by_gitignore(
                                     match_resolved, gitignore_rules, resolved_dir
+                                ):
+                                    continue
+                                # resolve() dereferences junctions/symlinks
+                                # (e.g. uv's .venv pointing into a cache):
+                                # the resolved target may escape the search
+                                # root so relative_to() fails and the rule
+                                # silently doesn't apply. Retry against the
+                                # walked path, which is the one the user
+                                # sees under the search root.
+                                if match_resolved != match_path and _is_ignored_by_gitignore(
+                                    match_path, gitignore_rules, resolved_dir
                                 ):
                                     continue
                             except Exception:
@@ -419,8 +485,11 @@ class Glob(CallableTool2[Params]):
 
             # Sort for consistent output
             matches.sort()
+            total = len(matches)
 
-            # Build output with byte limit
+            # Build output lines (relative paths, optional verbose metadata).
+            # Per-line cap keeps a single huge verbose line from hogging the
+            # byte budget.
             output_lines: list[str] = []
             n_bytes = 0
             truncated_by_bytes = False
@@ -434,7 +503,9 @@ class Glob(CallableTool2[Params]):
                         from pendulum import from_timestamp
                         mtime = from_timestamp(stat_result.st_mtime).to_datetime_string()
                         kind = "dir" if await p.is_dir() else "file"
-                        line = f"{relative_path}  ({size} bytes, {kind}, {mtime})"
+                        line = truncate_line(
+                            f"{relative_path}  ({size} bytes, {kind}, {mtime})"
+                        )
                     except Exception:
                         line = relative_path
                 else:
@@ -447,20 +518,34 @@ class Glob(CallableTool2[Params]):
                     truncated_by_bytes = True
                     break
 
+            # Apply the final display fold budget (head+tail with marker).
+            # 0 = unlimited → MAX_MATCHES collection cap remains the limit.
+            omitted_by_fold = 0
+            if params.max_results:
+                output_lines, omitted_by_fold = fold_lines(
+                    output_lines, params.max_results
+                )
+
             output = "\n".join(output_lines)
 
             # Build message
-            shown_count = len(output_lines)
-            if shown_count > 0:
-                message = f"Found {shown_count} matches for pattern `{pattern}`."
+            shown_count = len(output_lines) - (1 if omitted_by_fold else 0)
+            if total > 0:
+                message = f"Found {total} matches for pattern `{pattern}`."
             else:
                 message = f"No matches found for pattern `{pattern}`."
 
-            if truncated:
+            if omitted_by_fold:
                 message += (
-                    f" Showing first {MAX_MATCHES} matches. "
-                    "Use a more specific pattern."
+                    f" Showing {shown_count} of {total} (head+tail fold). "
+                    "Use max_results=0 or a more specific pattern to see more."
                 )
+                top_dirs = _top_dirs_summary(matches, dir_path)
+                if top_dirs:
+                    message += f" {top_dirs}"
+
+            if truncated:
+                message += f" Search capped at {MAX_MATCHES} matches."
 
             if timed_out:
                 message += (

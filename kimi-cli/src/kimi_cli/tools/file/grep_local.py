@@ -16,7 +16,7 @@ import stat
 import tempfile
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, override
+from typing import Any, Literal, override
 
 from kaos.path import KaosPath
 from kosong.tooling import (
@@ -42,6 +42,12 @@ from kimi_cli._rtk_common import _rtk_binary_name
 from kimi_cli.install import _RTK_DOWNLOAD_LOCK, _download_and_install_rtk
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.file.output_utils import (
+    dedup_lines,
+    fold_lines,
+    parse_rtk_rg_output,
+    truncate_line,
+)
 from kimi_cli.tools.utils import ToolResultBuilder
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.path import (
@@ -147,6 +153,17 @@ class Params(BaseModel):
         alias="token_kill",  # backward compat
         description="Deduplicate repeated output lines via rtk (token killer). "
         "Set to False to see raw, unfiltered output.",
+    )
+    max_output_lines: int = Field(
+        default=500,
+        alias="fold",
+        ge=0,
+        description=(
+            "Maximum number of lines in the final tool output. Longer results "
+            "are head+tail folded with an omitted-count marker and a summary "
+            "in `message`. 0 = unlimited (the byte cap still applies). "
+            "Applied after offset/head_limit pagination."
+        ),
     )
 
 
@@ -334,6 +351,9 @@ def _build_rg_args(
         # Stop ripgrep early once we have enough matches for the requested
         # page. A generous margin is included so that sensitive-file
         # filtering still leaves enough results in the common case.
+        # NB: when rtk wraps rg (content mode, deduplicate_output=True) it
+        # caps per-file output at 25 lines anyway, so this margin is
+        # pointless there — kept as-is for the plain-rg path (harmless).
         if params.head_limit:
             max_count = (params.offset or 0) + params.head_limit + _RG_HEAD_LIMIT_MARGIN
             args.extend(["--max-count", str(max_count)])
@@ -483,6 +503,39 @@ def _strip_path_prefix(lines: list[str], search_base: str) -> list[str]:
 def _normalize_output_lines(lines: list[str], output_mode: str) -> list[str]:
     """No-op passthrough (paths kept in native OS format)."""
     return lines
+
+
+def _rtk_fold_note(meta: dict[str, Any]) -> str | None:
+    """Build a human-readable summary of rtk's fold markers.
+
+    rtk folds long content-mode output and records what it hid in protocol
+    lines; this turns that metadata into a message fragment the model can
+    act on (e.g. ``tail -n +26 <log>`` to page through the full output).
+
+    Returns ``None`` when no fold markers were present.
+    """
+    parts: list[str] = []
+    for entry in meta.get("folded_files") or []:
+        parts.append(f"{entry['count']} more lines in {entry['path']}")
+    skipped = meta.get("skipped_files")
+    if skipped:
+        parts.append(f"{skipped} more files")
+    if not parts:
+        return None
+
+    note = "rtk folded output: " + "; ".join(parts) + "."
+    log: str | None = None
+    folded = meta.get("folded_files") or []
+    if folded and folded[-1].get("log"):
+        last = folded[-1]
+        log = last["log"]
+        if last.get("start_line") is not None:
+            log = f"tail -n +{last['start_line']} {last['log']}"
+    elif meta.get("skipped_log"):
+        log = meta["skipped_log"]
+    if log:
+        note += f" Full log: {log}"
+    return note
 
 
 # Minimal type-to-extension mapping for common file types.
@@ -830,6 +883,13 @@ class Grep(CallableTool2[Params]):
             files_truncated_early = False
             total_raw_files = 0
 
+            # Step 0: strip rtk protocol lines (content mode only) and keep
+            # their metadata for the summary message. Other modes pass through
+            # untouched (rtk does not emit protocol lines for them).
+            rtk_meta: dict[str, Any] = {}
+            if params.output_mode == "content":
+                lines, rtk_meta = parse_rtk_rg_output(lines)
+
             # Step 1: mtime sorting (files_with_matches only, skip on timeout)
             if not timed_out and params.output_mode == "files_with_matches":
                 lines = [ln for ln in lines if ln.strip()]
@@ -857,7 +917,8 @@ class Grep(CallableTool2[Params]):
                 search_base = str(search_path.parent)
             lines = _strip_path_prefix(lines, search_base)
 
-            # Step 3: filter sensitive files from output
+            # Step 3: filter sensitive files from output (now on a clean
+            # stream: rtk fold markers can no longer be mistaken for paths)
             filtered_paths: list[str] = []
             kept_lines: list[str] = []
             sensitive_path_set: set[str] = set()
@@ -895,7 +956,7 @@ class Grep(CallableTool2[Params]):
 
             lines = kept_lines
 
-            # Step 4: count_matches summary (before pagination, on full results)
+            # Step 4: summaries (before pagination, on full results)
             if params.output_mode == "count_matches":
                 total_matches = 0
                 total_files = 0
@@ -912,7 +973,38 @@ class Grep(CallableTool2[Params]):
                 )
                 message = f"{message} {count_summary}" if message else count_summary
 
-            # Step 5: offset + head_limit pagination
+            if (
+                params.output_mode == "content"
+                and rtk_meta.get("total_matches") is not None
+            ):
+                # rtk header reported totals for the whole search.
+                rtk_summary = (
+                    f"Found {rtk_meta['total_matches']} matches in "
+                    f"{rtk_meta['total_files']} files."
+                )
+                message = f"{message} {rtk_summary}" if message else rtk_summary
+                fold_note = _rtk_fold_note(rtk_meta)
+                if fold_note:
+                    message = f"{message} {fold_note}" if message else fold_note
+
+            if params.output_mode == "files_with_matches":
+                files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
+                message = f"{message} {files_summary}" if message else files_summary
+
+            # Step 5: local dedup fallback — only when rtk did NOT run, so
+            # repeated lines are never collapsed twice.
+            dedup_saved = 0
+            if (
+                params.output_mode == "content"
+                and params.deduplicate_output
+                and rtk_path is None
+            ):
+                lines, dedup_saved = dedup_lines(lines)
+                if dedup_saved:
+                    dedup_msg = f"Removed {dedup_saved} repeated line(s) via dedup."
+                    message = f"{message} {dedup_msg}" if message else dedup_msg
+
+            # Step 6: offset + head_limit pagination
             if params.offset > 0:
                 lines = lines[params.offset:]
 
@@ -937,7 +1029,23 @@ class Grep(CallableTool2[Params]):
                 )
                 message = f"{message} {truncation_msg}" if message else truncation_msg
 
+            # Step 7: final display fold budget (head+tail fold with marker).
+            # 0 = unlimited → the byte cap below is the only remaining limit.
+            omitted_by_fold = 0
+            if params.max_output_lines:
+                lines, omitted_by_fold = fold_lines(lines, params.max_output_lines)
+                if omitted_by_fold:
+                    fold_msg = (
+                        f"Results folded to {len(lines) - 1} lines "
+                        f"({omitted_by_fold} omitted). "
+                        "Use max_output_lines=0 or offset to see more."
+                    )
+                    message = f"{message} {fold_msg}" if message else fold_msg
+
             lines = _normalize_output_lines(lines, params.output_mode)
+            # Per-line hygiene before the byte cap: no single line can hog the
+            # whole budget (mirror of the display builder's own truncation).
+            lines = [truncate_line(ln) for ln in lines]
             output, truncated_by_bytes = _join_with_byte_limit(lines)
 
             if not output and not buffer_truncated:
@@ -1123,6 +1231,19 @@ class Grep(CallableTool2[Params]):
                 )
                 message = f"{message} {count_summary}" if message else count_summary
 
+            # files_with_matches summary (after filtering, before pagination).
+            if output_mode == "files_with_matches":
+                files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
+                message = f"{message} {files_summary}" if message else files_summary
+
+            # Local dedup fallback (backup_grep never runs rtk).
+            dedup_saved = 0
+            if output_mode == "content" and params.deduplicate_output:
+                lines, dedup_saved = dedup_lines(lines)
+                if dedup_saved:
+                    dedup_msg = f"Removed {dedup_saved} repeated line(s) via dedup."
+                    message = f"{message} {dedup_msg}" if message else dedup_msg
+
             # Strip search-base prefix for relative paths.
             search_base = str(search_path)
             if search_path.is_file():
@@ -1167,7 +1288,21 @@ class Grep(CallableTool2[Params]):
                     )
                     message = f"{message} {truncation_msg}" if message else truncation_msg
 
+            # Final display fold budget (head+tail fold with marker).
+            omitted_by_fold = 0
+            if params.max_output_lines:
+                lines, omitted_by_fold = fold_lines(lines, params.max_output_lines)
+                if omitted_by_fold:
+                    fold_msg = (
+                        f"Results folded to {len(lines) - 1} lines "
+                        f"({omitted_by_fold} omitted). "
+                        "Use max_output_lines=0 or offset to see more."
+                    )
+                    message = f"{message} {fold_msg}" if message else fold_msg
+
             lines = _normalize_output_lines(lines, output_mode)
+            # Per-line hygiene before the byte cap.
+            lines = [truncate_line(ln) for ln in lines]
             builder = ToolResultBuilder()
             output, truncated_by_bytes = _join_with_byte_limit(lines)
 

@@ -275,12 +275,19 @@ async def test_grep_output_truncation(grep_tool: Grep):
 
         assert not result.is_error
         assert isinstance(result.output, str)
-        # When rtk wraps rg it may deduplicate the repeated lines first, in
-        # which case the Grep tool's own byte-limit truncation does not fire.
-        # Either the Grep-tool message or an empty message is acceptable.
-        assert result.message in (
-            "",
-            "Output truncated to 102400 bytes. Output truncated.",
+        # rtk (when active) deduplicates the repeated lines and folds the
+        # rest; the tool strips rtk protocol lines and summarizes them in the
+        # message instead of leaking them into the output stream. Without
+        # rtk the local fold/byte-cap fallbacks apply instead.
+        assert "matches in" not in result.output
+        assert "[see remaining:" not in result.output
+        assert any(
+            token in result.message
+            for token in (
+                "Found 2000 matches in 1 files.",  # rtk content summary
+                "Results folded to",  # local fold fallback (no rtk)
+                "Output truncated to 102400 bytes",  # byte cap fallback
+            )
         )
         assert len(result.output) < DEFAULT_MAX_CHARS + 100
 
@@ -413,7 +420,8 @@ async def test_grep_default_head_limit(grep_tool: Grep):
         for i in range(600):
             (Path(temp_dir) / f"file_{i:03d}.txt").write_text("marker\n")
 
-        # head_limit defaults to 500 now
+        # head_limit defaults to 500; with max_output_lines=500 the fold
+        # budget matches the pagination limit, so no fold marker appears.
         result = await grep_tool(
             Params(pattern="marker", path=temp_dir, output_mode="files_with_matches")
         )
@@ -421,13 +429,15 @@ async def test_grep_default_head_limit(grep_tool: Grep):
         assert len(output) == 500
         lines = [x for x in result.output.split("\n") if x.strip()]
         assert len(lines) == 500
+        assert "lines omitted" not in result.output
         assert "Results truncated to 500 lines" in result.message
         assert "total: 600" in result.message
         assert "Use offset=500 to see more" in result.message
+        assert "Results folded" not in result.message
 
 
 async def test_grep_head_limit_zero_unlimited(grep_tool: Grep):
-    """head_limit=0 returns all results without truncation."""
+    """head_limit=0 keeps all results; the display fold budget is 500 by default."""
     with tempfile.TemporaryDirectory() as temp_dir:
         for i in range(300):
             (Path(temp_dir) / f"file_{i:03d}.txt").write_text("marker\n")
@@ -438,7 +448,11 @@ async def test_grep_head_limit_zero_unlimited(grep_tool: Grep):
         assert not result.is_error
         assert isinstance(result.output, str)
         lines = [x for x in result.output.split("\n") if x.strip()]
+        # All 300 collected; 300 <= max_output_lines=500 so no folding.
         assert len(lines) == 300
+        assert "lines omitted" not in result.output
+        assert "Results folded" not in result.message
+        assert "Found 300 files matching 'marker'." in result.message
         assert "truncated" not in result.message.lower()
 
 
@@ -1805,6 +1819,15 @@ def test_grep_params_deduplicate_output_default():
     assert Params(pattern="x").deduplicate_output is True
 
 
+def test_grep_params_max_output_lines_default_500():
+    assert Params(pattern="x").max_output_lines == 500
+
+
+def test_grep_params_max_output_lines_alias_fold():
+    params = Params.model_validate({"pattern": "x", "fold": 0})
+    assert params.max_output_lines == 0
+
+
 def test_grep_params_token_kill_alias():
     """token_kill=False maps to deduplicate_output=False (backward compat)."""
     params = Params.model_validate({"pattern": "x", "token_kill": False})
@@ -1916,3 +1939,127 @@ async def test_grep_rtk_preserves_no_match_exit_code(
     assert not result.is_error
     assert "No matches found" in result.message
     assert captured["args"][0] == _share_bin_rtk()
+
+
+# === Tests for output shaping (rtk protocol cleanup / local dedup / fold) ===
+
+
+@pytest.mark.asyncio
+async def test_grep_rtk_markers_stripped_and_summarized(
+    grep_tool: Grep, monkeypatch
+):
+    """rtk protocol lines are stripped from the output and summarized in message."""
+    fake_stdout = (
+        "42 matches in 1 files:\n"
+        "\n"
+        "src/a.py:10:def foo():\n"
+        "  +40 more in src\\a.py [see remaining: tail -n +2 C:\\log\\tee.log]\n"
+        "+5 more files [see remaining: tail -n +43 C:\\log\\tee2.log]\n"
+    ).encode()
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProcess(stdout=fake_stdout, returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    # Force the plain-rg path so the fake stdout flows into post-processing.
+    grep_tool._rg_path = "rg"
+    grep_tool._rg_path_task = None
+    grep_tool._rtk_path = None
+    grep_tool._rtk_path_task = None
+
+    result = await grep_tool(
+        Params(
+            pattern="def",
+            path=".",
+            output_mode="content",
+            head_limit=0,
+            deduplicate_output=True,
+        )
+    )
+    assert not result.is_error
+    assert isinstance(result.output, str)
+    # Protocol lines must never appear in the result output.
+    assert "matches in 1 files" not in result.output
+    assert "see remaining" not in result.output
+    assert "+40 more in" not in result.output
+    assert "+5 more files" not in result.output
+    # The real content survives; counts and fold notes land in the message.
+    assert "src/a.py:10:def foo():" in result.output
+    assert "Found 42 matches in 1 files." in result.message
+    assert "rtk folded output: 40 more lines in src\\a.py" in result.message
+    assert "5 more files" in result.message
+    assert "Full log: tail -n +2 C:\\log\\tee.log" in result.message
+
+
+@pytest.mark.asyncio
+async def test_grep_local_dedup_fallback(grep_tool: Grep, monkeypatch):
+    """With rtk unavailable, local dedup collapses repeated content lines."""
+    monkeypatch.setattr(grep_local, "_find_existing_rtk", lambda bin_name: None)
+    grep_tool._rtk_path = None
+    grep_tool._rtk_path_task = None
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        test_file = Path(temp_dir) / "repeats.txt"
+        test_file.write_text("match line\n" * 500)
+
+        result = await grep_tool(
+            Params(
+                pattern="match",
+                path=temp_dir,
+                output_mode="content",
+                head_limit=0,
+                line_number=False,
+                deduplicate_output=True,
+            )
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        lines = [x for x in result.output.split("\n") if x.strip()]
+        # 500 identical "repeats.txt:match line" lines collapse to one.
+        assert len(lines) == 1
+        assert "(499 repeats)" in lines[0]
+        assert "Removed 499 repeated line(s) via dedup." in result.message
+
+
+@pytest.mark.asyncio
+async def test_grep_fold_output(grep_tool: Grep):
+    """head_limit=0 with 500 matches folds to max_output_lines=200."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        (Path(temp_dir) / "data.txt").write_text(
+            "\n".join(f"line{i} word" for i in range(500)) + "\n"
+        )
+        result = await grep_tool(
+            Params(
+                pattern="word",
+                path=temp_dir,
+                output_mode="content",
+                head_limit=0,
+                max_output_lines=200,
+                deduplicate_output=False,  # keep lines unique & un-deduped
+            )
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        lines = [x for x in result.output.split("\n") if x.strip()]
+        assert len(lines) == 201  # 200 real lines + fold marker
+        assert "… (300 lines omitted) …" in result.output
+        assert "Results folded to 200 lines (300 omitted)" in result.message
+        assert "Use max_output_lines=0 or offset to see more" in result.message
+
+
+@pytest.mark.asyncio
+async def test_grep_files_mode_summary(grep_tool: Grep):
+    """files_with_matches always reports Found N files in the message."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for name in ("a.py", "b.py", "c.py"):
+            (Path(temp_dir) / name).write_text("def marker():\n    pass\n")
+        result = await grep_tool(
+            Params(
+                pattern="marker",
+                path=temp_dir,
+                output_mode="files_with_matches",
+            )
+        )
+        assert not result.is_error
+        assert "Found 3 files matching 'marker'." in result.message

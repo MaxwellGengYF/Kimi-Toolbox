@@ -218,7 +218,7 @@ async def test_glob_single_character_wildcard(glob_tool: Glob, test_files: KaosP
 
 
 async def test_glob_max_matches_limit(glob_tool: Glob, temp_work_dir: KaosPath):
-    """Test that glob respects the MAX_MATCHES limit."""
+    """Glob collects up to MAX_MATCHES and folds the display to max_results."""
     # Create more than MAX_MATCHES files
     for i in range(MAX_MATCHES + 50):
         await (temp_work_dir / f"file_{i}.txt").write_text(f"content {i}")
@@ -226,11 +226,15 @@ async def test_glob_max_matches_limit(glob_tool: Glob, temp_work_dir: KaosPath):
 
     assert not result.is_error
     assert isinstance(result.output, str)
-    # Should only return MAX_MATCHES results
     output_lines = [line for line in result.output.split("\n") if line.strip()]
-    assert len(output_lines) == MAX_MATCHES
-    # Should contain warning message
-    assert f"Showing first {MAX_MATCHES} matches" in result.message
+    # MAX_MATCHES are collected (count is exact), but the display folds to
+    # max_results=500 (500 real lines + fold marker).
+    real_lines = [ln for ln in output_lines if "lines omitted" not in ln]
+    assert len(real_lines) == 500
+    assert len(output_lines) == 501
+    assert "… (500 lines omitted) …" in result.output
+    assert f"Found {MAX_MATCHES} matches" in result.message
+    assert "Showing 500 of 1000 (head+tail fold)" in result.message
 
 
 async def test_glob_enhanced_double_star(glob_tool: Glob, temp_work_dir: KaosPath):
@@ -259,10 +263,15 @@ async def test_glob_exactly_max_matches(glob_tool: Glob, temp_work_dir: KaosPath
     assert not result.is_error
     assert isinstance(result.output, str)
     output_lines = [line for line in result.output.split("\n") if line.strip()]
-    assert len(output_lines) == MAX_MATCHES
-    # Should NOT contain warning message since we have exactly MAX_MATCHES
-    assert "Only the first" not in result.message
+    # Count is exact (all MAX_MATCHES collected); display folds to 500.
+    real_lines = [ln for ln in output_lines if "lines omitted" not in ln]
+    assert len(real_lines) == 500
+    assert len(output_lines) == 501
     assert f"Found {MAX_MATCHES} matches" in result.message
+    assert "Showing 500 of 1000 (head+tail fold)" in result.message
+    # Should NOT contain the capped-collection warning (exactly MAX_MATCHES).
+    assert "Only the first" not in result.message
+    assert "Search capped" not in result.message
 
 
 async def test_glob_character_class(glob_tool: Glob, temp_work_dir: KaosPath):
@@ -520,3 +529,140 @@ async def test_glob_outside_work_dir_nonexistent_has_warning(glob_tool: Glob):
         result = await glob_tool(Params(pattern="*", directory=nonexistent))
         assert result.is_error
         assert "[out of work-dir]" in result.message
+
+
+# === Tests for output shaping (fold / max_results / gitignore fix) ===
+
+
+async def test_glob_fold_output(glob_tool: Glob, temp_work_dir: KaosPath):
+    """>max_results matches are head+tail folded with counts in message."""
+    for i in range(500):
+        await (temp_work_dir / f"f{i:03d}.txt").write_text(f"content {i}")
+    # Explicit max_results=200: the default 500 would not fold 500 matches.
+    result = await glob_tool(
+        Params(pattern="*.txt", directory=str(temp_work_dir), max_results=200)
+    )
+
+    assert not result.is_error
+    assert isinstance(result.output, str)
+    output_lines = [line for line in result.output.split("\n") if line.strip()]
+    real_lines = [ln for ln in output_lines if "lines omitted" not in ln]
+    assert len(real_lines) == 200
+    assert len(output_lines) == 201
+    assert "… (300 lines omitted) …" in result.output
+    assert "Found 500 matches" in result.message
+    assert "Showing 200 of 500 (head+tail fold)" in result.message
+
+
+async def test_glob_gitignore_dir_only_excludes_descendants(
+    glob_tool: Glob, temp_work_dir: KaosPath
+):
+    """A dir-only rule (`.venv/`) excludes the dir AND its descendants."""
+    await (temp_work_dir / ".gitignore").write_text(".venv/\n")
+    await (temp_work_dir / "keep.py").write_text("x")
+    await (temp_work_dir / ".venv").mkdir()
+    await (temp_work_dir / ".venv" / "a.py").write_text("x")
+    await (temp_work_dir / "sub").mkdir()
+    await (temp_work_dir / "sub" / ".venv").mkdir()
+    await (temp_work_dir / "sub" / ".venv" / "b.py").write_text("x")
+
+    result = await glob_tool(Params(pattern="**/*.py", directory=str(temp_work_dir)))
+    assert not result.is_error
+    output = result.output.replace("\\", "/")
+    assert "keep.py" in output
+    assert ".venv/a.py" not in output
+    assert "sub/.venv/b.py" not in output
+    assert "Found 1 matches" in result.message
+
+
+async def test_glob_gitignore_dir_only_negated_unignores(
+    glob_tool: Glob, temp_work_dir: KaosPath
+):
+    """A negated dir-only rule (`!.venv/`) un-ignores the dir and its contents."""
+    await (temp_work_dir / ".gitignore").write_text(".venv/\n!.venv/\n")
+    await (temp_work_dir / ".venv").mkdir()
+    await (temp_work_dir / ".venv" / "a.py").write_text("x")
+    await (temp_work_dir / ".venv" / "sub").mkdir()
+    await (temp_work_dir / ".venv" / "sub" / "b.py").write_text("x")
+
+    result = await glob_tool(Params(pattern="**/*.py", directory=str(temp_work_dir)))
+    assert not result.is_error
+    output = result.output.replace("\\", "/")
+    assert ".venv/a.py" in output
+    assert ".venv/sub/b.py" in output
+    assert "Found 2 matches" in result.message
+
+
+async def test_glob_verbose_fold_and_truncate_line(
+    glob_tool: Glob, temp_work_dir: KaosPath
+):
+    """Verbose lines are folded and per-line capped."""
+    for i in range(250):
+        await (temp_work_dir / f"f{i:03d}.txt").write_text("x")
+    # A deeply nested long path forces per-line truncation in verbose mode.
+    long_dir = "d" * 240
+    long_name = "n" * 240
+    await (temp_work_dir / long_dir).mkdir()
+    await (temp_work_dir / long_dir / f"{long_name}.txt").write_text("deep")
+
+    result = await glob_tool(
+        Params(
+            pattern="**/*.txt",
+            directory=str(temp_work_dir),
+            verbose=True,
+            max_results=200,  # explicit: default 500 would not fold 251
+        )
+    )
+    assert not result.is_error
+    output_lines = result.output.split("\n")
+    assert any("lines omitted" in ln for ln in output_lines)
+    assert "Showing 200 of 251 (head+tail fold)" in result.message
+    # Every verbose line is hard-capped (500 + marker slack).
+    for ln in output_lines:
+        assert len(ln) <= 520, f"line too long: {len(ln)} chars"
+    assert any("… [+" in ln for ln in output_lines)
+
+
+async def test_glob_fold_top_dirs_summary(glob_tool: Glob, temp_work_dir: KaosPath):
+    """Folded results include a directory-grouped summary in the message."""
+    for d in ("aaa", "bbb", "ccc"):
+        await (temp_work_dir / d).mkdir()
+    for i in range(150):
+        await (temp_work_dir / "aaa" / f"f{i:03d}.txt").write_text("x")
+    for i in range(100):
+        await (temp_work_dir / "bbb" / f"f{i:03d}.txt").write_text("x")
+    for i in range(50):
+        await (temp_work_dir / "ccc" / f"f{i:03d}.txt").write_text("x")
+
+    # Explicit max_results=200: the default 500 would not fold 300 matches.
+    result = await glob_tool(
+        Params(pattern="**/*.txt", directory=str(temp_work_dir), max_results=200)
+    )
+    assert not result.is_error
+    assert "Showing 200 of 300 (head+tail fold)" in result.message
+    assert "top dirs: aaa (150), bbb (100), ccc (50)" in result.message
+
+
+async def test_glob_max_results_unlimited(glob_tool: Glob, temp_work_dir: KaosPath):
+    """max_results=0 disables folding; the MAX_MATCHES cap still applies."""
+    for i in range(MAX_MATCHES + 50):
+        await (temp_work_dir / f"file_{i}.txt").write_text(f"content {i}")
+    result = await glob_tool(
+        Params(pattern="*.txt", directory=str(temp_work_dir), max_results=0)
+    )
+
+    assert not result.is_error
+    assert isinstance(result.output, str)
+    output_lines = [line for line in result.output.split("\n") if line.strip()]
+    assert len(output_lines) == MAX_MATCHES
+    assert "lines omitted" not in result.output
+    assert f"Search capped at {MAX_MATCHES} matches." in result.message
+
+
+def test_glob_params_max_results_default_500():
+    assert Params(pattern="x").max_results == 500
+
+
+def test_glob_params_max_results_alias_fold():
+    params = Params.model_validate({"pattern": "x", "fold": 0})
+    assert params.max_results == 0
