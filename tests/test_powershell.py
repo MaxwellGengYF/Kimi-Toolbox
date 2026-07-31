@@ -1,6 +1,7 @@
 """Tests for the PowerShell tool interactive mode and shared ProcessTask behavior."""
 
 import asyncio
+import shutil
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -10,7 +11,6 @@ from pydantic import ValidationError
 
 from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
-from kimi_cli.tools import SkipThisTool
 
 from kimix.tools.common import ProcessTask, _rtk_binary_path
 from kimix.tools.file.bash import Powershell
@@ -19,12 +19,23 @@ from kimix.tools.background.utils import TaskData, _pop_task_data
 
 
 def _pwsh_is_available() -> bool:
-    """Return True when Powershell can be instantiated on this platform."""
-    try:
-        Powershell(session=MagicMock(spec=Session))
-        return True
-    except SkipThisTool:
+    """Return True when a real PowerShell can run on this host.
+
+    Host-capability probe (Windows only, mirroring the tool's platform gate):
+    PowerShell 7 via ``find_pwsh`` or the Windows PowerShell fallback.  The
+    probe deliberately ignores shell *selection* — with the default
+    Git-Bash-first policy the tool is disabled whenever bash exists, but the
+    integration tests below execute real pwsh directly and only need
+    PowerShell itself to be installed.
+    """
+    if sys.platform != "win32":
         return False
+    if find_pwsh() is not None:
+        return True
+    return (
+        shutil.which("powershell.exe") is not None
+        or shutil.which("powershell") is not None
+    )
 
 
 PWSH_AVAILABLE = _pwsh_is_available()
@@ -390,6 +401,17 @@ class TestPowershellSessionContinuation:
     reason="PowerShell tool is not available on this platform",
 )
 class TestPowershellInteractiveIntegration:
+    @pytest.fixture(autouse=True)
+    def _force_pwsh_enabled(self) -> Any:
+        """Bypass the shell-selection gate for these real-pwsh integration tests.
+
+        With the default Git-Bash-first policy on Windows the Powershell tool
+        is disabled whenever Git Bash is installed; the gate only decides
+        which shell tool is offered, so it is bypassed here.
+        """
+        with _force_pwsh_enabled():
+            yield
+
     async def test_interactive_read_host(self, mock_session: MagicMock) -> None:
         pwsh = Powershell(session=mock_session)
         params = PowershellParams(cmd="Read-Host -Prompt 'Name'", mode="interactive")

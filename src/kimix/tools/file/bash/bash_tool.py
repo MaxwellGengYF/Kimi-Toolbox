@@ -40,7 +40,45 @@ if TYPE_CHECKING:
     from kimix.tools.background.utils import BackgroundStream
 
 USE_SYSTEM_SHELL = True
-USE_SYSTEM_PWSH_ON_WINDOWS = True
+
+# Default Windows shell policy: "Git Bash first, PowerShell as fallback".  The
+# Bash tool is enabled whenever a real bash (typically shipped with Git for
+# Windows) is installed, and the Powershell tool is enabled only when no bash
+# exists (no git install).  Set to True to always prefer PowerShell on Windows
+# (disabling the Bash tool there).
+USE_SYSTEM_PWSH_ON_WINDOWS = False
+
+
+def _is_windows_apps_stub(path: str) -> bool:
+    """Return True if *path* points into the WindowsApps directory (Store stub).
+
+    Windows ships ``bash.exe`` in ``WindowsApps`` as an App Execution Alias
+    (Microsoft Store stub) that only offers to install WSL; it is not a real
+    bash and must never be treated as one.
+    """
+    normalized = os.path.normpath(path).replace("/", "\\")
+    return "WindowsApps" in normalized.split("\\")
+
+
+def _bash_runs(bash_path: str) -> bool:
+    """Smoke-test *bash_path*: return True when it launches and exits 0.
+
+    Guards against ``bash`` entries that exist on disk but cannot actually run
+    (broken installs, WSL launchers without a distribution, corrupt binaries,
+    etc.).  A bash that fails this probe is treated as "no bash" so that
+    PowerShell becomes the fallback shell on Windows.
+    """
+    try:
+        result = subprocess.run(
+            [bash_path, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _where_git_executables() -> list[str]:
@@ -110,42 +148,54 @@ def _git_bash_candidates_from_exec_path(exec_path: str) -> list[Path]:
 
 
 def _find_git_bash_windows() -> str | None:
-    """Locate Git Bash on Windows.
+    """Locate a *working* Git Bash on Windows.
+
+    Every candidate must both exist on disk and pass the ``--version`` smoke
+    test (``_bash_runs``): a bash entry that cannot launch is treated as "no
+    bash", so PowerShell becomes the fallback shell.
 
     Resolution order:
       1. ``KIMIX_GIT_BASH_PATH`` environment variable.
       2. ``where.exe git`` -> ``<gitDir>/../bin/bash.exe``.
       3. ``git --exec-path`` -> Git for Windows install root -> ``bin/bash.exe``.
       4. Common install locations.
-      5. ``bash`` on PATH.
+      5. ``bash`` on PATH (WindowsApps Store stubs are ignored — they are not
+         a real bash, so a machine without git reports "no bash" and
+         PowerShell becomes the fallback shell).
     """
+    def _usable(candidate: Path) -> bool:
+        return candidate.exists() and _bash_runs(str(candidate))
+
     override = os.environ.get("KIMIX_GIT_BASH_PATH")
     if override:
         candidate = Path(override)
-        if candidate.exists():
+        if _usable(candidate):
             return str(candidate.resolve())
 
     for git_path in _where_git_executables():
         bash_candidate = _git_bash_candidate_from_git_path(git_path)
-        if bash_candidate.exists():
+        if _usable(bash_candidate):
             return str(bash_candidate.resolve())
 
         git_exec_path = _git_exec_path(git_path)
         if git_exec_path:
             for bash_candidate in _git_bash_candidates_from_exec_path(git_exec_path):
-                if bash_candidate.exists():
+                if _usable(bash_candidate):
                     return str(bash_candidate.resolve())
 
     for candidate in (
         Path(r"C:\Program Files\Git\bin\bash.exe"),
         Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
     ):
-        if candidate.exists():
+        if _usable(candidate):
             return str(candidate.resolve())
 
     bash = shutil.which("bash")
-    if bash:
+    if bash and not _is_windows_apps_stub(bash) and _bash_runs(bash):
         return bash
+    # A WindowsApps ``bash.exe`` is only a Microsoft Store stub (installs WSL),
+    # not a usable bash: report "no bash" so PowerShell takes over as the
+    # fallback shell when there is no git install.
     return None
 
 
@@ -249,6 +299,12 @@ def _should_enable_bash() -> bool:
     ``"bash"`` enables Bash wherever it is installed; ``"powershell"``
     disables Bash on Windows (on non-Windows platforms the Powershell tool is
     unavailable, so Bash remains the fallback).
+
+    With no explicit config on Windows, Git Bash is preferred: Bash is enabled
+    whenever a real bash (typically shipped with Git for Windows) is found,
+    and PowerShell is used only as the fallback when no bash exists (no git
+    install).  Set ``USE_SYSTEM_PWSH_ON_WINDOWS`` to True to always prefer
+    PowerShell on Windows instead.
     """
     if not USE_SYSTEM_SHELL:
         return False
@@ -274,6 +330,11 @@ def _should_enable_powershell() -> bool:
     ``"bash"`` disables the tool unless Bash is unavailable (e.g. Windows
     without Git Bash), in which case PowerShell is the fallback shell;
     ``"powershell"`` forces the tool on Windows.
+
+    With no explicit config on Windows, PowerShell is the fallback shell: it
+    is enabled only when no bash (no git install) is available.  Set
+    ``USE_SYSTEM_PWSH_ON_WINDOWS`` to True to always enable the tool on
+    Windows regardless of Bash.
     """
     if sys.platform != "win32":
         return False

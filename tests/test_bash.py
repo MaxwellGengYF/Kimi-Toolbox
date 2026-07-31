@@ -23,11 +23,13 @@ from kimix.tools.file.bash import (
 )
 from kimix.tools.file.bash.bash_fix import BashFix, fix_bash_command
 from kimix.tools.file.bash.bash_tool import (
+    _bash_runs,
     _configured_shell,
     _find_git_bash_windows,
     _git_bash_candidate_from_git_path,
     _git_bash_candidates_from_exec_path,
     _git_install_root_from_exec_path,
+    _is_windows_apps_stub,
     _prepare_bash_cmd,
     find_bash,
 )
@@ -39,8 +41,8 @@ def _bash_is_available() -> bool:
 
     Host-capability probe: the agent config's ``shell`` selection is ignored
     so the result depends only on whether bash is actually installed (the
-    shipped agent_worker.json selects ``bash``, so real sessions enable the
-    Bash tool wherever this probe is True).
+    default Windows policy is Git-Bash-first with PowerShell as fallback, so
+    real sessions enable the Bash tool wherever this probe is True).
     """
     return find_bash() is not None
 
@@ -133,6 +135,10 @@ class TestFindGitBashWindows:
             # round-trip unchanged on any platform.
             "kimix.tools.file.bash.bash_tool.Path.resolve",
             lambda self: self,
+        ), patch(
+            # The candidate must also pass the --version smoke test.
+            "kimix.tools.file.bash.bash_tool._bash_runs",
+            return_value=True,
         ):
             assert _find_git_bash_windows() == r"C:\Custom\Git\bin\bash.exe"
 
@@ -155,9 +161,121 @@ class TestFindGitBashWindows:
             # Windows path strings round-trip unchanged on any platform.
             "kimix.tools.file.bash.bash_tool.Path.resolve",
             lambda self: self,
+        ), patch(
+            # The candidate must also pass the --version smoke test.
+            "kimix.tools.file.bash.bash_tool._bash_runs",
+            return_value=True,
         ):
             assert _find_git_bash_windows() == r"C:\Program Files\Git\bin\bash.exe"
 
+    def test_windowsapps_bash_stub_ignored(self, monkeypatch: Any) -> None:
+        """A WindowsApps ``bash.exe`` is only a Store stub (installs WSL).
+
+        With no git install the stub must not count as bash, so PowerShell
+        becomes the fallback shell.
+        """
+        monkeypatch.delenv("KIMIX_GIT_BASH_PATH", raising=False)
+        stub = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe"
+        with patch(
+            "kimix.tools.file.bash.bash_tool._where_git_executables",
+            return_value=[],
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.shutil.which",
+            return_value=stub,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.Path.exists",
+            lambda self: False,
+        ), patch(
+            # See test_honors_env_override: keep resolve() an identity so
+            # Windows path strings round-trip unchanged on any platform.
+            "kimix.tools.file.bash.bash_tool.Path.resolve",
+            lambda self: self,
+        ):
+            assert _find_git_bash_windows() is None
+
+    def test_real_bash_on_path_still_accepted(self, monkeypatch: Any) -> None:
+        """A genuine (non-stub) bash on PATH is still a valid bash."""
+        monkeypatch.delenv("KIMIX_GIT_BASH_PATH", raising=False)
+        real = r"C:\msys64\usr\bin\bash.exe"
+        with patch(
+            "kimix.tools.file.bash.bash_tool._where_git_executables",
+            return_value=[],
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.shutil.which",
+            return_value=real,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.Path.exists",
+            lambda self: False,
+        ), patch(
+            # See test_honors_env_override: keep resolve() an identity so
+            # Windows path strings round-trip unchanged on any platform.
+            "kimix.tools.file.bash.bash_tool.Path.resolve",
+            lambda self: self,
+        ), patch(
+            # The PATH candidate must also pass the --version smoke test.
+            "kimix.tools.file.bash.bash_tool._bash_runs",
+            return_value=True,
+        ):
+            assert _find_git_bash_windows() == real
+
+    def test_invalid_git_bash_falls_through_to_valid_path_bash(
+        self, monkeypatch: Any
+    ) -> None:
+        """An existing-but-broken git bash is skipped; a working bash on PATH
+        is used instead — only a fully unusable bash drops to PowerShell."""
+        monkeypatch.delenv("KIMIX_GIT_BASH_PATH", raising=False)
+        broken = r"C:\Program Files\Git\bin\bash.exe"
+        good = r"C:\msys64\usr\bin\bash.exe"
+        with patch(
+            "kimix.tools.file.bash.bash_tool._where_git_executables",
+            return_value=[r"C:\Program Files\Git\cmd\git.exe"],
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._git_exec_path",
+            return_value=None,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.Path.exists",
+            lambda self: str(self) in (broken, good),
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._bash_runs",
+            side_effect=lambda p: p == good,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.shutil.which",
+            return_value=good,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.Path.resolve",
+            lambda self: self,
+        ):
+            assert _find_git_bash_windows() == good
+
+    def test_all_bash_candidates_invalid_returns_none(
+        self, monkeypatch: Any
+    ) -> None:
+        """Every candidate exists but none can run: report "no bash" so
+        PowerShell becomes the fallback shell."""
+        monkeypatch.delenv("KIMIX_GIT_BASH_PATH", raising=False)
+        with patch(
+            "kimix.tools.file.bash.bash_tool._where_git_executables",
+            return_value=[r"C:\Program Files\Git\cmd\git.exe"],
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._git_exec_path",
+            return_value=None,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.Path.exists",
+            lambda self: True,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._bash_runs",
+            return_value=False,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.shutil.which",
+            return_value=None,
+        ):
+            assert _find_git_bash_windows() is None
+
+    def test_bash_runs_smoke_test(self) -> None:
+        """A real executable that exits 0 counts as bash; a missing binary
+        (or one that cannot launch) does not."""
+        assert _bash_runs(sys.executable) is True
+        assert _bash_runs(r"C:\definitely\missing\bash.exe") is False
 
 # ============================================================================
 # Bash / Powershell mutual exclusion on Windows
@@ -209,6 +327,36 @@ class TestWindowsShellExclusion:
         self, mock_session: MagicMock
     ) -> None:
         with self._with_platform(bash_available=True, pwsh_preferred=True):
+            Powershell(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Bash(mock_session)
+
+    def test_default_flag_prefers_bash_on_windows(
+        self, mock_session: MagicMock
+    ) -> None:
+        """Shipped default: Git Bash is preferred on Windows; PowerShell is
+        only the fallback when no bash (no git install) exists."""
+        import kimix.tools.file.bash.bash_tool as bash_tool_module
+
+        assert bash_tool_module.USE_SYSTEM_PWSH_ON_WINDOWS is False
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value=None
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ):
+            Bash(mock_session)  # does not raise
+            with pytest.raises(SkipThisTool):
+                Powershell(mock_session)
+
+    def test_default_flag_falls_back_to_powershell_without_bash(
+        self, mock_session: MagicMock
+    ) -> None:
+        """Shipped default: no git install (no bash) on Windows → PowerShell
+        becomes the fallback shell tool."""
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.tools.file.bash.bash_tool._configured_shell", return_value=None
+        ), patch("kimix.tools.file.bash.bash_tool.find_bash", return_value=None):
             Powershell(mock_session)  # does not raise
             with pytest.raises(SkipThisTool):
                 Bash(mock_session)
@@ -2036,10 +2184,10 @@ class TestPowershellInactivityTimeout:
     def _force_pwsh_enabled(self) -> Any:
         """Force-enable the Powershell tool for these integration tests.
 
-        With the shipped agent_worker.json selecting ``bash``, the gate
+        With the default Git-Bash-first policy on Windows, the gate
         ``_should_enable_powershell()`` is False whenever Git Bash is
-        installed on Windows; these tests execute real pwsh commands, so the
-        gate is bypassed.
+        installed; these tests execute real pwsh commands, so the gate is
+        bypassed.
         """
         with patch(
             "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
