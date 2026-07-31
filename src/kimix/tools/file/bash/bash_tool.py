@@ -6,22 +6,22 @@ import contextlib
 import functools
 import ntpath
 import os
-import orjson
-import regex as re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import kimi_cli
-from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+import orjson
+import regex as re
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.display import ShellDisplayBlock
+from pydantic import BaseModel, Field, model_validator
 
+from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from kimix.tools.common import (
+    ProcessTask,
     _build_session_output_block,
     _env_with_rg_bin_path,
     _extract_export_path,
@@ -30,11 +30,14 @@ from kimix.tools.common import (
     _maybe_rewrite_shell_command_with_rtk,
     _summarize_long_output_async,
     _token_filter_output,
-    ProcessTask,
+)
+from kimix.tools.file.bash.bash_fix import (
+    bash_compatibility_prelude,
+    fix_bash_command,
 )
 
 if TYPE_CHECKING:
-    from kimi_agent_sdk import CallableTool2 as _CallableTool2
+    from kimix.tools.background.utils import BackgroundStream
 
 USE_SYSTEM_SHELL = True
 USE_SYSTEM_PWSH_ON_WINDOWS = True
@@ -188,10 +191,11 @@ def find_bash() -> str | None:
       3. Standard system locations (``/bin/bash`` and ``/usr/bin/bash``).
       4. ``bash`` on PATH.
     """
-    if sys.platform == "win32":
+    platform: str = sys.platform
+    if platform == "win32":
         return _find_git_bash_windows()
 
-    if sys.platform == "darwin":
+    if platform == "darwin":
         # Prefer newer Homebrew/MacPorts bash over the aging system bash.
         for candidate in _bash_candidates_macos():
             if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -226,10 +230,12 @@ def _configured_shell() -> str | None:
         data = orjson.loads(_default_agent_file.read_text(encoding="utf-8"))
         shell = data.get("agent", {}).get("shell")
     except (OSError, ValueError, AttributeError):
-        return 'bash'
+        return None
     if not isinstance(shell, str):
-        return 'bash'
+        return None
     shell = shell.strip().lower()
+    if shell == "bash":
+        return "bash"
     if shell in ("powershell", "pwsh"):
         return "powershell"
     return None
@@ -247,14 +253,15 @@ def _should_enable_bash() -> bool:
     if not USE_SYSTEM_SHELL:
         return False
     configured = _configured_shell()
+    platform: str = sys.platform
     if configured == "powershell":
-        if sys.platform == "win32":
+        if platform == "win32":
             return False
         return find_bash() is not None
     if configured == "bash":
         return find_bash() is not None
     # No explicit config: legacy platform-based behavior.
-    if sys.platform == "win32" and USE_SYSTEM_PWSH_ON_WINDOWS:
+    if platform == "win32" and USE_SYSTEM_PWSH_ON_WINDOWS:
         return False
     return find_bash() is not None
 
@@ -658,7 +665,7 @@ class BashParams(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_mode(cls, data: dict) -> dict:
+    def _normalize_mode(cls, data: dict[str, Any]) -> dict[str, Any]:
         """Convert deprecated boolean flags and mode aliases to canonical names."""
         if isinstance(data, dict):
             if data.get('interactive', False):
@@ -697,7 +704,10 @@ class Bash(CallableTool2[BashParams]):
         if not _should_enable_bash():
             raise SkipThisTool()
         self._session = session
-        self._bash = find_bash()
+        bash = find_bash()
+        if bash is None:
+            raise SkipThisTool()
+        self._bash = bash
 
         # Windows-specific experience (verified by TestPrepareBashCmd and
         # TestBashBackslashPaths): unquoted backslash paths are auto-converted.
@@ -728,6 +738,10 @@ class Bash(CallableTool2[BashParams]):
         Returns:
             ToolOk on success, ToolError on failure or timeout.
         """
+        forbidden = self._forbidden_error(params.cmd)
+        if forbidden is not None:
+            return forbidden
+
         # Early dispatch: continue an existing session
         if params.task_id is not None:
             return await self._continue_session(params)
@@ -746,18 +760,6 @@ class Bash(CallableTool2[BashParams]):
         if isinstance(pattern, ToolError):
             return pattern
 
-        # Check forbidden commands (pre-normalized in __init__)
-        if params.cmd and self._forbidden_keywords:
-            full_cmd = params.cmd
-            normalized_cmd = " ".join(full_cmd.split())
-            for keyword in self._forbidden_keywords:
-                if keyword in normalized_cmd:
-                    return ToolError(
-                        output="",
-                        message=f"`{full_cmd}` is forbidden by config rule.",
-                        brief="Forbidden command",
-                    )
-
         # Refresh PATH/PATHEXT from registry so that tools installed
         # since the last command (e.g. via WinGet) are discoverable.
         if sys.platform == "win32":
@@ -766,12 +768,26 @@ class Bash(CallableTool2[BashParams]):
 
         if params.mode == "interactive":
             rtk_rewritten = False
+            bootstrap = bash_compatibility_prelude()
             if params.cmd:
-                safe_cmd = _prepare_bash_cmd(params.cmd)
+                safe_cmd = self._prepare_command(params.cmd)
+                if isinstance(safe_cmd, ToolError):
+                    return safe_cmd
                 rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
                     safe_cmd, params.deduplicate_output, exclude_read=True
                 )
-                bash_args = ["-c", rtk_cmd + "; exec bash -i"]
+                startup_cmd = "\n".join(
+                    part for part in (bootstrap, rtk_cmd) if part
+                )
+            else:
+                startup_cmd = bootstrap
+            if startup_cmd:
+                forbidden = self._forbidden_error(
+                    startup_cmd, display_command=params.cmd
+                )
+                if forbidden is not None:
+                    return forbidden
+                bash_args = ["-c", startup_cmd + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
             process_task = ProcessTask(self._bash, bash_args, None, _env_with_rg_bin_path(), append_newline=True)
@@ -805,10 +821,15 @@ class Bash(CallableTool2[BashParams]):
 
         # Build the command line to pass to bash -c
         # On Windows, escape backslashes so bash preserves them in paths.
-        safe_cmd = _prepare_bash_cmd(params.cmd)
+        safe_cmd = self._prepare_command(params.cmd)
+        if isinstance(safe_cmd, ToolError):
+            return safe_cmd
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
             safe_cmd, params.deduplicate_output, exclude_read=True
         )
+        forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
+        if forbidden is not None:
+            return forbidden
         process_task = ProcessTask(self._bash, ["-c", rtk_cmd], None, _env_with_rg_bin_path())
         task_id = await process_task.start(self._session, "bash")
 
@@ -878,8 +899,6 @@ class Bash(CallableTool2[BashParams]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
-        elapsed = stream.process_elapsed if stream else None
-
         if not success:
             msg = "failed"
             return ToolError(output=block, message=msg, brief="Command execution failed")
@@ -891,6 +910,71 @@ class Bash(CallableTool2[BashParams]):
             brief="Command executed successfully",
             display_block=ShellDisplayBlock(language="shell"),
         )
+
+    def _forbidden_error(
+        self, command: str, *, display_command: str | None = None
+    ) -> ToolError | None:
+        """Return an error when *command* matches a configured policy rule."""
+        if not command or not self._forbidden_keywords:
+            return None
+        normalized = " ".join(command.split())
+        for keyword in self._forbidden_keywords:
+            if keyword in normalized:
+                shown = command if display_command is None else display_command
+                return ToolError(
+                    output="",
+                    message=f"`{shown}` is forbidden by config rule.",
+                    brief="Forbidden command",
+                )
+        return None
+
+    def _prepare_command(self, command: str) -> str | ToolError:
+        """Normalize and add Windows fallbacks, enforcing policy on generated text."""
+        prepared = fix_bash_command(_prepare_bash_cmd(command)).command
+        forbidden = self._forbidden_error(prepared, display_command=command)
+        return forbidden if forbidden is not None else prepared
+
+    def _continuation_may_be_incomplete(self, command: str) -> bool:
+        """Return whether Bash may combine this fragment with later input.
+
+        Forbidden-command rules are evaluated per API call.  Allowing an
+        incomplete fragment while such rules are active would let later calls
+        assemble a forbidden command that never appears in any individual
+        policy check.  Bash's own no-execute parser handles balanced compound
+        commands, arrays, substitutions, and here-documents more faithfully
+        than a second hand-written shell parser.
+        """
+        stripped = command.rstrip(" \t\r\n")
+        if not stripped:
+            return False
+
+        trailing_backslashes = len(stripped) - len(stripped.rstrip("\\"))
+        if trailing_backslashes % 2:
+            return True
+
+        try:
+            checked = subprocess.run(
+                [self._bash, "--noprofile", "--norc", "-n", "-c", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            # Fail closed only while command-policy rules are active.
+            return True
+        if checked.returncode == 0:
+            return False
+
+        error = checked.stderr.lower()
+        incomplete_markers = (
+            "unexpected end of file",
+            "unexpected eof while looking for matching",
+            "delimited by end-of-file",
+        )
+        return any(marker in error for marker in incomplete_markers)
 
     def _compile_pattern(self, wait_for_pattern: str | None) -> re.Pattern[str] | ToolError:
         if wait_for_pattern is None:
@@ -906,10 +990,15 @@ class Bash(CallableTool2[BashParams]):
 
     async def _execute_background(self, params: BashParams) -> ToolReturnValue:
         """Execute a bash command in background and return immediately with task_id."""
-        safe_cmd = _prepare_bash_cmd(params.cmd)
+        safe_cmd = self._prepare_command(params.cmd)
+        if isinstance(safe_cmd, ToolError):
+            return safe_cmd
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
             safe_cmd, params.deduplicate_output, exclude_read=True
         )
+        forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
+        if forbidden is not None:
+            return forbidden
         process_task = ProcessTask(self._bash, ["-c", rtk_cmd], None, _env_with_rg_bin_path())
         task_id = await process_task.start(self._session, "bash")
 
@@ -947,18 +1036,34 @@ class Bash(CallableTool2[BashParams]):
         if isinstance(pattern, ToolError):
             return pattern
 
-        # Discard prior output so we only report new output produced after this input.
-        await stream.pop_output()
+        if self._forbidden_keywords and self._continuation_may_be_incomplete(params.cmd):
+            return ToolError(
+                output="",
+                message=(
+                    "Incomplete interactive Bash input is disabled while "
+                    "forbidden-command rules are configured."
+                ),
+                brief="Unsafe command fragment",
+            )
 
-        rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, params.deduplicate_output, exclude_read=True
-        )
+        # A persistent shell accepts arbitrary parser fragments: a heredoc
+        # body, an unfinished quote, or the remainder of a compound command.
+        # Rewriting such input as an independent program would corrupt parser
+        # state and `$?`.  Compatibility functions were exported when the
+        # interactive shell started, so continuation text is sent verbatim.
+        rtk_cmd = params.cmd
+        rtk_rewritten = False
+
+        # Report only output produced after an accepted input command.  Retain
+        # the drained buffer so a process that rejects input cannot lose it.
+        prior_output = await stream.pop_output()
+
         input_text = rtk_cmd
         if not input_text.endswith("\n"):
             input_text += "\n"
         if not await stream.input(input_text):
             return ToolError(
-                output="",
+                output=prior_output,
                 message=f"Failed to send input to task '{task_id}'",
                 brief="Send input failed",
             )
@@ -1019,7 +1124,7 @@ class Bash(CallableTool2[BashParams]):
             real_exit_code = None
         else:
             real_exit_code = stream.exit_code if stream else None
-            if real_exit_code is None:
+            if real_exit_code is None and stream is not None:
                 real_exit_code = 0 if await stream.success() else None
         block = _build_session_output_block(
             task_id=task_id,

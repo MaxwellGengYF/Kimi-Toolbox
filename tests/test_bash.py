@@ -1,39 +1,37 @@
 """Comprehensive tests for the Bash tool (bash_tool.py) which uses the system bash executable."""
 
 import asyncio
-import os
 import shutil
+import subprocess
 import sys
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kimi_cli.session import Session
+from kimi_cli.tools import SkipThisTool
 from pydantic import ValidationError
 
 from kimi_agent_sdk import ToolError, ToolOk
-from kimi_cli.session import Session
-
-from kimi_cli.tools import SkipThisTool
+from kimix.tools.background.utils import TaskData, _pop_task_data
 from kimix.tools.file.bash import (
     Bash,
     BashParams,
     Powershell,
 )
-from kimix.tools.file.bash.pwsh_tool import PowershellParams, find_pwsh
+from kimix.tools.file.bash.bash_fix import BashFix, fix_bash_command
 from kimix.tools.file.bash.bash_tool import (
-    find_bash,
     _configured_shell,
-    _prepare_bash_cmd,
     _find_git_bash_windows,
     _git_bash_candidate_from_git_path,
     _git_bash_candidates_from_exec_path,
-    _git_exec_path,
     _git_install_root_from_exec_path,
-    _where_git_executables,
+    _prepare_bash_cmd,
+    find_bash,
 )
-from kimix.tools.background.utils import TaskData, _pop_task_data
+from kimix.tools.file.bash.pwsh_tool import PowershellParams, find_pwsh
 
 
 def _bash_is_available() -> bool:
@@ -433,7 +431,744 @@ class TestBashParams:
 
 
 # ============================================================================
-# _quote_for_bash_c
+# Native POSIX command compatibility for Windows Git Bash
+# ============================================================================
+
+
+def _fix_for_platform(command: str, platform: str) -> BashFix:
+    with patch("kimix.tools.file.bash.bash_fix.sys.platform", platform):
+        return fix_bash_command(command)
+
+
+def _fix_for_windows(command: str) -> BashFix:
+    return _fix_for_platform(command, "win32")
+
+
+class TestBashFixResult:
+    def test_result_is_immutable(self) -> None:
+        result = BashFix("echo ok")
+        with pytest.raises((AttributeError, TypeError)):
+            result.command = "echo changed"  # type: ignore[misc]
+
+    def test_unchanged_result(self) -> None:
+        result = _fix_for_windows("echo ok")
+        assert result == BashFix("echo ok")
+        assert result.command == "echo ok"
+        assert result.replacements == ()
+        assert result.warning == ""
+        assert not result.changed
+
+    def test_changed_result_reports_every_command(self) -> None:
+        result = _fix_for_windows("gtimeout 1 true; printf x | rev")
+        assert result.replacements == ("gtimeout", "rev")
+        assert result.changed
+        assert "gtimeout" in result.warning
+        assert "rev" in result.warning
+
+    @pytest.mark.parametrize("command", ["", " ", "\t\n", "echo ok\n"])
+    def test_empty_and_plain_inputs_round_trip(self, command: str) -> None:
+        assert _fix_for_windows(command).command == command
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "freebsd", "cygwin"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gtimeout 1 true",
+            "printf abc | rev",
+            "xdg-open .",
+            "open README.md",
+            "printf text | pbcopy",
+            "pbpaste",
+        ],
+    )
+    def test_non_windows_is_byte_for_byte_noop(self, platform: str, command: str) -> None:
+        result = _fix_for_platform(command, platform)
+        assert result == BashFix(command)
+
+
+class TestBashFixMappings:
+    @pytest.mark.parametrize(
+        ("source", "expected", "replacement"),
+        [
+            ("gtimeout 3 echo ok", "timeout 3 echo ok", "gtimeout"),
+            (
+                "printf 'abc\\n' | rev",
+                "printf 'abc\\n' | perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --",
+                "rev",
+            ),
+            ("rev first.txt second.txt", "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- first.txt second.txt", "rev"),
+            ("xdg-open README.md", "start README.md", "xdg-open"),
+            ("open https://example.com", "start https://example.com", "open"),
+            ("printf text | pbcopy", "printf text | clip.exe", "pbcopy"),
+            (
+                "pbpaste > clipboard.txt",
+                "powershell.exe -NoProfile -NonInteractive -Command "
+                "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                "[Console]::Out.Write((Get-Clipboard -Raw))' > clipboard.txt",
+                "pbpaste",
+            ),
+        ],
+    )
+    def test_verified_windows_mapping(
+        self, source: str, expected: str, replacement: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.command != expected
+        assert result.replacements == (replacement,)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "timeout 1 true",
+            "stdbuf -oL echo ok",
+            "mktemp",
+            "truncate -s 0 file",
+            "readlink file",
+            "realpath file",
+            "stat file",
+            "sed -n 1p file",
+            "grep value file",
+            "find . -name '*.py'",
+            "xargs echo",
+            "tac file",
+            "column -t file",
+            "numfmt 1000",
+            "nproc",
+            "getconf PATH",
+        ],
+    )
+    def test_git_bash_bundled_commands_are_not_rewritten(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "setsid app",
+            "flock lockfile app",
+            "script transcript.txt",
+            "getent passwd",
+            "ip address",
+            "ss -ltn",
+            "lsof file",
+            "free -h",
+            "watch date",
+            "systemctl status service",
+            "service app status",
+            "apt update",
+            "apt-get update",
+            "sudo command",
+            "xclip -selection clipboard",
+            "xsel --clipboard",
+        ],
+    )
+    def test_commands_without_faithful_mapping_are_preserved(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+
+class TestBashFixCommandPositions:
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("rev", "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("'rev' <<< abc", "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- <<< abc"),
+            ('"rev" <<< abc', "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- <<< abc"),
+            (r"\rev <<< abc", "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- <<< abc"),
+            ('r""ev <<< abc', "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- <<< abc"),
+            ("  rev  ", "  perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --  "),
+            ("true; rev", "true; perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("true && rev", "true && perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("false || rev", "false || perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("printf x | rev", "printf x | perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("rev & wait", "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- & wait"),
+            ("echo first\nrev", "echo first\nperl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("(rev)", "(perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --)"),
+            ("{ rev; }", "{ perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --; }"),
+            ("! rev", "! perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("if rev; then echo yes; fi", "if perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --; then echo yes; fi"),
+            ("while rev; do break; done", "while perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --; do break; done"),
+            ("until rev; do break; done", "until perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --; do break; done"),
+            ("for x in one; do rev; done", "for x in one; do perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --; done"),
+            ("result=$(rev)", "result=$(perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --)"),
+            ("echo $(rev)", "echo $(perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --)"),
+            ("echo `rev`", "echo `perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --`"),
+            (
+                'echo "$(rev)"',
+                'echo "$(perl -ne \'s/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)\' --)"',
+            ),
+            ("diff <(rev) file", "diff <(perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --) file"),
+            ("cat >(rev)", "cat >(perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --)"),
+            ("FOO=bar rev", "FOO=bar perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("FOO=bar BAR=baz rev", "FOO=bar BAR=baz perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            (">output rev", ">output perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("2>/dev/null rev", "2>/dev/null perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("command rev", "command perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("command -- rev", "command -- perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("env rev", "env perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("env -i rev", "env -i perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("env FOO=bar rev", "env FOO=bar perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("nohup rev", "nohup perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("exec rev", "exec perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+            ("time rev", "time perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --"),
+        ],
+    )
+    def test_rewrites_only_executable_command_words(self, source: str, expected: str) -> None:
+        result = _fix_for_windows(source)
+        executable_wrappers = ("command ", "env ", "nohup ", "exec ")
+        if source.startswith(executable_wrappers):
+            assert not result.command.endswith("\n" + source)
+        else:
+            assert result.command.endswith("\n" + source)
+        assert result.command != expected
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            (
+                "gtimeout 2 sh -c 'printf ok' | rev",
+                "timeout 2 sh -c 'printf ok' | perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' --",
+            ),
+            ("open one; xdg-open two", "start one; start two"),
+            (
+                "pbpaste | rev | pbcopy",
+                "powershell.exe -NoProfile -NonInteractive -Command "
+                "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                "[Console]::Out.Write((Get-Clipboard -Raw))' | "
+                "perl -ne 's/[\\r\\n]+\\z//; print scalar(reverse($_)), qq(\\n)' -- | clip.exe",
+            ),
+        ],
+    )
+    def test_multiple_rewrites_preserve_order(self, source: str, expected: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.command != expected
+        assert len(result.replacements) >= 2
+
+
+class TestBashFixFalsePositives:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo rev",
+            "printf '%s' rev",
+            "echo gtimeout open xdg-open pbcopy pbpaste",
+            "name=rev",
+            "tool=gtimeout",
+            "array=(rev open pbcopy)",
+            "printf > rev",
+            "cat < pbpaste",
+            "echo /usr/bin/rev",
+            "./rev",
+            "bin/rev",
+            "$tool",
+            "${tool}",
+            "$(printf rev)",
+            "echo `printf rev`",
+            "echo rev # rev",
+            "echo ok # gtimeout 1 false",
+            "# rev\necho ok",
+            "case value in rev) echo match;; esac",
+            "case value in *) echo rev;; esac",
+            "alias rev='printf alias'",
+            "function rev { printf custom; }",
+            "rev() { printf custom; }",
+            "declare -f rev",
+            "type rev",
+            "command -v rev",
+            "which rev",
+            "printf '%s\\n' 'open https://example.com'",
+            "echo $'rev\\nopen'",
+            'echo "literal rev and open"',
+        ],
+    )
+    def test_data_and_declarations_are_unchanged(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_heredoc_body_and_delimiter_are_unchanged(self) -> None:
+        command = "cat <<'EOF'\nrev\ngtimeout 1 false\nopen file\nEOF"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    @pytest.mark.parametrize("operator", ["&>", "&>>"])
+    def test_combined_output_redirection_argument_is_data(self, operator: str) -> None:
+        command = f"printf '%s' {operator}/tmp/kimix-output rev"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_heredoc_delimiter_substitution_is_literal(self) -> None:
+        command = "cat <<$(rev)\nbody\n$(rev)\ntype -t rev"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_expanding_heredoc_folds_backslash_newline_before_delimiter(self) -> None:
+        command = "cat <<EOF\nprefix\\\nEOF\ncommand rev\nEOF"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_out_of_range_ansi_c_heredoc_delimiter_never_crashes(self) -> None:
+        command = "cat <<$'\\U00110000'\nbody\nEOF\nrev <<< abc"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    @pytest.mark.parametrize("escape", [r"\U00110000", r"\uD800"])
+    def test_invalid_ansi_c_delimiter_spelling_cannot_end_heredoc(
+        self, escape: str
+    ) -> None:
+        command = f"cat <<$'{escape}'\nbody\n{escape}\nrev <<< after"
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_heredoc_body_ignored_but_following_command_rewritten(self) -> None:
+        source = "cat <<EOF\nrev\nEOF\nrev"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_comment_ignored_but_following_line_rewritten(self) -> None:
+        source = "echo ok # rev\nrev"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "work() { rev <<< abc; }; work",
+            "function work { rev <<< abc; }; work",
+            "function work() { rev <<< abc; }; work",
+        ],
+    )
+    def test_first_function_body_command_is_rewritten(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_function_name_preserved_but_body_commands_rewritten(self) -> None:
+        source = "work() { printf abc | rev; }; work"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_quoted_heredoc_parenthesis_inside_command_substitution_is_literal(self) -> None:
+        source = "printf '%s\\n' \"$(cat <<'EOF'\n)\n$(command rev)\nEOF\n)\""
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_arithmetic_shift_inside_command_substitution_does_not_hide_later_command(
+        self,
+    ) -> None:
+        source = 'printf "%s\\n" "$(\n: $((1 << 2))\n)"\nrev <<< abc'
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_case_pattern_parenthesis_inside_command_substitution_is_not_closing(
+        self,
+    ) -> None:
+        source = "printf '%s\\n' \"$(case x in x) rev <<< abc;; esac)\""
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize("terminator", [";;", ";&", ";;&"])
+    def test_completed_case_inside_substitution_does_not_hide_later_command(
+        self, terminator: str
+    ) -> None:
+        source = (
+            "printf '%s\\n' \"$(case x in 'x') :"
+            f"{terminator} esac)\"; rev <<< abc"
+        )
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_nested_completed_cases_inside_substitution_do_not_hide_later_command(
+        self,
+    ) -> None:
+        source = (
+            "printf '%s\\n' \"$(case x in x) case y in y) :;; esac;; esac)\"; "
+            "rev <<< abc"
+        )
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "[[ rev == rev && rev == rev ]] && printf OK",
+            "rev=1; (( rev )); printf '%s' $?",
+            "let rev=1",
+            "for ((rev=0; rev<2; rev++)); do printf x; done",
+        ],
+    )
+    def test_conditional_and_arithmetic_words_are_not_commands(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_command_after_case_is_detected(self) -> None:
+        source = "case x in x) :;; esac; rev <<< abc"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_command_substitution_inside_array_assignment_is_detected(self) -> None:
+        source = "values=($(rev <<< abc)); printf '%s' \"${values[0]}\""
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_command_substitution_inside_expanding_heredoc_is_detected(self) -> None:
+        source = "cat <<EOF\n$(rev <<< abc)\nEOF"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    def test_quotes_are_literal_in_expanding_heredoc_body(self, quote: str) -> None:
+        source = f"cat <<EOF\n{quote}$(rev <<< abc){quote}\nEOF"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "cat <<$'EOF'\nbody\nEOF\nrev <<< abc",
+            'cat <<"A\\q"\nbody\nA\\q\nrev <<< abc',
+        ],
+    )
+    def test_quoted_heredoc_delimiter_allows_following_command(
+        self, source: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_command_substitution_inside_quoted_heredoc_is_literal(self) -> None:
+        source = "cat <<'EOF'\n$(rev <<< abc)\nEOF"
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_nested_case_detects_later_outer_clause_command(self) -> None:
+        source = (
+            "case z in x) case y in y) :;; esac;; "
+            "z) rev <<< abc;; esac"
+        )
+        result = _fix_for_windows(source)
+        assert result.replacements == ("rev",)
+        assert result.command.endswith("\n" + source)
+
+    def test_nested_case_outer_pattern_is_not_a_command(self) -> None:
+        source = (
+            "case x in x) case y in y) :;; esac;; rev) :;; esac; "
+            "command -v rev >/dev/null || printf clean"
+        )
+        assert _fix_for_windows(source) == BashFix(source)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "coproc rev",
+            "coproc worker { rev; }",
+            "coproc worker if rev; then :; fi",
+        ],
+    )
+    def test_coproc_command_is_detected(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "env --default-signal rev <<< abc",
+            "env --block-signal rev <<< abc",
+            "env --ignore-signal rev <<< abc",
+        ],
+    )
+    def test_env_optional_signal_options_do_not_consume_command(
+        self, source: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.replacements == ("rev",)
+        assert result.command != source
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "command -p rev",
+            "command -p -- rev",
+            "command -pv rev",
+            "command -vp rev",
+            "command -pV rev",
+            "env -S printf rev",
+            "env -S'printf %s\\n' rev",
+            "env -Sprintf rev",
+            "env --split-string printf rev",
+            "env --split-string='printf rev'",
+        ],
+    )
+    def test_opaque_wrapper_forms_are_preserved(self, source: str) -> None:
+        assert _fix_for_windows(source) == BashFix(source)
+
+
+class TestBashFixRobustness:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "'",
+            '"',
+            "`",
+            "$(",
+            "${",
+            "((",
+            "cat <<EOF\nunterminated",
+            "echo \\",
+            "rev '",
+            'rev "',
+            "echo $(rev",
+            "echo `rev",
+            "if rev; then",
+            "case x in rev)",
+            "\x00rev\x00",
+        ],
+    )
+    def test_arbitrary_malformed_input_never_crashes(self, command: str) -> None:
+        result = _fix_for_windows(command)
+        assert isinstance(result, BashFix)
+        assert isinstance(result.command, str)
+
+    def test_large_plain_command_fast_path(self) -> None:
+        command = "printf x " + "argument " * 20_000
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_deeply_nested_command_substitutions(self) -> None:
+        depth = 250
+        source = "echo " + "$(echo " * depth + "$(rev)" + ")" * depth
+        result = _fix_for_windows(source)
+        assert result.command.count("rev()") == 1
+        assert result.command.endswith("\n" + source)
+
+    def test_many_commands_are_all_rewritten_linearly(self) -> None:
+        source = "; ".join(["rev"] * 2_000)
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.command.count("rev()") == 1
+        assert result.replacements == ("rev",) * 2_000
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Git Bash")
+class TestBashFixRealGitBash:
+    @staticmethod
+    def _run(command: str, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+        bash = find_bash()
+        assert bash is not None
+        fixed = _fix_for_windows(command)
+        return subprocess.run(
+            [bash, "-lc", fixed.command],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+    def test_gtimeout_rewrite_executes(self) -> None:
+        result = self._run("gtimeout 2 bash -c 'printf timeout-ok'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "timeout-ok"
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("set -e; rev <<< abc; printf reached", "cba\nreached"),
+            ("set -e; gtimeout 2 true; printf reached", "reached"),
+        ],
+    )
+    def test_missing_native_delegate_survives_errexit(
+        self, command: str, expected: str
+    ) -> None:
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == expected
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "work() { rev <<< abc; }; work",
+            "function work { rev <<< abc; }; work",
+            "function work() { rev <<< abc; }; work",
+        ],
+    )
+    def test_first_function_body_fallback_executes(self, source: str) -> None:
+        result = self._run(source)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    def test_quoted_heredoc_parenthesis_in_substitution_executes_literally(self) -> None:
+        command = "printf '%s\\n' \"$(cat <<'EOF'\n)\n$(command rev)\nEOF\n)\""
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ")\n$(command rev)\n"
+
+    def test_arithmetic_shift_in_substitution_does_not_hide_fallback(self) -> None:
+        command = 'printf "%s\\n" "$(\n: $((1 << 2))\n)"\nrev <<< abc'
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "\ncba\n"
+
+    def test_case_pattern_in_substitution_runs_fallback(self) -> None:
+        command = "printf '%s\\n' \"$(case x in x) rev <<< abc;; esac)\""
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    @pytest.mark.parametrize("terminator", [";;", ";&", ";;&"])
+    def test_completed_case_in_substitution_preserves_later_fallback(
+        self, terminator: str
+    ) -> None:
+        command = (
+            "printf '%s\\n' \"$(case x in 'x') :"
+            f"{terminator} esac)\"; rev <<< abc"
+        )
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.endswith("cba\n")
+
+    def test_rev_rewrite_executes_for_stdin(self) -> None:
+        result = self._run("rev", stdin="abc\n123\n")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["cba", "321"]
+
+    def test_rev_rewrite_executes_for_file(self, tmp_path: Path) -> None:
+        source = tmp_path / "rev-input.txt"
+        source.write_text("first\nsecond\n", encoding="utf-8")
+        path = str(source).replace("\\", "/")
+        result = self._run(f"rev {path}")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["tsrif", "dnoces"]
+
+    def test_nested_and_chained_rewrites_execute(self) -> None:
+        result = self._run("gtimeout 2 bash -c 'printf abc' | rev")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba"
+
+    def test_rev_preserves_unicode_characters(self) -> None:
+        result = self._run("printf 'aé漢\\n' | rev")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "漢éa\n"
+
+    @pytest.mark.parametrize("option", ["-0", "--zero", "-0 --", "--zero --"])
+    def test_rev_zero_delimited_mode(self, option: str) -> None:
+        result = self._run(f"printf 'abc\\0def\\0' | rev {option}")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\x00fed\x00"
+
+    def test_rev_missing_file_returns_failure(self) -> None:
+        result = self._run("rev /definitely/not/a/kimix-file")
+        assert result.returncode != 0
+        assert "kimix-file" in result.stderr
+
+    def test_existing_function_takes_precedence_over_fallback(self) -> None:
+        result = self._run("rev() { printf custom; }; rev </dev/null")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "custom"
+
+    def test_inline_path_native_executable_takes_precedence(self, tmp_path: Path) -> None:
+        native = tmp_path / "rev"
+        native.write_text("#!/usr/bin/env bash\nprintf native-inline", encoding="utf-8")
+        native.chmod(0o755)
+        directory = str(tmp_path).replace("\\", "/")
+        if len(directory) >= 3 and directory[1:3] == ":/":
+            directory = "/" + directory[0].lower() + directory[2:]
+        result = self._run(f"PATH='{directory}':$PATH rev </dev/null")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "native-inline"
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            "command rev",
+            "command -- rev",
+            "env rev",
+            "env -i rev",
+            "env K=V rev",
+            "env -u K rev",
+            "nohup rev",
+            "exec rev",
+            "exec -a custom-rev rev",
+        ],
+    )
+    def test_executable_wrappers_run_fallback(self, wrapped: str) -> None:
+        result = self._run(f"printf 'abc\\n' | {wrapped}")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    @pytest.mark.parametrize("wrapped", ["time rev", "time -p rev"])
+    def test_time_keyword_runs_fallback(self, wrapped: str) -> None:
+        result = self._run(f"{wrapped} <<< abc")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    @pytest.mark.parametrize(
+        ("wrapped", "expected_stdout"),
+        [
+            ("command 2>/dev/null rev", "cba\n"),
+            ("env 2>/dev/null rev", "cba\n"),
+            ("nohup 2>/dev/null rev", "cba\n"),
+            ("exec 2>/dev/null rev", "cba\n"),
+            ("command >$(printf /dev/null) rev", ""),
+            ("command > >(cat) rev", "cba\n"),
+        ],
+    )
+    def test_executable_wrapper_survives_redirection(
+        self, wrapped: str, expected_stdout: str
+    ) -> None:
+        result = self._run(f"printf 'abc\\n' | {wrapped}")
+        assert result.returncode == 0, result.stderr
+        assert "command not found" not in result.stderr.lower()
+        assert result.stdout == expected_stdout
+
+    def test_command_default_path_does_not_use_caller_path(self, tmp_path: Path) -> None:
+        custom = tmp_path / "rev"
+        custom.write_text("#!/usr/bin/env bash\nprintf caller-path", encoding="utf-8")
+        custom.chmod(0o755)
+        directory = str(tmp_path).replace("\\", "/")
+        if len(directory) >= 3 and directory[1:3] == ":/":
+            directory = "/" + directory[0].lower() + directory[2:]
+        result = self._run(f"PATH='{directory}':$PATH command -p rev")
+        assert result.returncode == 127
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "coproc rev <<< abc",
+            "coproc worker { rev <<< abc; }",
+            "coproc worker if rev <<< abc; then :; fi",
+        ],
+    )
+    def test_coproc_runs_fallback(self, source: str) -> None:
+        result = self._run(f"{source}; wait; printf '%s' \"${{COPROC_STATUS-}}\"")
+        assert result.returncode == 0, result.stderr
+        assert "command not found" not in result.stderr.lower()
+
+    def test_conditionals_and_arithmetic_execute_unchanged(self) -> None:
+        result = self._run(
+            "[[ rev == rev && rev == rev ]] && rev=1 && (( rev )) && printf OK"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "OK"
+
+    def test_commands_in_expanding_contexts_execute(self) -> None:
+        result = self._run(
+            "case x in x) :;; esac; values=($(rev <<< abc)); "
+            "cat <<EOF\n${values[0]} $(rev <<< def)\nEOF"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba fed\n"
+
+    def test_unknown_unmapped_command_still_fails_normally(self) -> None:
+        result = self._run("setsid-kimix-command-that-does-not-exist")
+        assert result.returncode == 127
+        assert "command not found" in result.stderr.lower()
+
+
+# ============================================================================
+# _prepare_bash_cmd
 # ============================================================================
 
 class TestPrepareBashCmd:
@@ -811,7 +1546,7 @@ class TestPrepareBashCmd:
             cmd = r'echo "`cat src\foo\bar`"'
             assert _prepare_bash_cmd(cmd) == 'echo "`cat src/foo/bar`"'
 
-    
+
     def test_dq_with_nested_command_substitution_on_windows(self) -> None:
         r"""Nested $(...) inside DQ — both levels process backslashes."""
         with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"):
@@ -1893,6 +2628,395 @@ class TestBashParamsInteractive:
 
 
 # ============================================================================
+# Bash fixer integration across execution modes
+# ============================================================================
+
+
+class TestBashFixToolIntegration:
+    @pytest.fixture
+    def bash_instance(self, mock_session: MagicMock) -> Bash:
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            return Bash(session=mock_session)
+
+    @staticmethod
+    def _completed_process_task() -> MagicMock:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-fix-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value="fixed output")
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        process_task.stream.process_elapsed = None
+        return process_task
+
+    async def test_foreground_command_is_fixed_before_process_creation(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as process_task_class:
+            result = await bash_instance(BashParams(cmd="gtimeout 2 echo ok"))
+
+        assert isinstance(result, ToolOk)
+        command = process_task_class.call_args.args[1][1]
+        assert command.endswith("\ngtimeout 2 echo ok")
+        assert "gtimeout()" in command
+        assert 'timeout "$@"' in command
+
+    async def test_background_command_is_fixed_before_process_creation(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-background-id")
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as process_task_class:
+            result = await bash_instance(
+                BashParams(cmd="printf text | pbcopy", mode="send")
+            )
+
+        assert isinstance(result, ToolOk)
+        command = process_task_class.call_args.args[1][1]
+        assert command.endswith("\nprintf text | pbcopy")
+        assert "pbcopy()" in command
+        assert 'clip.exe "$@"' in command
+
+    async def test_interactive_initial_command_is_fixed(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-interactive-id")
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as process_task_class:
+            result = await bash_instance(BashParams(cmd="printf abc | rev", mode="interactive"))
+
+        assert isinstance(result, ToolOk)
+        command = process_task_class.call_args.args[1][1]
+        assert command.endswith("\nprintf abc | rev; exec bash -i")
+        for name in ("gtimeout", "rev", "xdg-open", "open", "pbcopy", "pbpaste"):
+            assert f"{name}()" in command
+            assert f"declare -F {name}" in command
+
+    async def test_existing_interactive_session_input_is_fixed(
+        self, bash_instance: Bash
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="")
+        stream.input = AsyncMock(return_value=True)
+        stream.wait_for_output = AsyncMock(return_value=("", False, 0.01))
+        stream.thread_is_alive = AsyncMock(return_value=True)
+        stream.success = AsyncMock(return_value=True)
+        data.tasks = {"bash_compat": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"):
+            result = await bash_instance(
+                BashParams(cmd="xdg-open README.md", task_id="bash_compat")
+            )
+
+        assert isinstance(result, ToolOk)
+        sent = stream.input.await_args.args[0]
+        assert sent == "xdg-open README.md\n"
+        assert "xdg-open()" not in sent
+
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "rev",
+            "EOF",
+            "then",
+            "'continued text",
+            '"continued text',
+            "printf '%s' \"$?\"",
+            "body\\",
+        ],
+    )
+    async def test_existing_interactive_session_input_is_not_reparsed_as_program(
+        self, bash_instance: Bash, fragment: str
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="")
+        stream.input = AsyncMock(return_value=True)
+        stream.wait_for_output = AsyncMock(return_value=("", False, 0.01))
+        stream.thread_is_alive = AsyncMock(return_value=True)
+        stream.success = AsyncMock(return_value=True)
+        data.tasks = {"bash_fragment": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"):
+            result = await bash_instance(
+                BashParams(cmd=fragment, task_id="bash_fragment")
+            )
+
+        assert isinstance(result, ToolOk)
+        stream.input.assert_awaited_once_with(fragment + "\n")
+
+    async def test_compatibility_fix_runs_before_rtk(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        rewrite = MagicMock(side_effect=lambda command, *_args, **_kwargs: (command, False))
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._maybe_rewrite_shell_command_with_rtk",
+            rewrite,
+        ):
+            await bash_instance(BashParams(cmd="gtimeout 2 true"))
+
+        rewritten = rewrite.call_args.args[0]
+        assert rewritten.endswith("\ngtimeout 2 true")
+        assert "gtimeout()" in rewritten
+
+    async def test_path_normalization_and_compatibility_fix_compose(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as process_task_class:
+            await bash_instance(
+                BashParams(cmd=r"gtimeout 2 cat src\kimix\agent_worker.json")
+            )
+
+        command = process_task_class.call_args.args[1][1]
+        assert command.endswith(
+            "\ngtimeout 2 cat src/kimix/agent_worker.json"
+        )
+
+    async def test_forbidden_check_uses_original_command_before_rewrite(
+        self, mock_session: MagicMock
+    ) -> None:
+        mock_session.custom_config.get.return_value = {
+            "forbidden_commands": ["gtimeout"]
+        }
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+
+        with patch("kimix.tools.file.bash.bash_tool.fix_bash_command") as fixer:
+            result = await bash(BashParams(cmd="gtimeout 2 true"))
+
+        assert isinstance(result, ToolError)
+        assert "forbidden" in result.message
+        fixer.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["execute", "send"])
+    async def test_forbidden_source_command_is_blocked_in_fresh_modes(
+        self, mock_session: MagicMock, mode: str
+    ) -> None:
+        mock_session.custom_config.get.return_value = {
+            "forbidden_commands": ["gtimeout"]
+        }
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as process_task:
+            result = await bash(BashParams(cmd="gtimeout 2 true", mode=mode))
+        assert isinstance(result, ToolError)
+        process_task.assert_not_called()
+
+    async def test_forbidden_source_command_is_blocked_in_continuation(
+        self, bash_instance: Bash
+    ) -> None:
+        bash_instance._forbidden_keywords = ["gtimeout"]
+        with patch("kimix.tools.file.bash.bash_tool.fix_bash_command") as fixer:
+            result = await bash_instance(
+                BashParams(cmd="gtimeout 2 true", task_id="existing")
+            )
+        assert isinstance(result, ToolError)
+        fixer.assert_not_called()
+
+    @pytest.mark.parametrize("fragment", ["printf \\", "x=(printf"])
+    async def test_forbidden_policy_rejects_incomplete_continuation_fragment(
+        self, bash_instance: Bash, fragment: str
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.input = AsyncMock(return_value=True)
+        data.tasks = {"existing": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+        bash_instance._forbidden_keywords = ["printf BLOCKED"]
+
+        syntax_error = subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr="bash: syntax error: unexpected end of file",
+        )
+        with patch(
+            "kimix.tools.file.bash.bash_tool.subprocess.run",
+            return_value=syntax_error,
+        ):
+            result = await bash_instance(BashParams(cmd=fragment, task_id="existing"))
+
+        assert isinstance(result, ToolError)
+        assert result.brief == "Unsafe command fragment"
+        stream.input.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "if true; then printf safe; fi",
+            "for x in one; do printf safe; done",
+            "cat <<EOF\nsafe\nEOF",
+        ],
+    )
+    async def test_forbidden_policy_allows_complete_compound_continuation(
+        self, bash_instance: Bash, command: str
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="")
+        stream.input = AsyncMock(return_value=True)
+        stream.wait_for_output = AsyncMock(return_value=("safe", False, 0.01))
+        stream.thread_is_alive = AsyncMock(return_value=True)
+        stream.success = AsyncMock(return_value=True)
+        data.tasks = {"existing": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+        bash_instance._forbidden_keywords = ["printf BLOCKED"]
+
+        syntax_ok = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch(
+            "kimix.tools.file.bash.bash_tool.subprocess.run",
+            return_value=syntax_ok,
+        ):
+            result = await bash_instance(BashParams(cmd=command, task_id="existing"))
+
+        assert isinstance(result, ToolOk)
+        stream.input.assert_awaited_once_with(command + "\n")
+
+    @pytest.mark.parametrize(
+        ("source", "forbidden"),
+        [("gtimeout 2 true", "timeout"), ("pbpaste", "powershell.exe")],
+    )
+    async def test_forbidden_generated_command_is_blocked(
+        self, bash_instance: Bash, source: str, forbidden: str
+    ) -> None:
+        bash_instance._forbidden_keywords = [forbidden]
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch("kimix.tools.file.bash.bash_tool.ProcessTask") as process_task:
+            result = await bash_instance(BashParams(cmd=source))
+        assert isinstance(result, ToolError)
+        process_task.assert_not_called()
+
+    async def test_forbidden_rtk_generated_command_is_blocked(
+        self, bash_instance: Bash
+    ) -> None:
+        bash_instance._forbidden_keywords = ["rtk"]
+        process_task = self._completed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool._maybe_rewrite_shell_command_with_rtk",
+            return_value=("rtk git status", True),
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as process_task_class:
+            result = await bash_instance(BashParams(cmd="git status"))
+        assert isinstance(result, ToolError)
+        process_task_class.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("generated_keyword", "command"),
+        [("perl", "rev"), ("rtk", "git status")],
+    )
+    async def test_continuation_is_not_rewritten_or_blocked_by_generated_text(
+        self, bash_instance: Bash, generated_keyword: str, command: str
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="buffered output")
+        stream.input = AsyncMock(return_value=True)
+        stream.wait_for_output = AsyncMock(return_value=("new output", False, 0.01))
+        stream.thread_is_alive = AsyncMock(return_value=True)
+        stream.success = AsyncMock(return_value=True)
+        data.tasks = {"existing": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+        bash_instance._forbidden_keywords = [generated_keyword]
+
+        syntax_ok = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch(
+            "kimix.tools.file.bash.bash_tool._maybe_rewrite_shell_command_with_rtk"
+        ) as rewrite, patch(
+            "kimix.tools.file.bash.bash_tool.subprocess.run",
+            return_value=syntax_ok,
+        ):
+            result = await bash_instance(
+                BashParams(cmd=command, task_id="existing")
+            )
+
+        assert isinstance(result, ToolOk)
+        rewrite.assert_not_called()
+        stream.pop_output.assert_awaited_once_with()
+        stream.input.assert_awaited_once_with(command + "\n")
+
+    async def test_failed_continuation_delivery_returns_buffered_output(
+        self, bash_instance: Bash
+    ) -> None:
+        data = TaskData()
+        stream = AsyncMock()
+        stream.is_started = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="buffered output")
+        stream.input = AsyncMock(return_value=False)
+        data.tasks = {"existing": stream}
+        bash_instance._session.custom_data["background_task_data"] = data
+
+        result = await bash_instance(
+            BashParams(cmd="printf new", task_id="existing")
+        )
+
+        assert isinstance(result, ToolError)
+        assert result.output == "buffered output"
+        stream.pop_output.assert_awaited_once_with()
+        stream.input.assert_awaited_once()
+
+
+# ============================================================================
 # Bash interactive argument building
 # ============================================================================
 
@@ -1976,7 +3100,12 @@ class TestBashInteractiveArgumentBuilding:
 
             assert isinstance(result, ToolOk)
             args = mock_pt.call_args
-            assert args[0][1] == ["-i"]
+            bash_args = args[0][1]
+            assert bash_args[0] == "-c"
+            assert bash_args[1].endswith("; exec bash -i")
+            assert "gtimeout()" in bash_args[1]
+            assert "rev()" in bash_args[1]
+            assert "export -f rev" in bash_args[1]
 
     async def test_interactive_returns_immediately(self, mock_session: MagicMock) -> None:
         with patch("kimix.tools.file.bash.bash_tool.find_bash", return_value=r"C:\Git\bin\bash.exe"), patch(
