@@ -1,6 +1,6 @@
 [project]
 name = "kimi-cli-x"
-version = "1.45.1"
+version = "1.45.2"
 description = "Kimi Code CLI is your next CLI agent."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -10,7 +10,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "aiohttp>=3.14.1",
     "typer>=0.24.1",
-    "kosong-x==0.53.11",
+    "kosong-x==0.54.2",
     "loguru>=0.6.0",
     "pillow>=12.2.0",
     "pyyaml>=6.0.3",
