@@ -1093,12 +1093,181 @@ class TestBashFixRobustness:
         assert result.command.count("rev()") == 1
         assert result.command.endswith("\n" + source)
 
+    def test_extreme_nesting_beyond_scan_bound_is_unchanged(self) -> None:
+        # Pathological nesting must neither hang the scanner nor crash it:
+        # beyond the recursion bound the content is left byte-for-byte for
+        # Bash to handle.
+        depth = 2_000
+        source = "echo " + "$(" * depth + "pwd" + ")" * depth
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_nested_substitutions_still_rewritten_at_moderate_depth(self) -> None:
+        depth = 50
+        source = "cd " + "$(cd " * depth + "D:\\x" + ")" * depth
+        result = _fix_for_windows(source)
+        assert result.path_changes == ("D:\\x",)
+        expected = "cd " + "$(cd " * depth + "D:/x" + ")" * depth
+        assert result.command == expected
+
     def test_many_commands_are_all_rewritten_linearly(self) -> None:
         source = "; ".join(["rev"] * 2_000)
         result = _fix_for_windows(source)
         assert result.command.endswith("\n" + source)
         assert result.command.count("rev()") == 1
         assert result.replacements == ("rev",) * 2_000
+
+
+class TestBashFixWindowsPaths:
+    """Windows backslash paths and cmd.exe idioms rewritten for Git Bash."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("cd D:\\kimi-agent\\kimi-cli", "cd D:/kimi-agent/kimi-cli"),
+            ("cd d:\\tools\\build", "cd d:/tools/build"),
+            ("cd C:\\", "cd C:/"),
+            ("cd \\\\server\\share\\dir", "cd //server/share/dir"),
+            ("cd \\Users\\foo", "cd /Users/foo"),
+            ("cd ~\\Desktop\\file.txt", "cd ~/Desktop/file.txt"),
+            ("cd .\\build\\dist", "cd ./build/dist"),
+            ("cd ..\\src\\lib", "cd ../src/lib"),
+            ("cd ..\\..\\repo", "cd ../../repo"),
+            ("mkdir build\\dist\\assets", "mkdir build/dist/assets"),
+            ("cd foo\\\\bar", "cd foo/bar"),
+            ("cd D:\\temp\\cache\\", "cd D:/temp/cache/"),
+            ("ls D:\\*.txt", "ls D:/*.txt"),
+            ("echo D:\\foo", "echo D:/foo"),
+            ("cd D:\\a\\b && cp D:\\a\\b.txt E:\\dest\\",
+             "cd D:/a/b && cp D:/a/b.txt E:/dest/"),
+            ("cd \\Program\\ Files\\x", 'cd "/Program Files/x"'),
+            ("env -C D:\\x cmd", "env -C D:/x cmd"),
+            ("env --chdir D:\\x cmd", "env --chdir D:/x cmd"),
+            ("env --chdir=D:\\x cmd", "env --chdir=D:/x cmd"),
+            ("time -o D:\\out.txt cmd", "time -o D:/out.txt cmd"),
+            ("time --output=D:\\out.txt cmd", "time --output=D:/out.txt cmd"),
+            ("sudo -D D:\\x cmd", "sudo -D D:/x cmd"),
+        ],
+    )
+    def test_windows_backslash_paths_rewritten(
+        self, source: str, expected: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command == expected
+        assert result.changed
+        assert result.replacements == ()
+        assert result.path_changes
+
+    def test_path_with_spaces_is_quoted(self) -> None:
+        result = _fix_for_windows("cd D:\\Program\\ Files\\Git")
+        assert result.command == 'cd "D:/Program Files/Git"'
+        assert result.path_changes == ("D:\\Program\\ Files\\Git",)
+
+    def test_path_with_metacharacter_is_quoted(self) -> None:
+        result = _fix_for_windows("cd D:\\a\\&b\\c")
+        assert result.command == 'cd "D:/a&b/c"'
+
+    def test_tilde_with_spaces_keeps_tilde_outside_quotes(self) -> None:
+        result = _fix_for_windows("cd ~\\My\\ Docs\\x")
+        assert result.command == 'cd ~"/My Docs/x"'
+
+    def test_path_change_reports_warning(self) -> None:
+        result = _fix_for_windows("cd D:\\x")
+        assert result.changed
+        assert result.replacements == ()
+        assert "forward slashes" in result.warning
+
+    def test_cd_d_flag_dropped(self) -> None:
+        result = _fix_for_windows("cd /d D:\\kimi-agent\\kimi-cli")
+        assert result.command == "cd  D:/kimi-agent/kimi-cli"
+        assert result.changed
+        assert result.path_changes == ("cd /d", "D:\\kimi-agent\\kimi-cli")
+
+    def test_cd_D_flag_dropped(self) -> None:
+        result = _fix_for_windows("cd /D C:\\Users\\me")
+        assert result.command == "cd  C:/Users/me"
+
+    def test_cd_flag_requires_following_argument(self) -> None:
+        assert _fix_for_windows("cd /d") == BashFix("cd /d")
+        assert _fix_for_windows("cd /d && echo x") == BashFix("cd /d && echo x")
+        assert _fix_for_windows("cd /d # comment") == BashFix("cd /d # comment")
+
+    def test_cd_flag_dropped_with_quoted_path_preserved(self) -> None:
+        result = _fix_for_windows("cd /d 'D:\\x'")
+        assert result.command == "cd  'D:\\x'"
+
+    def test_multiple_cd_flags_on_one_line(self) -> None:
+        result = _fix_for_windows("cd D:\\x; cd /d D:\\y")
+        assert result.command == "cd D:/x; cd  D:/y"
+
+    def test_path_in_command_substitution(self) -> None:
+        result = _fix_for_windows("echo $(cd D:\\foo && pwd)")
+        assert result.command == "echo $(cd D:/foo && pwd)"
+
+    def test_redirection_target_path_rewritten(self) -> None:
+        result = _fix_for_windows("echo hi > D:\\out.txt")
+        assert result.command == "echo hi > D:/out.txt"
+
+    def test_path_after_environment_assignment_is_data(self) -> None:
+        # `env` consumes FOO=... as its own word: the value is data.
+        assert _fix_for_windows("env FOO=D:\\x true") == BashFix("env FOO=D:\\x true")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo foo\\bar",  # single-segment relative: ambiguous
+            "echo a\\nb",  # looks like an accidental escape
+            "grep a\\b file",
+            "echo \\n",
+            "echo 'D:\\foo'",  # single-quoted text is literal data
+            'echo "D:\\foo"',  # double-quoted text is literal data
+            "printf '%s\\n' a",  # tool-level escapes stay quoted
+            "echo -e 'a\\tb'",
+            "echo $PATH\\foo",  # expansions untouched
+            "echo ${DIR}\\x",
+            "x=D:\\foo",  # assignment values untouched
+            "alias cd=D:\\x",
+            "case value in D:\\x) echo hit;; esac",
+            "[[ -d D:\\x ]]",
+            "# cd D:\\x",
+            "echo ok # cd D:\\x",
+            "cat <<'EOF'\ncd D:\\x\nEOF",  # heredoc body is data
+            "cat <<< D:\\x",  # here-string body is data
+            "echo \\",  # bare backslash
+            "echo \\\\",  # bare double backslash
+            # Bash escape sequences are ambiguous, not Windows paths: the
+            # rewrite must never turn them into slashed directory words.
+            r"echo \a\b",  # single-letter root-relative escapes
+            r"echo \n\t",
+            r"printf \033\015",  # octal escapes
+            r"echo \x\41",  # hex escape style
+            r"echo \033\033",
+            r"echo x\n\t",  # relative escape sequences
+            r"echo a\033\015",
+            r"cd \a\b\c",  # all single-letter root segments
+            r"cd a\b\c",  # all single-letter relative segments
+            # wrapper option values that are not paths stay data
+            r"env -C 'D:\x' cmd",  # quoted option value is literal data
+            r"time -o log.txt cmd",
+            r"env -u FOO D:\x cmd",  # -u takes a name; D:\x is a command word
+            r"env -C /d cmd",  # no backslash: not a Windows path
+            # backslash-newline line continuations inside path words: the word
+            # spans two physical lines and must stay untouched so Bash performs
+            # the continuation itself (rewriting would inject a raw newline
+            # into the emitted word and change the command's line structure).
+            "cd \\Users\\foo\\\nb",
+            "cd ~\\Desktop\\\nfile.txt",
+            "cd D:\\a\\\nb",
+            "cd build\\dist\\\nassets",
+            "cd D:\\a\\\rb",  # escaped carriage return
+        ],
+    )
+    def test_ambiguous_or_quoted_words_are_untouched(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_non_windows_platform_is_noop(self) -> None:
+        result = _fix_for_platform("cd D:\\x", "linux")
+        assert result == BashFix("cd D:\\x")
+        assert not result.changed
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Git Bash")
@@ -1191,6 +1360,42 @@ class TestBashFixRealGitBash:
         result = self._run(f"rev {path}")
         assert result.returncode == 0, result.stderr
         assert result.stdout.splitlines() == ["tsrif", "dnoces"]
+
+    def test_windows_backslash_cd_executes(self, tmp_path: Path) -> None:
+        backslash = str(tmp_path).replace("/", "\\").replace(" ", "\\ ")
+        result = self._run(f"cd {backslash} && printf reached")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "reached"
+
+    def test_cd_d_flag_rewrite_executes(self, tmp_path: Path) -> None:
+        backslash = str(tmp_path).replace("/", "\\").replace(" ", "\\ ")
+        result = self._run(f"cd /d {backslash} && printf ok")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
+
+    def test_windows_path_with_space_executes(self, tmp_path: Path) -> None:
+        target = tmp_path / "sub dir"
+        target.mkdir()
+        source_path = str(target).replace(" ", "\\ ")
+        result = self._run(f"cd {source_path} && printf spaced")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "spaced"
+
+    def test_escape_sequence_words_are_not_rewritten(self) -> None:
+        # ``\a\b`` and ``\n\t`` are Bash escapes ("ab nt"), not paths; the
+        # fixer must leave them alone so the shell keeps its meaning.
+        result = self._run(r"echo \a\b \n\t")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ab nt\n"
+
+    def test_env_c_path_option_rewrite_executes(self, tmp_path: Path) -> None:
+        backslash = str(tmp_path).replace("/", "\\")
+        result = self._run(f"env -C {backslash} pwd")
+        assert result.returncode == 0, result.stderr
+        # Git Bash canonicalizes the user temp directory to its ``/tmp`` MSYS
+        # mount, so only the target directory name is compared, not the full
+        # spelling.
+        assert result.stdout.strip().endswith("/" + tmp_path.name)
 
     def test_nested_and_chained_rewrites_execute(self) -> None:
         result = self._run("gtimeout 2 bash -c 'printf abc' | rev")

@@ -6,10 +6,21 @@ already available.  This module rewrites only verified, behaviorally compatible
 command words.  It does not install software and deliberately leaves commands
 without a faithful equivalent untouched.
 
-The scanner is shell-aware: quoted text, comments, redirection operands,
-heredoc bodies, assignments, case patterns, and ordinary arguments are data,
-not commands.  Nested command substitutions and process substitutions are
-scanned as their own command contexts.
+Windows-style backslash paths (``D:\\repo\\src``, ``\\\\server\\share``,
+``~\\Desktop``, ``.\\build``) are rewritten to the forward-slash spellings Git
+Bash understands, and the cmd.exe-only ``cd /d <path>`` form loses its flag
+(``cd`` accepts a single argument in Bash).  Rewrites are conservative: the
+unquoted word must look unambiguously like a Windows path, so quoted data,
+tool-level escape sequences, short ambiguous words such as ``a\\nb``, and
+single-segment relative paths such as ``foo\\bar`` are preserved byte-for-byte.
+Words whose normalized form needs it (spaces, ``&``, ``;``, ...) are emitted
+inside double quotes; glob metacharacters stay unquoted so ``D:/x/*.txt`` still
+performs pathname expansion.
+
+The scanner is shell-aware: quoted text, comments, heredoc and here-string
+bodies, assignments, case patterns, and ordinary arguments are data, not
+commands.  Nested command substitutions and process substitutions are scanned
+as their own command contexts.
 """
 
 from __future__ import annotations
@@ -134,33 +145,94 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
     "time": frozenset({"-f", "--format", "-o", "--output"}),
 }
 
+# Wrapper options whose value is a filesystem path rather than a name or
+# number.  Windows backslash spellings of these values are rewritten for Git
+# Bash just like ordinary argument paths; every other option value stays
+# opaque.
+_WRAPPER_PATH_OPTIONS = {
+    "env": frozenset({"-C", "--chdir"}),
+    "sudo": frozenset({"-D", "--chdir"}),
+    "time": frozenset({"-o", "--output"}),
+}
+_WRAPPER_PATH_OPTION_LONG = frozenset({"--chdir", "--output"})
+
 _OPERATOR_CHARS = frozenset(";&|()<>\n")
 _REDIRECTION_START = frozenset("<>")
 
+# Characters that terminate an unquoted word: operators plus horizontal
+# whitespace.  A single frozenset membership test is cheaper than two.
+_WORD_END_CHARS = _OPERATOR_CHARS | frozenset(" \t\r")
+
+# Nesting deeper than this is never scanned: ``_find_matching`` and
+# ``_scan_range`` recurse once per ``$( ... )`` level, so pathological input
+# (e.g. a pasted blob with hundreds of nested substitutions) would otherwise
+# cost O(depth * length).  Real commands stay far below this bound; content
+# beyond it is simply left byte-for-byte for Bash to handle.
+_MAX_NESTING_DEPTH = 1024
+
+# ── Windows path recognition ────────────────────────────────────────────────
+# Rewrites apply only to unquoted words that unambiguously look like Windows
+# paths; everything else (quotes, expansions, short ambiguous words) is left
+# byte-for-byte for Bash to handle.
+
+_PATH_DRIVE_RE = re.compile(r"[A-Za-z]:\\.*")
+"""Drive-absolute path such as ``D:\\foo`` or the drive root ``C:\\``."""
+
+_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.~\\-]+")
+"""Decoded value of a plausible multi-segment relative path (no spaces)."""
+
+_PATH_SAFE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:~@%+=-#,[]*?"
+)
+"""Characters that may appear unquoted in a normalized path word.
+
+Glob metacharacters are included on purpose so ``D:/x/*.txt`` still performs
+pathname expansion instead of being quoted into a literal name.
+"""
+
+_ESCAPED_LITERAL_CHARS = frozenset(" \t&;|()<>#'\"$`{}!")
+"""Chars whose backslash form is a pure Bash escape, not a path separator.
+
+``\\ `` (escaped space) is how a space inside an unquoted word is written;
+normalizing it to ``/ `` would invent a directory level that does not exist.
+The backslash is dropped and the character kept inside its segment.
+"""
 
 @dataclass(frozen=True)
 class BashFix:
     """Result of :func:`fix_bash_command`.
 
-    ``replacements`` records each original command name in source order.  An
-    empty tuple means the command was returned byte-for-byte unchanged.
+    ``replacements`` records each original command name in source order and
+    ``path_changes`` each original argument word whose Windows-style
+    backslashes (or cmd.exe ``/d`` flag) were rewritten for Git Bash.  Empty
+    tuples mean the command was returned byte-for-byte unchanged.
     """
 
     command: str
     replacements: tuple[str, ...] = ()
+    path_changes: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
         """Return whether any compatibility replacement was made."""
-        return bool(self.replacements)
+        return bool(self.replacements) or bool(self.path_changes)
 
     @property
     def warning(self) -> str:
         """Return a concise description of compatibility changes."""
-        if not self.replacements:
-            return ""
-        names = ", ".join(f"`{name}`" for name in self.replacements)
-        return f"Added Windows Git Bash fallback(s) for native command(s): {names}."
+        parts: list[str] = []
+        if self.replacements:
+            names = ", ".join(f"`{name}`" for name in self.replacements)
+            parts.append(
+                f"Added Windows Git Bash fallback(s) for native command(s): {names}."
+            )
+        if self.path_changes:
+            words = ", ".join(f"`{word}`" for word in self.path_changes)
+            parts.append(
+                "Rewrote Windows path(s) for Git Bash (backslashes to forward "
+                f"slashes): {words}."
+            )
+        return " ".join(parts)
 
 
 @dataclass
@@ -168,6 +240,7 @@ class _Wrapper:
     kind: str
     skip_next: bool = False
     opaque: bool = False
+    path_value: bool = False
 
 
 @dataclass
@@ -180,13 +253,15 @@ class _HereDoc:
 class _Scanner:
     """Conservative scanner for Bash executable command positions."""
 
-    __slots__ = ("s", "n", "edits", "names")
+    __slots__ = ("s", "n", "edits", "names", "path_notes", "nest_depth")
 
     def __init__(self, command: str) -> None:
         self.s = command
         self.n = len(command)
         self.edits: list[tuple[int, int, str]] = []
         self.names: list[str] = []
+        self.path_notes: list[str] = []
+        self.nest_depth = 0
 
     def fix(self) -> BashFix:
         try:
@@ -195,7 +270,7 @@ class _Scanner:
             # Malformed or adversarial nesting must never make the Bash tool
             # fail before Bash itself can report the syntax error.
             return BashFix(self.s)
-        if not self.names:
+        if not self.names and not self.edits:
             return BashFix(self.s)
         definitions = "\n".join(
             _FALLBACKS[name] for name in dict.fromkeys(self.names)
@@ -210,7 +285,8 @@ class _Scanner:
             source = "".join(pieces)
         else:
             source = self.s
-        return BashFix(definitions + "\n" + source, tuple(self.names))
+        prefix = definitions + "\n" if definitions else ""
+        return BashFix(prefix + source, tuple(self.names), tuple(self.path_notes))
 
     @staticmethod
     def _literal_command_name(raw: str) -> str | None:
@@ -268,6 +344,21 @@ class _Scanner:
         return name if name in _FALLBACKS else None
 
     def _scan_range(self, start: int, end: int) -> None:
+        """Scan *start..end* as a command context, bounding recursion depth.
+
+        The wrapper exists so pathological nesting (hundreds of nested
+        ``$( ... )`` levels) costs O(_MAX_NESTING_DEPTH * length) instead of
+        O(depth * length); the innermost levels are left for Bash.
+        """
+        if self.nest_depth >= _MAX_NESTING_DEPTH:
+            return
+        self.nest_depth += 1
+        try:
+            self._scan_range_inner(start, end)
+        finally:
+            self.nest_depth -= 1
+
+    def _scan_range_inner(self, start: int, end: int) -> None:
         s = self.s
         i = start
         command_expected = True
@@ -275,6 +366,7 @@ class _Scanner:
         redirect_resume = True
         wrapper: _Wrapper | None = None
         heredoc_operator: str | None = None
+        herestring_flag = False
         pending_heredocs: list[_HereDoc] = []
         case_stack: list[str] = []
         function_name_expected = False
@@ -297,6 +389,7 @@ class _Scanner:
                 command_expected = True
                 redirect_expected = False
                 heredoc_operator = None
+                herestring_flag = False
                 wrapper = None
                 continue
             if ch == "#" and self._comment_starts(i, start):
@@ -304,10 +397,12 @@ class _Scanner:
                 i = end if newline < 0 else newline
                 continue
 
-            process_substitution = s.startswith("<(", i) or s.startswith(">(", i)
+            process_substitution = ch in _REDIRECTION_START and (
+                s.startswith("<(", i) or s.startswith(">(", i)
+            )
             if not process_substitution and (
                 ch in _REDIRECTION_START
-                or s.startswith("&>", i)
+                or (ch == "&" and s.startswith("&>", i))
                 or (ch.isdigit() and self._redirection_after_fd(i, end))
             ):
                 op_start = i
@@ -318,6 +413,7 @@ class _Scanner:
                 if op:
                     redirect_resume = command_expected
                     redirect_expected = True
+                    herestring_flag = op == "<<<"
                     if op in {"<<", "<<-"}:
                         # The delimiter is captured when the following word is
                         # read; its body starts only after this command line.
@@ -349,23 +445,29 @@ class _Scanner:
                         pending_heredocs.append(
                             _HereDoc(delimiter, heredoc_operator == "<<-", expands)
                         )
+                elif not herestring_flag:
+                    raw_word = s[i:word_end]
+                    replacement = self._windows_path_replacement(raw_word)
+                    if replacement is not None:
+                        self.edits.append((i, word_end, replacement))
+                        self.path_notes.append(raw_word)
                 i = word_end
                 command_expected = redirect_resume
                 redirect_expected = False
                 heredoc_operator = None
                 continue
 
-            if s.startswith("[[", i):
+            if s.startswith("[[", i) and ch == "[":
                 function_body_expected = False
                 i = self._skip_conditional(i + 2, end)
                 command_expected = False
                 continue
-            if s.startswith("((", i):
+            if s.startswith("((", i) and ch == "(":
                 function_body_expected = False
                 i = self._skip_arithmetic(i + 2, end)
                 command_expected = False
                 continue
-            if s.startswith("$(", i) and not s.startswith("$((", i):
+            if ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 inner_end = close if close < end else end
                 self._scan_range(i + 2, inner_end)
@@ -380,7 +482,9 @@ class _Scanner:
                 if command_expected:
                     command_expected = False
                 continue
-            if s.startswith("<(", i) or s.startswith(">(", i):
+            if ch in _REDIRECTION_START and (
+                s.startswith("<(", i) or s.startswith(">(", i)
+            ):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
@@ -458,6 +562,11 @@ class _Scanner:
                     command_expected = True
                 elif raw == "esac" and case_stack:
                     case_stack.pop()
+                else:
+                    replacement = self._windows_path_replacement(raw)
+                    if replacement is not None:
+                        self.edits.append((word_start, word_end, replacement))
+                        self.path_notes.append(raw)
                 continue
 
             if raw == "function":
@@ -491,6 +600,9 @@ class _Scanner:
                 command_expected = True
                 continue
 
+            if raw == "cd":
+                self._drop_cmd_cd_flag(i, end)
+
             executable_wrapper = (
                 wrapper is not None and wrapper.kind not in {"coproc", "time"}
             )
@@ -499,9 +611,36 @@ class _Scanner:
                     wrapper = None
                     command_expected = True
                     continue
+            inline_consumed = False
+            if wrapper is not None and wrapper.kind in _WRAPPER_PATH_OPTIONS:
+                for option in _WRAPPER_PATH_OPTION_LONG:
+                    if raw.startswith(option + "="):
+                        value = raw[len(option) + 1 :]
+                        replacement = self._windows_path_replacement(value)
+                        if replacement is not None:
+                            self.edits.append(
+                                (word_start, word_end, option + "=" + replacement)
+                            )
+                            self.path_notes.append(raw)
+                        # An inline option also fills a pending value slot
+                        # (``env -C --chdir=D:\\x``) and leaves the wrapper
+                        # itself active for the command that follows it.
+                        wrapper.skip_next = False
+                        wrapper.path_value = False
+                        command_expected = True
+                        inline_consumed = True
+                        break
+            if inline_consumed:
+                continue
             if wrapper is not None:
+                path_option_value = wrapper.path_value and wrapper.skip_next
                 action = self._consume_wrapper_word(wrapper, raw)
                 if action == "skip":
+                    if path_option_value:
+                        replacement = self._windows_path_replacement(raw)
+                        if replacement is not None:
+                            self.edits.append((word_start, word_end, replacement))
+                            self.path_notes.append(raw)
                     command_expected = True
                     continue
                 if action == "inspect":
@@ -531,7 +670,7 @@ class _Scanner:
         i = start
         while i < end:
             ch = s[i]
-            if ch in " \t\r\n" or ch in _OPERATOR_CHARS:
+            if ch in _WORD_END_CHARS:
                 break
             if ch == "#" and i == start:
                 break
@@ -553,24 +692,25 @@ class _Scanner:
                     self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
                 continue
-            if s.startswith("$(", i) and not s.startswith("$((", i):
-                close = self._find_matching(i + 2, end, ")")
-                if scan_substitutions:
-                    self._scan_range(i + 2, close if close < end else end)
-                i = close + 1 if close < end else end
-                continue
-            if s.startswith("$((", i):
-                i = self._skip_arithmetic(i + 3, end)
-                continue
-            if s.startswith("${", i):
-                if scan_substitutions:
-                    i = self._skip_parameter(i + 2, end)
-                else:
-                    i = self._skip_parameter_literal(i + 2, end)
-                continue
-            if s.startswith("$'", i):
-                i = self._skip_ansi_quote(i + 2, end)
-                continue
+            if ch == "$":
+                if s.startswith("$((", i):
+                    i = self._skip_arithmetic(i + 3, end)
+                    continue
+                if s.startswith("$(", i):
+                    close = self._find_matching(i + 2, end, ")")
+                    if scan_substitutions:
+                        self._scan_range(i + 2, close if close < end else end)
+                    i = close + 1 if close < end else end
+                    continue
+                if s.startswith("${", i):
+                    if scan_substitutions:
+                        i = self._skip_parameter(i + 2, end)
+                    else:
+                        i = self._skip_parameter_literal(i + 2, end)
+                    continue
+                if s.startswith("$'", i):
+                    i = self._skip_ansi_quote(i + 2, end)
+                    continue
             i += 1
         return i
 
@@ -601,11 +741,11 @@ class _Scanner:
                 close = self._find_backtick_end(i + 1, end)
                 self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s.startswith("${", i):
+            elif ch == "$" and s.startswith("${", i):
                 i = self._skip_parameter(i + 2, end)
             else:
                 i += 1
@@ -615,25 +755,26 @@ class _Scanner:
         """Scan executable substitutions in a region whose plain words are data."""
         s = self.s
         while i < end:
-            if s[i] == "\\":
+            ch = s[i]
+            if ch == "\\":
                 i += 2 if i + 1 < end else 1
-            elif s.startswith("$'", i):
+            elif ch == "$" and s.startswith("$'", i):
                 i = self._skip_ansi_quote(i + 2, end)
-            elif s[i] == "'":
+            elif ch == "'":
                 i = self._skip_single_quote(i + 1, end)
-            elif s[i] == '"':
+            elif ch == '"':
                 i = self._skip_double_quote(i + 1, end)
-            elif s[i] == "`":
+            elif ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$((", i):
                 i = self._skip_arithmetic(i + 3, end)
-            elif s.startswith("${", i):
+            elif ch == "$" and s.startswith("${", i):
                 i = self._skip_parameter(i + 2, end)
             else:
                 i += 1
@@ -646,19 +787,20 @@ class _Scanner:
         """
         s = self.s
         while i < end:
-            if s[i] == "\\":
+            ch = s[i]
+            if ch == "\\":
                 i += 2 if i + 1 < end else 1
-            elif s[i] == "`":
+            elif ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$((", i):
                 i = self._skip_arithmetic(i + 3, end)
-            elif s.startswith("${", i):
+            elif ch == "$" and s.startswith("${", i):
                 i = self._skip_parameter(i + 2, end)
             else:
                 i += 1
@@ -667,25 +809,26 @@ class _Scanner:
         """Skip a ``[[ ... ]]`` expression while scanning its substitutions."""
         s = self.s
         while i < end:
-            if s.startswith("]]", i):
+            ch = s[i]
+            if ch == "]" and s.startswith("]]", i):
                 return i + 2
-            if s[i] == "\\":
+            if ch == "\\":
                 i += 2 if i + 1 < end else 1
-            elif s.startswith("$'", i):
+            elif ch == "$" and s.startswith("$'", i):
                 i = self._skip_ansi_quote(i + 2, end)
-            elif s[i] == "'":
+            elif ch == "'":
                 i = self._skip_single_quote(i + 1, end)
-            elif s[i] == '"':
+            elif ch == '"':
                 i = self._skip_double_quote(i + 1, end)
-            elif s[i] == "`":
+            elif ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$((", i):
                 i = self._skip_arithmetic(i + 3, end)
             else:
                 i += 1
@@ -717,20 +860,21 @@ class _Scanner:
         s = self.s
         depth = 1
         while i < end:
-            if s[i] == "\\":
+            ch = s[i]
+            if ch == "\\":
                 i += 2 if i + 1 < end else 1
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s[i] == "'":
+            elif ch == "'":
                 i = self._skip_single_quote(i + 1, end)
-            elif s[i] == '"':
+            elif ch == '"':
                 i = self._skip_double_quote(i + 1, end)
-            elif s[i] == "{":
+            elif ch == "{":
                 depth += 1
                 i += 1
-            elif s[i] == "}":
+            elif ch == "}":
                 depth -= 1
                 i += 1
                 if depth == 0:
@@ -743,23 +887,24 @@ class _Scanner:
         s = self.s
         depth = 1
         while i < end:
-            if s.startswith("$(", i) and not s.startswith("$((", i):
+            ch = s[i]
+            if ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-            elif s.startswith("((", i):
+            elif ch == "(" and s.startswith("((", i):
                 depth += 1
                 i += 2
-            elif s.startswith("))", i):
+            elif ch == ")" and s.startswith("))", i):
                 depth -= 1
                 i += 2
                 if depth == 0:
                     return i
-            elif s[i] == "\\":
+            elif ch == "\\":
                 i += 2 if i + 1 < end else 1
-            elif s[i] == "'":
+            elif ch == "'":
                 i = self._skip_single_quote(i + 1, end)
-            elif s[i] == '"':
+            elif ch == '"':
                 i = self._skip_double_quote(i + 1, end)
             else:
                 i += 1
@@ -777,6 +922,20 @@ class _Scanner:
         return end
 
     def _find_matching(self, i: int, end: int, closing: str) -> int:
+        """Find the position of the bracket matching the one at ``i - 2``.
+
+        Recursion is bounded by :data:`_MAX_NESTING_DEPTH`; beyond it the
+        region is treated as unmatched so the caller skips it for Bash.
+        """
+        if self.nest_depth >= _MAX_NESTING_DEPTH:
+            return end
+        self.nest_depth += 1
+        try:
+            return self._find_matching_inner(i, end, closing)
+        finally:
+            self.nest_depth -= 1
+
+    def _find_matching_inner(self, i: int, end: int, closing: str) -> int:
         s = self.s
         depth = 0
         pending_heredocs: list[_HereDoc] = []
@@ -792,9 +951,9 @@ class _Scanner:
                         i, end, pending_heredocs, scan_expansions=False
                     )
                     pending_heredocs.clear()
-            elif s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$((", i):
                 i = self._skip_arithmetic(i + 3, end)
-            elif s.startswith("<<", i) and not s.startswith("<<<", i):
+            elif ch == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
                 strip_tabs = s.startswith("<<-", i)
                 delimiter_start = i + (3 if strip_tabs else 2)
                 while delimiter_start < end and s[delimiter_start] in " \t\r":
@@ -817,15 +976,15 @@ class _Scanner:
             elif ch == "#" and self._comment_starts(i, 0):
                 newline = s.find("\n", i + 1, end)
                 i = end if newline < 0 else newline
-            elif s.startswith(";;&", i):
+            elif ch == ";" and s.startswith(";;&", i):
                 if case_stack:
                     case_stack[-1] = "patterns"
                 i += 3
-            elif s.startswith(";;", i) or s.startswith(";&", i):
+            elif ch == ";" and (s.startswith(";;", i) or s.startswith(";&", i)):
                 if case_stack:
                     case_stack[-1] = "patterns"
                 i += 2
-            elif ch not in " \t\r;&|<>()":
+            elif ch not in _WORD_END_CHARS:
                 word_end = self._read_word(i, end, scan_substitutions=False)
                 if word_end <= i:
                     i += 1
@@ -863,14 +1022,15 @@ class _Scanner:
     def _skip_double_quote_for_matching(self, i: int, end: int) -> int:
         s = self.s
         while i < end:
-            if s[i] == "\\" and i + 1 < end and s[i + 1] in '$`"\\\n':
+            ch = s[i]
+            if ch == "\\" and i + 1 < end and s[i + 1] in '$`"\\\n':
                 i += 2
-            elif s[i] == '"':
+            elif ch == '"':
                 return i + 1
-            elif s[i] == "`":
+            elif ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 i = close + 1 if close < end else end
-            elif s.startswith("$(", i) and not s.startswith("$((", i):
+            elif ch == "$" and s.startswith("$(", i) and not s.startswith("$((", i):
                 close = self._find_matching(i + 2, end, ")")
                 i = close + 1 if close < end else end
             else:
@@ -879,11 +1039,27 @@ class _Scanner:
 
     def _read_control_operator(self, i: int, end: int) -> tuple[str, int]:
         s = self.s
-        for op in (";;&", ";;", ";&", "&&", "||", "|&"):
-            if s.startswith(op, i):
-                return op, i + len(op)
-        if s[i] in ";&|()":
-            return s[i], i + 1
+        ch = s[i]
+        if ch == ";":
+            if s.startswith(";;&", i):
+                return ";;&", i + 3
+            if s.startswith(";;", i):
+                return ";;", i + 2
+            if s.startswith(";&", i):
+                return ";&", i + 2
+            return ";", i + 1
+        if ch == "&":
+            if s.startswith("&&", i):
+                return "&&", i + 2
+            return "&", i + 1
+        if ch == "|":
+            if s.startswith("||", i):
+                return "||", i + 2
+            if s.startswith("|&", i):
+                return "|&", i + 2
+            return "|", i + 1
+        if ch in "()":
+            return ch, i + 1
         return "", i
 
     def _read_redirection(self, i: int, end: int) -> tuple[str, int]:
@@ -953,6 +1129,8 @@ class _Scanner:
             return "skip"
         if raw in _WRAPPER_OPTIONS_WITH_VALUE.get(wrapper.kind, ()):
             wrapper.skip_next = True
+            if raw in _WRAPPER_PATH_OPTIONS.get(wrapper.kind, ()):
+                wrapper.path_value = True
             return "skip"
         if raw.startswith("-"):
             return "skip"
@@ -1132,6 +1310,167 @@ class _Scanner:
     def _heredoc_line_continues(line: str) -> bool:
         trailing = len(line) - len(line.rstrip("\\"))
         return trailing % 2 == 1
+
+    # ── Windows path normalization for Git Bash ─────────────────────────────
+
+    def _drop_cmd_cd_flag(self, i: int, end: int) -> None:
+        """Drop the cmd.exe-only ``cd /d <path>`` flag form.
+
+        Bash ``cd`` accepts a single argument, so ``cd /d D:\\x`` fails with
+        "too many arguments".  The flag is deleted only when a path argument
+        actually follows it on the same line; bare ``cd /d`` stays untouched.
+        """
+        s = self.s
+        j = i
+        while j < end and s[j] in " \t\r":
+            j += 1
+        if j >= end:
+            return
+        flag_end = self._read_word(j, end, scan_substitutions=False)
+        if flag_end <= j or s[j:flag_end] not in {"/d", "/D"}:
+            return
+        k = flag_end
+        while k < end and s[k] in " \t\r":
+            k += 1
+        if k >= end or s[k] in _OPERATOR_CHARS or s[k] == "#":
+            return
+        self.edits.append((j, flag_end, ""))
+        self.path_notes.append("cd /d")
+
+    def _windows_path_replacement(self, raw: str) -> str | None:
+        """Return the Git Bash spelling of a Windows backslash path word.
+
+        Only unquoted words are considered: quoted text is literal data that
+        may carry regexes or tool-level escape sequences.  The word must look
+        unambiguously like a Windows path (drive letter, UNC share, root- or
+        home-relative, dot-relative, or a multi-segment relative path); short
+        ambiguous words such as ``a\nb`` and ``foo\bar`` are left for Bash
+        to handle.  Words spanning a backslash-newline line continuation are
+        also left untouched: injecting the line break into a rewritten word
+        would change the command's line structure.
+        """
+        if not raw or "\\" not in raw:
+            return None
+        backslashes = 0
+        for ch in raw:
+            if ch == "\\":
+                backslashes += 1
+            elif ch in "'\"`$\n\r":
+                return None
+        if _PATH_DRIVE_RE.fullmatch(raw):
+            pass
+        elif raw.startswith("\\\\") and len(raw) > 2:
+            pass
+        elif raw.startswith("\\") and not raw.startswith("\\\\") and backslashes >= 2:
+            # Root-relative paths are not anchored like ``D:\...``: an unquoted
+            # word such as ``\a\b`` or ``\033\015`` is far more likely to be a
+            # Bash escape sequence than a path, so the segments must look like
+            # real directory names before the rewrite happens.
+            if not self._plausible_path_segments(raw):
+                return None
+        elif raw.startswith("~\\"):
+            pass
+        elif raw.startswith(".\\") or raw.startswith("..\\"):
+            pass
+        elif backslashes >= 2:
+            decoded = self._decode_unquoted_word(raw)
+            if (
+                len(decoded) < 2
+                or not any(ch.isalnum() for ch in decoded)
+                or not _PATH_SEGMENT_RE.fullmatch(decoded)
+                or not self._plausible_path_segments(raw)
+            ):
+                return None
+        else:
+            return None
+        return self._quote_path_word(self._normalize_windows_path(raw))
+
+    @staticmethod
+    def _plausible_path_segments(raw: str) -> bool:
+        """Require at least one segment that looks like a real directory name.
+
+        Bash escape sequences are written with single-letter backslash escapes
+        (``\\a``, ``\\n``, ``\\t``, ``\\x``) or pure-digit octal/hex bodies
+        (``\\033``, ``\\015``), so words built only from one-character or
+        digit-led segments (``\\a\\b``, ``\\033\\015``, ``x\\n\\t``) stay
+        ambiguous and are preserved byte-for-byte.  A segment of at least two
+        characters starting with a letter (``Users``, ``build``, ``Program``)
+        marks the word as a genuine path.
+        """
+        return any(
+            len(segment) >= 2 and segment[0].isalpha()
+            for segment in raw.split("\\")
+        )
+
+    @staticmethod
+    def _decode_unquoted_word(raw: str) -> str:
+        """Return the word value after Bash quote removal (unquoted form)."""
+        value: list[str] = []
+        i = 0
+        while i < len(raw):
+            ch = raw[i]
+            if ch == "\\" and i + 1 < len(raw):
+                value.append(raw[i + 1])
+                i += 2
+            else:
+                value.append(ch)
+                i += 1
+        return "".join(value)
+
+    @staticmethod
+    def _normalize_windows_path(raw: str) -> str:
+        """Rewrite backslashes as the forward slashes Git Bash understands.
+
+        A leading ``\\\\`` UNC prefix becomes ``//``; a backslash before a
+        char from :data:`_ESCAPED_LITERAL_CHARS` is a pure Bash escape (the
+        char belongs inside its segment, e.g. ``\\ `` is a space); every other
+        backslash separates segments and becomes ``/``.
+        """
+        out: list[str] = []
+        i = 0
+        n = len(raw)
+        if n >= 2 and raw.startswith("\\\\"):
+            out.append("//")
+            i = 2
+        while i < n:
+            ch = raw[i]
+            if ch == "\\" and i + 1 < n:
+                nxt = raw[i + 1]
+                if nxt == "\\":
+                    out.append("/")
+                elif nxt in _ESCAPED_LITERAL_CHARS:
+                    out.append(nxt)
+                else:
+                    out.append("/")
+                    out.append(nxt)
+                i += 2
+            elif ch == "\\":
+                out.append("/")
+                i += 1
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    def _quote_path_word(self, normalized: str) -> str:
+        """Quote a normalized path only when unquoted emission would break it.
+
+        Safe characters (including glob metacharacters, so ``D:/x/*.txt``
+        keeps performing pathname expansion) pass through untouched.  A
+        leading ``~`` stays outside the quotes so tilde expansion still
+        applies to it.
+        """
+        if all(ch in _PATH_SAFE_CHARS for ch in normalized):
+            return normalized
+        if normalized.startswith("~"):
+            return "~" + self._quote_path_word(normalized[1:])
+        escaped = (
+            normalized.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("`", "\\`")
+        )
+        return '"' + escaped + '"'
 
 
 def bash_compatibility_prelude() -> str:
