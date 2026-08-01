@@ -102,7 +102,10 @@ class ContextMeterProvider(DynamicInjectionProvider):
             "Context is volatile — persist important facts with the `Memory` tool; "
             "they survive compaction. When unsure about history or memory, "
             "recall past decisions, file paths, or errors with the "
-            "`Memory` tool (action='retrieve')."
+            "`Memory` tool (action='retrieve'). "
+            "There is no need to call the `Memory` tool frequently — this reminder "
+            "only fires when context usage materially changes, so write or retrieve "
+            "only when there is something genuinely important."
         )
         return [DynamicInjection(type=_CONTEXT_METER_TYPE, content=content)]
 

@@ -234,16 +234,16 @@ Default is 3."""
     'self_eval' (one model review call) or 'majority' (pairwise votes).
     Default is 'self_eval'."""
 
-    context_meter_enabled: bool = Field(default=True)
+    context_meter_enabled: bool = Field(default=False)
     """When true, inject a reminder to persist important facts with the `Memory`
     tool when usage materially changes, so the agent can self-regulate
-    (checkpoint, flush memory) before the harness compacts. Default is true."""
-    context_meter_min_delta: float = Field(default=0.05, ge=0.0, le=0.5)
+    (checkpoint, flush memory) before the harness compacts. Default is false."""
+    context_meter_min_delta: float = Field(default=0.15, ge=0.0, le=0.5)
     """Minimum usage-ratio change since the last context-meter injection
-    required to inject again. Default is 0.05 (5%)."""
-    context_meter_cooldown_steps: int = Field(default=10, ge=0)
+    required to inject again. Default is 0.15 (15%)."""
+    context_meter_cooldown_steps: int = Field(default=30, ge=0)
     """Minimum number of steps between context-meter injections.
-    Default is 10."""
+    Default is 30."""
 
     pre_compact_flush_enabled: bool = Field(default=True)
     """When true, flush important agent state (unfinished todos, notes) to the

@@ -29,10 +29,13 @@ from kimix.tools.file.bash.bash_tool import (
     _git_bash_candidate_from_git_path,
     _git_bash_candidates_from_exec_path,
     _git_install_root_from_exec_path,
+    _is_git_bash_install,
     _is_windows_apps_stub,
     _prepare_bash_cmd,
+    _with_msystem_neutralized,
     find_bash,
 )
+from kimix.tools.common import _env_with_rg_bin_path
 from kimix.tools.file.bash.pwsh_tool import PowershellParams, find_pwsh
 
 
@@ -3476,3 +3479,91 @@ class TestBashInteractiveIntegration:
         exit_result = await bash(BashParams(cmd="exit", task_id=task_id, timeout=5))
         assert isinstance(exit_result, ToolOk)
         assert "status: completed" in exit_result.output
+
+
+# ============================================================================
+# MSYSTEM neutralization (Git Bash -> xmake windows/MSVC default)
+# ============================================================================
+
+
+class TestIsGitBashInstall:
+    def test_git_bash_inner_bash_detected(self) -> None:
+        with patch("kimix.tools.file.bash.bash_tool.os.path.isfile", return_value=True):
+            assert _is_git_bash_install(r"C:\Program Files\Git\usr\bin\bash.exe") is True
+
+    def test_git_bash_wrapper_detected(self) -> None:
+        """The ``bin/bash.exe`` launcher (the process the tool actually
+        spawns) is also recognized as a Git Bash install."""
+        with patch("kimix.tools.file.bash.bash_tool.os.path.isfile", return_value=True):
+            assert _is_git_bash_install(r"C:\Program Files\Git\bin\bash.exe") is True
+
+    def test_msys2_bash_rejected(self) -> None:
+        """MSYS2 also ships ``usr/bin/bash.exe`` but has no ``cmd/git.exe``
+        marker, so its environment must stay untouched."""
+        with patch("kimix.tools.file.bash.bash_tool.os.path.isfile", return_value=False):
+            assert _is_git_bash_install(r"C:\msys64\usr\bin\bash.exe") is False
+
+    def test_wrapper_without_git_marker_rejected(self) -> None:
+        """A ``bin/bash.exe`` that is not backed by a Git for Windows install
+        (no ``cmd/git.exe`` marker) is not neutralized."""
+        with patch("kimix.tools.file.bash.bash_tool.os.path.isfile", return_value=False):
+            assert _is_git_bash_install(r"C:\Program Files\Git\bin\bash.exe") is False
+
+    def test_none_or_garbage_rejected(self) -> None:
+        assert _is_git_bash_install(None) is False
+        assert _is_git_bash_install("") is False
+        assert _is_git_bash_install("/bin/bash") is False
+
+
+class TestMsystemNeutralizedCommand:
+    def test_win32_git_bash_prepends_prefix(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(sys, "platform", "win32")
+        with patch(
+            "kimix.tools.file.bash.bash_tool._is_git_bash_install",
+            return_value=True,
+        ):
+            cmd = _with_msystem_neutralized("echo hi", r"C:\Program Files\Git\bin\bash.exe")
+        assert cmd == "export MSYSTEM=; echo hi"
+
+    def test_win32_non_git_bash_unchanged(self, monkeypatch: Any) -> None:
+        """Real MSYS2 shells keep their ``MSYSTEM``; only Git Bash is
+        neutralized."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        with patch(
+            "kimix.tools.file.bash.bash_tool._is_git_bash_install",
+            return_value=False,
+        ):
+            cmd = _with_msystem_neutralized("echo hi", r"C:\msys64\usr\bin\bash.exe")
+        assert cmd == "echo hi"
+
+    def test_non_windows_unchanged(self, monkeypatch: Any) -> None:
+        """The change is strictly Windows-only: on Linux/macOS the command
+        is returned unchanged even for a Git-style bash path."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        cmd = _with_msystem_neutralized("echo hi", r"C:\Program Files\Git\bin\bash.exe")
+        assert cmd == "echo hi"
+
+
+class TestMSystemNeutralizationRealBash:
+    @pytest.mark.skipif(
+        sys.platform != "win32" or not BASH_AVAILABLE,
+        reason="requires a real Git Bash on Windows",
+    )
+    def test_spawned_bash_sees_empty_msystem(self) -> None:
+        """End-to-end: the bash actually chosen by the tool, launched with
+        the tool's child environment and the neutralized command, sees an
+        empty ``MSYSTEM`` (so xmake detects the native MSVC platform instead
+        of mingw)."""
+        bash = find_bash()
+        assert bash is not None
+        cmd = _with_msystem_neutralized(r'printf "%s" "$MSYSTEM"', bash)
+        result = subprocess.run(
+            [bash, "-c", cmd],
+            env=_env_with_rg_bin_path(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""

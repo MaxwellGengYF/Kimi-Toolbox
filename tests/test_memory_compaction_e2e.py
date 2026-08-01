@@ -211,8 +211,8 @@ class TestLoopControlConfig:
         assert lc.todo_reminder_enabled is True
         assert lc.todo_reminder_interval_steps == 20
         assert lc.context_meter_enabled is True
-        assert lc.context_meter_min_delta == pytest.approx(0.05)
-        assert lc.context_meter_cooldown_steps == 10
+        assert lc.context_meter_min_delta == pytest.approx(0.15)
+        assert lc.context_meter_cooldown_steps == 30
         assert lc.pre_compact_flush_enabled is True
         assert lc.memory_restore_enabled is True
 

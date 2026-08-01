@@ -147,6 +147,51 @@ def _git_bash_candidates_from_exec_path(exec_path: str) -> list[Path]:
     ]
 
 
+def _is_git_bash_install(bash_path: str) -> bool:
+    """Return True when *bash_path* is a bash of a Git for Windows install.
+
+    Both layouts are accepted: the native launcher ``<root>/bin/bash.exe``
+    and the real MSYS2 bash ``<root>/usr/bin/bash.exe``.  Git for Windows
+    always ships a ``<root>/cmd/git.exe`` marker; MSYS2 (which also ships
+    ``usr/bin/bash.exe``) has no such marker, so ``MSYSTEM`` neutralization
+    stays limited to Git Bash and never affects real MSYS2 shells.
+    """
+    if not bash_path:
+        return False
+    text = ntpath.normpath(bash_path)
+    drive, tail = ntpath.splitdrive(text)
+    parts = [p.lower() for p in tail.split("\\") if p]
+    # expect either ...\usr\bin\bash.exe or ...\bin\bash.exe
+    if len(parts) < 3 or parts[-1] != "bash.exe" or parts[-2] != "bin":
+        return False
+    if parts[-3] == "usr":
+        root = "\\".join(parts[:-3])
+    else:
+        root = "\\".join(parts[:-2])
+    return os.path.isfile(ntpath.join(drive, root, "cmd", "git.exe"))
+
+
+_MSYSTEM_NEUTRALIZE_PREFIX = "export MSYSTEM=; "
+
+
+def _with_msystem_neutralized(cmd: str, bash_path: str | None) -> str:
+    """Prepend an ``MSYSTEM``-neutralizing statement to *cmd* on Git Bash.
+
+    Git Bash's ``bin/bash.exe`` launcher unconditionally injects
+    ``MSYSTEM=MINGW64`` into the shell (setting ``MSYSTEM`` in the parent
+    environment is useless), and the MSYS2 runtime re-injects the variable
+    into children when it is *absent* (``unset`` does not stick).  Exporting
+    an *empty* value at the start of the command makes xmake — a child
+    process — see an empty ``MSYSTEM`` and default to the ``windows``/MSVC
+    platform, while the launcher's PATH setup stays intact.  Limited to Git
+    for Windows bash on Windows; all other platforms and shells run the
+    command unchanged.
+    """
+    if sys.platform == "win32" and _is_git_bash_install(bash_path or ""):
+        return _MSYSTEM_NEUTRALIZE_PREFIX + cmd
+    return cmd
+
+
 def _find_git_bash_windows() -> str | None:
     """Locate a *working* Git Bash on Windows.
 
@@ -848,7 +893,7 @@ class Bash(CallableTool2[BashParams]):
                 )
                 if forbidden is not None:
                     return forbidden
-                bash_args = ["-c", startup_cmd + "; exec bash -i"]
+                bash_args = ["-c", _with_msystem_neutralized(startup_cmd, self._bash) + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
             process_task = ProcessTask(self._bash, bash_args, None, _env_with_rg_bin_path(), append_newline=True)
@@ -891,7 +936,7 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", rtk_cmd], None, _env_with_rg_bin_path())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _env_with_rg_bin_path())
         task_id = await process_task.start(self._session, "bash")
 
         wait_matched: bool | None = None
@@ -1060,7 +1105,7 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", rtk_cmd], None, _env_with_rg_bin_path())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _env_with_rg_bin_path())
         task_id = await process_task.start(self._session, "bash")
 
         return ToolOk(

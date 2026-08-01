@@ -305,7 +305,10 @@ class Memory(CallableTool2[Params]):
         "Use 'write'/'append' to persist facts, 'read' to recall a topic, "
         "'search' to find facts across all topics, 'list' to see what you have stored, "
         "and 'retrieve' to search both past conversation turns AND durable memory "
-        "(or fetch by id: a history turn id or 'memory:<topic>')."
+        "(or fetch by id: a history turn id or 'memory:<topic>').\n"
+        "There is no need to call this tool frequently — persist facts only when "
+        "they are genuinely important, and retrieve only when you are unsure about "
+        "history or memory; calling it every turn wastes tokens and context."
     )
     params: type[Params] = Params
 
