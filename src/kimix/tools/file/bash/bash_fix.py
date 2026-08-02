@@ -472,15 +472,20 @@ class _Scanner:
                 inner_end = close if close < end else end
                 self._scan_range(i + 2, inner_end)
                 i = close + 1 if close < end else end
-                if command_expected:
-                    command_expected = False
+                if case_stack and case_stack[-1] == "word":
+                    # A substitution can be the case subject word itself
+                    # (``case $(...) in ...``); it ends the header just like
+                    # a plain subject word.
+                    case_stack[-1] = "await-in"
+                command_expected = False
                 continue
             if ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 self._scan_range(i + 1, close)
                 i = close + 1 if close < end else end
-                if command_expected:
-                    command_expected = False
+                if case_stack and case_stack[-1] == "word":
+                    case_stack[-1] = "await-in"
+                command_expected = False
                 continue
             if ch in _REDIRECTION_START and (
                 s.startswith("<(", i) or s.startswith(">(", i)
@@ -488,8 +493,9 @@ class _Scanner:
                 close = self._find_matching(i + 2, end, ")")
                 self._scan_range(i + 2, close if close < end else end)
                 i = close + 1 if close < end else end
-                if command_expected:
-                    command_expected = False
+                if case_stack and case_stack[-1] == "word":
+                    case_stack[-1] = "await-in"
+                command_expected = False
                 continue
 
             op, op_end = self._read_control_operator(i, end)
@@ -953,6 +959,11 @@ class _Scanner:
                     pending_heredocs.clear()
             elif ch == "$" and s.startswith("$((", i):
                 i = self._skip_arithmetic(i + 3, end)
+                if case_stack and case_stack[-1] == "word":
+                    # Arithmetic expansion can be the case subject word
+                    # (``case $((...)) in ...``); it ends the header just
+                    # like a plain subject word.
+                    case_stack[-1] = "await-in"
             elif ch == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
                 strip_tabs = s.startswith("<<-", i)
                 delimiter_start = i + (3 if strip_tabs else 2)
@@ -973,6 +984,11 @@ class _Scanner:
             elif ch == "`":
                 close = self._find_backtick_end(i + 1, end)
                 i = close + 1 if close < end else end
+                if case_stack and case_stack[-1] == "word":
+                    # A backquote substitution can be the case subject word
+                    # (``case `...` in ...``); it ends the header just like
+                    # a plain subject word.
+                    case_stack[-1] = "await-in"
             elif ch == "#" and self._comment_starts(i, 0):
                 newline = s.find("\n", i + 1, end)
                 i = end if newline < 0 else newline

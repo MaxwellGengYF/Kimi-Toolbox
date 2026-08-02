@@ -956,6 +956,67 @@ class TestBashFixFalsePositives:
         assert result.command.endswith("\n" + source)
         assert result.replacements == ("rev",)
 
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            "$(printf x)",  # command substitution is the case subject word
+            "`printf x`",  # backquote substitution is the case subject word
+            "$((0))",  # arithmetic expansion is the case subject word
+            "<(printf x)",  # process substitution is the case subject word
+        ],
+    )
+    def test_case_subject_substitution_still_finds_body_command(
+        self, subject: str
+    ) -> None:
+        # The subject word may be a substitution rather than a plain word;
+        # it still ends the case header, so body commands are executable.
+        source = f"case {subject} in x) rev;; esac"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "subject",
+        ["$(printf x)", "`printf x`", "$((0))"],
+    )
+    def test_case_subject_substitution_inside_command_substitution(
+        self, subject: str
+    ) -> None:
+        # The bracket matcher must not mistake the first pattern ``)`` for
+        # the end of the enclosing ``$( ... )`` when the case subject is a
+        # substitution; the body command is still executable.
+        source = f"printf '%s' \"$(case {subject} in x) rev;; esac)\""
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    def test_case_subject_substitution_before_later_command(self) -> None:
+        source = "echo $(case `printf x` in x) :;; esac); rev <<< abc"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # Pattern words stay data even when the subject is a substitution.
+            "case $(printf x) in rev) echo hit;; esac",
+            "case `printf x` in rev | open) echo hit;; esac",
+        ],
+    )
+    def test_case_pattern_after_substitution_subject_is_not_a_command(
+        self, source: str
+    ) -> None:
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_case_pattern_named_in_after_substitution_subject(self) -> None:
+        # ``in`` can itself be a pattern; only the first ``in`` after the
+        # substitution subject is the case keyword.
+        source = "case $(printf x) in in) rev;; esac"
+        result = _fix_for_windows(source)
+        assert result.command.endswith("\n" + source)
+        assert result.replacements == ("rev",)
+
     def test_command_substitution_inside_array_assignment_is_detected(self) -> None:
         source = "values=($(rev <<< abc)); printf '%s' \"${values[0]}\""
         result = _fix_for_windows(source)
@@ -1333,6 +1394,21 @@ class TestBashFixRealGitBash:
     def test_case_pattern_in_substitution_runs_fallback(self) -> None:
         command = "printf '%s\\n' \"$(case x in x) rev <<< abc;; esac)\""
         result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    @pytest.mark.parametrize(
+        ("subject", "pattern"),
+        [
+            ("$(printf x)", "x"),  # command substitution subject
+            ("`printf x`", "x"),  # backquote substitution subject
+            ("$((0))", "0"),  # arithmetic expansion subject
+        ],
+    )
+    def test_case_subject_substitution_runs_fallback(
+        self, subject: str, pattern: str
+    ) -> None:
+        result = self._run(f"case {subject} in {pattern}) rev <<< abc;; esac")
         assert result.returncode == 0, result.stderr
         assert result.stdout == "cba\n"
 
