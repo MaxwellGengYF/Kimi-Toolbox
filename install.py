@@ -257,14 +257,16 @@ def _install_coreutils() -> tuple[bool, bool]:
         return False, False
 
 def _install_git() -> tuple[bool, bool]:
-    """Prompt for and install Git if needed (Windows only).
+    """Prompt for and install Git if needed (cross-platform).
+
+    If ``git`` is already on PATH it is skipped without any version check.
+    Otherwise ``scripts/install_git.py`` installs it into a directory that
+    is already on PATH (e.g. ``/usr/bin`` or ``C:\\Windows``) and reports
+    where it was installed.
 
     Returns (was_installed, should_restart_shell).
     """
-    if sys.platform != "win32":
-        return False, False
-
-    if command_exists("git.exe"):
+    if command_exists("git"):
         print("✅ Git is already installed, skipping.")
         return False, False
 
@@ -286,7 +288,7 @@ def _install_git() -> tuple[bool, bool]:
         print("\n▶ Installing Git ...")
         result = install_git.install_git()
         if result:
-            print("✅ Git installed successfully.")
+            print(f"✅ Git installed at {result}.")
             return True, True
         else:
             print("⚠️  Git installation was not successful (non-fatal).")
@@ -458,9 +460,9 @@ def main() -> int:
 
     # 2. Optional binary installations (before uv sync so they are available)
     coreutils_installed, cu_restart = _install_coreutils()
-    git_installed, git_restart = _install_git()
     rg_installed, rg_restart = _install_ripgrep()
     rtk_installed, rtk_restart = _install_rtk()
+    git_installed, git_restart = _install_git()
 
     any_binary_installed = coreutils_installed or git_installed or rg_installed or rtk_installed
     needs_restart = cu_restart or git_restart or rg_restart or rtk_restart
