@@ -26,6 +26,7 @@ from kimix.tools.common import (
     _env_with_rg_bin_path,
     _extract_export_path,
     _interactive_scope_text,
+    _long_pipeline_advice,
     _maybe_export_output_async,
     _maybe_rewrite_shell_command_with_rtk,
     _summarize_long_output_async,
@@ -168,7 +169,15 @@ def _is_git_bash_install(bash_path: str) -> bool:
         root = "\\".join(parts[:-3])
     else:
         root = "\\".join(parts[:-2])
-    return os.path.isfile(ntpath.join(drive, root, "cmd", "git.exe"))
+    # Probe the marker with an *absolute* path: ``ntpath.join(drive, root, ...)``
+    # would produce a drive-relative path ("C:foo") that Windows resolves
+    # against the process's current directory on drive C:.  When that per-drive
+    # CWD is not the drive root (e.g. after code chdirs into a temp dir on C:),
+    # the marker lookup silently fails even for a real Git install and MSYSTEM
+    # neutralization gets skipped.  Anchoring the drive makes the check
+    # CWD-independent.
+    root_path = (drive + "\\" if drive else "") + root
+    return os.path.isfile(ntpath.join(root_path, "cmd", "git.exe"))
 
 
 _MSYSTEM_NEUTRALIZE_PREFIX = "export MSYSTEM=; "
@@ -866,6 +875,11 @@ class Bash(CallableTool2[BashParams]):
         if isinstance(pattern, ToolError):
             return pattern
 
+        # Nudge the LLM backend towards the Python tool when the command is a
+        # long multi-operator one-liner (detection is cheap: O(1) length gate,
+        # C-level operator-character gate, then a quote-aware early-exit scan).
+        pipe_warning = _long_pipeline_advice(params.cmd)
+
         # Refresh PATH/PATHEXT from registry so that tools installed
         # since the last command (e.g. via WinGet) are discoverable.
         if sys.platform == "win32":
@@ -912,7 +926,7 @@ class Bash(CallableTool2[BashParams]):
                     message=(
                         f"Interactive Bash started. task_id: `{task_id}`. "
                         "Send 'exit' to close the session."
-                    ),
+                    ) + pipe_warning,
                     brief="Interactive Bash started",
                 )
             return ToolOk(
@@ -921,7 +935,7 @@ class Bash(CallableTool2[BashParams]):
                     f"Interactive Bash started. task_id: `{task_id}`. "
                     "Use task_id to send commands and TaskOutput to read results. "
                     "Send 'exit' to close the session."
-                ),
+                ) + pipe_warning,
                 brief="Interactive Bash started",
             )
 
@@ -969,7 +983,7 @@ class Bash(CallableTool2[BashParams]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                message="Cancelled",
+                message="Cancelled" + pipe_warning,
                 brief="Command cancelled",
             )
 
@@ -978,7 +992,7 @@ class Bash(CallableTool2[BashParams]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                                    message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                                    message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`" + pipe_warning,
                 brief="Timeout",
             )
 
@@ -1007,12 +1021,12 @@ class Bash(CallableTool2[BashParams]):
         )
         if not success:
             msg = "failed"
-            return ToolError(output=block, message=msg, brief="Command execution failed")
+            return ToolError(output=block, message=msg + pipe_warning, brief="Command execution failed")
 
         msg = "[rtk] success" if rtk_rewritten else "success"
         return ToolOk(
             output=block,
-            message=msg,
+            message=msg + pipe_warning,
             brief="Command executed successfully",
             display_block=ShellDisplayBlock(language="shell"),
         )
@@ -1108,9 +1122,10 @@ class Bash(CallableTool2[BashParams]):
         process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _env_with_rg_bin_path())
         task_id = await process_task.start(self._session, "bash")
 
+        pipe_warning = _long_pipeline_advice(params.cmd)
         return ToolOk(
             output=f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
-            message=f"Command started in background. task_id: `{task_id}`",
+            message=f"Command started in background. task_id: `{task_id}`" + pipe_warning,
             brief="Background task started",
         )
 

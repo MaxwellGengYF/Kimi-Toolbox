@@ -1,6 +1,7 @@
 """Comprehensive tests for the Bash tool (bash_tool.py) which uses the system bash executable."""
 
 import asyncio
+import ntpath
 import shutil
 import subprocess
 import sys
@@ -3794,6 +3795,21 @@ class TestIsGitBashInstall:
         assert _is_git_bash_install(None) is False
         assert _is_git_bash_install("") is False
         assert _is_git_bash_install("/bin/bash") is False
+
+    def test_marker_probe_uses_absolute_path(self) -> None:
+        """The ``cmd/git.exe`` marker must be probed with a drive-anchored
+        path.  A drive-relative probe ("C:foo") resolves against the process's
+        current directory on drive C:, so after a ``chdir`` into a C: temp dir
+        the marker lookup fails even for a real Git install and MSYSTEM
+        neutralization is silently skipped (order-dependent test failures)."""
+        with patch(
+            "kimix.tools.file.bash.bash_tool.os.path.isfile",
+            return_value=True,
+        ) as isfile:
+            assert _is_git_bash_install(r"C:\Program Files\Git\bin\bash.exe") is True
+        probed = isfile.call_args.args[0]
+        assert ntpath.isabs(probed), f"marker probe is drive-relative: {probed!r}"
+        assert probed.lower() == r"c:\program files\git\cmd\git.exe"
 
 
 class TestMsystemNeutralizedCommand:
