@@ -66,6 +66,26 @@ def _encode_startup_script(script: str) -> str:
 USE_SYSTEM_PWSH_ON_WINDOWS = False
 
 
+def _bash_subprocess_env() -> dict[str, str]:
+    """Return the environment for a bash subprocess.
+
+    Starts from ``_env_with_rg_bin_path()`` (shared ``bin`` dir first on
+    PATH).  On Windows it additionally opts the Git Bash child out of MSYS
+    argv path conversion: without this, Git Bash rewrites arguments that
+    *look* like Unix paths (``/FO``, ``/TN``, ``/Create``) into
+    ``C:/.../git/FO``-style paths, breaking native Windows tools such as
+    ``tasklist``, ``schtasks``, ``wmic``, and ``cmd /c`` invocations.
+    Git for Windows bash honors ``MSYS_NO_PATHCONV`` only, while real
+    MSYS2/Cygwin bash honors ``MSYS2_ARG_CONV_EXCL``; ``*`` disables all
+    conversion.  ``setdefault`` is used so explicit user settings win.
+    """
+    env = _env_with_rg_bin_path()
+    if sys.platform == "win32":
+        env.setdefault("MSYS_NO_PATHCONV", "1")
+        env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
+    return env
+
+
 def _is_windows_apps_stub(path: str) -> bool:
     """Return True if *path* points into the WindowsApps directory (Store stub).
 
@@ -77,21 +97,31 @@ def _is_windows_apps_stub(path: str) -> bool:
     return "WindowsApps" in normalized.split("\\")
 
 
+# Probe used to smoke-test a candidate bash: launch *external* MSYS programs,
+# not just builtins.  A builtin-only probe (e.g. ``--version``) passes even
+# when Git for Windows cannot fork children under system-wide Mandatory ASLR
+# (``ForceRelocateImages``) — bash starts, prints a version, and every real
+# command then fails.  ``--noprofile --norc`` keeps a broken login
+# post-install from falsely condemning an otherwise usable bash.
+_BASH_EXTERNAL_PROGRAM_PROBE = "/usr/bin/true; /usr/bin/cat --version >/dev/null"
+
+
 def _bash_runs(bash_path: str) -> bool:
-    """Smoke-test *bash_path*: return True when it launches and exits 0.
+    """Smoke-test *bash_path*: return True when it can launch external programs.
 
     Guards against ``bash`` entries that exist on disk but cannot actually run
     (broken installs, WSL launchers without a distribution, corrupt binaries,
-    etc.).  A bash that fails this probe is treated as "no bash" so that
-    PowerShell becomes the fallback shell on Windows.
+    or a Git for Windows install whose MSYS2 runtime cannot fork children
+    under Windows Mandatory ASLR).  A bash that fails this probe is treated as
+    "no bash" so that PowerShell becomes the fallback shell on Windows.
     """
     try:
         result = subprocess.run(
-            [bash_path, "--version"],
+            [bash_path, "--noprofile", "--norc", "-c", _BASH_EXTERNAL_PROGRAM_PROBE],
             capture_output=True,
             text=True,
             check=False,
-            timeout=5,
+            timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -220,9 +250,10 @@ def _with_msystem_neutralized(cmd: str, bash_path: str | None) -> str:
 def _find_git_bash_windows() -> str | None:
     """Locate a *working* Git Bash on Windows.
 
-    Every candidate must both exist on disk and pass the ``--version`` smoke
-    test (``_bash_runs``): a bash entry that cannot launch is treated as "no
-    bash", so PowerShell becomes the fallback shell.
+    Every candidate must both exist on disk and pass the external-program
+    smoke test (``_bash_runs``): a bash entry that cannot launch external
+    programs is treated as "no bash", so PowerShell becomes the fallback
+    shell.
 
     Resolution order:
       1. ``KIMIX_GIT_BASH_PATH`` environment variable.
@@ -929,7 +960,7 @@ class Bash(CallableTool2[BashParams]):
                 bash_args = ["-c", encoded + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
-            process_task = ProcessTask(self._bash, bash_args, None, _env_with_rg_bin_path(), append_newline=True)
+            process_task = ProcessTask(self._bash, bash_args, None, _bash_subprocess_env(), append_newline=True)
             task_id = await process_task.start(self._session, "bash")
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -970,7 +1001,7 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _env_with_rg_bin_path())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         wait_matched: bool | None = None
@@ -1140,7 +1171,7 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _env_with_rg_bin_path())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         pipe_warning = _long_pipeline_advice(params.cmd)

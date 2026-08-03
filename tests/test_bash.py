@@ -25,7 +25,9 @@ from kimix.tools.file.bash import (
 )
 from kimix.tools.file.bash.bash_fix import BashFix, fix_bash_command
 from kimix.tools.file.bash.bash_tool import (
+    _BASH_EXTERNAL_PROGRAM_PROBE,
     _bash_runs,
+    _bash_subprocess_env,
     _configured_shell,
     _find_git_bash_windows,
     _git_bash_candidate_from_git_path,
@@ -276,11 +278,98 @@ class TestFindGitBashWindows:
         ):
             assert _find_git_bash_windows() is None
 
-    def test_bash_runs_smoke_test(self) -> None:
-        """A real executable that exits 0 counts as bash; a missing binary
-        (or one that cannot launch) does not."""
-        assert _bash_runs(sys.executable) is True
+    def test_bash_runs_smoke_test(self, monkeypatch: Any) -> None:
+        """The smoke test trusts the exit status of an external-program probe:
+        exit 0 counts as bash; a non-zero exit, a timeout, or a missing binary
+        does not."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(
+            "kimix.tools.file.bash.bash_tool.subprocess.run", fake_run
+        )
+        assert _bash_runs("bash") is True
+        assert calls == [
+            ["bash", "--noprofile", "--norc", "-c", _BASH_EXTERNAL_PROGRAM_PROBE]
+        ]
+
+        def fake_run_failing(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        monkeypatch.setattr(
+            "kimix.tools.file.bash.bash_tool.subprocess.run", fake_run_failing
+        )
+        assert _bash_runs("bash") is False
         assert _bash_runs(r"C:\definitely\missing\bash.exe") is False
+
+    def test_bash_runs_probe_launches_external_programs(self) -> None:
+        """The probe must launch external MSYS programs, not just builtins.
+
+        A builtin-only probe (``--version``) passes even when Git for Windows
+        cannot fork children under system-wide Mandatory ASLR, while every
+        real command fails; the external-program probe rejects such a broken
+        bash so PowerShell becomes the fallback shell.
+        """
+        assert "/usr/bin/true" in _BASH_EXTERNAL_PROGRAM_PROBE
+        assert "/usr/bin/cat" in _BASH_EXTERNAL_PROGRAM_PROBE
+
+    def test_bash_runs_timeout(self, monkeypatch: Any) -> None:
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=15)
+
+        monkeypatch.setattr(
+            "kimix.tools.file.bash.bash_tool.subprocess.run", fake_run
+        )
+        assert _bash_runs("bash") is False
+
+
+# ============================================================================
+# _bash_subprocess_env — MSYS argv-conversion opt-out (Windows)
+# ============================================================================
+
+class TestBashSubprocessEnv:
+    def test_win32_sets_msys_opt_out(self, monkeypatch: Any) -> None:
+        """On Windows the bash env opts out of MSYS argv path conversion.
+
+        Without this, Git Bash rewrites slash-prefixed arguments (``/FO``,
+        ``/TN``) of native tools such as ``tasklist``/``schtasks`` into
+        ``C:/.../git/FO``-style paths.
+        """
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("MSYS_NO_PATHCONV", raising=False)
+        monkeypatch.delenv("MSYS2_ARG_CONV_EXCL", raising=False)
+        env = _bash_subprocess_env()
+        assert env["MSYS_NO_PATHCONV"] == "1"
+        assert env["MSYS2_ARG_CONV_EXCL"] == "*"
+
+    def test_respects_user_overrides(self, monkeypatch: Any) -> None:
+        """Explicit user settings win over the opt-out defaults (setdefault)."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setenv("MSYS_NO_PATHCONV", "0")
+        monkeypatch.setenv("MSYS2_ARG_CONV_EXCL", "/dev")
+        env = _bash_subprocess_env()
+        assert env["MSYS_NO_PATHCONV"] == "0"
+        assert env["MSYS2_ARG_CONV_EXCL"] == "/dev"
+
+    def test_posix_untouched(self, monkeypatch: Any) -> None:
+        """Off Windows no MSYS variables are injected."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("MSYS_NO_PATHCONV", raising=False)
+        monkeypatch.delenv("MSYS2_ARG_CONV_EXCL", raising=False)
+        env = _bash_subprocess_env()
+        assert "MSYS_NO_PATHCONV" not in env
+        assert "MSYS2_ARG_CONV_EXCL" not in env
+
+    def test_delegates_to_rg_bin_path(self, monkeypatch: Any) -> None:
+        """The bash env builds on ``_env_with_rg_bin_path`` (shared bin dir first)."""
+        monkeypatch.delenv("MSYS_NO_PATHCONV", raising=False)
+        monkeypatch.delenv("MSYS2_ARG_CONV_EXCL", raising=False)
+        env = _bash_subprocess_env()
+        base = _env_with_rg_bin_path()
+        assert env["PATH"] == base["PATH"]
 
 # ============================================================================
 # Bash / Powershell mutual exclusion on Windows
