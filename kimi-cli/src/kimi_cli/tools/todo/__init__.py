@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import sys
 from collections.abc import Callable
@@ -17,12 +18,172 @@ from pydantic import (
     AliasChoices, BaseModel, ConfigDict, Field,
     ValidationError, field_validator, model_validator,
 )
+from pydantic.json_schema import GenerateJsonSchema
 
 from kimi_cli import logger
 from kimi_cli.session_state import TodoItemState, TodoStatus
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_shell_kind() -> Literal["bash", "powershell"]:
+    """Return the enabled shell dialect for TodoList verification code.
+
+    Mirrors the enablement logic of the Bash/Powershell tools: when the
+    Bash tool is enabled, ``code`` shell fragments are bash; otherwise
+    PowerShell.
+
+    The kimix import is lazy and wrapped: importing any ``kimix.*`` module
+    runs ``kimix/__init__.py`` which pulls in ``kimi_agent_sdk`` ->
+    ``kimi_cli.app`` -> ``kimi_cli.soul.kimisoul`` -> this module, so it
+    must never happen while ``kimi_cli.app`` is still initializing (that is
+    an import cycle).  When kimix is not yet importable, fall back to the
+    platform rule: bash on non-Windows, PowerShell on Windows.
+    """
+    try:
+        from kimix.tools.file.bash import bash_tool as _bash_tool
+
+        if _bash_tool._should_enable_bash():
+            return "bash"
+    except ImportError:
+        # kimix not yet importable (early boot / isolated test): platform rule.
+        return "powershell" if sys.platform == "win32" else "bash"
+    # Bash tool disabled -> the enabled shell dialect is PowerShell.
+    return "powershell"
+
+
+def _get_shell_kind() -> Literal["bash", "powershell"]:
+    """Return the enabled shell dialect, resolved lazily on first use.
+
+    Import-time resolution is impossible (importing kimix while
+    ``kimi_cli.app`` initializes would cycle), so this must only run after
+    app boot / at tool-call time.  ``_detect_shell_kind`` is lru-cached.
+    """
+    return _detect_shell_kind()
+
+
+# Labels used in the ``Todo.code`` field description / tool description for
+# the enabled shell dialect, mirroring the Bash/Powershell tool enablement.
+_SHELL_LABEL: dict[Literal["bash", "powershell"], str] = {
+    "bash": "bash",
+    "powershell": "PowerShell",
+}
+_SHELL_EXT: dict[Literal["bash", "powershell"], str] = {
+    "bash": ".sh",
+    "powershell": ".ps1",
+}
+
+
+def _code_field_description(kind: Literal["bash", "powershell"]) -> str:
+    """Return the ``Todo.code`` field description for the enabled shell dialect."""
+    label = _SHELL_LABEL[kind]
+    ext = _SHELL_EXT[kind]
+    if kind == "bash":
+        run_note = (
+            "Bash is the enabled shell tool; shell code is executed via bash "
+            "with Windows Git Bash compatibility fixes applied."
+        )
+    else:
+        run_note = (
+            "PowerShell is the enabled shell tool; shell code is executed "
+            "via PowerShell."
+        )
+    return (
+        "Verification code: inline Python, a `.py` file path, a "
+        f"{label} command prefixed with `!` (e.g. `!pytest tests/ -x -q`), "
+        f"or a `{ext}` file path. "
+        f"{run_note} "
+        "Todos involving code changes should attach verification code. "
+        "Omit if this todo has no executable code. "
+        "Pass empty string to clear previously set code. "
+        "Accepts `code` or `code_file`."
+    )
+
+
+def _tool_description(kind: Literal["bash", "powershell"]) -> str:
+    """Return the TodoList tool description for the enabled shell dialect."""
+    label = _SHELL_LABEL[kind]
+    ext = _SHELL_EXT[kind]
+    if kind == "bash":
+        code_desc = (
+            f"a `!`-prefixed bash command (e.g. `!pytest tests/ -x -q`), "
+            f"or a `.sh` file path"
+        )
+        shell_line = (
+            "The enabled shell tool is **Bash** — `code` shell commands "
+            "run via bash (`.sh`)."
+        )
+    else:
+        code_desc = (
+            f"a `!`-prefixed PowerShell command (e.g. `!pytest tests/ -x -q`), "
+            f"or a `.ps1` file path"
+        )
+        shell_line = (
+            "The enabled shell tool is **PowerShell** — `code` shell commands "
+            "run via PowerShell (`.ps1`)."
+        )
+    return (
+        "Track progress with a todo list.\n"
+        "Call with no arguments to read the current list. "
+        "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
+        "mode='overwrite' replaces the list only when every existing todo is done; "
+        "use mode='force_overwrite' to intentionally discard unfinished items.\n"
+        "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
+        "Each todo may include a `code` field with inline Python, a `.py` file path, "
+        f"{code_desc}. "
+        "Todos involving code changes should attach verification `code`.\n"
+        "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
+        "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors.\n"
+        f"{shell_line}"
+    )
+
+
+def _patch_code_description(
+    schema: dict[str, Any], kind: Literal["bash", "powershell"]
+) -> None:
+    """Replace the ``Todo.code`` property description inside a JSON schema.
+
+    The ``code`` field description is baked into the ``Todo`` model class at
+    import time (where the enabled shell dialect cannot be detected), so the
+    generated params schema is patched in place with the dialect-specific
+    description whenever it is built.  Recurses into nested dicts/lists so
+    ``$defs``, ``items``, and ``anyOf`` entries are all covered.
+    """
+    new_desc = _code_field_description(kind)
+    if isinstance(schema, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            code_schema = props.get("code")
+            if isinstance(code_schema, dict):
+                desc = code_schema.get("description")
+                if isinstance(desc, str) and desc.startswith("Verification code:"):
+                    code_schema["description"] = new_desc
+        for value in schema.values():
+            _patch_code_description(value, kind)
+    elif isinstance(schema, list):
+        for value in schema:
+            _patch_code_description(value, kind)
+
+
+# Class-level description: neutral (mentions both shells) because the enabled
+# dialect is only detectable at runtime.  ``TodoList.__init__`` replaces it
+# with the dialect-specific ``_tool_description`` for the instance, and
+# ``TodoListParams.model_json_schema`` patches the ``code`` field description.
+_TODO_LIST_DESCRIPTION_NEUTRAL = (
+    "Track progress with a todo list.\n"
+    "Call with no arguments to read the current list. "
+    "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
+    "mode='overwrite' replaces the list only when every existing todo is done; "
+    "use mode='force_overwrite' to intentionally discard unfinished items.\n"
+    "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
+    "Each todo may include a `code` field with inline Python, a `.py` file path, "
+    "a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
+    "Todos involving code changes should attach verification `code`.\n"
+    "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
+    "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors."
+)
 
 
 def _truncate_prompt(text: str, max_len: int = 200) -> str:
@@ -105,6 +266,9 @@ class Todo(BaseModel):
     code: str | None = Field(
         default=None,
         validation_alias=AliasChoices("code", "code_file"),
+        # Neutral at import time: the enabled shell dialect is only detectable
+        # at runtime, so ``TodoListParams.model_json_schema`` patches this
+        # description with the dialect-specific text when the schema is built.
         description=(
             "Verification code: inline Python, a `.py` file path, a shell command "
             "prefixed with `!` (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
@@ -262,25 +426,44 @@ class MergeResult:
     warnings: list[str] = field(default_factory=list)
 
 
+class TodoListParams(Params):
+    """Params whose generated JSON schema carries the enabled shell dialect.
+
+    The ``Todo.code`` field description is baked into the model class at
+    import time, but the enabled shell dialect (bash vs PowerShell) is only
+    detectable at runtime (importing ``kimix`` while ``kimi_cli.app``
+    initializes would create an import cycle).  ``model_json_schema``
+    therefore patches the generated schema with the dialect-specific
+    description on every call.
+    """
+
+    @classmethod
+    def model_json_schema(
+        cls,
+        by_alias: bool = True,
+        ref_template: str = "#/$defs/{model}",
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        mode: Literal["validation", "serialization"] = "validation",
+    ) -> dict[str, Any]:
+        schema = super().model_json_schema(
+            by_alias=by_alias,
+            ref_template=ref_template,
+            schema_generator=schema_generator,
+            mode=mode,
+        )
+        _patch_code_description(schema, _get_shell_kind())
+        return schema
+
+
 class TodoList(CallableTool2[Params]):
     name: str = "TodoList"
-    description: str = (
-        "Track progress with a todo list.\n"
-        "Call with no arguments to read the current list. "
-        "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
-        "mode='overwrite' replaces the list only when every existing todo is done; "
-        "use mode='force_overwrite' to intentionally discard unfinished items.\n"
-        "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
-        "Each todo may include a `code` field with inline Python, a `.py` file path, "
-        "a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
-        "Todos involving code changes should attach verification `code`.\n"
-        "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
-        "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors."
-    )
-    params: type[Params] = Params
+    description: str = _TODO_LIST_DESCRIPTION_NEUTRAL
+    params: type[Params] = TodoListParams
 
     def __init__(self, runtime: Runtime) -> None:
-        super().__init__()
+        shell_kind = _get_shell_kind()
+        self._shell_kind: Literal["bash", "powershell"] = shell_kind
+        super().__init__(description=_tool_description(shell_kind))
         self._runtime = runtime
 
     @override
@@ -491,7 +674,7 @@ class TodoList(CallableTool2[Params]):
             if t.code:
                 stripped = t.code.strip()
                 if stripped.startswith("!"):
-                    kind_label = "shell"
+                    kind_label = "pwsh" if _get_shell_kind() == "powershell" else "bash"
                 elif stripped.lower().endswith((".py", ".sh", ".ps1")) and Path(stripped).is_file():
                     kind_label = "file"
                 else:
@@ -510,8 +693,11 @@ class TodoList(CallableTool2[Params]):
         Returns a ``(kind, payload)`` tuple, or ``None`` when the code has
         no runnable content. Kinds:
 
-        - ``("shell", command)`` — code starts with ``!`` (shell command);
-        - ``("shell_file", path)`` — code points to a ``.sh``/``.ps1`` file;
+        - ``("shell", command)`` — code starts with ``!`` (shell command;
+          the dialect — bash vs PowerShell — is decided at run time by
+          ``_get_shell_kind()`` in ``_shell_argv``);
+        - ``("shell_file", path)`` — code points to a ``.sh``/``.ps1`` file
+          (the extension routes it to its own shell at run time);
         - ``("python", path)`` — code points to an existing ``.py`` file;
         - ``("python_inline", temp_path)`` — inline Python written to a temp file.
         """
@@ -542,6 +728,7 @@ class TodoList(CallableTool2[Params]):
         timeout: int,
         *,
         not_found_hint: str,
+        env: dict[str, str] | None = None,
     ) -> tuple[bool, str]:
         """Run a subprocess with timeout, returning ``(success, output)``."""
         try:
@@ -549,6 +736,7 @@ class TodoList(CallableTool2[Params]):
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         except FileNotFoundError:
             return False, not_found_hint
@@ -576,17 +764,36 @@ class TodoList(CallableTool2[Params]):
         return False, f"Code failed (exit code {proc.returncode}):\n{output}"
 
     @staticmethod
-    def _shell_argv(command: str) -> tuple[list[str], str]:
-        """Build the argv for a shell command, plus a not-found hint."""
-        if sys.platform == "win32":
-            import shutil
+    def _shell_argv(
+        command: str,
+        shell_kind: Literal["bash", "powershell"] | None = None,
+    ) -> tuple[list[str], str, dict[str, str] | None] | None:
+        """Build argv/env for a shell command, plus a not-found hint.
 
-            shell_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-            return (
-                [shell_exe, "-NoProfile", "-NonInteractive", "-Command", command],
-                f"Shell executable not found: {shell_exe}",
+        ``shell_kind`` selects the dialect and defaults to the runtime
+        resolved enabled shell.  Returns ``None`` when the command is an
+        unrepairable PowerShell command.  The third tuple element is the
+        subprocess environment to pass (``None`` = inherit).
+
+        Delegates to ``kimix.tools.file.bash.shell_common`` so the exact same
+        fixer machinery as the Bash / Powershell tools is applied: bash
+        (``prepare_bash_command`` -> ``bash_argv`` with the login flag) and
+        PowerShell (``pwsh_argv``: repair, PS5.1 downgrade, try/catch wrapper).
+        """
+        from kimix.tools.file.bash import shell_common
+
+        kind = shell_kind or _get_shell_kind()
+        if kind == "bash":
+            argv, env = shell_common.bash_argv(
+                shell_common.prepare_bash_command(command), login=True
             )
-        return (["bash", "-l", "-c", command], "bash executable not found")
+            return argv, f"bash executable not found: {argv[0]}", env
+
+        resolved = shell_common.pwsh_argv(command)
+        if resolved is None:
+            return None  # unrepairable PowerShell command
+        argv, hint = resolved
+        return argv, hint, None
 
     @staticmethod
     async def _run_code(
@@ -594,12 +801,15 @@ class TodoList(CallableTool2[Params]):
         timeout: int = 30,
         python_exe: str | None = None,
         executable: tuple[str, str] | str | None = None,
+        shell_kind: Literal["bash", "powershell"] | None = None,
     ) -> tuple[bool, str]:
         """Execute a todo's code and return ``(success, output_or_error)``.
 
         ``executable`` may be a ``(kind, payload)`` tuple as returned by
         ``_resolve_code_executable``, or a legacy plain ``.py`` path string.
-        When omitted, the executable is resolved from ``code``.
+        When omitted, the executable is resolved from ``code``.  ``shell_kind``
+        selects the dialect for ``!`` shell commands and defaults to the
+        runtime resolved enabled shell.
         """
         if executable is None:
             resolved = TodoList._resolve_code_executable(code)
@@ -612,19 +822,21 @@ class TodoList(CallableTool2[Params]):
         kind, payload = resolved
 
         if kind == "shell":
-            argv, hint = TodoList._shell_argv(payload)
-            return await TodoList._run_process(argv, timeout, not_found_hint=hint)
+            resolved_argv = TodoList._shell_argv(payload, shell_kind)
+            if resolved_argv is None:
+                return False, "Invalid PowerShell command."
+            argv, hint, env = resolved_argv
+            return await TodoList._run_process(argv, timeout, not_found_hint=hint, env=env)
         if kind == "shell_file":
-            if payload.lower().endswith(".ps1"):
-                import shutil
+            from kimix.tools.file.bash import shell_common
 
-                shell_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-                argv = [shell_exe, "-NoProfile", "-NonInteractive", "-File", payload]
-                hint = f"Shell executable not found: {shell_exe}"
+            if payload.lower().endswith(".ps1"):
+                argv, hint = shell_common.pwsh_file_argv(payload)
+                env = None
             else:
-                argv = ["bash", "-l", payload]
-                hint = "bash executable not found"
-            return await TodoList._run_process(argv, timeout, not_found_hint=hint)
+                argv, env = shell_common.bash_file_argv(payload)
+                hint = f"bash executable not found: {argv[0]}"
+            return await TodoList._run_process(argv, timeout, not_found_hint=hint, env=env)
 
         # python / python_inline
         if python_exe is None:

@@ -155,15 +155,25 @@ async def test_glob_with_relative_path(glob_tool: Glob):
     assert "does not exist" in result.message
 
 
-async def test_glob_tilde_path_expanded(glob_tool: Glob):
+async def test_glob_tilde_path_expanded(glob_tool: Glob, temp_work_dir: KaosPath, monkeypatch: pytest.MonkeyPatch):
     """Test that ~ in directory path is expanded, not rejected as relative."""
-    # ~ expands to home dir; glob searches it successfully
+    # Point the home dir at a tiny temp dir so `~` resolves there instead of
+    # scanning the real (potentially huge) user profile, which can make this
+    # test take tens of seconds (slow glob + slow Windows teardown).
+    fake_home = Path(str(temp_work_dir)) / "fake_home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    (fake_home / "tilde.txt").write_text("tilde")
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # ~ expands to (the fake) home dir; glob searches it successfully
     result = await glob_tool(Params(pattern="*", directory="~/"))
     # Without expanduser() this would fail with "not an absolute path"
     assert "not an absolute path" not in result.message
     # Home directory exists and is searchable
     assert not result.is_error
-    assert "Found" in result.message or "No matches found" in result.message
+    assert "tilde.txt" in result.output
+    assert "Found 1 matches" in result.message
 
 
 async def test_glob_outside_work_directory_nonexistent(glob_tool: Glob):

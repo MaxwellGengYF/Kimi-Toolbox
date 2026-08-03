@@ -306,7 +306,9 @@ class Powershell(CallableTool2[PowershellParams]):
         if self._pwsh_path is None:
             # Resolve Windows PowerShell fallback to a full path so that we
             # avoid accidentally picking up a WindowsApps stub at runtime.
-            self._pwsh_fallback_path = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell"
+            from kimix.tools.file.bash import shell_common
+
+            self._pwsh_fallback_path = shell_common.pwsh_executable()
             _print_warning(
                 "PowerShell 7.x not found on this system; falling back to Windows PowerShell 5.1. "
                 "PowerShell 7 syntax will be downgraded automatically, which may change command behavior."
@@ -463,15 +465,13 @@ class Powershell(CallableTool2[PowershellParams]):
         # 2. Append ``; exit $LASTEXITCODE`` so PowerShell preserves the real
         #    native exit code from external programs (otherwise all non-zero
         #    codes are flattened to 1).
-        raw_command = (
-            _PWSH_CONSOLE_INIT
-            + "try{" + cmd + "}catch{$_|Out-String|Write-Error;exit 1}"
-            + ";exit $LASTEXITCODE"
-        )
+        from kimix.tools.file.bash import shell_common
+
+        raw_command = shell_common.wrap_pwsh_command(cmd)
         encoded_cmd, param_name, was_encoded = self._maybe_encode_command(raw_command)
         process_task = ProcessTask(
             executable,
-            ["-NoP", "-NonI", "-Exec", "Bypass", "-NoL", param_name, encoded_cmd],
+            [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
             None,
             _env_with_rg_bin_path(),
         )
@@ -641,15 +641,13 @@ class Powershell(CallableTool2[PowershellParams]):
         note += _long_pipeline_advice(params.cmd)
         self._resolve_pwsh()
         executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
-        raw_command = (
-            _PWSH_CONSOLE_INIT
-            + "try{" + cmd + "}catch{$_|Out-String|Write-Error;exit 1}"
-            + ";exit $LASTEXITCODE"
-        )
+        from kimix.tools.file.bash import shell_common
+
+        raw_command = shell_common.wrap_pwsh_command(cmd)
         encoded_cmd, param_name, was_encoded = self._maybe_encode_command(raw_command)
         process_task = ProcessTask(
             executable,
-            ["-NoP", "-NonI", "-Exec", "Bypass", "-NoL", param_name, encoded_cmd],
+            [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
             None,
             _env_with_rg_bin_path(),
         )

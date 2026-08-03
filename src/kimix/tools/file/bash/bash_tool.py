@@ -34,6 +34,10 @@ from kimix.tools.common import (
 )
 from kimix.tools.file.bash.bash_fix import (
     bash_compatibility_prelude,
+    # Kept in the module namespace even though one-shot preparation now goes
+    # through ``shell_common.prepare_bash_command``: tests patch
+    # ``bash_tool.fix_bash_command`` to assert the fixer is never run for
+    # forbidden source commands.
     fix_bash_command,
 )
 
@@ -1102,7 +1106,9 @@ class Bash(CallableTool2[BashParams]):
 
     def _prepare_command(self, command: str) -> str | ToolError:
         """Normalize and add Windows fallbacks, enforcing policy on generated text."""
-        prepared = fix_bash_command(_prepare_bash_cmd(command)).command
+        from kimix.tools.file.bash import shell_common
+
+        prepared = shell_common.prepare_bash_command(command)
         forbidden = self._forbidden_error(prepared, display_command=command)
         return forbidden if forbidden is not None else prepared
 

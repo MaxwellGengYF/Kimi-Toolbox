@@ -1,6 +1,7 @@
 """Tests for Defects 4.1-4.4: TodoList improvements."""
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,6 +106,55 @@ class TestTodoCodeField:
         new = Todo(title="task", status="done", code="")
         merged = TodoList._merge_one(old, new)
         assert merged.code == ""
+
+
+class TestTodoShellBackwardCompat:
+    """Smoke tests that shell-aware execution keeps the static defaults working."""
+
+    def test_resolve_code_executable_shell_prefix(self) -> None:
+        assert TodoList._resolve_code_executable("!pytest tests/ -x -q") == (
+            "shell",
+            "pytest tests/ -x -q",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_code_accepts_legacy_executable_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy plain `.py` path passed as `executable` still routes to python."""
+        captured: dict[str, object] = {}
+
+        async def fake_run_process(
+            argv: list[str],
+            timeout: int,
+            *,
+            not_found_hint: str,
+            env: dict[str, str] | None = None,
+        ) -> tuple[bool, str]:
+            captured["argv"] = argv
+            captured["env"] = env
+            return True, "ok"
+
+        monkeypatch.setattr(TodoList, "_run_process", fake_run_process)
+        ok, out = await TodoList._run_code(
+            "C:/nonexistent/script.py", executable="C:/nonexistent/script.py"
+        )
+        assert ok and out == "ok"
+        argv = captured["argv"]
+        assert isinstance(argv, list) and argv[0] == sys.executable
+        assert argv[1] == "C:/nonexistent/script.py"
+        assert captured["env"] is None
+
+    def test_params_and_todo_construction_unchanged(self) -> None:
+        params = TodoListParams(
+            todos=[Todo(title="task", status="pending", code="print('hello')")]
+        )
+        assert params.todos[0].code == "print('hello')"
+
+    def test_tool_instantiation_sets_shell_kind(self, mock_runtime: MagicMock) -> None:
+        tl = TodoList(runtime=mock_runtime)
+        assert tl._shell_kind in ("bash", "powershell")
+        assert "Track progress with a todo list." in tl.description
 
 
 class TestAllDoneReminderWrite:

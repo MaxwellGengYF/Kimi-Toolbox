@@ -252,8 +252,12 @@ def test_grep_params_schema(grep_tool: Grep):
                     "default": True,
                     "description": "Deduplicate repeated output lines via rtk (token killer). Set to False to see raw, unfiltered output.",
                     "type": "boolean",
-                },
-            },
+                }, "fold": {
+    "default": 500,
+    "description": "Maximum number of lines in the final tool output. Longer results are head+tail folded with an omitted-count marker and a summary in `message`. 0 = unlimited (the byte cap still applies). Applied after offset/head_limit pagination.",
+    "minimum": 0,
+    "type": "integer",
+}},
             "required": ["pattern"],
             "type": "object",
         }

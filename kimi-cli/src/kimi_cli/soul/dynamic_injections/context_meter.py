@@ -52,7 +52,6 @@ class ContextMeterProvider(DynamicInjectionProvider):
         self._cooldown_steps = max(0, cooldown_steps)
         self._suppress_above = suppress_above
         self._min_usage = min_usage
-        self._has_injected_before: bool = False
         self._last_injected_step: int | None = None
         self._last_injected_usage: float | None = None
         self._compaction_pending: bool = False
@@ -79,22 +78,42 @@ class ContextMeterProvider(DynamicInjectionProvider):
             return []
 
         step_no = soul._current_step_no
-        if self._has_injected_before:
-            # Normal cooldown / delta guard.
-            if self._last_injected_step is not None and self._last_injected_usage is not None:
-                steps_since = step_no - self._last_injected_step
-                usage_delta = abs(usage - self._last_injected_usage)
-                if steps_since < self._cooldown_steps or usage_delta < self._min_delta:
-                    return []
-        else:
-            # First-ever call — require minimum usage to avoid premature reminders,
-            # unless we just came out of a compaction (where the fresh lower usage
-            # should be reported even if it's below the threshold).
-            if usage < self._min_usage and not self._compaction_pending:
-                return []
+
+        # The post-compaction "fresh report" is a one-shot: consume the flag on
+        # the first evaluation regardless of outcome. If it stayed armed until
+        # the next injection, a harness that re-notifies providers on every
+        # step would keep the cooldown bypass alive forever.
+        compaction_pending = self._compaction_pending
         self._compaction_pending = False
 
-        self._has_injected_before = True
+        # ── Frequency guards ────────────────────────────────────────────────
+        # The cooldown and delta guards below are the ONLY thing standing
+        # between a periodic reminder and a per-step nag, so they must hold even
+        # after on_context_compacted() / on_afk_changed() ran since the last
+        # injection: those hooks never clear the throttle anchors here, so a
+        # spurious reset can never re-arm the meter.
+        if self._last_injected_step is not None:
+            steps_since = step_no - self._last_injected_step
+            cooldown_ok = steps_since >= self._cooldown_steps
+            # A real compaction drops usage below the last injected level; only
+            # then may the one-shot bypass the cooldown so the fresh low usage
+            # is reported promptly. A spurious reset does not drop usage, so the
+            # cooldown keeps applying.
+            usage_dropped = bool(
+                self._last_injected_usage is not None
+                and usage < self._last_injected_usage
+            )
+            if not cooldown_ok and not (compaction_pending and usage_dropped):
+                return []
+            if self._last_injected_usage is not None:
+                usage_delta = abs(usage - self._last_injected_usage)
+                if usage_delta < self._min_delta:
+                    return []
+        elif not compaction_pending and usage < self._min_usage:
+            # First injection (or right after an AFK resume): require a minimum
+            # usage so we don't nag during a nearly-empty session.
+            return []
+
         self._last_injected_step = step_no
         self._last_injected_usage = usage
 
@@ -110,14 +129,23 @@ class ContextMeterProvider(DynamicInjectionProvider):
         return [DynamicInjection(type=_CONTEXT_METER_TYPE, content=content)]
 
     async def on_context_compacted(self) -> None:
-        """Reset so the post-compaction (much lower) usage is reported once."""
-        self._has_injected_before = False
-        self._last_injected_step = None
-        self._last_injected_usage = None
+        """Mark that a real compaction happened so the fresh (much lower) usage
+        is reported promptly, even below ``min_usage``.
+
+        The throttle anchors (last step / last usage) are intentionally NOT
+        cleared here: they keep the cooldown and delta guards active.
+        ``_compaction_pending`` is a one-shot flag — it is consumed on the first
+        evaluation and only bypasses the *cooldown* guard (the delta guard still
+        applies) — so even if this hook were called on every step (e.g. if the
+        harness started resetting providers when it strips stale reminders), the
+        meter would stay quiet until both cooldown and a material usage change
+        are satisfied.
+        """
         self._compaction_pending = True
 
     async def on_afk_changed(self, enabled: bool) -> None:
         _ = enabled
-        # Reset state on AFK change so the meter re-fires when the agent resumes.
+        # Re-anchor after AFK so the meter fires once when the agent resumes
+        # (still gated by ``min_usage`` via the first-injection path above).
         self._last_injected_step = None
         self._last_injected_usage = None

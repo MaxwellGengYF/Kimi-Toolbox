@@ -1314,10 +1314,13 @@ class KimiSoul:
         # ═══════════════════════════════════════════════════════════════════════
 
         # ── 2e.2a. Strip stale system reminders from previous steps/turns ─────
-        # Providers re-inject fresh reminders below, so removing old ones is safe.
-        # Reset provider state so throttled providers (e.g., afk) can re-inject.
-        if strip_system_reminders(self._context._history):
-            await self._notify_injection_providers_compacted()
+        # Providers re-inject fresh reminders below, so removing old ones is safe
+        # (reminders are ephemeral: one fresh copy per step, never accumulated).
+        # NOTE: this must NOT notify providers of "compaction" — doing so resets
+        # their throttling state every step and makes throttled reminders (context
+        # meter, todo, budget, compact) re-inject on every single step. Providers
+        # keep their own cooldown state and re-decide below.
+        strip_system_reminders(self._context._history)
 
         auto_retrieval_injections = await self._maybe_auto_retrieve_history()
         injections = await self._collect_injections()

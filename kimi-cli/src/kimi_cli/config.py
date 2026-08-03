@@ -234,10 +234,10 @@ Default is 3."""
     'self_eval' (one model review call) or 'majority' (pairwise votes).
     Default is 'self_eval'."""
 
-    context_meter_enabled: bool = Field(default=False)
+    context_meter_enabled: bool = Field(default=True)
     """When true, inject a reminder to persist important facts with the `Memory`
     tool when usage materially changes, so the agent can self-regulate
-    (checkpoint, flush memory) before the harness compacts. Default is false."""
+    (checkpoint, flush memory) before the harness compacts. Default is true."""
     context_meter_min_delta: float = Field(default=0.15, ge=0.0, le=0.5)
     """Minimum usage-ratio change since the last context-meter injection
     required to inject again. Default is 0.15 (15%)."""
