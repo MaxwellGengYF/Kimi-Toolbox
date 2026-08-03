@@ -426,7 +426,8 @@ class Powershell(CallableTool2[PowershellParams]):
             process_task = ProcessTask(executable, ps_args, None, _env_with_rg_bin_path(), append_newline=True)
             task_id = await process_task.start(self._session, "pwsh")
             if params.wait_for_pattern is not None and process_task.stream is not None:
-                inactivity_timeout = min(30.0, float(params.timeout))
+                from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+                inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
                 output, matched, elapsed = await process_task.stream.wait_for_output(
                     timeout=params.timeout, pattern=pattern,
                     inactivity_timeout=inactivity_timeout,
@@ -480,7 +481,8 @@ class Powershell(CallableTool2[PowershellParams]):
         elapsed_seconds: float | None = None
         try:
             if params.wait_for_pattern is not None and process_task.stream is not None:
-                inactivity_timeout = min(30.0, float(params.timeout))
+                from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+                inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
                 output, wait_matched, elapsed_seconds = await process_task.stream.wait_for_output(
                     timeout=params.timeout, pattern=pattern,
                     inactivity_timeout=inactivity_timeout,
@@ -702,7 +704,8 @@ class Powershell(CallableTool2[PowershellParams]):
                 brief="Send input failed",
             )
 
-        inactivity_timeout = min(30.0, float(params.timeout))
+        from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+        inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
         output, matched, elapsed = await stream.wait_for_output(
             timeout=params.timeout, pattern=pattern,
             inactivity_timeout=inactivity_timeout,

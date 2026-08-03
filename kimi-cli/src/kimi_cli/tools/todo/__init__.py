@@ -173,8 +173,8 @@ class Params(BaseModel):
     match_mode: Literal["exact", "fuzzy"] = Field(
         default="exact",
         description=(
-            "'exact': Match titles exactly. "
-            "'fuzzy' (default): Use fuzzy matching for near-miss titles when appending/updating."
+            "'exact' (default): Match titles exactly. "
+            "'fuzzy': Use fuzzy matching for near-miss titles when appending/updating."
         ),
     )
     auto_fix: bool = Field(

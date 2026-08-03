@@ -58,8 +58,8 @@ class Edit(BaseModel):
         "None means unlimited.",
     )
     match_mode: Literal["exact", "fuzzy"] = Field(
-        default="fuzzy",
-        description="'exact': Only replace literal matches of `old`. "
+        default="exact",
+        description="'exact' (default): Only replace literal matches of `old`. "
         "'fuzzy': Use fuzzy matching when exact match fails (may match similar text).",
     )
 
@@ -269,14 +269,12 @@ class EditFile(CallableTool2[Params]):
                     result = result[:idx] + norm_new + result[idx + len(norm_old):]
                     count += 1
                 if count == 0:
-                    suggestion = self._find_similar(edit.old, content) if edit.match_mode == "fuzzy" else None
-                    return content, 0, suggestion
+                    return content, 0, self._find_similar(edit.old, content)
                 return result, count, None
             else:
                 count = norm_content.count(norm_old)
                 if count == 0:
-                    suggestion = self._find_similar(edit.old, content) if edit.match_mode == "fuzzy" else None
-                    return content, 0, suggestion
+                    return content, 0, self._find_similar(edit.old, content)
                 return norm_content.replace(norm_old, norm_new), count, None
 
         # Single replacement with normalized line endings
@@ -284,10 +282,10 @@ class EditFile(CallableTool2[Params]):
         if idx != -1:
             return norm_content.replace(norm_old, norm_new, 1), 1, None
 
-        # Exact match failed — if match_mode="exact", return suggestion without fuzzy fallback
+        # Exact match failed. In exact mode (the default), no fuzzy heuristics
+        # are applied — report the closest line as a suggestion only.
         if edit.match_mode == "exact":
-            suggestion = self._find_similar(edit.old, content)
-            return content, 0, suggestion
+            return content, 0, self._find_similar(edit.old, content)
 
         # Fuzzy mode: try strip match (ignores leading/trailing spaces)
         stripped = self._try_strip_match(content, edit.old, edit.new)
@@ -307,8 +305,7 @@ class EditFile(CallableTool2[Params]):
             return new_content, 1, suggestion
 
         # No match at all — return suggestion for error message
-        suggestion = self._find_similar(edit.old, content)
-        return content, 0, suggestion
+        return content, 0, self._find_similar(edit.old, content)
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:

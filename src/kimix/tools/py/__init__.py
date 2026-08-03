@@ -305,7 +305,8 @@ class Python(CallableTool2[Params]):
         task_id = await process_task.start(self._session, "python")
 
         if params.wait_for_pattern is not None and process_task.stream is not None:
-            inactivity_timeout = min(30.0, float(params.timeout))
+            from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+            inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
             output, matched, elapsed = await process_task.stream.wait_for_output(
                 timeout=params.timeout, pattern=pattern,
                 inactivity_timeout=inactivity_timeout,
@@ -374,7 +375,8 @@ class Python(CallableTool2[Params]):
                 pattern = self._compile_pattern(params.wait_for_pattern)
                 if isinstance(pattern, ToolError):
                     return pattern
-                inactivity_timeout = min(30.0, float(params.timeout))
+                from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+                inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
                 output, wait_matched, elapsed_seconds = await process_task.stream.wait_for_output(
                     timeout=params.timeout, pattern=pattern,
                     inactivity_timeout=inactivity_timeout,
@@ -527,7 +529,8 @@ class Python(CallableTool2[Params]):
                 brief="Send input failed",
             )
 
-        inactivity_timeout = min(30.0, float(params.timeout))
+        from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
+        inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
         output, matched, elapsed = await stream.wait_for_output(
             timeout=params.timeout, pattern=pattern,
             inactivity_timeout=inactivity_timeout,

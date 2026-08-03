@@ -56,6 +56,31 @@ def test_apply_edit_replace_all_crlf():
 
 
 # ---------------------------------------------------------------------------
+# Default match_mode is exact
+# ---------------------------------------------------------------------------
+
+
+def test_apply_edit_default_exact_no_fuzzy_fallback():
+    """Default (exact) mode must not apply fuzzy fallback — it suggests instead."""
+    tool = object.__new__(EditFile)
+    content = "helo world\nnext line"
+    old = "hello world"
+    new = "hi universe"
+    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    assert count == 0
+    assert result == content
+    # The closest line is reported as a suggestion, not replaced
+    assert suggestion == "helo world"
+
+    # Sanity check: with fuzzy mode the same input IS replaced.
+    result_fuzzy, count_fuzzy, _ = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
+    assert count_fuzzy == 1
+    assert result_fuzzy == "hi universe\nnext line"
+
+
+# ---------------------------------------------------------------------------
 # Fuzzy single-line matching
 # ---------------------------------------------------------------------------
 
@@ -66,7 +91,9 @@ def test_apply_edit_fuzzy_single_line_trailing_spaces():
     content = "hello world  \nnext line"
     old = "hello world"
     new = "hi universe"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 1
     assert suggestion is None
     assert result == "hi universe  \nnext line"
@@ -78,7 +105,9 @@ def test_apply_edit_fuzzy_single_line_leading_spaces():
     content = "  hello world\nnext line"
     old = "hello world"
     new = "hi universe"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 1
     assert suggestion is None
     assert result == "  hi universe\nnext line"
@@ -90,7 +119,9 @@ def test_apply_edit_fuzzy_case_close():
     content = "def compute_sum(a, b):\n    return a + b"
     old = "def compute_sum(a, b):"
     new = "def add(a, b):"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 1
     assert suggestion is None
     assert result == "def add(a, b):\n    return a + b"
@@ -102,7 +133,9 @@ def test_apply_edit_fuzzy_no_match_returns_suggestion():
     content = "hello world\nfoo bar\nbaz qux"
     old = "xyz123_not_close"
     new = "replacement"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 0
     assert result == content
     # Below cutoff — no suggestion
@@ -117,7 +150,7 @@ def test_apply_edit_fuzzy_replace_all_no_match_returns_suggestion():
     old = "helo wrld"
     new = "replacement"
     result, count, suggestion = tool._apply_edit(
-        content, Edit(old=old, new=new, replace_all=True)
+        content, Edit(old=old, new=new, replace_all=True, match_mode="fuzzy")
     )
     assert count == 0
     # "helo wrld" is close enough to get a suggestion
@@ -126,7 +159,7 @@ def test_apply_edit_fuzzy_replace_all_no_match_returns_suggestion():
     # Completely unrelated — no suggestion
     old = "xyz123_not_close"
     result, count, suggestion = tool._apply_edit(
-        content, Edit(old=old, new=new, replace_all=True)
+        content, Edit(old=old, new=new, replace_all=True, match_mode="fuzzy")
     )
     assert count == 0
     assert suggestion is None
@@ -143,7 +176,9 @@ def test_apply_edit_fuzzy_multiline_minor_whitespace():
     content = "start\n  line A\n  line B\nend"
     old = "line A\nline B"
     new = "line X\nline Y"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 1
     # Fuzzy match returns match info
     assert suggestion is not None
@@ -158,7 +193,9 @@ def test_apply_edit_fuzzy_multiline_close_match():
     content = "class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        pass"
     old = "    def bar(self):\n        pass"
     new = "    def qux(self):\n        return 42"
-    result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="fuzzy")
+    )
     assert count == 1
     assert suggestion is None
     assert "def qux(self):" in result
@@ -274,7 +311,10 @@ async def test_replace_fuzzy_trailing_whitespace(edit_file_tool, temp_work_dir):
     await file_path.write_text("hello world  \nnext line")
 
     result = await edit_file_tool(
-        Params(path=str(file_path), edit=Edit(old="hello world", new="hi universe"))
+        Params(
+            path=str(file_path),
+            edit=Edit(old="hello world", new="hi universe", match_mode="fuzzy"),
+        )
     )
 
     assert not result.is_error
@@ -287,7 +327,10 @@ async def test_replace_fuzzy_leading_whitespace(edit_file_tool, temp_work_dir):
     await file_path.write_text("  hello world\nnext line")
 
     result = await edit_file_tool(
-        Params(path=str(file_path), edit=Edit(old="hello world", new="hi universe"))
+        Params(
+            path=str(file_path),
+            edit=Edit(old="hello world", new="hi universe", match_mode="fuzzy"),
+        )
     )
 
     assert not result.is_error
@@ -316,7 +359,7 @@ async def test_replace_fuzzy_multiline(edit_file_tool, temp_work_dir):
     result = await edit_file_tool(
         Params(
             path=str(file_path),
-            edit=Edit(old="line A\nline B", new="line X\nline Y"),
+            edit=Edit(old="line A\nline B", new="line X\nline Y", match_mode="fuzzy"),
         )
     )
 

@@ -8,9 +8,9 @@ from kimi_cli.tools.file.replace import Edit, Params as EditFileParams
 
 
 class TestEditFileParams:
-    def test_match_mode_default_fuzzy(self) -> None:
+    def test_match_mode_default_exact(self) -> None:
         edit = Edit(old="foo", new="bar")
-        assert edit.match_mode == "fuzzy"
+        assert edit.match_mode == "exact"
 
     def test_match_mode_exact_accepted(self) -> None:
         edit = Edit(old="foo", new="bar", match_mode="exact")

@@ -5,6 +5,7 @@ import ntpath
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -1515,14 +1516,28 @@ class TestBashFixRealGitBash:
         bash = find_bash()
         assert bash is not None
         fixed = _fix_for_windows(command)
-        return subprocess.run(
-            [bash, "-lc", fixed.command],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        # The full suite spawns hundreds of Git Bash processes back-to-back;
+        # under load a fresh bash.exe can take longer than a 15 s first-time
+        # startup (profile parsing + antivirus scanning) even though the
+        # rewritten command itself completes in milliseconds.  These tests
+        # pass in isolation, so the timeout is a resource-contention flake.
+        # Retry once on TimeoutExpired to absorb the transient spike; a
+        # genuine hang (a regression in the fixer) still fails after retry.
+        for attempt in range(2):
+            try:
+                return subprocess.run(
+                    [bash, "-lc", fixed.command],
+                    input=stdin,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                if attempt == 1:
+                    raise
+                time.sleep(1)
+        raise AssertionError("unreachable")
 
     def test_gtimeout_rewrite_executes(self) -> None:
         result = self._run("gtimeout 2 bash -c 'printf timeout-ok'")
@@ -4085,13 +4100,27 @@ class TestBashInteractiveIntegration:
         task = task_data.tasks.get(task_id)
         assert task is not None
 
-        await task.input("echo hello")
-        await asyncio.sleep(0.5)
-        output = await task.get_output()
-        assert "hello" in output
-
-        await task.input("exit")
-        await task.wait(timeout=5)
+        try:
+            await task.input("echo hello")
+            # Interactive Git Bash first sources a ~26 KB compatibility prelude
+            # (``bash -c "...; exec bash -i"``) before it can execute input, and
+            # under full-suite load that startup can take well over a fixed
+            # 0.5 s sleep.  Poll for the echoed output instead, so the test only
+            # depends on the echo actually appearing.
+            deadline = time.monotonic() + 15.0
+            output = ""
+            while time.monotonic() < deadline and "hello" not in output:
+                output = await task.get_output()
+                await asyncio.sleep(0.1)
+            assert "hello" in output, repr(output)
+        finally:
+            # Always tear the session down, even when an assertion fails, so a
+            # dangling interactive bash cannot leak into (and slow down) the
+            # remaining tests in the suite.
+            await task.input("exit")
+            await task.wait(timeout=5)
+            if await task.thread_is_alive():
+                await task.stop()
 
     async def test_interactive_start_with_wait_for_pattern(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -4105,9 +4134,17 @@ class TestBashInteractiveIntegration:
 
         # Continue with exit to clean up.
         task_id = result.output.split("task_id: ", 1)[1].split("\n", 1)[0]
-        exit_result = await bash(BashParams(cmd="exit", task_id=task_id, timeout=5))
-        assert isinstance(exit_result, ToolOk)
-        assert "status: completed" in exit_result.output
+        try:
+            exit_result = await bash(BashParams(cmd="exit", task_id=task_id, timeout=5))
+            assert isinstance(exit_result, ToolOk)
+            assert "status: completed" in exit_result.output
+        finally:
+            # If the continuation above fails, stop the session explicitly so
+            # no interactive bash leaks into later tests.
+            task_data = mock_session.custom_data.get("background_task_data")
+            task = task_data.tasks.get(task_id) if task_data is not None else None
+            if task is not None and await task.thread_is_alive():
+                await task.stop()
 
 
 # ============================================================================

@@ -317,7 +317,7 @@ def test_edit_file_params_schema(edit_file_tool: EditFile):
     assert "match_mode" in item_props
     # Verify match_mode enum
     assert item_props["match_mode"]["enum"] == ["exact", "fuzzy"]
-    assert item_props["match_mode"]["default"] == "fuzzy"
+    assert item_props["match_mode"]["default"] == "exact"
     # Verify max_replacements is nullable integer (None = unlimited)
     assert item_props["max_replacements"]["anyOf"][0]["minimum"] == 1
 

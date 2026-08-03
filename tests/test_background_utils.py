@@ -12,6 +12,7 @@ import pytest
 
 from kimix.tools.background.utils import (
     BackgroundStream,
+    DEFAULT_INACTIVITY_TIMEOUT,
     TaskData,
     _get_or_add_task_data,
     _get_task_data,
@@ -352,6 +353,31 @@ async def test_wait_with_inactivity_timeout_short_timeout_uses_wait(stream: Back
     assert completed is True
     assert inactivity_timed_out is False
     assert elapsed < 1.0
+
+
+def test_default_inactivity_timeout_value() -> None:
+    """The default inactivity window is 120 seconds."""
+    assert DEFAULT_INACTIVITY_TIMEOUT == 120.0
+
+
+async def test_wait_with_inactivity_timeout_uses_module_default(
+    stream: BackgroundStream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No explicit inactivity_timeout falls back to the module-level default."""
+    monkeypatch.setattr(
+        "kimix.tools.background.utils.DEFAULT_INACTIVITY_TIMEOUT", 2.0
+    )
+
+    def worker(q: queue.Queue[str]) -> None:
+        time.sleep(10.0)
+
+    await stream.start(worker, stop_function=lambda: None)
+    completed, elapsed, inactivity_timed_out = await stream.wait_with_inactivity_timeout(
+        timeout=15.0
+    )
+    assert completed is False
+    assert inactivity_timed_out is True
+    assert elapsed < 5.0
 
 
 async def test_wait_with_inactivity_timeout_triggers_on_no_output(stream: BackgroundStream) -> None:

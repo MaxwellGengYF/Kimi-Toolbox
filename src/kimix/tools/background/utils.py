@@ -10,7 +10,12 @@ from typing import Any, Awaitable, Callable, cast
 from kimi_cli.session import Session
 
 
-DEFAULT_INACTIVITY_TIMEOUT = 30.0
+# Seconds of output inactivity that triggers an early return from a blocking
+# wait (see ``wait_with_inactivity_timeout`` / ``wait_for_output``).  Callers
+# that pass no explicit ``inactivity_timeout`` fall back to this value, so it
+# is read at call time (never imported once at module load) to keep the value
+# patchable in tests.
+DEFAULT_INACTIVITY_TIMEOUT = 120.0
 
 
 class TaskData:
