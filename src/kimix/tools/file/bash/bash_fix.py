@@ -7,8 +7,10 @@ command words.  It does not install software and deliberately leaves commands
 without a faithful equivalent untouched.
 
 Windows-style backslash paths (``D:\\repo\\src``, ``\\\\server\\share``,
-``~\\Desktop``, ``.\\build``) are rewritten to the forward-slash spellings Git
-Bash understands, and the cmd.exe-only ``cd /d <path>`` form loses its flag
+``~\\Desktop``, ``.\\build``) — whether used as arguments, redirection targets,
+or as the command word itself (``C:\\tools\\rg.exe``) — are rewritten to the
+forward-slash spellings Git Bash understands, and the cmd.exe-only
+``cd /d <path>`` form loses its flag
 (``cd`` accepts a single argument in Bash).  Rewrites are conservative: the
 unquoted word must look unambiguously like a Windows path, so quoted data,
 tool-level escape sequences, short ambiguous words such as ``a\\nb``, and
@@ -50,6 +52,81 @@ _NATIVE_DELEGATE = (
     "if [[ -n $__kimix_native ]]; then \"$__kimix_native\" \"$@\"; return; fi; "
 )
 
+# Fallbacks whose ``command -v`` hit can be a non-functional placeholder: the
+# Microsoft Store App Execution Alias stubs in ``WindowsApps`` print an
+# install prompt instead of running the tool.  They get a stub-aware guard
+# (define the fallback even when ``command -v`` succeeds) and a delegate
+# that refuses stub paths.
+_STUB_AWARE_FALLBACKS = frozenset({"pip3", "python3"})
+
+_PGREP_PS_NAME = (
+    "$m = Get-Process | Where-Object { $_.Name -match $env:__KIMIX_PAT }; "
+    "if ($m) { $m | ForEach-Object { if ($env:__KIMIX_LIST -eq \"1\") { "
+    "\"$($_.Id) $($_.Name)\" } else { $_.Id } }; exit 0 } else { exit 1 }"
+)
+_PGREP_PS_FULL = (
+    "$m = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $env:__KIMIX_PAT }; "
+    "if ($m) { $m | ForEach-Object { if ($env:__KIMIX_LIST -eq \"1\") { "
+    "\"$($_.ProcessId) $($_.Name)\" } else { $_.ProcessId } }; exit 0 } else { exit 1 }"
+)
+_PKILL_PS_NAME = (
+    "$m = Get-Process | Where-Object { $_.Name -match $env:__KIMIX_PAT }; "
+    "if ($m) { $m | Stop-Process -Force; exit 0 } else { exit 1 }"
+)
+_PKILL_PS_FULL = (
+    "$m = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $env:__KIMIX_PAT }; "
+    "if ($m) { $m | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+    "exit 0 } else { exit 1 }"
+)
+
+_ZIP_PS = (
+    "Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; "
+    "$level = [System.IO.Compression.CompressionLevel]$env:__KIMIX_ZIP_LEVEL; "
+    "$dest = $env:__KIMIX_ZIP_DEST; "
+    "if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }; "
+    "$zip = [System.IO.Compression.ZipFile]::Open($dest, [System.IO.Compression.ZipArchiveMode]::Create); "
+    "foreach ($p in ($env:__KIMIX_ZIP_PATHS -split \"`n\")) { "
+    "$item = Get-Item -LiteralPath $p; $base = $item.Name; "
+    "if ($item.PSIsContainer) { $root = $item.FullName; "
+    "Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object { "
+    "$rel = $_.FullName.Substring($root.Length).TrimStart(\"\\\") -replace \"\\\\\", \"/\"; "
+    "if ($_.PSIsContainer) { $zip.CreateEntry($base + \"/\" + $rel + \"/\") | Out-Null } "
+    "else { [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $base + \"/\" + $rel, $level) | Out-Null } } } "
+    "else { [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $item.FullName, $base, $level) | Out-Null } }; "
+    "$zip.Dispose(); if (Test-Path -LiteralPath $dest) { exit 0 } else { exit 1 }"
+)
+
+_TREE_PERL = (
+    "perl -e '"
+    "my ($maxdepth,$showall,$dirsonly,$noreport,$top)=@ARGV; "
+    "print qq($top\\n); "
+    "my ($ndirs,$nfiles)=(0,0); "
+    "sub walk { my ($path,$prefix,$depth)=@_; "
+    "return if $maxdepth && $depth>$maxdepth; "
+    "opendir(my $dh,$path) or return; "
+    "my @e = grep { ! /^[.][.]?$/ } readdir($dh); closedir($dh); "
+    "@e = grep { $showall || ! /^[.]/ } @e; "
+    "@e = grep { ! $dirsonly || -d qq($path/$_) } @e; "
+    "@e = sort { lc($a) cmp lc($b) } @e; "
+    "my $n=@e; my $i=0; "
+    "for my $e (@e) { $i++; my $last = $i==$n; my $full = qq($path/$e); "
+    "my $isdir = -d $full; "
+    "if ($isdir) { $ndirs++ } else { $nfiles++ } "
+    "print $prefix, ($last ? qq(`-- ) : qq(|-- )), $e, qq(\\n); "
+    "walk($full, $prefix . ($last ? qq(    ) : qq(|   )), $depth+1) "
+    "if $isdir && ! -l $full } } "
+    "walk($top,q(),1); "
+    "my $dw = $ndirs==1 ? q(directory) : q(directories); "
+    "my $fw = $nfiles==1 ? q(file) : q(files); "
+    "print qq(\\n$ndirs $dw, $nfiles $fw\\n) unless $noreport'"
+)
+
+_POWERSHELL_PASTE = (
+    "powershell.exe -NoProfile -NonInteractive -Command "
+    "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+    "[Console]::Out.Write((Get-Clipboard -Raw))'"
+)
+
 _FALLBACK_BODIES = {
     "gtimeout": "timeout \"$@\"",
     "rev": (
@@ -64,21 +141,227 @@ _FALLBACK_BODIES = {
     "xdg-open": "start \"$@\"",
     "open": "start \"$@\"",
     "pbcopy": "clip.exe \"$@\"",
-    "pbpaste": (
-        "powershell.exe -NoProfile -NonInteractive -Command "
-        "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-        "[Console]::Out.Write((Get-Clipboard -Raw))' \"$@\""
+    "pbpaste": _POWERSHELL_PASTE + " \"$@\"",
+    "wget": (
+        "local __kimix_url='' __kimix_out='' __kimix_stdout=0; "
+        "local -a __kimix_args=(); "
+        "while (( $# )); do case $1 in "
+        "-O|--output-document) __kimix_out=$2; shift 2;; "
+        "-O?*) __kimix_out=${1#-O}; shift;; "
+        "--output-document=*) __kimix_out=${1#*=}; shift;; "
+        "-q|--quiet) __kimix_args+=(-s); shift;; "
+        "-c|--continue) __kimix_args+=(-C -); shift;; "
+        "--no-check-certificate) __kimix_args+=(-k); shift;; "
+        "-T|--timeout) __kimix_args+=(--max-time \"$2\"); shift 2;; "
+        "--timeout=*) __kimix_args+=(--max-time \"${1#*=}\"); shift;; "
+        "-*) printf '%s\\n' \"wget: unsupported option for curl fallback: $1\" >&2; return 1;; "
+        "*) __kimix_url=$1; shift;; esac; done; "
+        "if [[ -z $__kimix_url ]]; then "
+        "printf '%s\\n' 'wget: missing URL' >&2; return 1; fi; "
+        "if [[ $__kimix_out == '-' ]]; then __kimix_stdout=1; fi; "
+        "if [[ -z $__kimix_out && $__kimix_stdout -eq 0 ]]; then "
+        "__kimix_out=${__kimix_url##*/}; "
+        "[[ -n $__kimix_out ]] || __kimix_out=index.html; fi; "
+        "if (( __kimix_stdout )); then "
+        "curl -fSL \"${__kimix_args[@]}\" -- \"$__kimix_url\"; "
+        "else curl -fSL \"${__kimix_args[@]}\" -o \"$__kimix_out\" -- \"$__kimix_url\"; fi"
     ),
+    "xclip": (
+        "local __kimix_out=0; while (( $# )); do case $1 in "
+        "-o|-out) __kimix_out=1; shift;; "
+        "-i|-in) shift;; "
+        "-selection|-d|-display) shift 2;; "
+        "-selection*|-display*) shift;; "
+        "-*) printf '%s\\n' \"xclip: unsupported option for clipboard fallback: $1\" >&2; return 1;; "
+        "*) shift;; esac; done; "
+        "if (( __kimix_out )); then " + _POWERSHELL_PASTE + "; else clip.exe; fi"
+    ),
+    "xsel": (
+        "local __kimix_out=0; while (( $# )); do case $1 in "
+        "--output) __kimix_out=1; shift;; "
+        "--input|--clipboard|--primary|--secondary) shift;; "
+        "--*) printf '%s\\n' \"xsel: unsupported option for clipboard fallback: $1\" >&2; return 1;; "
+        "-*) case $1 in *o*) __kimix_out=1;; esac; shift;; "
+        "*) shift;; esac; done; "
+        "if (( __kimix_out )); then " + _POWERSHELL_PASTE + "; else clip.exe; fi"
+    ),
+    "wl-copy": (
+        "while (( $# )); do case $1 in "
+        "-*) printf '%s\\n' \"wl-copy: unsupported option for clipboard fallback: $1\" >&2; return 1;; "
+        "*) shift;; esac; done; clip.exe"
+    ),
+    "wl-paste": (
+        "while (( $# )); do case $1 in "
+        "-n|--no-newline) shift;; "
+        "-*) printf '%s\\n' \"wl-paste: unsupported option for clipboard fallback: $1\" >&2; return 1;; "
+        "*) shift;; esac; done; " + _POWERSHELL_PASTE
+    ),
+    "zip": (
+        "local __kimix_archive='' __kimix_level=Optimal __kimix_p='' "
+        "__kimix_combo='' __kimix_i=0; "
+        "local -a __kimix_paths=() __kimix_wpaths=() __kimix_split=(); "
+        "while (( $# )); do "
+        "if [[ $1 == -[!-]* && ${#1} -gt 2 ]]; then "
+        "__kimix_combo=${1#-}; __kimix_split=(); shift; "
+        "for (( __kimix_i=0; __kimix_i<${#__kimix_combo}; __kimix_i++ )); do "
+        "__kimix_split+=(-${__kimix_combo:__kimix_i:1}); done; "
+        "set -- \"${__kimix_split[@]}\" \"$@\"; continue; fi; "
+        "case $1 in "
+        "-r|-R|--recurse-paths|-q|--quiet) shift;; "
+        "-0) __kimix_level=NoCompression; shift;; "
+        "-1) __kimix_level=Fastest; shift;; "
+        "-[2-9]) shift;; "
+        "-*) printf '%s\\n' \"zip: unsupported option for Compress-Archive fallback: $1\" >&2; return 1;; "
+        "*) if [[ -z $__kimix_archive ]]; then __kimix_archive=$1; "
+        "else __kimix_paths+=(\"$1\"); fi; shift;; esac; done; "
+        "if [[ -z $__kimix_archive || ${#__kimix_paths[@]} -eq 0 ]]; then "
+        "printf '%s\\n' 'zip: missing archive name or input paths' >&2; return 1; fi; "
+        "for __kimix_p in \"${__kimix_paths[@]}\"; do "
+        "__kimix_wpaths+=(\"$(cygpath -w -- \"$__kimix_p\")\"); done; "
+        "__kimix_archive=$(cygpath -w -- \"$__kimix_archive\"); "
+        "__KIMIX_ZIP_LEVEL=$__kimix_level __KIMIX_ZIP_DEST=$__kimix_archive "
+        "__KIMIX_ZIP_PATHS=$(printf '%s\\n' \"${__kimix_wpaths[@]}\") "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _ZIP_PS + "'"
+    ),
+    "nc": (
+        "local __kimix_z=0 __kimix_v=0 __kimix_w='' __kimix_host='' __kimix_port=''; "
+        "while (( $# )); do case $1 in "
+        "-z) __kimix_z=1; shift;; "
+        "-v) __kimix_v=1; shift;; "
+        "-zv|-vz) __kimix_z=1; __kimix_v=1; shift;; "
+        "-w) __kimix_w=$2; shift 2;; "
+        "-w?*) __kimix_w=${1#-w}; shift;; "
+        "-*) printf '%s\\n' \"nc: unsupported option for /dev/tcp fallback: $1\" >&2; return 1;; "
+        "*) if [[ -z $__kimix_host ]]; then __kimix_host=$1; "
+        "elif [[ -z $__kimix_port ]]; then __kimix_port=$1; "
+        "else printf '%s\\n' 'nc: too many arguments' >&2; return 1; fi; "
+        "shift;; esac; done; "
+        "if (( ! __kimix_z )); then "
+        "printf '%s\\n' 'nc: only -z (zero-I/O scan) mode is supported by this fallback' >&2; "
+        "return 1; fi; "
+        "if [[ -z $__kimix_host || -z $__kimix_port ]]; then "
+        "printf '%s\\n' 'nc: missing host or port' >&2; return 1; fi; "
+        "if [[ -n $__kimix_w ]]; then "
+        "timeout \"$__kimix_w\" bash -c 'exec 3<>/dev/tcp/$1/$2' _ "
+        "\"$__kimix_host\" \"$__kimix_port\" 2>/dev/null; "
+        "else (exec 3<>/dev/tcp/\"$__kimix_host\"/\"$__kimix_port\") 2>/dev/null; fi; "
+        "local __kimix_rc=$?; "
+        "(( __kimix_rc != 0 )) && __kimix_rc=1; "
+        "if (( __kimix_rc == 0 )); then "
+        "(( __kimix_v )) && printf '%s\\n' \"Connection to $__kimix_host $__kimix_port port [tcp/*] succeeded!\" >&2; "
+        "else "
+        "(( __kimix_v )) && printf '%s\\n' \"nc: connect to $__kimix_host port $__kimix_port (tcp) failed\" >&2; fi; "
+        "return $__kimix_rc"
+    ),
+    "pgrep": (
+        "local __kimix_list=0 __kimix_full=0 __kimix_pat=''; "
+        "while (( $# )); do case $1 in "
+        "-l) __kimix_list=1; shift;; "
+        "-f) __kimix_full=1; shift;; "
+        "-lf|-fl) __kimix_list=1; __kimix_full=1; shift;; "
+        "--) shift; break;; "
+        "-*) printf '%s\\n' \"pgrep: unsupported option for Get-Process fallback: $1\" >&2; return 1;; "
+        "*) __kimix_pat=$1; shift;; esac; done; "
+        "if [[ -z $__kimix_pat ]]; then "
+        "printf '%s\\n' 'pgrep: missing pattern' >&2; return 1; fi; "
+        "if (( __kimix_full )); then "
+        "__KIMIX_PAT=$__kimix_pat __KIMIX_LIST=$__kimix_list "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _PGREP_PS_FULL + "'; "
+        "else "
+        "__KIMIX_PAT=$__kimix_pat __KIMIX_LIST=$__kimix_list "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _PGREP_PS_NAME + "'; fi"
+    ),
+    "pkill": (
+        "local __kimix_full=0 __kimix_pat=''; "
+        "while (( $# )); do case $1 in "
+        "-f) __kimix_full=1; shift;; "
+        "--) shift; break;; "
+        "-*) printf '%s\\n' \"pkill: unsupported option for Stop-Process fallback: $1\" >&2; return 1;; "
+        "*) __kimix_pat=$1; shift;; esac; done; "
+        "if [[ -z $__kimix_pat ]]; then "
+        "printf '%s\\n' 'pkill: missing pattern' >&2; return 1; fi; "
+        "if (( __kimix_full )); then "
+        "__KIMIX_PAT=$__kimix_pat "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _PKILL_PS_FULL + "'; "
+        "else "
+        "__KIMIX_PAT=$__kimix_pat "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _PKILL_PS_NAME + "'; fi"
+    ),
+    "traceroute": (
+        "local -a __kimix_args=(); "
+        "while (( $# )); do case $1 in "
+        "-n) __kimix_args+=(-d); shift;; "
+        "-m) __kimix_args+=(-h \"$2\"); shift 2;; "
+        "-m?*) __kimix_args+=(-h \"${1#-m}\"); shift;; "
+        "--max-hop=*) __kimix_args+=(-h \"${1#*=}\"); shift;; "
+        "-w) __kimix_args+=(-w \"$(( $2 * 1000 ))\"); shift 2;; "
+        "-w?*) __kimix_args+=(-w \"$(( ${1#-w} * 1000 ))\"); shift;; "
+        "-*) printf '%s\\n' \"traceroute: unsupported option for tracert fallback: $1\" >&2; return 1;; "
+        "*) __kimix_args+=(\"$1\"); shift;; esac; done; "
+        "tracert \"${__kimix_args[@]}\""
+    ),
+    "tree": (
+        "local __kimix_depth=0 __kimix_all=0 __kimix_dirs=0 __kimix_noreport=0 "
+        "__kimix_dir=''; "
+        "while (( $# )); do case $1 in "
+        "-L) __kimix_depth=$2; shift 2;; "
+        "-L?*) __kimix_depth=${1#-L}; shift;; "
+        "-a) __kimix_all=1; shift;; "
+        "-d) __kimix_dirs=1; shift;; "
+        "--noreport) __kimix_noreport=1; shift;; "
+        "--) shift; break;; "
+        "-*) printf '%s\\n' \"tree: unsupported option for perl fallback: $1\" >&2; return 1;; "
+        "*) __kimix_dir=$1; shift;; esac; done; "
+        "[[ -n $__kimix_dir ]] || __kimix_dir=.; "
+        + _TREE_PERL
+        + " -- \"$__kimix_depth\" \"$__kimix_all\" \"$__kimix_dirs\" \"$__kimix_noreport\" \"$__kimix_dir\""
+    ),
+    "say": (
+        "while (( $# )); do case $1 in "
+        "-*) printf '%s\\n' \"say: unsupported option for SAPI fallback: $1\" >&2; return 1;; "
+        "*) shift;; esac; done; "
+        "__KIMIX_SAY_TEXT=$* "
+        "powershell.exe -NoProfile -NonInteractive -Command "
+        "'Add-Type -AssemblyName System.Speech; "
+        "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:__KIMIX_SAY_TEXT)'"
+    ),
+    "python3": 'python "$@"',
+    "pip3": 'pip "$@"',
 }
 
 
+# GNU ``g``-prefixed command names (the Homebrew coreutils spelling used on
+# macOS) map to the very same GNU tools that Git Bash already ships, so the
+# mapping is faithful by construction.  ``gtimeout`` is spelled out above.
+for _gnu_command in (
+    "awk", "cat", "comm", "cp", "cut", "date", "df", "du", "egrep",
+    "fgrep", "find", "grep", "head", "join", "ln", "ls", "make", "mkdir",
+    "mv", "paste", "readlink", "realpath", "rm", "rmdir", "sed", "seq",
+    "shuf", "sort", "split", "stat", "tail", "tar", "tr", "uniq", "wc",
+    "xargs",
+):
+    _FALLBACK_BODIES.setdefault("g" + _gnu_command, f'{_gnu_command} "$@"')
+
+
 def _fallback_definition(name: str) -> str:
-    delegate = _NATIVE_DELEGATE.format(name=name)
     body = _FALLBACK_BODIES[name]
-    return (
-        f"if ! command -v {name} >/dev/null 2>&1; then "
-        f"{name}() {{ {delegate}{body}; }}; fi"
-    )
+    if name in _STUB_AWARE_FALLBACKS:
+        # The Microsoft Store App Execution Alias satisfies ``command -v``
+        # but is not a working interpreter: define the fallback anyway, and
+        # never delegate to the stub path.
+        guard = (
+            f"if ! command -v {name} >/dev/null 2>&1 "
+            f"|| [[ $(type -P {name}) == *WindowsApps* ]]; then "
+        )
+        delegate = (
+            f"local __kimix_native=''; __kimix_native=$(type -P {name}) || :; "
+            f"if [[ -n $__kimix_native && $__kimix_native != *WindowsApps* ]]; then "
+            f"\"$__kimix_native\" \"$@\"; return; fi; "
+        )
+    else:
+        guard = f"if ! command -v {name} >/dev/null 2>&1; then "
+        delegate = _NATIVE_DELEGATE.format(name=name)
+    return f"{guard}{name}() {{ {delegate}{body}; }}; fi"
 
 
 def _single_quote(command: str) -> str:
@@ -203,9 +486,9 @@ class BashFix:
     """Result of :func:`fix_bash_command`.
 
     ``replacements`` records each original command name in source order and
-    ``path_changes`` each original argument word whose Windows-style
-    backslashes (or cmd.exe ``/d`` flag) were rewritten for Git Bash.  Empty
-    tuples mean the command was returned byte-for-byte unchanged.
+    ``path_changes`` each original argument or command word whose
+    Windows-style backslashes (or cmd.exe ``/d`` flag) were rewritten for Git
+    Bash.  Empty tuples mean the command was returned byte-for-byte unchanged.
     """
 
     command: str
@@ -573,6 +856,19 @@ class _Scanner:
                     if replacement is not None:
                         self.edits.append((word_start, word_end, replacement))
                         self.path_notes.append(raw)
+                    if (
+                        _ASSIGNMENT_RE.match(raw)
+                        and i < end
+                        and s[i] == "("
+                    ):
+                        # Array literal as a declaration-builtin argument
+                        # (``declare -a arr=( ...)``): its elements are data
+                        # words, scanned like the command-position form.
+                        close = self._find_matching(i + 1, end, ")")
+                        self._scan_array_words(
+                            i + 1, close if close < end else end
+                        )
+                        i = close + 1 if close < end else end
                 continue
 
             if raw == "function":
@@ -601,7 +897,7 @@ class _Scanner:
             if _ASSIGNMENT_RE.match(raw):
                 if i < end and s[i] == "(":
                     close = self._find_matching(i + 1, end, ")")
-                    self._scan_expansions(i + 1, close if close < end else end)
+                    self._scan_array_words(i + 1, close if close < end else end)
                     i = close + 1 if close < end else end
                 command_expected = True
                 continue
@@ -666,6 +962,15 @@ class _Scanner:
                     self.edits.append(
                         (word_start, word_end, _wrapper_runner(fallback_name))
                     )
+            else:
+                # A command word can itself be a Windows executable path
+                # (``C:\tools\rg.exe``); Bash quote removal would eat the
+                # backslashes and lose the command, so rewrite it like an
+                # argument path.
+                replacement = self._windows_path_replacement(raw)
+                if replacement is not None:
+                    self.edits.append((word_start, word_end, replacement))
+                    self.path_notes.append(raw)
             command_expected = False
             wrapper = None
 
@@ -756,6 +1061,40 @@ class _Scanner:
             else:
                 i += 1
         return end
+
+    def _scan_array_words(self, i: int, end: int) -> None:
+        """Scan array literal elements as data words.
+
+        Elements are data, not commands: substitutions inside them are
+        scanned as their own command contexts (``_read_word`` handles
+        ``$( ... )`` and backquotes), and unquoted words get the same
+        Windows path rewrite as ordinary arguments — Bash quote removal
+        would otherwise eat their backslashes (``arr=(D:\\x\\y)`` would
+        store ``D:xy``).
+        """
+        s = self.s
+        while i < end:
+            ch = s[i]
+            if ch in " \t\r\n":
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < end and s[i + 1] == "\n":
+                i += 2
+                continue
+            if ch == "#" and self._comment_starts(i, 0):
+                newline = s.find("\n", i + 1, end)
+                i = end if newline < 0 else newline
+                continue
+            word_end = self._read_word(i, end)
+            if word_end <= i:
+                i += 1
+                continue
+            raw = s[i:word_end]
+            replacement = self._windows_path_replacement(raw)
+            if replacement is not None:
+                self.edits.append((i, word_end, replacement))
+                self.path_notes.append(raw)
+            i = word_end
 
     def _scan_expansions(self, i: int, end: int) -> None:
         """Scan executable substitutions in a region whose plain words are data."""

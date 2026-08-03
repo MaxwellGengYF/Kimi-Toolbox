@@ -42,6 +42,22 @@ if TYPE_CHECKING:
 
 USE_SYSTEM_SHELL = True
 
+
+def _encode_startup_script(script: str) -> str:
+    """Encode a multi-line startup script as a self-decoding one-liner.
+
+    Long multi-line scripts passed through the Windows command line to MSYS2
+    bash get corrupted (argv quoting heuristics).  A single-line base64+gzip
+    payload contains only safe ASCII characters and sidesteps every quoting
+    issue; the receiving shell decodes and evals it.
+    """
+    import gzip
+
+    import pybase64
+
+    payload = pybase64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
+    return "eval \"$(printf '%s' '" + payload + "' | base64 -d | gzip -d)\""
+
 # Default Windows shell policy: "Git Bash first, PowerShell as fallback".  The
 # Bash tool is enabled whenever a real bash (typically shipped with Git for
 # Windows) is installed, and the Powershell tool is enabled only when no bash
@@ -907,7 +923,10 @@ class Bash(CallableTool2[BashParams]):
                 )
                 if forbidden is not None:
                     return forbidden
-                bash_args = ["-c", _with_msystem_neutralized(startup_cmd, self._bash) + "; exec bash -i"]
+                encoded = _encode_startup_script(
+                    _with_msystem_neutralized(startup_cmd, self._bash)
+                )
+                bash_args = ["-c", encoded + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
             process_task = ProcessTask(self._bash, bash_args, None, _env_with_rg_bin_path(), append_newline=True)

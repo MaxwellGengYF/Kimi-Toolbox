@@ -596,6 +596,26 @@ def _fix_for_windows(command: str) -> BashFix:
     return _fix_for_platform(command, "win32")
 
 
+def _decode_startup_command(argv_command: str) -> str:
+    """Decode the base64+gzip one-liner used to deliver interactive startups.
+
+    ``bash_tool._encode_startup_script`` wraps multi-line startup scripts so
+    they survive Windows argv quoting; tests reverse the wrapping to assert on
+    the original script text.  Any trailing suffix appended after the encoded
+    payload (e.g. ``; exec bash -i``) is preserved verbatim.
+    """
+    prefix = "eval \"$(printf '%s' '"
+    suffix = "' | base64 -d | gzip -d)\""
+    assert argv_command.startswith(prefix), argv_command[:80]
+    payload_end = argv_command.index(suffix)
+    payload = argv_command[len(prefix):payload_end]
+    trailer = argv_command[payload_end + len(suffix):]
+    import base64 as _b64
+    import gzip as _gz
+
+    return _gz.decompress(_b64.b64decode(payload)).decode("utf-8") + trailer
+
+
 class TestBashFixResult:
     def test_result_is_immutable(self) -> None:
         result = BashFix("echo ok")
@@ -629,9 +649,20 @@ class TestBashFixResult:
             "printf abc | rev",
             "xdg-open .",
             "open README.md",
-            "printf text | pbcopy",
-            "pbpaste",
-        ],
+              "printf text | pbcopy",
+              "pbpaste",
+              "wget https://example.com/f.zip",
+              "xclip -selection clipboard",
+              "xsel -bo",
+              "gsed -n 1p file",
+              "zip -r out.zip dir",
+              "nc -z example.com 80",
+              "pgrep bash",
+              "tree -L 1 dir",
+              "say hello",
+              "wl-copy < file",
+              "python3 --version",
+          ],
     )
     def test_non_windows_is_byte_for_byte_noop(self, platform: str, command: str) -> None:
         result = _fix_for_platform(command, platform)
@@ -652,14 +683,25 @@ class TestBashFixMappings:
             ("xdg-open README.md", "start README.md", "xdg-open"),
             ("open https://example.com", "start https://example.com", "open"),
             ("printf text | pbcopy", "printf text | clip.exe", "pbcopy"),
-            (
-                "pbpaste > clipboard.txt",
-                "powershell.exe -NoProfile -NonInteractive -Command "
-                "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-                "[Console]::Out.Write((Get-Clipboard -Raw))' > clipboard.txt",
-                "pbpaste",
-            ),
-        ],
+              (
+                  "pbpaste > clipboard.txt",
+                  "powershell.exe -NoProfile -NonInteractive -Command "
+                  "'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                  "[Console]::Out.Write((Get-Clipboard -Raw))' > clipboard.txt",
+                  "pbpaste",
+              ),
+              ("wget https://example.com/f.zip", "curl -fSL -o f.zip -- https://example.com/f.zip", "wget"),
+              ("printf text | xclip -selection clipboard", "printf text | clip.exe", "xclip"),
+              ("xsel --clipboard", "clip.exe", "xsel"),
+              ("gsed -n 1p file", "sed -n 1p file", "gsed"),
+              ("zip -r out.zip dir", "Compress-Archive dir out.zip", "zip"),
+              ("nc -z example.com 80", "Test-NetConnection example.com -Port 80", "nc"),
+              ("pgrep bash", "Get-Process bash", "pgrep"),
+              ("tree -L 1 dir", "Get-ChildItem dir", "tree"),
+              ("say hello", "SpeechSynthesizer hello", "say"),
+              ("printf text | wl-copy", "printf text | clip.exe", "wl-copy"),
+              ("python3 --version", "python --version", "python3"),
+          ],
     )
     def test_verified_windows_mapping(
         self, source: str, expected: str, replacement: str
@@ -707,12 +749,10 @@ class TestBashFixMappings:
             "watch date",
             "systemctl status service",
             "service app status",
-            "apt update",
-            "apt-get update",
-            "sudo command",
-            "xclip -selection clipboard",
-            "xsel --clipboard",
-        ],
+              "apt update",
+              "apt-get update",
+              "sudo command",
+          ],
     )
     def test_commands_without_faithful_mapping_are_preserved(self, command: str) -> None:
         assert _fix_for_windows(command) == BashFix(command)
@@ -804,7 +844,8 @@ class TestBashFixFalsePositives:
         [
             "echo rev",
             "printf '%s' rev",
-            "echo gtimeout open xdg-open pbcopy pbpaste",
+                          "echo gtimeout open xdg-open pbcopy pbpaste wget xclip xsel "
+                          "gsed zip nc pgrep tree say wl-copy wl-paste python3 pip3",
             "name=rev",
             "tool=gtimeout",
             "array=(rev open pbcopy)",
@@ -1207,8 +1248,11 @@ class TestBashFixWindowsPaths:
             ("env --chdir=D:\\x cmd", "env --chdir=D:/x cmd"),
             ("time -o D:\\out.txt cmd", "time -o D:/out.txt cmd"),
             ("time --output=D:\\out.txt cmd", "time --output=D:/out.txt cmd"),
-            ("sudo -D D:\\x cmd", "sudo -D D:/x cmd"),
-        ],
+              ("sudo -D D:\\x cmd", "sudo -D D:/x cmd"),
+              # A Windows executable path as the command word itself: Bash
+              # quote removal would eat the backslashes and lose the command.
+              ("env -u FOO D:\\x cmd", "env -u FOO D:/x cmd"),
+          ],
     )
     def test_windows_backslash_paths_rewritten(
         self, source: str, expected: str
@@ -1310,7 +1354,7 @@ class TestBashFixWindowsPaths:
             # wrapper option values that are not paths stay data
             r"env -C 'D:\x' cmd",  # quoted option value is literal data
             r"time -o log.txt cmd",
-            r"env -u FOO D:\x cmd",  # -u takes a name; D:\x is a command word
+                          r"env -u D:\x cmd",  # -u takes a name; the value is opaque data
             r"env -C /d cmd",  # no backslash: not a Windows path
             # backslash-newline line continuations inside path words: the word
             # spans two physical lines and must stay untouched so Bash performs
@@ -1330,6 +1374,138 @@ class TestBashFixWindowsPaths:
         result = _fix_for_platform("cd D:\\x", "linux")
         assert result == BashFix("cd D:\\x")
         assert not result.changed
+
+
+class TestBashFixArrayLiterals:
+    """Windows path elements inside array literals rewritten for Git Bash.
+
+    Array elements are data, not commands: quote removal would eat their
+    backslashes (``arr=(D:\\x\\y)`` would store ``D:xy``), so unquoted
+    element words get the same conservative rewrite as ordinary arguments.
+    """
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("arr=(D:\\x\\y.txt D:\\a\\b.txt)", "arr=(D:/x/y.txt D:/a/b.txt)"),
+            ("arr+=(D:\\x\\y.txt)", "arr+=(D:/x/y.txt)"),
+            # Glob metacharacters stay unquoted for pathname expansion.
+            ("arr=(C:\\data\\*.csv)", "arr=(C:/data/*.csv)"),
+            ("declare -a arr=(D:\\x\\y.txt)", "declare -a arr=(D:/x/y.txt)"),
+            ("declare -a arr=(D:\\x\\y.txt plain)", "declare -a arr=(D:/x/y.txt plain)"),
+            ("local arr=(D:\\x\\y.txt)", "local arr=(D:/x/y.txt)"),
+            ("arr=(D:\\Program\\ Files\\x.txt)", 'arr=("D:/Program Files/x.txt")'),
+            ("arr=(D:\\x\\y.txt); echo ${arr[0]}", "arr=(D:/x/y.txt); echo ${arr[0]}"),
+        ],
+    )
+    def test_array_element_paths_rewritten(
+        self, source: str, expected: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command == expected
+        assert result.changed
+        assert result.replacements == ()
+        assert result.path_changes
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "arr=('D:\\x\\y.txt')",  # quoted element is literal data
+            'arr=("D:\\x\\y.txt")',
+            "array=(rev open pbcopy)",  # element words are data, not commands
+            "declare -a x=(rev)",  # no fallback injection for element data
+            "declare -a x=(wget xclip xsel)",
+            "arr=([k]=D:\\x)",  # associative key=value words stay opaque
+            "arr=(a\\nb)",  # ambiguous escape-like element
+        ],
+    )
+    def test_array_elements_stay_data(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_substitution_inside_array_is_scanned(self) -> None:
+        result = _fix_for_windows("arr=($(rev <<< abc))")
+        assert result.replacements == ("rev",)
+        assert result.path_changes == ()
+
+
+class TestBashFixCommandWordPaths:
+    """Windows executable paths in command position rewritten for Git Bash.
+
+    A command word such as ``C:\\tools\\rg.exe`` loses its backslashes to
+    Bash quote removal (becoming the nonexistent ``C:toolsrg.exe``), so the
+    same conservative path recognition used for argument words applies to
+    the command word itself.
+    """
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("C:\\Windows\\System32\\where.exe git", "C:/Windows/System32/where.exe git"),
+            ("d:\\tools\\run.exe --help", "d:/tools/run.exe --help"),
+            ("\\\\server\\share\\tool.exe arg", "//server/share/tool.exe arg"),
+            (".\\build\\tool.exe arg", "./build/tool.exe arg"),
+            ("..\\scripts\\run.sh", "../scripts/run.sh"),
+            ("~\\bin\\tool.exe --help", "~/bin/tool.exe --help"),
+            ("\\Users\\me\\tool.exe", "/Users/me/tool.exe"),
+            ("build\\dist\\tool.exe arg", "build/dist/tool.exe arg"),
+            ("echo a && C:\\x\\tool.exe", "echo a && C:/x/tool.exe"),
+            ("echo a; C:\\x\\tool.exe | cat", "echo a; C:/x/tool.exe | cat"),
+            ("(C:\\x\\tool.exe)", "(C:/x/tool.exe)"),
+            ("{ C:\\x\\tool.exe; }", "{ C:/x/tool.exe; }"),
+            ("if C:\\x\\probe.exe; then echo ok; fi", "if C:/x/probe.exe; then echo ok; fi"),
+            ("while C:\\x\\poll.exe; do :; done", "while C:/x/poll.exe; do :; done"),
+            ("command C:\\x\\tool.exe", "command C:/x/tool.exe"),
+            ("env FOO=1 D:\\x\\tool.exe", "env FOO=1 D:/x/tool.exe"),
+            ("nohup D:\\x\\tool.exe &", "nohup D:/x/tool.exe &"),
+            # Glob metacharacters stay unquoted for pathname expansion.
+            ("D:\\x\\*.exe", "D:/x/*.exe"),
+            # Normalized words that need it are double-quoted.
+            ("D:\\Program\\ Files\\x.exe", '"D:/Program Files/x.exe"'),
+            # Command words inside substitutions are rewritten too.
+            ("x=$(C:\\x\\tool.exe)", "x=$(C:/x/tool.exe)"),
+            ("echo `C:\\x\\tool.exe`", "echo `C:/x/tool.exe`"),
+        ],
+    )
+    def test_command_word_paths_rewritten(
+        self, source: str, expected: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command == expected
+        assert result.changed
+        assert result.replacements == ()
+        assert result.path_changes
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hello",  # plain command word: no backslash
+            "git --version",
+            "'C:\\x\\tool.exe' arg",  # quoted command word is literal data
+            '"C:\\x\\tool.exe" arg',
+            "foo\\bar arg",  # single-segment relative path stays ambiguous
+            "a\\nb arg",  # too short: ambiguous escape sequence
+            r"\a\b",  # single-letter root-relative escapes
+            r"x\n\t",  # escape-sequence-like segments
+            r"case $f in D:\x) echo ok;; esac",  # case pattern is data
+            r"case $f in (D:\x) echo ok;; esac",
+        ],
+    )
+    def test_command_word_non_paths_untouched(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_fallback_name_takes_priority_over_path_rewrite(self) -> None:
+        # ``\rev`` is the escaped literal command name ``rev``: the native
+        # fallback must be injected, never a path rewrite.
+        result = _fix_for_windows("\\rev <<< abc")
+        assert result.replacements == ("rev",)
+        assert result.path_changes == ()
+
+    def test_command_word_path_change_reports_warning(self) -> None:
+        result = _fix_for_windows("C:\\x\\tool.exe")
+        assert result.changed
+        assert result.replacements == ()
+        assert result.path_changes == ("C:\\x\\tool.exe",)
+        assert "forward slashes" in result.warning
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Git Bash")
@@ -1352,6 +1528,175 @@ class TestBashFixRealGitBash:
         result = self._run("gtimeout 2 bash -c 'printf timeout-ok'")
         assert result.returncode == 0, result.stderr
         assert result.stdout == "timeout-ok"
+
+    def test_command_word_windows_path_executes(self) -> None:
+        # ``C:\Windows\System32\where.exe`` is a Windows executable path in
+        # command position: the rewrite must make it runnable in Git Bash.
+        result = self._run(r"C:\Windows\System32\where.exe git")
+        assert result.returncode == 0, result.stderr
+        assert "git.exe" in result.stdout
+
+    def test_array_literal_windows_paths_execute(self) -> None:
+        result = self._run(
+            r"arr=(D:\x\y.txt D:\a\b.txt); printf '%s' ${arr[0]}"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "D:/x/y.txt"
+
+    def test_wget_fallback_downloads_file(self, tmp_path: Path) -> None:
+        fixture = tmp_path / "wget_fixture.txt"
+        fixture.write_text("wget-fixture\n", encoding="utf-8")
+        url = "file:///" + str(fixture).replace("\\", "/")
+        out = str(tmp_path / "wget_out.txt").replace("\\", "/")
+        result = self._run(f"wget -q -O {out} {url}")
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "wget_out.txt").read_text(encoding="utf-8") == "wget-fixture\n"
+
+    def test_wget_fallback_stdout_mode(self, tmp_path: Path) -> None:
+        fixture = tmp_path / "wget_fixture.txt"
+        fixture.write_text("wget-fixture\n", encoding="utf-8")
+        url = "file:///" + str(fixture).replace("\\", "/")
+        result = self._run(f"wget -q -O- {url}")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "wget-fixture\n"
+
+    def test_wget_fallback_rejects_unsupported_option(self) -> None:
+        result = self._run("wget --recursive https://example.com")
+        assert result.returncode == 1
+        assert "unsupported option" in result.stderr
+
+    def test_xclip_fallback_clipboard_roundtrip(self) -> None:
+        result = self._run(
+            "printf roundtrip | xclip -selection clipboard"
+            " && xclip -selection clipboard -o"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.rstrip("\r\n") == "roundtrip"
+
+    def test_xsel_fallback_clipboard_roundtrip(self) -> None:
+        result = self._run("printf seltest | xsel -b && xsel -bo")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.rstrip("\r\n") == "seltest"
+
+    def test_xclip_fallback_rejects_unsupported_option(self) -> None:
+        result = self._run("xclip -loops 3")
+        assert result.returncode == 1
+        assert "unsupported option" in result.stderr
+
+    def test_gsed_fallback_executes(self) -> None:
+        result = self._run("printf 'hello world\\n' | gsed 's/world/git-bash/'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "hello git-bash\n"
+
+    def test_gnu_g_prefix_fallback_executes(self) -> None:
+        result = self._run("gawk 'BEGIN{print 2+3}'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "5\n"
+
+    def test_tree_fallback_lists_directory(self, tmp_path: Path) -> None:
+        root = tmp_path / "tree_root"
+        (root / "sub").mkdir(parents=True)
+        (root / "a.txt").write_text("a", encoding="utf-8")
+        (root / "sub" / "b.txt").write_text("b", encoding="utf-8")
+        posix = str(root).replace("\\", "/")
+        result = self._run(f"tree -a {posix}")
+        assert result.returncode == 0, result.stderr
+        assert "a.txt" in result.stdout
+        assert "sub" in result.stdout
+        assert "b.txt" in result.stdout
+
+    def test_zip_fallback_roundtrip(self, tmp_path: Path) -> None:
+        root = tmp_path / "zip_root"
+        (root / "sub").mkdir(parents=True)
+        (root / "a.txt").write_text("alpha\n", encoding="utf-8")
+        (root / "sub" / "b.txt").write_text("beta\n", encoding="utf-8")
+        posix_root = str(root).replace("\\", "/")
+        posix_zip = str(tmp_path / "out.zip").replace("\\", "/")
+        result = self._run(
+            f"cd {posix_root} && zip -qr {posix_zip} a.txt sub"
+        )
+        assert result.returncode == 0, result.stderr
+        import zipfile
+
+        names = zipfile.ZipFile(tmp_path / "out.zip").namelist()
+        assert "a.txt" in names
+        assert "sub/b.txt" in names
+
+    def test_zip_fallback_rejects_unsupported_option(self) -> None:
+        result = self._run("zip --encrypt out.zip file.txt")
+        assert result.returncode == 1
+        assert "unsupported option" in result.stderr
+
+    def test_nc_z_fallback_open_and_closed_ports(self) -> None:
+        import socket
+        import threading
+
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept() -> None:
+            while not stop.is_set():
+                try:
+                    server.settimeout(0.2)
+                    conn, _ = server.accept()
+                    conn.close()
+                except OSError:
+                    continue
+
+        thread = threading.Thread(target=_accept, daemon=True)
+        thread.start()
+        try:
+            open_result = self._run(f"nc -z 127.0.0.1 {port}")
+            assert open_result.returncode == 0, open_result.stderr
+        finally:
+            stop.set()
+            server.close()
+        closed_result = self._run("nc -z -w 2 127.0.0.1 1")
+        assert closed_result.returncode == 1
+
+    def test_nc_fallback_rejects_non_scan_mode(self) -> None:
+        result = self._run("printf hi | nc 127.0.0.1 80")
+        assert result.returncode == 1
+        assert "only -z" in result.stderr
+
+    def test_pgrep_fallback_finds_bash(self) -> None:
+        result = self._run("pgrep bash")
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.split()
+        assert lines
+        assert all(line.isdigit() for line in lines)
+
+    def test_pgrep_fallback_no_match_returns_one(self) -> None:
+        result = self._run("pgrep kimix_no_such_process_name_zzz")
+        assert result.returncode == 1
+
+    def test_pkill_fallback_rejects_unsupported_option(self) -> None:
+        result = self._run("pkill --signal KILL kimix_no_such_process_name_zzz")
+        assert result.returncode == 1
+        assert "unsupported option" in result.stderr
+
+    def test_traceroute_fallback_localhost(self) -> None:
+        result = self._run("traceroute -n -m 1 127.0.0.1")
+        assert result.returncode == 0, result.stderr
+        assert "127.0.0.1" in result.stdout
+
+    def test_wl_clipboard_fallback_roundtrip(self) -> None:
+        result = self._run("printf wltest | wl-copy && wl-paste")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.rstrip("\r\n") == "wltest"
+
+    def test_python3_fallback_executes(self) -> None:
+        result = self._run("python3 --version")
+        assert result.returncode == 0, result.stderr
+        assert "Python 3" in result.stdout
+
+    def test_say_fallback_rejects_unsupported_option(self) -> None:
+        result = self._run("say -v Alex hello")
+        assert result.returncode == 1
+        assert "unsupported option" in result.stderr
 
     @pytest.mark.parametrize(
         ("command", "expected"),
@@ -3141,7 +3486,7 @@ class TestBashFixToolIntegration:
             result = await bash_instance(BashParams(cmd="printf abc | rev", mode="interactive"))
 
         assert isinstance(result, ToolOk)
-        command = process_task_class.call_args.args[1][1]
+        command = _decode_startup_command(process_task_class.call_args.args[1][1])
         assert command.endswith("\nprintf abc | rev; exec bash -i")
         for name in ("gtimeout", "rev", "xdg-open", "open", "pbcopy", "pbpaste"):
             assert f"{name}()" in command
@@ -3512,8 +3857,9 @@ class TestBashInteractiveArgumentBuilding:
             args = mock_pt.call_args
             bash_args = args[0][1]
             assert "-c" in bash_args
-            assert "echo start" in bash_args[1]
-            assert "exec bash -i" in bash_args[1]
+            decoded = _decode_startup_command(bash_args[1])
+            assert "echo start" in decoded
+            assert "exec bash -i" in decoded
             assert args.kwargs.get("append_newline") is True or args[0][4] is True
 
     async def test_interactive_args_without_cmd(self, mock_session: MagicMock) -> None:
@@ -3536,9 +3882,10 @@ class TestBashInteractiveArgumentBuilding:
             bash_args = args[0][1]
             assert bash_args[0] == "-c"
             assert bash_args[1].endswith("; exec bash -i")
-            assert "gtimeout()" in bash_args[1]
-            assert "rev()" in bash_args[1]
-            assert "export -f rev" in bash_args[1]
+            decoded = _decode_startup_command(bash_args[1])
+            assert "gtimeout()" in decoded
+            assert "rev()" in decoded
+            assert "export -f rev" in decoded
 
     async def test_interactive_returns_immediately(self, mock_session: MagicMock) -> None:
         with patch("kimix.tools.file.bash.bash_tool.find_bash", return_value=r"C:\Git\bin\bash.exe"), patch(
