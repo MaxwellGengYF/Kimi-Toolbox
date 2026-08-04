@@ -366,7 +366,7 @@ def print_usage(session: Session | None = None) -> None:
 def compact_default_context() -> None:
     if _globals._default_session and _globals._default_session.status.context_usage > 1e-8:
         if not base._quiet:
-            base._stream.colorful_print_word('Start compacting...', fg=Color.BRIGHT_CYAN, require_new_line=True)
+            base._stream.colorful_print_word('Start compacting...', fg=Color.BRIGHT_CYAN, require_new_line=True, flush=True)
         import time
         start_time = time.time()
         old_usage = percentage_and_token(_globals._default_session)
