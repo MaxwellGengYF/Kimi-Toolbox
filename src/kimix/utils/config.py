@@ -407,12 +407,85 @@ def init(
         print_debug(f"Ralph mode set to {ralph}.")
 
 
-# ── Existing _create_config (unchanged) ────────────────────────────────────
+# ── Generic config construction from a provider dict ───────────────────────
+
+
+def _resolve_api_key(provider_dict: dict[str, Any]) -> str:
+    """Resolve the API key from the provider dict or environment variables."""
+    api_key = provider_dict.get("api_key")
+    if not api_key:
+        api_key = os.environ.get("KIMI_API_KEY")
+    if not api_key:
+        api_key = os.environ.get("KIMIX_API_KEY")
+    if not api_key:
+        from kimix.ui.printing import print_warning
+
+        print_warning(
+            "api_key not found. May config in JSON, or set to env `KIMI_API_KEY` or `KIMIX_API_KEY`"
+        )
+        api_key = ""
+    return api_key
+
+
+def _build_llm_model(provider_dict: dict[str, Any]) -> "LLMModel":
+    """Build ``LLMModel`` generically from provider_dict keys.
+
+    Any key that is a declared field of ``LLMModel`` is extracted from
+    ``provider_dict`` and passed to the constructor.
+    """
+    from kimi_cli.config import LLMModel
+
+    model_data = {key: provider_dict[key] for key in LLMModel.model_fields if key in provider_dict}
+    model_data["max_context_size"] = int(model_data["max_context_size"])
+    return LLMModel(**model_data)
+
+
+def _build_llm_provider(provider_dict: dict[str, Any]) -> "LLMProvider":
+    """Build ``LLMProvider`` generically from provider_dict keys.
+
+    Any key that is a declared field of ``LLMProvider`` is extracted from
+    ``provider_dict``. Special handling applies to ``base_url``/``url``,
+    ``api_key``, ``oauth`` and ``openai_settings``.
+    """
+    from kimi_cli.config import LLMProvider
+
+    provider_data: dict[str, Any] = {}
+    for key in LLMProvider.model_fields:
+        if key == "base_url":
+            provider_data[key] = provider_dict.get("base_url") or provider_dict.get("url")
+        elif key == "api_key":
+            provider_data[key] = SecretStr(_resolve_api_key(provider_dict))
+        elif key == "oauth":
+            oauth_dict = provider_dict.get("oauth")
+            if isinstance(oauth_dict, dict):
+                provider_data[key] = OAuthRef(**oauth_dict)
+        elif key == "openai_settings":
+            settings_dict = provider_dict.get("openai_settings")
+            if isinstance(settings_dict, dict):
+                provider_data[key] = OpenAISettings(**settings_dict)
+        elif key in provider_dict:
+            provider_data[key] = provider_dict[key]
+    return LLMProvider(**provider_data)
+
+
+def _get_config_recognized_keys() -> set[str]:
+    """Return the set of provider_dict keys that are recognized by ``Config``.
+
+    This is derived directly from the declared fields of ``Config``,
+    ``LLMModel`` and ``LLMProvider``, plus legacy/alias keys.
+    """
+    from kimi_cli.config import LLMModel, LLMProvider
+
+    return (
+        set(Config.model_fields.keys())
+        | set(LLMModel.model_fields.keys())
+        | set(LLMProvider.model_fields.keys())
+        | {"url", "model_name", "name", "role"}
+    )
 
 
 def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config, dict[str, Any] | None]:
-    from kimi_cli.config import LLMModel, LLMProvider
-    from kimix.ui.printing import print_debug, print_warning
+    from kimix.ui.printing import print_warning
 
     provider_dict = provider_dict if provider_dict is not None else base._default_provider
     cfg = Config()
@@ -421,147 +494,50 @@ def _create_config(provider_dict: dict[str, Any] | None = None) -> tuple[Config,
         try:
             provider_dict = orjson.loads(
                 (Path(__file__).parent.parent / 'default_config.json').read_text(encoding='utf-8', errors='replace'))
-            if type(provider_dict) != dict:
+            if not isinstance(provider_dict, dict):
                 provider_dict = None
-        except:
+        except Exception:
             pass
-    if provider_dict is not None:
-        model = provider_dict.get('model')
-        max_context_size = provider_dict.get('max_context_size')
-        capabilities = set(provider_dict.get('capabilities', set()))
-        url = provider_dict.get('url')
-        provider_type = provider_dict.get("type")
-        assert provider_type is not None, "`provider_type` must be provided in config"
-        assert max_context_size is not None, "`max_context_size` must be provided in  config"
-        assert type(model) == str, "model(str) must be provided in config"
-        assert url is not None, "url must be provided in config"
 
-        env: dict | None =  provider_dict.get('env')
-        if env is not None:
+    if provider_dict is not None:
+        # Apply environment variables first.
+        env = provider_dict.get("env")
+        if isinstance(env, dict):
             for k, v in env.items():
                 os.environ[k] = v
-        max_context_size = int(max_context_size)
-        api_key = provider_dict.get('api_key', None)
-        if not api_key:
-            api_key = os.environ.get("KIMI_API_KEY")
-        if not api_key:
-            api_key = os.environ.get("KIMIX_API_KEY")
-        if not api_key:
-            print_warning(
-                'api_key not found. May config in JSON, or set to env `KIMI_API_KEY` or `KIMIX_API_KEY`')
-            api_key = ''
-        oath_dict = provider_dict.get('oauth')
-        oath : OAuthRef | None = None
-        if isinstance(oath_dict, dict):
-            oath = OAuthRef(key=oath_dict.get('key', ''))
-            oath.storage = oath_dict.get('storage', 'file')
-            assert isinstance(oath.storage, str), 'oath.storage must be str'
-            assert isinstance(oath.key, str), 'oath.key must be str'
-        else:
-            oath = None
-        openai_settings_dict = provider_dict.get('openai_settings')
-        openai_settings: OpenAISettings | None = None
-        if isinstance(openai_settings_dict, dict):
-            openai_settings = OpenAISettings(**openai_settings_dict)
-        cfg.provider = LLMProvider(
-            type=provider_type,
-            # example: "https://api.minimaxi.com/anthropic"
-            base_url=url,
-            api_key=SecretStr(api_key),
-            custom_headers=provider_dict.get('custom_headers'),
-            oauth=oath,
-            openai_settings=openai_settings,
+
+        # Validate required provider/model keys.
+        assert provider_dict.get("type") is not None, "`provider_type` must be provided in config"
+        assert provider_dict.get("max_context_size") is not None, "`max_context_size` must be provided in config"
+        assert isinstance(provider_dict.get("model"), str), "model(str) must be provided in config"
+        assert provider_dict.get("url") is not None or provider_dict.get("base_url") is not None, "url must be provided in config"
+
+        from kimi_cli.config import LLMModel, LLMProvider
+
+        provider_flat_keys = (
+            set(LLMModel.model_fields.keys())
+            | set(LLMProvider.model_fields.keys())
+            | {"url"}
         )
-        cfg.model = LLMModel(
-            model=model,
-            max_context_size=max_context_size,
-            capabilities=capabilities,
-        )
-        # Set loop control
-        loop_control = provider_dict.get('loop_control')
-        lc = LoopControl()
-        if loop_control and isinstance(loop_control, dict):
-            for key, value in loop_control.items():
-                if hasattr(lc, key):
-                    setattr(lc, key, value)
-        if base._default_ralph is not None and 'max_ralph_iterations' not in (loop_control or {}): # override
-            lc.max_ralph_iterations = base._default_ralph
-        cfg.loop_control = lc
-        def set_val(name: str, type_var: type) -> None:
-            v = provider_dict.get(name)
-            if v is not None:
-                setattr(cfg, name, type_var(v))
-        set_val('show_thinking_stream', bool)
-        # Set notifications
-        notifications = provider_dict.get('notifications')
-        if notifications and isinstance(notifications, dict):
-            nc = NotificationConfig()
-            for key, value in notifications.items():
-                if hasattr(nc, key):
-                    setattr(nc, key, value)
-            cfg.notifications = nc
-        # Set mcp
-        mcp = provider_dict.get('mcp')
-        if mcp and isinstance(mcp, dict):
-            mc = MCPConfig()
-            for key, value in mcp.items():
-                if hasattr(mc, key):
-                    setattr(mc, key, value)
-            cfg.mcp = mc
-        # Set LLM override settings
-        set_val('max_tokens', int)
-        set_val('thinking_effort', str)
-        set_val('temperature', float)
-        set_val('top_p', float)
-        set_val('top_k', int)
-        # Set background
-        background = provider_dict.get('background')
-        if background and isinstance(background, dict):
-            bc = BackgroundConfig()
-            for key, value in background.items():
-                if hasattr(bc, key):
-                    setattr(bc, key, value)
-            cfg.background = bc
-        # Set services (search, fetch)
-        services = provider_dict.get('services')
-        if services and isinstance(services, dict):
-            from kimi_cli.config import SearchConfig, FetchConfig
-            search_cfg = services.get('search')
-            if search_cfg and isinstance(search_cfg, dict):
-                cfg.services.search = SearchConfig(
-                    base_url=search_cfg.get('base_url', ''),
-                    api_key=SecretStr(search_cfg.get('api_key', '')),
-                    custom_headers=search_cfg.get('custom_headers'),
-                    oauth=(
-                        OAuthRef(key=search_cfg['oauth'].get('key', ''), storage=search_cfg['oauth'].get('storage', 'file'))
-                        if isinstance(search_cfg.get('oauth'), dict) else None
-                    ),
-                )
-            fetch_cfg = services.get('fetch')
-            if fetch_cfg and isinstance(fetch_cfg, dict):
-                cfg.services.fetch = FetchConfig(
-                    base_url=fetch_cfg.get('base_url', ''),
-                    api_key=SecretStr(fetch_cfg.get('api_key', '')),
-                    custom_headers=fetch_cfg.get('custom_headers'),
-                    oauth=(
-                        OAuthRef(key=fetch_cfg['oauth'].get('key', ''), storage=fetch_cfg['oauth'].get('storage', 'file'))
-                        if isinstance(fetch_cfg.get('oauth'), dict) else None
-                    ),
-                )
-        # Warn about unrecognized keys in provider_dict.
-        # recognized_keys must contain every key that is explicitly consumed above
-        # this point (including nested-dict keys handled via getattr checks), plus
-        # legacy keys that are accepted but ignored (model_name/name).
-        # When a new top-level key is added to the config contract, add it here.
-        recognized_keys = {
-            "model", "max_context_size", "capabilities", "url", "type", "env",
-            "api_key", "oauth", "openai_settings", "custom_headers", "loop_control",
-            "show_thinking_stream", "notifications", "mcp", "max_tokens",
-            "thinking_effort", "temperature", "top_p", "top_k", "background",
-            "services",
-            "model_name", "name", "role", 
+
+        # Build a normalized dict that matches the ``Config`` schema.
+        config_data: dict[str, Any] = {
+            key: value
+            for key, value in provider_dict.items()
+            if key in Config.model_fields and key not in provider_flat_keys
         }
-        unrecognized_keys = [k for k in provider_dict if k not in recognized_keys]
+        config_data["model"] = _build_llm_model(provider_dict)
+        config_data["provider"] = _build_llm_provider(provider_dict)
+
+        cfg = Config.model_validate(config_data)
+
+        # Ralph override only when not explicitly set in provider_dict.
+        if base._default_ralph is not None and 'max_ralph_iterations' not in (provider_dict.get('loop_control') or {}):
+            cfg.loop_control.max_ralph_iterations = base._default_ralph
+
+        # Warn about unrecognized keys.
+        unrecognized_keys = [k for k in provider_dict if k not in _get_config_recognized_keys()]
         if unrecognized_keys:
             print_warning(f"Unrecognized keys in provider_dict: {unrecognized_keys}")
+
     return cfg, provider_dict

@@ -87,148 +87,18 @@ def run_command(cmd: list[str], description: str) -> bool:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Winget helpers (Windows only)
-# ---------------------------------------------------------------------------
-
-
-def _parse_winget_version(output: str) -> str | None:
-    """Extract the first X.Y.Z version from winget tabular output.
-
-    Winget list/search output uses columns separated by 2+ spaces:
-
-        Name  ID  Version  [Available]  Source
-        ----  --- -------  ---------    ------
-        ...   ... X.Y.Z    ...          ...
-
-    Returns the first version-like string found (e.g. ``"1.2.3"``).
-    """
-    for line in output.splitlines():
-        line = line.strip()
-        if not line or line.startswith("-"):
-            continue
-        # Split on 2+ whitespace characters to get column values
-        parts = re.split(r"\s{2,}", line)
-        for part in parts:
-            m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", part)
-            if m:
-                return m.group(1)
-    return None
-
-
-def _get_winget_installed_version(package_id: str) -> str | None:
-    """Return the locally installed version of a winget *package_id*, or ``None``."""
-    try:
-        result = subprocess.run(
-            ["winget", "list", "--id", package_id, "--exact", "--disable-interactivity"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout:
-            return _parse_winget_version(result.stdout)
-    except Exception:
-        pass
-    return None
-
-
-def _get_winget_latest_version(package_id: str) -> str | None:
-    """Return the latest available version of a winget *package_id*, or ``None``."""
-    try:
-        result = subprocess.run(
-            ["winget", "search", package_id],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout:
-            return _parse_winget_version(result.stdout)
-    except Exception:
-        pass
-    return None
-
-
-def _winget_upgrade(package_id: str) -> bool:
-    """Run ``winget upgrade`` for *package_id* silently.
-
-    Returns ``True`` on success.
-    """
-    try:
-        result = subprocess.run(
-            [
-                "winget",
-                "upgrade",
-                "--id",
-                package_id,
-                "--exact",
-                "--silent",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def _install_coreutils() -> tuple[bool, bool]:
-    """Check version, install, or upgrade coreutils (Windows only).
+    """Check existence and install coreutils (Windows only).
 
     Returns (was_installed, should_restart_shell).
     """
     if sys.platform != "win32":
         return False, False
 
-    PACKAGE_ID = "Microsoft.Coreutils"
-    winget_available = shutil.which("winget") is not None
+    if command_exists("cat.exe"):
+        print("✅ Coreutils is already installed, skipping.")
+        return False, False
 
-    # --- Version check via winget (if available) ---
-    if winget_available:
-        installed_version = _get_winget_installed_version(PACKAGE_ID)
-
-        if installed_version is not None:
-            latest_version = _get_winget_latest_version(PACKAGE_ID)
-
-            if latest_version and installed_version != latest_version:
-                print(
-                    f"⚠️  Coreutils {installed_version} is installed, "
-                    f"but {latest_version} is available."
-                )
-                if _ask_yes_no("Upgrade Coreutils?"):
-                    print("\n▶ Upgrading Coreutils ...")
-                    success = _winget_upgrade(PACKAGE_ID)
-                    if success:
-                        print(f"✅ Coreutils upgraded to {latest_version}.")
-                        return True, True
-                    else:
-                        print("⚠️  Coreutils upgrade failed.")
-                        return False, False
-                else:
-                    print("⏭️  Skipping Coreutils upgrade.")
-                    return False, False
-            else:
-                # Up to date (or could not determine remote version)
-                print(f"✅ Coreutils {installed_version} is already the latest, skipping.")
-                return False, False
-        else:
-            # Not installed according to winget, but maybe cat.exe exists
-            # from a different installation method
-            if command_exists("cat.exe"):
-                print("✅ Coreutils is already installed (via other method), skipping.")
-                return False, False
-    else:
-        # Winget not available — fall back to checking cat.exe
-        if command_exists("cat.exe"):
-            print("✅ Coreutils is already installed, skipping.")
-            return False, False
-
-    # --- Not installed — ask and install via script ---
     if not _ask_yes_no("Microsoft Coreutils was not found. Install Coreutils?"):
         print("⏭️  Skipping Coreutils installation.")
         return False, False
