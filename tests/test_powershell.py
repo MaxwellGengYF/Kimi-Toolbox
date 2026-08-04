@@ -115,6 +115,25 @@ class TestPowershellParams:
         assert "background" in desc
 
 
+# ============================================================================
+# Powershell.description — pwsh_tool.md guidance text
+# ============================================================================
+
+class TestPowershellDescription:
+    """The Powershell tool description (loaded from pwsh_tool.md) steers the
+    agent to the Glob/Grep tools instead of shell search commands."""
+
+    def test_description_prefers_glob_grep_over_shell_search(
+        self, mock_session: MagicMock
+    ) -> None:
+        with _force_pwsh_enabled():
+            tool = Powershell(session=mock_session)
+        assert (
+            "Prefer `Glob`/`Grep` tools over `Get-ChildItem`/`Select-String`"
+            in tool.description
+        )
+
+
 class TestPowershellParamsFullCoverage:
     """Cover every PowershellParams field and alias."""
 

@@ -859,6 +859,7 @@ class Bash(CallableTool2[BashParams]):
     description: str = (
         "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
         "Accepts `cmd` or `command` parameter. "
+        "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
         "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
         "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
         + _interactive_scope_text(is_shell=True)

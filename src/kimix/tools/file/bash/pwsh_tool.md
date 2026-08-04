@@ -1,4 +1,4 @@
-Run a simple PowerShell command. Prefer Python for complex or stateful tasks.
+Run a simple PowerShell command. Prefer Python for complex or stateful tasks. Prefer `Glob`/`Grep` tools over `Get-ChildItem`/`Select-String` for file and content search.
 
 PowerShell quick reference:
 - Cmdlets use Verb-Noun names: Get-ChildItem (list files), Get-Content (read file), Set-Location (cd), Copy-Item, Move-Item, Remove-Item, New-Item, Select-String (grep), Get-Command, Get-Help.

@@ -2686,6 +2686,14 @@ class TestBashDescription:
         assert "auto-converted to forward slashes" not in tool.description
         assert "backslashes inside quotes are preserved" not in tool.description
 
+    def test_description_prefers_glob_grep_over_shell_search(
+        self, mock_session: MagicMock
+    ) -> None:
+        """The description steers the agent to Glob/Grep instead of find/grep/rg."""
+        for platform in ("win32", "linux"):
+            tool = self._make_tool(platform, mock_session)
+            assert "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg`" in tool.description
+
 
 # ============================================================================
 # Bash.__call__
