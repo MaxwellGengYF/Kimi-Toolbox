@@ -18,7 +18,7 @@ python -m kimix
 
 注意！这个仓库不止支持 KIMI LLM，支持各类 API Key! 如 OpenAI, Anthropic 等。各类默认 config 模板在 `docs/`, 配置后通过 `kimix --config=xx.json` 即可使用 !
 
-![teasor](teasor.png)
+![teasor](kimix_zh.png)
 ## 为什么选择 Kimi-CLI-X？
 
 Kimi-CLI-X 在原版 Kimi-CLI 基础上，围绕**提示词效率**、**工具可靠性**与**可扩展性**进行了深度优化，并补充了多款面向实际开发场景的工具。
