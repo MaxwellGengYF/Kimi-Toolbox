@@ -1089,3 +1089,38 @@ async def test_kimi_stream_sequential_parallel_tool_calls():
             {"arguments_part": '{"path":"b.txt"}'},
         ]
     )
+
+
+async def test_kimi_session_id_prompt_cache_key_in_body():
+    """The session id must reach the wire as ``prompt_cache_key``.
+
+    Doubles as the Phase-2 SDK-compat check: openai>=2.44 accepts
+    ``prompt_cache_key`` as a typed top-level kwarg, so it must appear in the
+    request body without any extra_body routing.
+    """
+    with respx.mock(base_url="https://api.moonshot.ai") as mock:
+        mock.post("/v1/chat/completions").mock(
+            return_value=Response(200, json=make_chat_completion_response("kimi-k2"))
+        )
+        provider = Kimi(
+            model="kimi-k2-turbo-preview", api_key="test-key", stream=False
+        ).with_generation_kwargs(prompt_cache_key="sess-abc-123")
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert body["prompt_cache_key"] == "sess-abc-123"
+
+
+async def test_kimi_without_prompt_cache_key_omits_field():
+    """No session id → no ``prompt_cache_key`` in the request body."""
+    with respx.mock(base_url="https://api.moonshot.ai") as mock:
+        mock.post("/v1/chat/completions").mock(
+            return_value=Response(200, json=make_chat_completion_response("kimi-k2"))
+        )
+        provider = Kimi(model="kimi-k2-turbo-preview", api_key="test-key", stream=False)
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert "prompt_cache_key" not in body

@@ -528,3 +528,32 @@ async def test_openai_responses_with_thinking_max_passes_through():
             pass
         body = json.loads(mock.calls.last.request.content.decode())
         assert body["reasoning"] == snapshot({"effort": "max", "summary": "auto"})
+
+
+async def test_openai_responses_session_id_user_in_body():
+    """The session id must reach the wire as ``user``, while server-side
+    session state (``store``) stays disabled for cross-provider sharing."""
+    with respx.mock(base_url="https://api.openai.com") as mock:
+        mock.post("/v1/responses").mock(return_value=Response(200, json=make_response()))
+        provider = OpenAIResponses(
+            model="gpt-4.1", api_key="test-key", stream=False
+        ).with_generation_kwargs(user="sess-abc-123")
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert body["user"] == "sess-abc-123"
+        assert body["store"] is False
+
+
+async def test_openai_responses_without_user_omits_field():
+    """No session id → no ``user`` in the request body; ``store`` stays False."""
+    with respx.mock(base_url="https://api.openai.com") as mock:
+        mock.post("/v1/responses").mock(return_value=Response(200, json=make_response()))
+        provider = OpenAIResponses(model="gpt-4.1", api_key="test-key", stream=False)
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert "user" not in body
+        assert body["store"] is False

@@ -34,6 +34,7 @@ from kosong.chat_provider.openai_common import (
 from kosong.contrib.chat_provider.common import (
     ToolMessageConversion,
     check_tool_call_id,
+    normalize_tool_call_ids,
     validate_tool_call_arguments,
 )
 from kosong.message import Message, TextPart, ThinkPart
@@ -92,6 +93,10 @@ class OpenAILegacy(OpenAICompatibleProviderMixin):
         frequency_penalty: float | None
         stop: str | list[str] | None
         prompt_cache_key: str | None
+        # Per-request session identity (see the session contract in
+        # ``kimi_cli.llm.create_llm``). The Chat Completions API has no
+        # server-side session; ``user`` is the standard identity field.
+        user: str | None
 
     _DEFAULT_SUPPORTED_EFFORTS: frozenset[ThinkingEffort] = frozenset(
         {"low", "medium", "high", "xhigh", "max"}
@@ -199,7 +204,14 @@ class OpenAILegacy(OpenAICompatibleProviderMixin):
         if system_prompt:
             # `system` vs `developer`: see `message_to_openai` comments
             messages.append({"role": "system", "content": system_prompt})
-        messages.extend(self._convert_message(message) for message in history)
+        # Normalize historical tool-call ids defensively: histories persisted
+        # under other providers (e.g. anthropic/kimi) or older sessions can
+        # carry ids strict OpenAI-compatible backends 400 on (e.g. ``Read:9``,
+        # ids >64 chars). Shared with the other providers so cross-provider
+        # session histories replay anywhere; input messages are never mutated.
+        messages.extend(
+            self._convert_message(message) for message in normalize_tool_call_ids(history)
+        )
 
         if self._reasoning_key is not None:
             extra_body_level = _reasoning_effort_to_extra_body_level(reasoning_effort)

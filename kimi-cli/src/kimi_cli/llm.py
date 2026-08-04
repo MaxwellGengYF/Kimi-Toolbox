@@ -118,6 +118,43 @@ def _kimi_default_headers(provider: LLMProvider, oauth: OAuthManager | None) -> 
     return headers
 
 LEGAL_THINKING_EFFORT = frozenset({"off", "low", "medium", "high", "xhigh", "max"})
+# ---------------------------------------------------------------------------
+# Cross-provider session contract
+# ---------------------------------------------------------------------------
+# A `Session` in kimi-cli is shared across providers via client-side history
+# replay: the whole conversation is persisted per Session (context.db /
+# context.jsonl) and replayed on every turn, so switching providers mid-session
+# keeps conversation continuity. `session_id` is NOT what carries the
+# conversation — it is only a per-request identity hint, mapped per provider:
+#
+#   kimi             -> `prompt_cache_key` (Moonshot server-side prompt cache
+#                                           key; scoped to the Moonshot
+#                                           backend only)
+#   anthropic        -> `metadata.user_id` (telemetry / abuse-tracking only;
+#                                           Anthropic prompt caching is
+#                                           content-addressed, so caches are
+#                                           never shared across providers)
+#   openai_legacy    -> `user`             (standard stateless identity field)
+#   openai_responses -> `user`             (identity field; server-side
+#                                           sessions stay disabled)
+#
+# OpenAI Responses `store=False` / no `previous_response_id` is intentional:
+# adopting server-side state would break cross-provider sharing (an
+# Anthropic/Kimi history cannot continue from an OpenAI response id) and would
+# leak provider-side state into client-persisted sessions.
+#
+# Identity fields are only set when `session_id` is truthy, so stateless
+# requests (user=None / no metadata / no prompt_cache_key) stay byte-identical.
+#
+# Notes:
+# - `user` / `metadata.user_id` are logged server-side; using the session id
+#   (uuid hex, 32 chars) there is the intended identity signal. That format is
+#   safe for all provider constraints (anthropic user_id <= 256 chars,
+#   Moonshot prompt_cache_key rules).
+# - Anthropic prompt caching is content-addressed: switching providers
+#   mid-session never reuses caches, so the first request on a new provider
+#   pays full input cost (cache creation) — expected, not a bug.
+# ---------------------------------------------------------------------------
 def create_llm(
     provider: LLMProvider,
     model: LLMModel,
@@ -233,6 +270,10 @@ def create_llm(
                 top_p = os.getenv("KIMI_MODEL_TOP_P")
             if top_p is not None:
                 gen_kwargs["top_p"] = float(top_p)
+            # Per-request session identity: the Chat Completions API has no
+            # server-side session; `user` is the standard identity field.
+            if session_id:
+                gen_kwargs["user"] = session_id
             if gen_kwargs:
                 chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
         case "openai_responses":
@@ -245,6 +286,15 @@ def create_llm(
                 default_headers=_kimi_default_headers(provider, oauth),
                 supported_efforts=model.supported_efforts,
             ).with_parallel_tool_calls(enabled=True)
+
+            # Per-request session identity. Server-side state (`store: true`,
+            # `previous_response_id`) must stay disabled — see the session
+            # contract comment above create_llm.
+            gen_kwargs: OpenAIResponses.GenerationKwargs = {}
+            if session_id:
+                gen_kwargs["user"] = session_id
+            if gen_kwargs:
+                chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
         case "anthropic":
             from kosong.contrib.chat_provider.anthropic import Anthropic
 

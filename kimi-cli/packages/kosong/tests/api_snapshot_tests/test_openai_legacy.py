@@ -785,3 +785,33 @@ async def test_openai_legacy_extra_body_user_supplied_preserved_when_auto_disabl
         assert body["thinking"] == {"keep": "all"}
         assert "reasoning" in body
         assert "chat_template_kwargs" in body
+
+
+async def test_openai_legacy_session_id_user_in_body():
+    """The session id must reach the wire as ``user``."""
+    with respx.mock(base_url="https://api.openai.com") as mock:
+        mock.post("/v1/chat/completions").mock(
+            return_value=Response(200, json=make_chat_completion_response("gpt-4.1"))
+        )
+        provider = OpenAILegacy(
+            model="gpt-4.1", api_key="test-key", stream=False
+        ).with_generation_kwargs(user="sess-abc-123")
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert body["user"] == "sess-abc-123"
+
+
+async def test_openai_legacy_without_user_omits_field():
+    """No session id → no ``user`` in the request body."""
+    with respx.mock(base_url="https://api.openai.com") as mock:
+        mock.post("/v1/chat/completions").mock(
+            return_value=Response(200, json=make_chat_completion_response("gpt-4.1"))
+        )
+        provider = OpenAILegacy(model="gpt-4.1", api_key="test-key", stream=False)
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert "user" not in body

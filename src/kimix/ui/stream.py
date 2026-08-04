@@ -665,8 +665,15 @@ class _ToolCallStreamPrinter:
         self._escape_buf += ch
         buf = self._escape_buf
         if len(buf) == 2 and buf[1] != 'u':
-            decoded = self._SIMPLE_ESCAPES.get(ch, ch)
+            decoded = self._SIMPLE_ESCAPES.get(ch)
             self._reset_escape()
+            if decoded is None:
+                # Unknown two-char escape (e.g. a single-backslash Windows
+                # path ``C:\dev\src`` or a regex ``\d`` emitted without
+                # JSON escaping): keep the backslash verbatim — decoding
+                # to the bare character would silently corrupt the
+                # displayed code.
+                decoded = f"\\{ch}"
             self._append_value_char(decoded)
         elif buf.startswith("\\u") and len(buf) == 6:
             self._reset_escape()
@@ -680,6 +687,25 @@ class _ToolCallStreamPrinter:
             # Should not happen; emit verbatim and recover.
             self._reset_escape()
             self._append_value_char(buf)
+        else:
+            # Incomplete ``\u`` escape.  A ``\u`` is only well-formed when
+            # exactly 4 hex digits follow (possibly split across streamed
+            # fragments).  A non-hex digit arriving before completion means
+            # this ``\u`` was never a unicode escape — LLMs emit raw ``\u``
+            # when writing Python raw strings like ``r"\u"`` or paths such
+            # as ``C:\users\...``.  Emit the buffered escape verbatim,
+            # reset, and reprocess the current character normally —
+            # otherwise a following closing quote would be swallowed and
+            # the rest of the JSON document would leak into the streamed
+            # value.
+            if len(buf) > 2 and ch not in "0123456789abcdefABCDEF":
+                self._reset_escape()
+                # Emit everything buffered so far *except* the offending
+                # character (it is not part of the escape), then reprocess
+                # the character normally — a closing quote still terminates
+                # the string, a plain char is appended exactly once.
+                self._append_value_char(buf[:-1])
+                self._feed_char(ch)
 
     def _reset_escape(self) -> None:
         self._in_escape = False

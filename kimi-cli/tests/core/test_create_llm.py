@@ -120,6 +120,102 @@ def test_create_llm_anthropic_without_session_id():
     assert llm.chat_provider._metadata is None
 
 
+def test_create_llm_kimi_with_session_id(monkeypatch):
+    provider = LLMProvider(
+        type="kimi",
+        base_url="https://api.test/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="kimi-base",
+        max_context_size=4096,
+        capabilities=None,
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, session_id="sess-abc-123")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, Kimi)
+    assert llm.chat_provider._generation_kwargs["prompt_cache_key"] == "sess-abc-123"
+
+
+def test_create_llm_openai_legacy_with_session_id(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, session_id="sess-abc-123")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider._generation_kwargs["user"] == "sess-abc-123"
+
+
+def test_create_llm_openai_legacy_without_session_id(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model)
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert "user" not in llm.chat_provider._generation_kwargs
+
+
+def test_create_llm_openai_responses_with_session_id():
+    provider = LLMProvider(
+        type="openai_responses",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+
+    llm = create_llm(provider, model, session_id="sess-abc-123")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAIResponses)
+    assert llm.chat_provider._generation_kwargs["user"] == "sess-abc-123"
+
+
+def test_create_llm_openai_responses_without_session_id():
+    provider = LLMProvider(
+        type="openai_responses",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+
+    llm = create_llm(provider, model)
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAIResponses)
+    assert "user" not in llm.chat_provider._generation_kwargs
+
+
 def test_create_llm_requires_base_url_for_kimi():
     provider = LLMProvider(type="kimi", base_url="", api_key=SecretStr("test-key"))
     model = LLMModel(model="kimi-base", max_context_size=4096)

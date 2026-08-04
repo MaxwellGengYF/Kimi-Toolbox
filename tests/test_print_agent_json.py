@@ -270,6 +270,178 @@ async def test_print_agent_json_stream_handles_split_unicode_escape(monkeypatch:
     assert "\\u4f" not in plain
 
 
+async def test_print_agent_json_split_unicode_escape_right_after_backslash_u(monkeypatch: Any) -> None:
+    """A valid ``\\uXXXX`` escape split immediately after the ``\\u`` (the
+    most fragile boundary for the escape state machine) must still decode."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+    )
+
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(ToolCallPart(arguments_part='{"content": "\\u'), session)
+    await base.print_agent_json(ToolCallPart(arguments_part='4f60"}'), session)
+
+    plain = _plain(chunks)
+    assert plain.count("你") == 1
+    assert "\\u4f" not in plain
+    assert base._stream._last_char_was_newline is True
+
+
+async def test_stream_malformed_unicode_escape_does_not_swallow_quote(monkeypatch: Any) -> None:
+    """Regression (Python tool): when the LLM emits a single-backslash ``\\u``
+    that is not a real unicode escape (e.g. a Python raw string ``r"\\u"``
+    serialized without JSON-escaped backslashes), the lexer used to swallow
+    the closing quote, leak the rest of the JSON document into the streamed
+    ``code:`` value and get stuck mid-string — the displayed code became
+    ``print(r\\u", "mode`` and the tool result merged into the garbage.
+
+    The malformed escape must be emitted verbatim, the string must still
+    terminate, and the remaining arguments must print normally.
+    """
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(name="Python", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(ToolCallPart(arguments_part='{"code": "print(r'), session)
+    await base.print_agent_json(ToolCallPart(arguments_part='\\u", "mode": "run"}'), session)
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(
+                is_error=False, message="success", output="", display=[]
+            ),
+        ),
+        session,
+    )
+
+    plain = _plain(chunks)
+    # The malformed escape is emitted verbatim, not dropped.
+    assert "print(r\\u" in plain
+    # No JSON scaffolding leaks into the streamed code value.
+    assert '", "mode' not in plain
+    assert '"}' not in plain
+    # The remaining argument prints normally under its own label.
+    assert " mode:run" in plain
+    # The tool result renders on its own line, not merged into the code.
+    assert "\n✓ Python" in plain
+
+
+async def test_stream_malformed_unicode_escape_recovers_mid_string(monkeypatch: Any) -> None:
+    """A malformed ``\\u`` followed by more string content (e.g. ``\\u12z``)
+    must emit the buffered escape verbatim and continue decoding the rest of
+    the value without duplicating or dropping characters."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(name="Python", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"code": "x = \\u12z", "mode": "run"}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    # ``\\u12`` emitted verbatim, ``z`` appended exactly once (no duplication).
+    assert "x = \\u12z" in plain
+    assert "x = \\u12zz" not in plain
+    assert " mode:run" in plain
+    # The streamed line is terminated cleanly before the tool result.
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(
+                is_error=False, message="success", output="", display=[]
+            ),
+        ),
+        session,
+    )
+    plain = _plain(chunks)
+    assert "\n✓ Python" in plain
+
+
+async def test_stream_single_backslash_windows_path_preserved(monkeypatch: Any) -> None:
+    """LLMs frequently emit single-backslash Windows paths in tool
+    arguments (``r'C:\\dev\\src'`` — invalid JSON escapes, but common).
+    Unknown two-char escapes must keep their backslash instead of decoding
+    to the bare character, so the path is not displayed mangled
+    (``C:devsrc``)."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(name="Python", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part='{"code": "p = r\'C:\\dev\\src\'", "timeout": 30}'),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "p = r'C:\\dev\\src'" in plain, f"path mangled: {plain!r}"
+    assert " timeout:30" in plain
+    # The streamed line is terminated cleanly before the tool result.
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(
+                is_error=False, message="success", output="", display=[]
+            ),
+        ),
+        session,
+    )
+    plain = _plain(chunks)
+    assert "\n✓ Python" in plain
+
+
+async def test_stream_unknown_escape_keeps_backslash(monkeypatch: Any) -> None:
+    """Regex escapes emitted without JSON escaping (``\\d``, ``\\s``) keep
+    their backslash in the streamed display instead of collapsing to the
+    bare letter."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    await base.print_agent_json(
+        ToolCall(
+            id="call-1",
+            function=ToolCall.FunctionBody(name="Python", arguments=None),
+        ),
+        session,
+    )
+    await base.print_agent_json(
+        ToolCallPart(arguments_part="{\"code\": \"import re\\nr = re.compile(r'\\d+\\s')\"}"),
+        session,
+    )
+
+    plain = _plain(chunks)
+    assert "r'\\d+\\s'" in plain, f"regex escapes mangled: {plain!r}"
+    # The streamed line is terminated cleanly before the tool result.
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(
+                is_error=False, message="success", output="", display=[]
+            ),
+        ),
+        session,
+    )
+    plain = _plain(chunks)
+    assert "\n✓ Python" in plain
+
+
 async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: Any) -> None:
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()

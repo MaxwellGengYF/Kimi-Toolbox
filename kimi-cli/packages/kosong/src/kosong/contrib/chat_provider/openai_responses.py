@@ -52,6 +52,7 @@ from kosong.contrib.chat_provider.common import (
     BaseStreamedMessage,
     ToolMessageConversion,
     check_tool_call_id,
+    normalize_tool_call_ids,
     validate_tool_call_arguments,
 )
 from kosong.message import (
@@ -189,7 +190,11 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
             inputs.append(system_message)
         # The `Message` type is OpenAI-compatible for Responses API `input` messages.
 
-        for message in history:
+        # Normalize historical tool-call ids defensively (parity with the
+        # anthropic/kimi providers) so sessions persisted under other providers
+        # replay cleanly: ids like ``Read:9`` or >64 chars would 400 on strict
+        # OpenAI-compatible backends. Input messages are never mutated.
+        for message in normalize_tool_call_ids(history):
             inputs.extend(self._convert_message(message))
 
         generation_kwargs: dict[str, Any] = {}
@@ -208,6 +213,12 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
             "model": self._model,
             "input": inputs,
             "tools": [_convert_tool(tool) for tool in tools],
+            # Server-side sessions must stay disabled for cross-provider
+            # session sharing: ``store=True``/``previous_response_id`` would
+            # break replay of anthropic/kimi histories (they cannot continue
+            # from an OpenAI response id) and leak provider-side state into
+            # client-persisted sessions. See the session contract in
+            # ``kimi_cli.llm.create_llm``. Identity is carried via ``user``.
             "store": False,
             **generation_kwargs,
         }

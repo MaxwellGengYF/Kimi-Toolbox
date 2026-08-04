@@ -1268,6 +1268,45 @@ async def test_anthropic_with_parallel_tool_calls_disabled():
         )
 
 
+async def test_anthropic_session_id_metadata_user_id_in_body():
+    """The session id must reach the wire as ``metadata.user_id``."""
+    with respx.mock(base_url="https://api.anthropic.com") as mock:
+        mock.post("/v1/messages").mock(
+            return_value=Response(200, json=make_anthropic_response())
+        )
+        provider = Anthropic(
+            model="claude-sonnet-4-20250514",
+            api_key="test-key",
+            default_max_tokens=1024,
+            stream=False,
+            metadata={"user_id": "sess-abc-123"},
+        )
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert body["metadata"] == {"user_id": "sess-abc-123"}
+
+
+async def test_anthropic_without_metadata_omits_field():
+    """No session id → no ``metadata`` in the request body."""
+    with respx.mock(base_url="https://api.anthropic.com") as mock:
+        mock.post("/v1/messages").mock(
+            return_value=Response(200, json=make_anthropic_response())
+        )
+        provider = Anthropic(
+            model="claude-sonnet-4-20250514",
+            api_key="test-key",
+            default_max_tokens=1024,
+            stream=False,
+        )
+        stream = await provider.generate("", [], [Message(role="user", content="Hi")])
+        async for _ in stream:
+            pass
+        body = json.loads(mock.calls.last.request.content.decode())
+        assert "metadata" not in body
+
+
 async def test_anthropic_aclose_is_idempotent():
     provider = Anthropic(
         model="claude-sonnet-4-20250514",
