@@ -26,7 +26,6 @@ from kimix.tools.common import (
     _env_with_rg_bin_path,
     _extract_export_path,
     _interactive_scope_text,
-    _long_pipeline_advice,
     _maybe_export_output_async,
     _maybe_rewrite_shell_command_with_rtk,
     _summarize_long_output_async,
@@ -356,12 +355,6 @@ class Powershell(CallableTool2[PowershellParams]):
                 transform_warning = '\n[WARNING]' + warning_lines
             executable = self._pwsh_fallback_path if self._pwsh_fallback_path else "powershell"
 
-        # Nudge the LLM backend towards the Python tool when the command is a
-        # long multi-operator one-liner (cheap: O(1) length gate, C-level
-        # operator-character gate, then a quote-aware early-exit scan).  Folded
-        # into ``transform_warning`` so every message below carries it.
-        transform_warning += _long_pipeline_advice(params.cmd)
-
         # Lightweight input validation before proceeding.
         # Skip validation for interactive sessions with no initial command
         # (empty cmd is valid in that case — just starts a shell).
@@ -638,7 +631,6 @@ class Powershell(CallableTool2[PowershellParams]):
             if fix.changed:
                 cmd = fix.command
                 note = "\n[WARNING] " + fix.warning
-        note += _long_pipeline_advice(params.cmd)
         self._resolve_pwsh()
         executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
         from kimix.tools.file.bash import shell_common
