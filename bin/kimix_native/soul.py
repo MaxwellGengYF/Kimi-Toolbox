@@ -2,7 +2,7 @@
 
 Native implementations live in ``runtime_py.soul`` (compiled kernels, GIL
 released). The pure-Python ``_compat`` mirrors below replicate the reference
-algorithms from C:/dev/kimi-agent (chat_provider/kimi.py _convert_message +
+algorithms from the kimi-agent repo (chat_provider/kimi.py _convert_message +
 _normalize_tool_call_ids, soul/context_pruning.py candidate selection,
 soul/message.py is_system_reminder_message, soul/dynamic_injection.py
 normalize_history, soul/compaction.py SimpleCompaction.prepare), so

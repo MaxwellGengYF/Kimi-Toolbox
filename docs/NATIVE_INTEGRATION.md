@@ -1,8 +1,9 @@
 # Native Integration (kimix-base `runtime_py` → kimi-agent)
 
 The performance-critical pure-Python code in this project can be accelerated
-by the native C++ runtime compiled in
-[`C:\dev\kimix-base`](https://github.com/…) (`runtime_py.pyd` + `runtime.dll`,
+by the native C++ runtime compiled in the
+[kimix-base](https://github.com/…) repo (a sibling of this checkout by
+default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd` + `runtime.dll`,
 pybind11 extension with submodules `text` / `index` / `search` / `parse` /
 `soul` / `tools` / `stream` / `codec` / `json` / `concurrency`).
 
@@ -13,26 +14,30 @@ bit-identical outputs.
 
 ## How it works
 
-1. **Build** the native library in kimix-base:
+1. **Build** the native library in kimix-base (``<kimix-base>`` is the repo
+   root — the `KIMIX_BASE` env var when set, otherwise the ``kimix-base``
+   sibling of this checkout):
 
    ```bash
-   cd C:\dev\kimix-base
+   cd <kimix-base>
    python bootstrap.py            # release build (artifacts in bin\release)
    # python bootstrap.py --debug  # debug build (bin\debug)
    ```
 
-2. **Stage** the binaries into this project's work-dir:
+2. **Stage** the binaries into this project's work-dir (``<repo>`` = this
+   checkout's root):
 
    ```bash
-   cd C:\dev\kimi-agent
+   cd <repo>
    python tools\sync_native.py              # copies from kimix-base\bin\release
    python tools\sync_native.py --mode debug # force a build mode
    python tools\sync_native.py --mode auto  # newest valid build
    ```
 
    `sync_native.py` copies `runtime_py.pyd` + `runtime.dll` (plus any runtime
-   DLL deps) **and the `kimix_native` shim package** into `C:\dev\kimi-agent\bin\`
-   — the default native path. Idempotent; run it before every test/bench run.
+   DLL deps) into `<repo>\bin\` — the default native path. The
+   `kimix_native` shim package is tracked by git (not ignored), so it is never
+   synced. Idempotent; run it before every test/bench run.
 
 3. **Load**: `kimix/native_loader.py` (re-exported by
    `kimi_cli/native_loader.py`) resolves the shim in this order:
@@ -42,7 +47,7 @@ bit-identical outputs.
    | 1 | `KIMIX_NATIVE_PATH` env var (explicit override, only dir tried) |
    | 2 | **`<repo>\bin`** — the sync destination (default) |
    | 3 | already importable on `sys.path` (pip-installed `kimix-native`) |
-   | 4 | dev-only last resort: `C:\dev\kimix-base\bin\{release,releasedbg,debug}` |
+   | 4 | dev-only last resort: `<kimix-base>\bin\{release,releasedbg,debug}` — where `<kimix-base>` is `$KIMIX_BASE` or the `kimix-base` sibling of this repo |
 
    The first usable directory is inserted on `sys.path` and the `kimix_native`
    shim is imported once (cached). No absolute cross-repo path is baked into
@@ -78,6 +83,7 @@ Measured on this machine (release build, 200k iterations):
 | `KIMIX_NATIVE=1` | **require** native; `ImportError` if the .pyd is missing |
 | `KIMIX_NATIVE=auto` (default) | native when importable, Python fallback otherwise |
 | `KIMIX_NATIVE_<KERNEL>=0` | disable one kernel (TEXT/INDEX/SEARCH/PARSE/SOUL/TOOLS/STREAM/CODEC/JSON/CONCURRENCY) |
+| `KIMIX_BASE=<dir>` | kimix-base repo root for the dev-only fallback & `sync_native.py` (default: the `kimix-base` sibling of this checkout) |
 
 Per-kernel toggles make every kernel switchable and reversible without code
 changes — each kernel has a bit-identical Python fallback.
@@ -142,8 +148,9 @@ errors, determinism, thread-safety smoke).
   output change in this repo.
 - **Benchmark tradeoff**: small per-call kernels can be *slower* native due to
   the Python→C boundary (see the NOT integrated table). Bulk kernels win big.
-- `bin\` is gitignored; re-run `tools\sync_native.py` after every kimix-base
-  rebuild.
+- `bin\` is gitignored except the tracked `bin\kimix_native\` shim; re-run
+  `tools\sync_native.py` after every kimix-base rebuild to refresh the
+  binaries.
 
 ## Adding a new kernel
 

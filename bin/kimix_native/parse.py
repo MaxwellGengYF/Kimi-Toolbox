@@ -2,7 +2,7 @@
 
 Native implementations live in ``runtime_py.parse`` (compiled kernels, GIL
 released). The pure-Python ``_compat`` mirrors are the reference algorithms
-from C:/dev/kimi-agent (vendored in ``_parse_compat.py`` and
+from the kimi-agent repo (vendored in ``_parse_compat.py`` and
 ``_shell_compat.py``, with attribution), so ``use_native("PARSE") is False``
 yields bit-identical behavior.
 

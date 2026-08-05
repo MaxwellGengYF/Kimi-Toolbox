@@ -2,7 +2,7 @@
 
 Native implementations live in ``runtime_py.tools`` (compiled kernels, GIL
 released). The ``_compat`` mirrors below replicate the reference algorithms
-from C:/dev/kimi-agent (hash_line.py::compute_line_hash, find_str.py::
+from the kimi-agent repo (hash_line.py::compute_line_hash, find_str.py::
 find_in_file, grep_local.py backup_grep content-mode line scanning), so
 ``use_native("TOOLS") is False`` yields bit-identical behavior.
 

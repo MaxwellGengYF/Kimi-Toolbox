@@ -2,10 +2,16 @@
 """Install script for the project using uv."""
 
 import os
+import platform
+import re
 import shutil
 import subprocess
-import re
 import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 
 
@@ -309,6 +315,288 @@ def _install_rtk() -> tuple[bool, bool]:
         return False, False
 
 
+# ---------------------------------------------------------------------------
+# kimix_base native runtime (download + unpack into bin/)
+# ---------------------------------------------------------------------------
+
+# Release metadata for the kimix_base native runtime (runtime_py.pyd +
+# runtime.dll). The release asset naming rule is:
+#   kimix_base-<platform>-<arch>-<version>.zip
+# e.g. kimix_base-windows-x64-0.1.0.zip under
+# https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/...
+KIMIX_BASE_VERSION = "0.1.0"
+KIMIX_BASE_RELEASE_URL = (
+    "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release"
+)
+KIMIX_BASE_NATIVE_FILES = ("runtime.dll", "runtime_py.pyd")
+
+
+def _kimix_base_platform_arch() -> tuple[str, str]:
+    """Detect ``(platform, arch)`` for the kimix_base archive name rule.
+
+    Supported platforms: windows / macos / linux.
+    Supported architectures: x64 / x86 / arm64.
+    """
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        arch = "x64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    elif machine in ("x86", "i386", "i686"):
+        arch = "x86"
+    else:
+        raise RuntimeError(f"Unsupported architecture for kimix_base: {machine}")
+
+    if sys.platform == "win32":
+        os_name = "windows"
+    elif sys.platform == "darwin":
+        os_name = "macos"
+    elif sys.platform.startswith("linux"):
+        os_name = "linux"
+    else:
+        raise RuntimeError(f"Unsupported platform for kimix_base: {sys.platform}")
+    return os_name, arch
+
+
+def _kimix_base_archive_name(
+    os_name: str, arch: str, version: str = KIMIX_BASE_VERSION
+) -> str:
+    """Return the release archive file name (``kimix_base-<platform>-<arch>-<version>.zip``)."""
+    return f"kimix_base-{os_name}-{arch}-{version}.zip"
+
+
+def _kimix_base_download_url(
+    os_name: str, arch: str, version: str = KIMIX_BASE_VERSION
+) -> str:
+    """Return the full download URL for the kimix_base release archive."""
+    return f"{KIMIX_BASE_RELEASE_URL}/{_kimix_base_archive_name(os_name, arch, version)}"
+
+
+def _download_file(url: str, dest: Path) -> None:
+    """Download *url* to *dest* with a progress indicator.
+
+    Raises urllib.error.HTTPError / urllib.error.URLError on failure.
+    """
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "kimi-agent-install/1.0"}
+    )
+    with urllib.request.urlopen(request, timeout=300) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        downloaded = 0
+        with open(dest, "wb") as fh:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = min(100, int(downloaded * 100 / total))
+                    sys.stdout.write(f"\r  {pct}%")
+                    sys.stdout.flush()
+        print()  # newline after the progress line
+
+
+def _extract_zip(archive: Path, dest: Path) -> None:
+    """Extract a ``.zip`` archive into *dest* (created if missing).
+
+    Uses the standard-library ``zipfile`` module — the same dependency-free
+    approach as the ripgrep/rtk installers
+    (``kimi_cli._ripgrep_common._extract_rg_archive``) — so no third-party
+    package is required.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(path=dest)
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(
+            f"Failed to extract {archive.name}: not a valid zip archive"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Failed to extract {archive.name}") from exc
+
+
+def _unlink_with_retry(path: Path, attempts: int = 5, delay: float = 1.0) -> None:
+    """Delete *path*, retrying on transient Windows file locks (e.g. AV scans)."""
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
+def _stage_native_files(src_dir: Path, dest_dir: Path) -> list[str]:
+    """Copy the native artifacts found under *src_dir* into *dest_dir*.
+
+    The release archive may place ``runtime_py.pyd`` + ``runtime.dll`` at the
+    archive root or inside a sub-directory, so the directory holding
+    ``runtime_py.pyd`` is located by walking *src_dir*. ``runtime.dll``,
+    ``runtime_py.pyd`` and any sibling ``*.dll`` runtime dependencies are then
+    copied into *dest_dir* (the same layout contract as tools/sync_native.py:
+    ``runtime.dll`` + ``runtime_py.pyd`` at the root of ``bin/``). Returns the
+    list of copied file names.
+    """
+    pyd_dirs = sorted(
+        d for d in src_dir.rglob("*") if d.is_dir() and (d / "runtime_py.pyd").is_file()
+    )
+    source = pyd_dirs[0] if pyd_dirs else src_dir
+    if not (source / "runtime_py.pyd").is_file() or not (source / "runtime.dll").is_file():
+        raise RuntimeError(
+            f"archive does not contain runtime_py.pyd + runtime.dll (checked {source})"
+        )
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    locked: list[str] = []
+    for name in sorted(os.listdir(source)):
+        path = source / name
+        if not path.is_file():
+            continue
+        if name in KIMIX_BASE_NATIVE_FILES or name.lower().endswith(".dll"):
+            try:
+                shutil.copy2(path, dest_dir / name)
+                copied.append(name)
+            except OSError:
+                locked.append(name)
+    if locked:
+        raise RuntimeError(
+            "cannot overwrite "
+            + ", ".join(locked)
+            + f" in {dest_dir}: the file(s) are in use by a running process "
+            "(e.g. a kimix/agent session that loaded the native runtime from bin/). "
+            "Close that process and re-run."
+        )
+    return copied
+
+
+def _verify_native_binaries(bin_dir: Path) -> tuple[bool, str]:
+    """Verify the staged native runtime in *bin_dir*.
+
+    Checks that ``runtime.dll`` + ``runtime_py.pyd`` exist and that the
+    ``kimix_native`` shim can import the compiled extension. ``KIMIX_NATIVE=1``
+    is forced so a broken/mismatched pyd is an error instead of a silent pure-
+    Python fallback. Returns ``(ok, version_or_error)``.
+    """
+    for name in KIMIX_BASE_NATIVE_FILES:
+        if not (bin_dir / name).is_file():
+            return False, f"missing {name}"
+    code = (
+        "import sys;"
+        f"sys.path.insert(0, {str(bin_dir)!r});"
+        "import kimix_native;"
+        "assert kimix_native._native is not None, 'native extension failed to load';"
+        "print(kimix_native.version())"
+    )
+    env = dict(os.environ)
+    env["KIMIX_NATIVE"] = "1"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        return False, f"verification command failed: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        return False, (detail[-1] if detail else f"exit code {result.returncode}")
+    return True, result.stdout.strip()
+
+
+def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> bool:
+    """Download the kimix_base native runtime and unpack it into ``bin/``.
+
+    The archive name follows the rule
+    ``kimix_base-<platform>-<arch>-<version>.zip`` (e.g.
+    ``kimix_base-windows-x64-0.1.0.zip``). The ``.zip`` is downloaded to a
+    temporary location, extracted, staged into *bin_dir* (default
+    ``<repo>\bin`` — the same layout as the current ``runtime.dll`` +
+    ``runtime_py.pyd``), verified by importing the extension, and the
+    downloaded archive is deleted on success.
+
+    When the staged runtime already loads and its version matches
+    ``KIMIX_BASE_VERSION`` the download is skipped; a version mismatch prompts
+    a reinstall. Pass ``force=True`` to always re-download and re-install.
+
+    Returns True when the runtime is installed (or was already installed and
+    verified); False when skipped or failed (non-fatal, matching the other
+    optional binary installers in this script).
+    """
+    if bin_dir is None:
+        bin_dir = Path(__file__).resolve().parent / "bin"
+
+    already, installed_version = _verify_native_binaries(bin_dir)
+    if already and not force:
+        if KIMIX_BASE_VERSION in installed_version:
+            print("✅ kimix_base native runtime is already installed and verified, skipping.")
+            return True
+        print(
+            f"⚠️  kimix_base native runtime found but version is {installed_version!r}, "
+            f"expected {KIMIX_BASE_VERSION}."
+        )
+        if not _ask_yes_no("Reinstall kimix_base native runtime to the expected version?"):
+            print("⏭️  Skipping kimix_base reinstall.")
+            return False
+
+    if not _ask_yes_no(
+        "kimix_base native runtime (runtime_py.pyd + runtime.dll) was not found/verified. "
+        "Download and install it?"
+    ):
+        print("⏭️  Skipping kimix_base native runtime installation.")
+        return False
+
+    try:
+        os_name, arch = _kimix_base_platform_arch()
+    except RuntimeError as exc:
+        print(f"⚠️  {exc}")
+        return False
+
+    archive_name = _kimix_base_archive_name(os_name, arch)
+    url = _kimix_base_download_url(os_name, arch)
+    print(f"\n▶ Downloading kimix_base native runtime {KIMIX_BASE_VERSION} ({os_name}-{arch}) ...")
+    print(f"   {url}")
+
+    tmpdir: Path | None = None
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="kimi-kimix-base-"))
+        archive_path = tmpdir / archive_name
+        extract_dir = tmpdir / "extract"
+
+        _download_file(url, archive_path)
+        print(f"\n▶ Extracting {archive_name} ...")
+        _extract_zip(archive_path, extract_dir)
+        copied = _stage_native_files(extract_dir, bin_dir)
+        print(f"   staged into {bin_dir}: {', '.join(copied)}")
+
+        ok, message = _verify_native_binaries(bin_dir)
+        if not ok:
+            raise RuntimeError(f"verification failed: {message}")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        print(f"❌ Failed to download kimix_base native runtime: {exc}")
+        if tmpdir is not None and archive_path.exists():
+            print(f"   Downloaded archive kept at {archive_path} for debugging.")
+        return False
+    except (RuntimeError, OSError) as exc:
+        print(f"❌ Failed to install kimix_base native runtime: {exc}")
+        if tmpdir is not None and archive_path.exists():
+            print(f"   Downloaded archive kept at {archive_path} for debugging.")
+        return False
+
+    # Success: delete the downloaded archive (only on success), then clean up.
+    _unlink_with_retry(archive_path)
+    print(f"🗑️  Removed downloaded archive {archive_path.name}.")
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print(f"✅ kimix_base native runtime {KIMIX_BASE_VERSION} installed and verified: {message}")
+    return True
+
+
 def main() -> int:
     # 1. Check if python or uv exists
     has_python = command_exists("python") or command_exists("python3")
@@ -369,7 +657,10 @@ def main() -> int:
     else:
         print("⏭️  Skipping uv sync. Dependencies may be out of date.")
 
-    # 5. Run uv tool install -e .
+    # 5. Install the kimix_base native runtime (download + unpack into bin/)
+    _install_kimix_native()
+
+    # 6. Run uv tool install -e .
     if _ask_yes_no("Install tool in editable mode?"):
         if not run_command(["uv", "tool", "install", "-e", "."], "Installing tool in editable mode"):
             print(

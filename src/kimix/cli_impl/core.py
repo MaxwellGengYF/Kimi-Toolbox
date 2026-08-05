@@ -1,7 +1,9 @@
+import os
 from pathlib import Path
 from typing import Any
 
 import kimix.base as base
+from kimix import native_loader
 from kimix.base import sync_all
 from kimix.ui.printing import (
     print_debug,
@@ -20,6 +22,24 @@ from .commands import _cmd_unknown, _command_map
 from .utils import _input
 
 exec_ctx: dict[str, Any] = {}
+
+
+def _check_native() -> None:
+    """Detect the optional native acceleration path and log its status.
+
+    The native library (``runtime_py.pyd`` + ``runtime.dll`` wrapped by the
+    ``kimix_native`` shim) is an OPTIONAL acceleration. When it loads, an info
+    log confirms it is enabled; when the binary is missing or the library is
+    invalid, ``kimix.native_loader`` falls back to pure Python and a concise
+    warning is logged through ``kimix.ui.printing`` so the fallback does not
+    go unnoticed. ``KIMIX_NATIVE=0`` (explicit opt-out) prints nothing.
+    """
+    if native_loader.NATIVE_AVAILABLE:
+        print_debug("Native acceleration enabled.")
+        return
+    if os.environ.get("KIMIX_NATIVE") == "0":
+        return  # Explicit opt-out; the user asked for pure Python.
+    print_warning("Native acceleration unavailable, falling back to pure-Python.")
 
 
 def _enable_line_editing() -> None:
@@ -138,6 +158,8 @@ def _client_cli() -> None:
 def _run_cli() -> None:
     global exec_ctx
     exec_ctx = {"__name__": "__main__"}
+
+    _check_native()
 
     subcmd, args = set_arg()
 

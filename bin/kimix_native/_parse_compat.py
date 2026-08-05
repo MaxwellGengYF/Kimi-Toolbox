@@ -1,6 +1,6 @@
 """Vendored pure-Python mirrors of the kimi-agent comment parsers.
 
-Copied (with attribution) from C:/dev/kimi-agent/src/kimix/parser/ so the
+Copied (with attribution) from the kimi-agent repo's src/kimix/parser/ so the
 shim has a bit-exact fallback when the reference checkout is not importable.
 The classes are used unchanged (same algorithm, same quirks); only the import
 of the base module is redirected to the definitions below.

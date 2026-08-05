@@ -1,6 +1,6 @@
 """Vendored pure-Python mirrors of the kimi-agent bash/pwsh scanners.
 
-Copied (with attribution) from C:/dev/kimi-agent/src/kimix/tools/file/bash/
+Copied (with attribution) from the kimi-agent repo's src/kimix/tools/file/bash/
 so the shim has a bit-exact fallback when the reference checkout is not
 importable. Only the self-contained scanner code is vendored (no tool I/O).
 

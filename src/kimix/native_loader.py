@@ -1,7 +1,7 @@
 """kimix.native_loader — resolve and load the ``kimix_native`` shim.
 
 The native acceleration path (``runtime_py.pyd`` + ``runtime.dll`` compiled
-from C:/dev/kimix-base, plus the pure-Python ``kimix_native`` shim that wraps
+in the kimix-base repo, plus the pure-Python ``kimix_native`` shim that wraps
 them) is OPTIONAL. This module locates the shim using an ordered list of
 search paths, inserts the first usable directory on ``sys.path`` and imports
 it once (cached). When the binaries are missing the loader degrades to the
@@ -13,15 +13,17 @@ Search order (first usable directory wins):
 1. ``KIMIX_NATIVE_PATH`` env var — explicit override; when set, only that
    directory is tried.
 2. **default**: ``<repo root>\\bin`` — the current project work-dir where
-   ``tools\\sync_native.py`` stages ``runtime_py.pyd`` + ``runtime.dll`` +
-   the ``kimix_native`` shim package. "Repo root" is the parent of
+   ``tools\\sync_native.py`` stages ``runtime_py.pyd`` + ``runtime.dll`` (the
+   ``kimix_native`` shim package is tracked by git and always present there).
+   "Repo root" is the parent of
    ``src/kimix`` (falling back to ``os.getcwd()`` when the repo layout is not
    detectable, e.g. an installed wheel).
 3. Already importable on ``sys.path`` (a ``runtime_py`` import that succeeds
    elsewhere, e.g. a pip-installed ``kimix-native`` wheel).
-4. Dev-only last resort: ``C:/dev/kimix-base/bin/{release,releasedbg,debug}``
+4. Dev-only last resort: ``<kimix-base>/bin/{release,releasedbg,debug}``
    (plus the sibling ``python`` dir for the shim) — convenience for local
-   development, never required.
+   development, never required. ``<kimix-base>`` is the ``KIMIX_BASE`` env
+   var when set, otherwise the ``kimix-base`` sibling of this repo root.
 
 Env toggles (same contract as the shim):
 
@@ -30,6 +32,8 @@ Env toggles (same contract as the shim):
 * ``KIMIX_NATIVE=auto`` (default) — native when importable, fallback otherwise.
 * ``KIMIX_NATIVE_<KERNEL>=0`` — disable one kernel (TEXT|INDEX|SEARCH|PARSE|
   SOUL|TOOLS|STREAM|CODEC|JSON|CONCURRENCY) while the rest stay native.
+* ``KIMIX_BASE=<dir>`` — kimix-base repo root for the dev-only fallback
+  (priority 4); defaults to the ``kimix-base`` sibling of this repo root.
 """
 
 from __future__ import annotations
@@ -82,13 +86,26 @@ def _repo_root() -> str:
     return os.getcwd()  # repo layout not detectable (installed wheel etc.)
 
 
+def _dev_base() -> str:
+    """kimix-base repo root for the dev-only fallback (priority 4).
+
+    ``$KIMIX_BASE`` overrides the default, which is the ``kimix-base``
+    sibling of this repo root — no absolute path is baked in, so the loader
+    works on any platform/layout without editing code.
+    """
+    env = os.environ.get("KIMIX_BASE")
+    if env:
+        return env
+    return os.path.join(os.path.dirname(_repo_root()), "kimix-base")
+
+
 def _candidate_dirs() -> list[str]:
     """Ordered candidate directories (env override short-circuits)."""
     env = os.environ.get("KIMIX_NATIVE_PATH")
     if env:
         return [env]
     dirs = [os.path.join(_repo_root(), "bin")]
-    base = os.path.join(os.path.dirname(_repo_root()), "kimix-base", "bin")
+    base = os.path.join(_dev_base(), "bin")
     for mode in _DEV_MODES:
         dirs.append(os.path.join(base, mode))
     return dirs
