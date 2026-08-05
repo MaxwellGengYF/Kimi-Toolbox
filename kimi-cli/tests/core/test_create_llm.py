@@ -216,6 +216,27 @@ def test_create_llm_openai_responses_without_session_id():
     assert "user" not in llm.chat_provider._generation_kwargs
 
 
+def test_create_llm_openai_responses_maps_max_tokens_to_max_output_tokens():
+    provider = LLMProvider(
+        type="openai_responses",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-5.6-sol",
+        max_context_size=372000,
+        capabilities={"thinking"},
+    )
+
+    llm = create_llm(provider, model, max_tokens=128000, thinking=True)
+
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAIResponses)
+    assert llm.chat_provider._generation_kwargs["max_output_tokens"] == 128000
+    assert "max_tokens" not in llm.chat_provider._generation_kwargs
+    assert "max_completion_tokens" not in llm.chat_provider._generation_kwargs
+
+
 def test_create_llm_requires_base_url_for_kimi():
     provider = LLMProvider(type="kimi", base_url="", api_key=SecretStr("test-key"))
     model = LLMModel(model="kimi-base", max_context_size=4096)

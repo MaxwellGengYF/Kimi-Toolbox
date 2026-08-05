@@ -291,6 +291,10 @@ def create_llm(
             # `previous_response_id`) must stay disabled — see the session
             # contract comment above create_llm.
             gen_kwargs: OpenAIResponses.GenerationKwargs = {}
+            if max_tokens is not None:
+                # Responses API uses `max_output_tokens`; `max_tokens` is a
+                # Chat Completions parameter and must not be sent here.
+                gen_kwargs["max_output_tokens"] = int(max_tokens)
             if session_id:
                 gen_kwargs["user"] = session_id
             if gen_kwargs:
