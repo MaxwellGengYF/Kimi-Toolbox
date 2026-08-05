@@ -119,6 +119,43 @@ _POWERSHELL_PASTE = (
     "[Console]::Out.Write((Get-Clipboard -Raw))'"
 )
 
+# Windows cmd-style command fallbacks.  These names are not part of the Git
+# Bash POSIX userland and are commonly emitted by agents accustomed to cmd.exe
+# or cross-platform documentation.  Each fallback is only installed when Git
+# Bash cannot already resolve the command via ``command -v``.
+
+_TASKLIST_PS = (
+    "Get-Process | Select-Object Name, Id, CPU, WorkingSet | Format-Table -AutoSize"
+)
+
+_TASKKILL_PS = (
+    "$force = $env:__KIMIX_FORCE -eq '1'; "
+    "if ($env:__KIMIX_PID) { Stop-Process -Id $env:__KIMIX_PID -Force:$force; exit 0 } "
+    "$procs = Get-Process | Where-Object { $_.Name -eq $env:__KIMIX_IM }; "
+    "if ($procs) { $procs | Stop-Process -Force:$force; exit 0 } else { exit 1 }"
+)
+
+_SYSTEMINFO_PS = "Get-ComputerInfo | Format-List"
+
+_KILLALL_PS = (
+    "$procs = Get-Process | Where-Object { $_.Name -eq $env:__KIMIX_NAME }; "
+    "if ($procs) { $procs | Stop-Process -Force; exit 0 } else { exit 1 }"
+)
+
+_PIDOF_PS = (
+    "$ids = (Get-Process | Where-Object { $_.Name -eq $env:__KIMIX_NAME }).Id; "
+    "if ($ids) { $ids -join \" \"; exit 0 } else { exit 1 }"
+)
+
+_COLUMN_PERL = (
+    "perl -e '"
+    "my $sep = shift @ARGV; $sep = qr/\\s+/ if $sep eq \"DEFAULT\"; "
+    "my @rows; my @max; "
+    "while (<>) { chomp; my @c = split $sep; push @rows, \\@c; "
+    "for my $i (0..$#c) { $max[$i] = length($c[$i]) if !defined $max[$i] || length($c[$i]) > $max[$i]; } } "
+    "for my $r (@rows) { print join(\"  \", map { sprintf(\"%-*s\", $max[$_]//0, $r->[$_]) } 0..$#$r), \"\\n\"; }'"
+)
+
 _FALLBACK_BODIES = {
     "gtimeout": "timeout \"$@\"",
     "rev": (
@@ -319,6 +356,105 @@ _FALLBACK_BODIES = {
     ),
     "python3": 'python "$@"',
     "pip3": 'pip "$@"',
+    # Windows cmd-style commands -> POSIX/Git Bash equivalents.
+    "copy": (
+        "if [[ $# -lt 2 ]]; then "
+        "printf '%s\\n' 'copy: missing source or destination' >&2; return 1; fi; "
+        "cp -R -- \"$@\""
+    ),
+    "move": (
+        "if [[ $# -lt 2 ]]; then "
+        "printf '%s\\n' 'move: missing source or destination' >&2; return 1; fi; "
+        "mv -- \"$@\""
+    ),
+    "del": "rm -- \"$@\"",
+    "erase": "rm -- \"$@\"",
+    "ren": (
+        "if [[ $# -ne 2 ]]; then "
+        "printf '%s\\n' 'ren: exactly two arguments required' >&2; return 1; fi; "
+        "mv -- \"$1\" \"$2\""
+    ),
+    "rename": (
+        "if [[ $# -ne 2 ]]; then "
+        "printf '%s\\n' 'rename: exactly two arguments required' >&2; return 1; fi; "
+        "mv -- \"$1\" \"$2\""
+    ),
+    "rd": "rmdir -- \"$@\"",
+    "md": "mkdir -p -- \"$@\"",
+    "chdir": "cd -- \"$@\"",
+    "cls": "clear",
+    "xcopy": "cp -r -- \"$@\"",
+    "mklink": (
+        "local __kimix_hard=0 __kimix_link='' __kimix_target=''; "
+        "while (( $# )); do case $1 in "
+        "/D|/d|/J|/j) shift;; "
+        "/H|/h) __kimix_hard=1; shift;; "
+        "*) if [[ -z $__kimix_link ]]; then __kimix_link=$1; "
+        "elif [[ -z $__kimix_target ]]; then __kimix_target=$1; "
+        "else printf '%s\\n' 'mklink: too many arguments' >&2; return 1; fi; "
+        "shift;; esac; done; "
+        "if [[ -z $__kimix_link || -z $__kimix_target ]]; then "
+        "printf '%s\\n' 'mklink: missing link name or target' >&2; return 1; fi; "
+        "if (( __kimix_hard )); then ln -f -- \"$__kimix_target\" \"$__kimix_link\"; "
+        "else ln -s -- \"$__kimix_target\" \"$__kimix_link\"; fi"
+    ),
+    "findstr": "grep \"$@\"",
+    "fc": "diff \"$@\"",
+    "where": "which \"$@\"",
+    "tasklist": (
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _TASKLIST_PS + "'"
+    ),
+    "taskkill": (
+        "local __kimix_force=0 __kimix_pid='' __kimix_im=''; "
+        "while (( $# )); do case $1 in "
+        "/F|/f) __kimix_force=1; shift;; "
+        "/IM|/im) __kimix_im=$2; shift 2;; "
+        "/PID|/pid) __kimix_pid=$2; shift 2;; "
+        "/*) printf '%s\\n' \"taskkill: unsupported option: $1\" >&2; return 1;; "
+        "*) printf '%s\\n' \"taskkill: unsupported argument: $1\" >&2; return 1;; esac; done; "
+        "if [[ -n $__kimix_pid ]]; then "
+        "__KIMIX_FORCE=$__kimix_force __KIMIX_PID=$__kimix_pid "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _TASKKILL_PS + "'; "
+        "elif [[ -n $__kimix_im ]]; then "
+        "__KIMIX_FORCE=$__kimix_force __KIMIX_IM=$__kimix_im "
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _TASKKILL_PS + "'; "
+        "else printf '%s\\n' 'taskkill: missing /PID or /IM' >&2; return 1; fi"
+    ),
+    "systeminfo": (
+        "powershell.exe -NoProfile -NonInteractive -Command '" + _SYSTEMINFO_PS + "'"
+    ),
+    # POSIX utilities often absent from a bare Git Bash userland.
+    "watch": (
+        "local __kimix_interval=2; "
+        "while (( $# )); do case $1 in "
+        "-n) __kimix_interval=$2; shift 2;; "
+        "-n?*) __kimix_interval=${1#-n}; shift;; "
+        "-t|-d|--no-title|--color) shift;; "
+        "--) shift; break;; "
+        "-*) printf '%s\\n' \"watch: unsupported option: $1\" >&2; return 1;; "
+        "*) break;; esac; done; "
+        "if [[ $# -eq 0 ]]; then printf '%s\\n' 'watch: missing command' >&2; return 1; fi; "
+        "while true; do clear; \"$@\"; sleep \"$__kimix_interval\"; done"
+    ),
+    "killall": (
+        "if [[ $# -eq 0 ]]; then printf '%s\\n' 'killall: missing process name' >&2; return 1; fi; "
+        "__KIMIX_NAME=$1 powershell.exe -NoProfile -NonInteractive -Command '" + _KILLALL_PS + "'"
+    ),
+    "pidof": (
+        "if [[ $# -eq 0 ]]; then printf '%s\\n' 'pidof: missing process name' >&2; return 1; fi; "
+        "__KIMIX_NAME=$1 powershell.exe -NoProfile -NonInteractive -Command '" + _PIDOF_PS + "'"
+    ),
+    "column": (
+        "local __kimix_sep='DEFAULT'; "
+        "while (( $# )); do case $1 in "
+        "-t) shift;; "
+        "-s) __kimix_sep=$2; shift 2;; "
+        "-s?*) __kimix_sep=${1#-s}; shift;; "
+        "-*) printf '%s\\n' \"column: unsupported option for perl fallback: $1\" >&2; return 1;; "
+        "*) break;; esac; done; "
+        + _COLUMN_PERL
+        + " \"$__kimix_sep\" \"$@\""
+    ),
 }
 
 
@@ -366,6 +502,11 @@ def _wrapper_runner(name: str) -> str:
     script = _fallback_definition(name) + f"; {name} \"$@\""
     return "/usr/bin/bash -c " + _single_quote(script) + " --"
 
+
+# ``netcat`` is a common synonym for ``nc`` on systems where the binary is
+# spelled with the longer name; both are absent from Git Bash, so share the
+# same ``/dev/tcp`` zero-I/O fallback.
+_FALLBACK_BODIES.setdefault("netcat", _FALLBACK_BODIES["nc"])
 
 _FALLBACKS = {name: _fallback_definition(name) for name in _FALLBACK_BODIES}
 

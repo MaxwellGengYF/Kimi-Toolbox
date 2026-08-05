@@ -786,6 +786,7 @@ class TestBashFixMappings:
               ("gsed -n 1p file", "sed -n 1p file", "gsed"),
               ("zip -r out.zip dir", "Compress-Archive dir out.zip", "zip"),
               ("nc -z example.com 80", "Test-NetConnection example.com -Port 80", "nc"),
+              ("netcat -z example.com 80", "Test-NetConnection example.com -Port 80", "netcat"),
               ("pgrep bash", "Get-Process bash", "pgrep"),
               ("tree -L 1 dir", "Get-ChildItem dir", "tree"),
               ("say hello", "SpeechSynthesizer hello", "say"),
@@ -816,7 +817,6 @@ class TestBashFixMappings:
             "find . -name '*.py'",
             "xargs echo",
             "tac file",
-            "column -t file",
             "numfmt 1000",
             "nproc",
             "getconf PATH",
@@ -836,7 +836,6 @@ class TestBashFixMappings:
             "ss -ltn",
             "lsof file",
             "free -h",
-            "watch date",
             "systemctl status service",
             "service app status",
               "apt update",
@@ -1247,6 +1246,97 @@ class TestBashFixFalsePositives:
     )
     def test_opaque_wrapper_forms_are_preserved(self, source: str) -> None:
         assert _fix_for_windows(source) == BashFix(source)
+
+
+class TestBashFixNewFallbacks:
+    """Tests for Windows cmd-style and missing-POSIX fallback commands."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "copy a b",
+            "move a b",
+            "del a",
+            "erase a",
+            "ren a b",
+            "rename a b",
+            "rd d",
+            "md d",
+            "chdir /tmp",
+            "cls",
+            "xcopy a b",
+            "mklink /D link target",
+            "mklink link target",
+            "findstr x file",
+            "fc a b",
+            "where bash",
+            "tasklist",
+            "taskkill /IM notepad /F",
+            "taskkill /PID 1234",
+            "systeminfo",
+            "watch -n 1 true",
+            "killall bash",
+            "pidof bash",
+            "column -t file",
+            "column -s , -t file",
+        ],
+    )
+    def test_new_fallbacks_are_rewritten(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.changed
+        assert result.command.endswith("\n" + source)
+        name = source.split()[0]
+        assert name in result.replacements
+
+    def test_multiple_new_fallbacks_preserve_order(self) -> None:
+        source = "copy a b; move c d; del e"
+        result = _fix_for_windows(source)
+        assert result.replacements == ("copy", "move", "del")
+
+    def test_new_fallbacks_in_pipes_and_substitutions(self) -> None:
+        source = "pidof bash | killall bash"
+        result = _fix_for_windows(source)
+        assert result.replacements == ("pidof", "killall")
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "echo copy a b",
+            "name=copy",
+            "tool=move",
+            "array=(del erase)",
+            "printf > md",
+            "cat < rd",
+            "echo /usr/bin/copy",
+            "./copy",
+            "bin/move",
+            "$tool",
+            "${tool}",
+            "$(printf copy)",
+            "echo `printf del`",
+            "echo copy # copy a b",
+            "case value in copy) echo match;; esac",
+            "alias copy='printf alias'",
+            "function copy { printf custom; }",
+            "copy() { printf custom; }",
+            "declare -f copy",
+            "type copy",
+            "command -v copy",
+            "which copy",
+            "echo tasklist",
+            "echo watch date",
+        ],
+    )
+    def test_new_fallback_data_and_declarations_unchanged(
+        self, source: str
+    ) -> None:
+        assert _fix_for_windows(source) == BashFix(source)
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "freebsd", "cygwin"])
+    def test_new_fallbacks_noop_on_non_windows(self, platform: str) -> None:
+        source = "copy a b; tasklist; watch -n 1 date"
+        result = _fix_for_platform(source, platform)
+        assert result == BashFix(source)
 
 
 class TestBashFixRobustness:
@@ -2047,6 +2137,96 @@ class TestBashFixRealGitBash:
         result = self._run("setsid-kimix-command-that-does-not-exist")
         assert result.returncode == 127
         assert "command not found" in result.stderr.lower()
+
+    def test_copy_fallback_executes(self, tmp_path: Path) -> None:
+        source = tmp_path / "copy_src.txt"
+        source.write_text("copy-fixture\n", encoding="utf-8")
+        src = str(source).replace("\\", "/")
+        dst = str(tmp_path / "copy_dst.txt").replace("\\", "/")
+        result = self._run(f"copy {src} {dst}")
+        assert result.returncode == 0, result.stderr
+        assert Path(dst).read_text(encoding="utf-8") == "copy-fixture\n"
+
+    def test_move_fallback_executes(self, tmp_path: Path) -> None:
+        source = tmp_path / "move_src.txt"
+        source.write_text("move-fixture\n", encoding="utf-8")
+        src = str(source).replace("\\", "/")
+        dst = str(tmp_path / "move_dst.txt").replace("\\", "/")
+        result = self._run(f"move {src} {dst}")
+        assert result.returncode == 0, result.stderr
+        assert not source.exists()
+        assert Path(dst).read_text(encoding="utf-8") == "move-fixture\n"
+
+    @pytest.mark.parametrize("cmd", ["del", "erase"])
+    def test_del_and_erase_fallback_executes(self, cmd: str, tmp_path: Path) -> None:
+        target = tmp_path / f"{cmd}_target.txt"
+        target.write_text("data", encoding="utf-8")
+        path = str(target).replace("\\", "/")
+        result = self._run(f"{cmd} {path}")
+        assert result.returncode == 0, result.stderr
+        assert not target.exists()
+
+    @pytest.mark.parametrize("cmd", ["ren", "rename"])
+    def test_ren_and_rename_fallback_executes(self, cmd: str, tmp_path: Path) -> None:
+        source = tmp_path / f"{cmd}_src.txt"
+        source.write_text("rename-fixture\n", encoding="utf-8")
+        src = str(source).replace("\\", "/")
+        dst = str(tmp_path / f"{cmd}_dst.txt").replace("\\", "/")
+        result = self._run(f"{cmd} {src} {dst}")
+        assert result.returncode == 0, result.stderr
+        assert not source.exists()
+        assert Path(dst).read_text(encoding="utf-8") == "rename-fixture\n"
+
+    def test_md_and_rd_fallback_executes(self, tmp_path: Path) -> None:
+        directory = str(tmp_path / "md_rd_dir").replace("\\", "/")
+        result = self._run(f"md {directory} && rd {directory}")
+        assert result.returncode == 0, result.stderr
+        assert not (tmp_path / "md_rd_dir").exists()
+
+    def test_chdir_fallback_executes(self) -> None:
+        result = self._run("chdir /tmp && pwd")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().endswith("/tmp")
+
+    def test_mklink_fallback_creates_symlink(self, tmp_path: Path) -> None:
+        source = tmp_path / "sym_target.txt"
+        source.write_text("symlink-fixture\n", encoding="utf-8")
+        src = str(source).replace("\\", "/")
+        dst = str(tmp_path / "sym_link.txt").replace("\\", "/")
+        result = self._run(f"mklink {dst} {src}")
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "sym_link.txt").exists()
+        assert (
+            tmp_path / "sym_link.txt"
+        ).read_text(encoding="utf-8") == "symlink-fixture\n"
+
+    def test_mklink_hard_link_fallback_executes(self, tmp_path: Path) -> None:
+        source = tmp_path / "hard_src.txt"
+        source.write_text("hard-link-fixture\n", encoding="utf-8")
+        src = str(source).replace("\\", "/")
+        dst = str(tmp_path / "hard_dst.txt").replace("\\", "/")
+        result = self._run(f"mklink /H {dst} {src}")
+        assert result.returncode == 0, result.stderr
+        assert Path(dst).read_text(encoding="utf-8") == "hard-link-fixture\n"
+
+    def test_pidof_fallback_finds_bash(self) -> None:
+        result = self._run("pidof bash")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip()
+        assert all(p.strip().isdigit() for p in result.stdout.split())
+
+    def test_killall_nonexistent_returns_one(self) -> None:
+        result = self._run("killall kimix_no_such_process_name_zzz")
+        assert result.returncode == 1
+
+    def test_column_fallback_formats_table(self, tmp_path: Path) -> None:
+        source = tmp_path / "column_input.txt"
+        source.write_text("alpha beta\ngamma delta\n", encoding="utf-8")
+        path = str(source).replace("\\", "/")
+        result = self._run(f"column -t {path}")
+        assert result.returncode == 0, result.stderr
+        assert "alpha" in result.stdout
+        assert "beta" in result.stdout
 
 
 # ============================================================================

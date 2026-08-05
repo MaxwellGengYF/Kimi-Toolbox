@@ -29,6 +29,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from kimix_native import workspace as _native_workspace
+    from kimix_native import use_native as _native_use_native
+except Exception:  # noqa: S110 — shim is optional
+    _native_workspace = None
+    _native_use_native = None
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -144,6 +151,12 @@ def cleanup_worker_workspace(worker_path: Path, kind: str, main_work_dir: Path) 
 
 def _snapshot_files(root: Path) -> dict[str, bytes]:
     """Snapshot relative path -> content bytes for diff computation."""
+    if _native_use_native is not None and _native_use_native("WORKSPACE"):
+        return _native_workspace.snapshot(
+            str(root),
+            ignore_dirs=[".git", ".venv", "venv", "node_modules", "__pycache__"],
+        )
+
     import xxhash  # noqa: F401 — fast hashing available if needed later
 
     snapshot: dict[str, bytes] = {}
@@ -201,6 +214,11 @@ def collect_diff(worker_path: Path, kind: str, before_snapshot: dict[str, bytes]
     # Copy mode: diff before/after snapshots textually.
     before = before_snapshot or {}
     after = _snapshot_files(worker_path)
+
+    if _native_use_native is not None and _native_use_native("WORKSPACE"):
+        diff_bytes = _native_workspace.diff_snapshots(before, after)
+        return diff_bytes.decode("utf-8", errors="replace")
+
     chunks: list[str] = []
     for rel in sorted(set(before) | set(after)):
         old = before.get(rel, b"").decode("utf-8", errors="replace").splitlines(keepends=True)

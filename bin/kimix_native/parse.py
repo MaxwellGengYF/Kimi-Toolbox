@@ -32,6 +32,8 @@ Native-path notes (documented deviations):
 
 from __future__ import annotations
 
+import re
+
 from . import _native, use_native
 from . import _parse_compat as _compat
 from . import _shell_compat as _shell
@@ -42,6 +44,24 @@ from ._shell_compat import BashFix, PwshFix  # noqa: F401
 
 _LANG_NAMES = ("c", "python", "shell", "sql", "html", "lisp", "pascal")
 _KIND_NAMES = ("line", "block", "doc")
+
+# Fallback command names added after the native PARSE kernel was built.  The
+# kernel scanner does not know these words, so the shim routes any ASCII
+# command that likely contains one of them as an executable word to the
+# pure-Python reference implementation (``_shell_compat`` mirrors
+# ``bash_fix.py``).  This keeps behaviour bit-identical without waiting for a
+# kernel rebuild.
+_POST_KERNEL_FALLBACKS = frozenset({
+    "netcat",
+    "copy", "move", "del", "erase", "ren", "rename", "rd", "md", "chdir",
+    "cls", "xcopy", "mklink", "findstr", "fc", "where", "tasklist", "taskkill",
+    "systeminfo", "watch", "killall", "pidof", "column",
+})
+_POST_KERNEL_RE = re.compile(
+    r"(?:^|[\s;|&(){}!\n])"
+    r"(?:" + "|".join(map(re.escape, _POST_KERNEL_FALLBACKS)) + r")"
+    r"(?=[\s;|&(){}<>\n]|$)"
+)
 
 _COMPAT_PARSERS = {
     "c": _compat.CParser,
@@ -383,6 +403,12 @@ def fix_bash_command(cmd: str) -> BashFix:
     if not isinstance(cmd, str):
         raise TypeError("cmd must be a string")
     if not _shell_native("bash_fix", cmd):
+        return _shell.fix_bash_command(cmd)
+    # Fallback commands added after the compiled kernel was built are not
+    # recognised by the native scanner.  Route commands that may contain such
+    # newer aliases through the pure-Python reference so behaviour stays
+    # bit-identical with ``bash_fix.py`` until the kernel is rebuilt.
+    if _POST_KERNEL_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)

@@ -598,7 +598,7 @@ def _find_dq_end(cmd: str, start: int) -> int:
 
 
 def _process_unquoted(cmd: str) -> str:
-    """Convert unquoted backslashes to forward slashes in ``cmd``.
+    r"""Convert unquoted backslashes to forward slashes in ``cmd``.
 
     Walks the string in *unquoted mode* (the same rules that apply at the
     top level of a bash command): a bare ``\`` followed by a non-metachar

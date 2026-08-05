@@ -325,18 +325,32 @@ def _compat_normalize_tool_call_ids(history: list[dict]) -> list[tuple]:
 
 
 def _compat_is_system_reminder(msg: dict) -> bool:
-    if msg.get("role") != "user" or len(msg.get("content") or []) != 1:
+    if msg.get("role") != "user":
         return False
-    part = (msg.get("content") or [])[0]
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.strip().startswith("<system-reminder>")
+    if not content or len(content) != 1:
+        return False
+    part = content[0]
+    if not isinstance(part, dict):
+        return False
     return part.get("type") == "text" and (
         (part.get("text") or "").strip().startswith("<system-reminder>")
     )
 
 
 def _compat_is_notification(msg: dict) -> bool:
-    if msg.get("role") != "user" or len(msg.get("content") or []) != 1:
+    if msg.get("role") != "user":
         return False
-    part = (msg.get("content") or [])[0]
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.lstrip().startswith("<notification ")
+    if not content or len(content) != 1:
+        return False
+    part = content[0]
+    if not isinstance(part, dict):
+        return False
     return part.get("type") == "text" and (
         (part.get("text") or "").lstrip().startswith("<notification ")
     )
@@ -486,6 +500,213 @@ def _compat_prune_scan(history: list[dict], policy: dict | None = None) -> list[
     return actions
 
 
+def _compat_prune_history(messages: list[dict], policy: dict) -> dict:
+    """Full prune_history pass (Plan 017): Tier A drops + Tier B elision stubs.
+
+    Mirrors ContextPruner.prune but uses the explicit ``max_elision_tokens``
+    budget from the policy instead of computing one from token counts.
+    """
+    policy = dict(policy or {})
+    stable_prefix = policy.get("stable_prefix_messages", 4)
+    recent_protected = policy.get("recent_messages_protected", 6)
+    current_turn = policy.get("current_turn_index")
+    max_tokens = policy.get("max_elision_tokens", 0)
+    min_tokens = policy.get("tool_output_min_tokens", 512)
+    superseded_enabled = policy.get("superseded_read_enabled", True)
+    oversized_enabled = policy.get("oversized_output_enabled", True)
+    stale_enabled = policy.get("stale_tool_result_enabled", True)
+    n = len(messages)
+
+    # ---- protected set -----------------------------------------------------
+    protected: set[int] = set()
+    for i in range(min(stable_prefix, n)):
+        protected.add(i)
+    tail: list[int] = []
+    for i in range(n - 1, -1, -1):
+        if len(tail) >= recent_protected:
+            break
+        if messages[i].get("role") in ("user", "assistant"):
+            tail.append(i)
+    for i in tail:
+        protected.add(i)
+    pair_ids: set[str] = set()
+    for i in protected:
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            pair_ids.update(tc.get("id", "") for tc in msg["tool_calls"])
+    for j in range(n):
+        if j in protected:
+            continue
+        if messages[j].get("role") == "tool" and messages[j].get("tool_call_id") in pair_ids:
+            protected.add(j)
+    if current_turn is not None:
+        for i in range(current_turn, n):
+            protected.add(i)
+
+    # ---- per-message text --------------------------------------------------
+    texts = [_compat_text(m) for m in messages]
+
+    def _first_text(msg: dict) -> str:
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if not content:
+            return ""
+        first = content[0]
+        if not isinstance(first, dict):
+            return ""
+        if first.get("type") == "text":
+            return first.get("text") or ""
+        if first.get("type") == "think":
+            return first.get("think") or ""
+        return ""
+
+    first_texts = [_first_text(m) for m in messages]
+
+    # ---- Tier B helpers ----------------------------------------------------
+    def is_superseded(i: int) -> bool:
+        text = texts[i]
+        if not text.strip():
+            return False
+        for j in range(i + 1, n):
+            if messages[j].get("role") == "tool":
+                later = texts[j]
+                if later and ("Tool output is empty" in later or len(later) < len(text) // 2):
+                    return True
+        return False
+
+    def is_resolved(i: int) -> bool:
+        text = texts[i]
+        if "<system>ERROR:" not in text:
+            return False
+        for j in range(i + 1, n):
+            if messages[j].get("role") == "tool":
+                later = texts[j]
+                if later and "<system>ERROR:" not in later:
+                    return True
+        return False
+
+    def is_oversized(i: int) -> bool:
+        return max(len(texts[i]) // 4, 1) >= min_tokens
+
+    # ---- collect candidates ------------------------------------------------
+    candidates: list[tuple[int, int, str, str]] = []  # (index, savings, tier, kind)
+
+    # Tier A: ephemeral drops (task snapshots keep only the latest).
+    snapshots = [
+        i
+        for i in range(n)
+        if i not in protected
+        and policy.get("drop_task_snapshots", True)
+        and _compat_is_task_snapshot(messages[i])
+    ]
+    latest_snapshot = max(snapshots) if snapshots else -1
+
+    for i in range(n):
+        if i in protected:
+            continue
+        if _compat_is_ephemeral(messages[i], policy):
+            savings = max(len(first_texts[i]) // 4, 1)
+            if _compat_is_task_snapshot(messages[i]):
+                if len(snapshots) >= 2 and i != latest_snapshot:
+                    candidates.append((i, savings, "A", "ephemeral"))
+            else:
+                candidates.append((i, savings, "A", "ephemeral"))
+
+    # Tier B: substantive elision (superseded -> oversized -> resolved).
+    for i in range(n):
+        if i in protected:
+            continue
+        if messages[i].get("role") != "tool":
+            continue
+        savings = max(len(texts[i]) // 4, 1)
+        if superseded_enabled and is_superseded(i):
+            candidates.append((i, savings, "B", "superseded_read"))
+            continue
+        if oversized_enabled and is_oversized(i):
+            candidates.append((i, savings, "B", "oversized_output"))
+            continue
+        if stale_enabled and is_resolved(i):
+            candidates.append((i, savings, "B", "resolved_error"))
+
+    if not candidates:
+        return {
+            "messages": list(messages),
+            "elided": [],
+            "freed_tokens": 0,
+            "earliest_removed_index": None,
+        }
+
+    # ---- greedy tail-inward selection --------------------------------------
+    candidates.sort(key=lambda x: (-x[0], 0 if x[2] == "A" else 1, -x[1]))
+    selected_indices: set[int] = set()
+    total_freed = 0
+    selected: list[tuple[int, int, str, str]] = []
+    for idx, savings, tier, kind in candidates:
+        if total_freed >= max_tokens:
+            break
+        if idx in selected_indices:
+            continue
+        selected_indices.add(idx)
+        total_freed += savings
+        selected.append((idx, savings, tier, kind))
+
+    if not selected:
+        return {
+            "messages": list(messages),
+            "elided": [],
+            "freed_tokens": 0,
+            "earliest_removed_index": None,
+        }
+
+    # ---- build result ------------------------------------------------------
+    # Sort selected by index ascending so refs are assigned in index order.
+    selected.sort(key=lambda x: x[0])
+    selected_by_index = {idx: (savings, tier, kind) for idx, savings, tier, kind in selected}
+
+    result_messages: list[dict] = []
+    elided: list[dict] = []
+    ref_counter = 0
+    changes: set[int] = set()
+
+    for i, msg in enumerate(messages):
+        if i not in selected_indices:
+            result_messages.append(msg)
+            continue
+
+        changes.add(i)
+        _, tier, kind = selected_by_index[i]
+        if tier == "A":
+            continue
+
+        ref = f"prune_{ref_counter}"
+        ref_counter += 1
+        savings, _, _ = selected_by_index[i]
+        stub_text = (
+            f"<system>[context-elided: {kind} — content elided. "
+            f"~{savings} tokens freed. "
+            f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
+        )
+        elided.append({
+            "index": i,
+            "role": msg.get("role"),
+            "kind": kind,
+            "summary": f"{kind} at index {i}",
+            "original_text": texts[i],
+            "ref": ref,
+        })
+        new_msg = dict(msg)
+        new_msg["content"] = [{"type": "text", "text": stub_text}]
+        result_messages.append(new_msg)
+
+    return {
+        "messages": result_messages,
+        "elided": elided,
+        "freed_tokens": total_freed,
+        "earliest_removed_index": min(changes) if changes else None,
+    }
+
+
 def _compat_count_leading_reminders(history: list[dict]) -> int:
     count = 0
     for msg in history:
@@ -580,6 +801,16 @@ def prune_scan(history: list[dict], policy: dict | None = None) -> list[tuple]:
             (int(i), int(r)) for i, r in _native.soul.prune_scan(buf, structure, policy)
         ]
     return _compat_prune_scan(history, policy)
+
+
+def prune_history(messages: list[dict], policy: dict) -> dict:
+    """Full prune pass: Tier A drops + Tier B elision stubs.
+
+    Returns ``{messages, elided, freed_tokens, earliest_removed_index}``.
+    """
+    if _USE:
+        return _native.soul.prune_history(messages, policy)
+    return _compat_prune_history(messages, policy)
 
 
 def count_leading_reminders(history: list[dict]) -> int:
