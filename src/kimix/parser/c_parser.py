@@ -84,6 +84,12 @@ class CParser(BaseParser):
     )
 
     def parse(self, source_code: str) -> ParseResult:  # noqa: C901
+        # Native acceleration: kimix_native.parse.parse (c).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("c", "C", source_code)
+        if native is not None:
+            return native
+        
         """Parse C-family source code and extract comments.
 
         Args:

@@ -35,6 +35,53 @@ class ParseResult:
         return [c for c in self.comments if c.kind == kind]
 
 
+def native_parse_result(
+    lang: str,
+    app_language: str,
+    source_code: str,
+) -> ParseResult | None:
+    """Route a parser invocation to the native kernel (kimix_native.parse).
+
+    Returns an app-shaped :class:`ParseResult` (comments converted to this
+    module's :class:`Comment`) when the native path is active, else None so
+    the caller runs its original pure-Python body unchanged.
+
+    Args:
+        lang: native language key ("c", "python", "shell", "sql",
+            "html", "lisp", "pascal").
+        app_language: the language label the app parsers put into
+            ``ParseResult.language`` (e.g. "C", "Python").
+        source_code: source text to parse.
+    """
+    try:
+        from kimix.native_loader import get_module, use_native
+    except Exception:
+        # kimix.native_loader unavailable (e.g. kimix-base's isolated
+        # reference-test env loads this file into a synthetic package):
+        # run the pure-Python body unchanged.
+        return None
+
+    if not use_native("PARSE"):
+        return None
+    mod = get_module("parse")
+    if mod is None:
+        return None
+    result = mod.parse(lang, source_code)
+    return ParseResult(
+        language=app_language,
+        comments=[
+            Comment(
+                content=c.content,
+                line=c.line,
+                column=c.column,
+                kind=c.kind,
+            )
+            for c in result.comments
+        ],
+        code_without_comments=result.code_without_comments,
+    )
+
+
 class BaseParser(ABC):
     """Abstract base class for all language parsers."""
 

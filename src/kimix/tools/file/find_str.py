@@ -1,6 +1,10 @@
 
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimix.tools.common import _maybe_export_output
 
 
@@ -98,24 +102,42 @@ class FindStr(CallableTool2):
         def find_in_file(file_path: str, search_content: str, case_sensitive: bool) -> list[dict]:
             """Find all occurrences of search_content in file."""
             results = []
-            
+
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                     lines = f.readlines()
             except Exception:
                 return []
-            
+
+            # Native acceleration: kimix_native.tools.find_in_file. Only safe
+            # when content and needle are pure ASCII and the needle contains
+            # no line endings (the native kernel splits on \n and searches
+            # within the line body, so a needle containing \n/\r would behave
+            # differently from the Python per-line scan).
+            if (
+                _native_use_native("TOOLS")
+                and "\n" not in search_content
+                and "\r" not in search_content
+            ):
+                _mod = _native_get_module("tools")
+                if _mod is not None:
+                    content = "".join(lines)
+                    if content.isascii() and search_content.isascii():
+                        return _mod.find_in_file(
+                            content, search_content, case_sensitive, file_path
+                        )
+
             if not case_sensitive:
                 search_lower = search_content.lower()
             else:
                 search_lower = search_content
-            
+
             for line_num, line in enumerate(lines, start=1):
                 if not case_sensitive:
                     line_to_search = line.lower()
                 else:
                     line_to_search = line
-                
+
                 # Find all occurrences in this line
                 start = 0
                 while True:
@@ -129,7 +151,7 @@ class FindStr(CallableTool2):
                         'content': line.rstrip('\n\r')
                     })
                     start = idx + 1
-            
+
             return results
 
         try:

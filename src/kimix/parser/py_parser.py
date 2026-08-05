@@ -35,6 +35,12 @@ class PythonParser(BaseParser):
     _QUOTE_CHARS = frozenset("\"'")
 
     def parse(self, source_code: str) -> ParseResult:
+        # Native acceleration: kimix_native.parse.parse (python).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("python", "Python", source_code)
+        if native is not None:
+            return native
+        
         """Parse Python source and extract all comments and docstrings."""
         comments: list[Comment] = []
 

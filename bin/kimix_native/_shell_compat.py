@@ -1,36 +1,28 @@
-"""Windows Git Bash compatibility fixes for selected native POSIX commands.
+"""Vendored pure-Python mirrors of the kimi-agent bash/pwsh scanners.
 
-Git for Windows ships a substantial POSIX userland, but a few command names
-commonly emitted for Linux or macOS are absent even though an equivalent is
-already available.  This module rewrites only verified, behaviorally compatible
-command words.  It does not install software and deliberately leaves commands
-without a faithful equivalent untouched.
+Copied (with attribution) from C:/dev/kimi-agent/src/kimix/tools/file/bash/
+so the shim has a bit-exact fallback when the reference checkout is not
+importable. Only the self-contained scanner code is vendored (no tool I/O).
 
-Windows-style backslash paths (``D:\\repo\\src``, ``\\\\server\\share``,
-``~\\Desktop``, ``.\\build``) — whether used as arguments, redirection targets,
-or as the command word itself (``C:\\tools\\rg.exe``) — are rewritten to the
-forward-slash spellings Git Bash understands, and the cmd.exe-only
-``cd /d <path>`` form loses its flag
-(``cd`` accepts a single argument in Bash).  Rewrites are conservative: the
-unquoted word must look unambiguously like a Windows path, so quoted data,
-tool-level escape sequences, short ambiguous words such as ``a\\nb``, and
-single-segment relative paths such as ``foo\\bar`` are preserved byte-for-byte.
-Words whose normalized form needs it (spaces, ``&``, ``;``, ...) are emitted
-inside double quotes; glob metacharacters stay unquoted so ``D:/x/*.txt`` still
-performs pathname expansion.
-
-The scanner is shell-aware: quoted text, comments, heredoc and here-string
-bodies, assignments, case patterns, and ordinary arguments are data, not
-commands.  Nested command substitutions and process substitutions are scanned
-as their own command contexts.
+Reference files: bash_fix.py (the _Scanner + fallback data), bash_tool.py
+(_process_unquoted + helpers, lines 440-756), pwsh_fix.py, process_pwsh.py.
 """
 
 from __future__ import annotations
 
+
+# ======================================================================
+# bash_fix.py (kimi-agent) - Windows Git Bash compatibility scanner
+# ======================================================================
+
+
 import sys
 from dataclasses import dataclass
 
-import regex as re
+try:
+    import regex as re
+except ImportError:  # pragma: no cover
+    import re  # stdlib: the used patterns are all stdlib-compatible
 
 _REV_PERL = (
     "perl '-Mopen=:std,:encoding(UTF-8)' -e '"
@@ -343,12 +335,6 @@ for _gnu_command in (
     _FALLBACK_BODIES.setdefault("g" + _gnu_command, f'{_gnu_command} "$@"')
 
 
-from kimix.native_loader import (
-    get_module as _native_get_module,
-    use_native as _native_use_native,
-)
-
-
 def _fallback_definition(name: str) -> str:
     body = _FALLBACK_BODIES[name]
     if name in _STUB_AWARE_FALLBACKS:
@@ -525,7 +511,7 @@ class BashFix:
 
 
 @dataclass
-class _Wrapper:
+class _BashWrapper:
     kind: str
     skip_next: bool = False
     opaque: bool = False
@@ -533,13 +519,13 @@ class _Wrapper:
 
 
 @dataclass
-class _HereDoc:
+class _BashHereDoc:
     delimiter: str | None
     strip_tabs: bool
     expands: bool
 
 
-class _Scanner:
+class _BashFixScanner:
     """Conservative scanner for Bash executable command positions."""
 
     __slots__ = ("s", "n", "edits", "names", "path_notes", "nest_depth")
@@ -653,10 +639,10 @@ class _Scanner:
         command_expected = True
         redirect_expected = False
         redirect_resume = True
-        wrapper: _Wrapper | None = None
+        wrapper: _BashWrapper | None = None
         heredoc_operator: str | None = None
         herestring_flag = False
-        pending_heredocs: list[_HereDoc] = []
+        pending_heredocs: list[_BashHereDoc] = []
         case_stack: list[str] = []
         function_name_expected = False
         function_body_expected = False
@@ -732,7 +718,7 @@ class _Scanner:
                     if heredoc is not None:
                         delimiter, expands = heredoc
                         pending_heredocs.append(
-                            _HereDoc(delimiter, heredoc_operator == "<<-", expands)
+                            _BashHereDoc(delimiter, heredoc_operator == "<<-", expands)
                         )
                 elif not herestring_flag:
                     raw_word = s[i:word_end]
@@ -957,7 +943,7 @@ class _Scanner:
                     continue
 
             if raw in _COMMAND_WRAPPERS:
-                wrapper = _Wrapper(raw)
+                wrapper = _BashWrapper(raw)
                 command_expected = True
                 continue
 
@@ -1289,7 +1275,7 @@ class _Scanner:
     def _find_matching_inner(self, i: int, end: int, closing: str) -> int:
         s = self.s
         depth = 0
-        pending_heredocs: list[_HereDoc] = []
+        pending_heredocs: list[_BashHereDoc] = []
         case_stack: list[str] = []
         while i < end:
             ch = s[i]
@@ -1320,7 +1306,7 @@ class _Scanner:
                 heredoc = self._heredoc_delimiter(s[delimiter_start:delimiter_end])
                 if heredoc is not None:
                     delimiter, expands = heredoc
-                    pending_heredocs.append(_HereDoc(delimiter, strip_tabs, expands))
+                    pending_heredocs.append(_BashHereDoc(delimiter, strip_tabs, expands))
                 i = delimiter_end if delimiter_end > delimiter_start else delimiter_start
             elif ch == "'":
                 i = self._skip_single_quote(i + 1, end)
@@ -1457,7 +1443,7 @@ class _Scanner:
             return None
         return self._empty_parentheses_end(i, end)
 
-    def _consume_wrapper_word(self, wrapper: _Wrapper, raw: str) -> str:
+    def _consume_wrapper_word(self, wrapper: _BashWrapper, raw: str) -> str:
         if wrapper.skip_next:
             wrapper.skip_next = False
             if wrapper.opaque:
@@ -1631,7 +1617,7 @@ class _Scanner:
         self,
         i: int,
         end: int,
-        documents: list[_HereDoc],
+        documents: list[_BashHereDoc],
         *,
         scan_expansions: bool = True,
     ) -> int:
@@ -1861,18 +1847,1578 @@ def fix_bash_command(command: str) -> BashFix:
     """
     if sys.platform != "win32" or not command:
         return BashFix(command)
-    # Native acceleration: kimix_native.parse.fix_bash_command.
-    if _native_use_native("PARSE"):
-        _mod = _native_get_module("parse")
-        if _mod is not None:
-            result = _mod.fix_bash_command(command)
-            return BashFix(
-                command=result.command,
-                replacements=tuple(result.replacements),
-                path_changes=tuple(result.path_changes),
-            )
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
     # substring fast path would miss legal executable words.  The scanner is
     # linear and exits without allocating generated shell code when unchanged.
-    return _Scanner(command).fix()
+    return _BashFixScanner(command).fix()
+
+
+# ======================================================================
+# bash_tool.py (kimi-agent) - _process_unquoted + helpers
+# ======================================================================
+_BASH_METACHARACTERS = frozenset("()|;&<>$\"`'\"*?[]{}~!#=% \t\n\r")
+
+# In double quotes, \ only escapes these characters.  $ and ` are included
+# because \$, \` inside "..." are literal (the $ / ` is escaped, not triggering
+# variable expansion or command substitution).
+_DQ_ESCAPED = frozenset(('"', '\\', '$', '`'))
+
+# Precompiled regex for finding the next special character in unquoted mode.
+# Matches backslash, single quote, double quote, dollar, or backtick.
+_UNQUOTED_SPECIAL_RE = re.compile(r'[\\\'"$`]')
+
+
+def _find_ansi_c_end(cmd: str, start: int) -> int:
+    """Return the index AFTER the closing ' of a ``$'...'`` region.
+
+    ``start`` is the position right after the opening ``$'`` (i.e. the first
+    character inside the region).  Returns ``-1`` if the region is
+    unterminated.  Inside ``$'...'`` every ``\\X`` pair is treated as an
+    escape (any character after \\ is skipped over).
+    """
+    i = start
+    length = len(cmd)
+    while i < length:
+        c = cmd[i]
+        if c == "\\" and i + 1 < length:
+            i += 2
+        elif c == "'":
+            return i + 1
+        else:
+            i += 1
+    return -1
+
+
+def _find_backtick_end(cmd: str, start: int) -> int:
+    """Return the index AFTER the closing `` ` `` of a backtick region.
+
+    ``start`` is the position right after the opening `` ` ``.
+    Returns ``-1`` if the region is unterminated.  ``\\` `` inside the
+    region is an escaped backtick (literal `` ` ``).
+    """
+    i = start
+    length = len(cmd)
+    while i < length:
+        c = cmd[i]
+        if c == "\\" and i + 1 < length:
+            i += 2  # skip escaped char (including \`)
+        elif c == "`":
+            return i + 1
+        else:
+            i += 1
+    return -1
+
+
+def _find_matching_paren(cmd: str, open_pos: int) -> int:
+    """Return the index of the ``)`` matching the ``(`` at ``cmd[open_pos]``.
+
+    Returns ``-1`` if no matching ``)`` is found.  Tracks nested ``$(...)``,
+    single-quoted regions, double-quoted regions (including their own
+    nested ``$(...)`` and backticks), and backtick regions.
+    """
+    assert cmd[open_pos] == "("
+    depth = 1
+    i = open_pos + 1
+    length = len(cmd)
+    while i < length:
+        c = cmd[i]
+        if c == "'":
+            end = cmd.find("'", i + 1)
+            if end == -1:
+                return -1
+            i = end + 1
+        elif c == '"':
+            i = _find_dq_end(cmd, i + 1)
+            if i == -1:
+                return -1
+        elif c == "`":
+            i = _find_backtick_end(cmd, i + 1)
+            if i == -1:
+                return -1
+        elif c == "$" and i + 1 < length and cmd[i + 1] == "(":
+            depth += 1
+            i += 2
+        elif c == "$" and i + 1 < length and cmd[i + 1] == "'":
+            # $'...' ANSI-C quoted region — skip to its closing '
+            end = _find_ansi_c_end(cmd, i + 2)
+            if end == -1:
+                return -1
+            i = end
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+        else:
+            i += 1
+    return -1
+
+
+def _find_dq_end(cmd: str, start: int) -> int:
+    """Return the index AFTER the closing ``"`` of a double-quoted region.
+
+    ``start`` is the position right after the opening ``"``.
+    Returns ``-1`` if the region is unterminated.  Recognises ``\\X``
+    escapes (``X`` in ``_DQ_ESCAPED``), nested ``$(...)``, ``$'...'``, and
+    backtick command substitutions inside the region.
+    """
+    i = start
+    length = len(cmd)
+    while i < length:
+        c = cmd[i]
+        if c == "\\" and i + 1 < length and cmd[i + 1] in _DQ_ESCAPED:
+            i += 2  # skip \X (X is escaped: ", \, $, `)
+        elif c == '"':
+            return i + 1
+        elif c == "$" and i + 1 < length and cmd[i + 1] == "(":
+            end = _find_matching_paren(cmd, i + 1)
+            if end == -1:
+                return -1
+            i = end + 1
+        elif c == "$" and i + 1 < length and cmd[i + 1] == "'":
+            end = _find_ansi_c_end(cmd, i + 2)
+            if end == -1:
+                return -1
+            # _find_ansi_c_end returns the index AFTER the closing '
+            i = end
+        elif c == "`":
+            end = _find_backtick_end(cmd, i + 1)
+            if end == -1:
+                return -1
+            # _find_backtick_end returns the index AFTER the closing `
+            i = end
+        else:
+            i += 1
+    return -1
+
+
+def _process_unquoted(cmd: str) -> str:
+    """Convert unquoted backslashes to forward slashes in ``cmd``.
+
+    Walks the string in *unquoted mode* (the same rules that apply at the
+    top level of a bash command): a bare ``\\`` followed by a non-metachar
+    is converted to ``/``, while ``\\`` followed by a bash metacharacter,
+    or ``\\`` inside single / double / ANSI-C quotes, is preserved.
+
+    The function also descends into ``$(...)`` and backtick command
+    substitutions, processing their *content* in unquoted mode as well
+    (because bash runs the content of ``$(...)`` and `` ` ` `` in a
+    subshell where it is parsed unquoted — even when the substitution is
+    itself nested inside ``"..."``).
+    """
+    result: list[str] = []
+    i = 0
+    length = len(cmd)
+
+    while i < length:
+        # ---- find the next special character ----
+        # Use a single regex search (C-accelerated) to bulk-skip non-special chars.
+        m = _UNQUOTED_SPECIAL_RE.search(cmd, i)
+        if m:
+            nxt = m.start()
+            if nxt > i:
+                result.append(cmd[i:nxt])
+                i = nxt
+        else:
+            # No more special characters — append the remaining suffix and finish.
+            result.append(cmd[i:])
+            break
+
+        if i >= length:
+            break
+
+        char = cmd[i]
+
+        if char == "'":
+            # Single-quoted region — copy literally until closing '
+            end = cmd.find("'", i + 1)
+            if end == -1:
+                result.append(cmd[i:])
+                break
+            result.append(cmd[i : end + 1])
+            i = end + 1
+
+        elif char == '"':
+            # Double-quoted region.  First find the end of the region,
+            # then walk through it and convert the *content* of any
+            # $(...) and `...` sub-regions using unquoted-mode rules
+            # (bash runs command substitutions in a subshell where the
+            # content is parsed unquoted, so backslashes inside must be
+            # converted to '/' just like at the top level).
+            dq_end = _find_dq_end(cmd, i + 1)
+            if dq_end == -1:
+                # Unterminated — copy the rest verbatim
+                result.append(cmd[i:])
+                break
+            j = i + 1
+            chunk_start = i
+            while j < dq_end:
+                # Bulk-skip to the next interesting character inside DQ:
+                # backslash, dollar, or backtick.
+                m2 = _UNQUOTED_SPECIAL_RE.search(cmd, j, dq_end)
+                if m2:
+                    nxt2 = m2.start()
+                    if nxt2 > j:
+                        j = nxt2
+                else:
+                    # No more special chars inside DQ — rest is verbatim
+                    j = dq_end
+                    break
+
+                c = cmd[j]
+                if c == "\\" and j + 1 < dq_end and cmd[j + 1] in _DQ_ESCAPED:
+                    # \X inside DQ: X is escaped.  Skip the pair; it will
+                    # be included in the next emitted chunk.
+                    j += 2
+                elif c == "$" and j + 1 < dq_end and cmd[j + 1] == "(":
+                    # $(...) command substitution — process content
+                    paren_end = _find_matching_paren(cmd, j + 1)
+                    if paren_end == -1 or paren_end >= dq_end:
+                        # Unterminated or mismatched — treat rest as verbatim
+                        j = dq_end
+                        break
+                    result.append(cmd[chunk_start:j])
+                    result.append("$(")
+                    result.append(_process_unquoted(cmd[j + 2 : paren_end]))
+                    result.append(")")
+                    j = paren_end + 1
+                    chunk_start = j
+                elif c == "$" and j + 1 < dq_end and cmd[j + 1] == "'":
+                    # $'...' ANSI-C region — skip through it (copied
+                    # verbatim as part of the next chunk).
+                    ac_end = _find_ansi_c_end(cmd, j + 2)
+                    if ac_end == -1 or ac_end > dq_end:
+                        # Unterminated or extends beyond DQ — treat rest as verbatim
+                        j = dq_end
+                        break
+                    j = ac_end
+                elif c == "`":
+                    # Backtick command substitution — process content
+                    bt_end = _find_backtick_end(cmd, j + 1)
+                    if bt_end == -1 or bt_end > dq_end:
+                        # Unterminated or extends beyond DQ — treat rest as verbatim
+                        j = dq_end
+                        break
+                    result.append(cmd[chunk_start:j])
+                    result.append("`")
+                    result.append(_process_unquoted(cmd[j + 1 : bt_end - 1]))
+                    result.append("`")
+                    j = bt_end
+                    chunk_start = j
+                else:
+                    # Should not reach here — char is not one we handle in DQ
+                    j += 1
+            # Emit the final chunk (up to and including the closing ")
+            result.append(cmd[chunk_start:dq_end])
+            i = dq_end
+
+        elif char == "$" and i + 1 < length and cmd[i + 1] == "'":
+            # $'...' ANSI-C quoted region at top level — copy literally
+            ac_end = _find_ansi_c_end(cmd, i + 2)
+            if ac_end == -1:
+                result.append(cmd[i:])
+                break
+            result.append(cmd[i:ac_end])
+            i = ac_end
+
+        elif char == "`":
+            # Backtick command substitution at top level — process content
+            bt_end = _find_backtick_end(cmd, i + 1)
+            if bt_end == -1:
+                result.append(cmd[i:])
+                break
+            result.append("`")
+            result.append(_process_unquoted(cmd[i + 1 : bt_end - 1]))
+            result.append("`")
+            i = bt_end
+
+        elif char == "\\":
+            if i + 1 < length and cmd[i + 1] in _BASH_METACHARACTERS:
+                # Backslash is escaping a bash metacharacter — preserve both.
+                # Append atomically so the metacharacter (e.g. ' " $) is not
+                # re-processed as a quote-start or ANSI-C region on the next
+                # iteration.
+                result.append("\\")
+                result.append(cmd[i + 1])
+                i += 2
+            else:
+                # Unquoted backslash in a path-like context — convert to /
+                result.append("/")
+                i += 1
+
+        else:
+            # Defensive: nxt should always point to a special char we handle.
+            result.append(char)
+            i += 1
+
+    return "".join(result)
+
+
+
+
+# pwsh_fix.py (kimi-agent) - PowerShell quoting validator/repair
+# ======================================================================
+
+
+from dataclasses import dataclass
+
+_NORMAL = "normal"
+_DQ = "double-quoted"
+_SQ = "single-quoted"
+_HDQ = "here-double"
+_HSQ = "here-single"
+_COMMENT = "line-comment"
+_BLOCK = "block-comment"
+
+_W_UNCLOSED_DQ = (
+    "The command has an unclosed double-quoted string; "
+    'appended a closing `"` at the end to make it a legal PowerShell command.'
+)
+_W_UNCLOSED_SQ = (
+    "The command has an unclosed single-quoted string; "
+    "appended a closing `'` at the end to make it a legal PowerShell command."
+)
+_W_UNCLOSED_HDQ = (
+    "The command has an unclosed double-quoted here-string; "
+    'appended a newline and `"@` at the end to close it.'
+)
+_W_UNCLOSED_HSQ = (
+    "The command has an unclosed single-quoted here-string; "
+    "appended a newline and `'@` at the end to close it."
+)
+_W_UNCLOSED_BLOCK = (
+    "The command has an unclosed block comment `<#`; "
+    "appended `#>` at the end to close it."
+)
+_W_TRAILING_COMMENT = (
+    "The command ends with a line comment; "
+    "appended a newline so the trailing comment does not swallow the "
+    "try/catch wrapper used to execute the command."
+)
+_W_STOP_PARSING = (
+    "The command ends with the `--%` stop-parsing marker; "
+    "appended a newline so the wrapper is not passed literally to the "
+    "native command."
+)
+_W_COMMENT_ONLY = (
+    "The command contains only comments; appended a newline and a no-op "
+    "`$null` statement so the try/catch wrapper has a statement to execute."
+)
+_W_TRAILING_CONTINUATION = (
+    "The command ends with a backtick line-continuation; "
+    "appended a newline so the continuation does not join with the "
+    "try/catch wrapper used to execute the command."
+)
+
+
+@dataclass(frozen=True)
+class PwshFix:
+    """Result of :func:`fix_pwsh_command`.
+
+    ``command`` is the (possibly repaired) command to execute and ``warning``
+    is a human-readable note describing any modification, or ``""`` when the
+    command was already valid and left unchanged.
+    """
+
+    command: str
+    warning: str = ""
+
+    @property
+    def changed(self) -> bool:
+        """True when the command text differs from the input."""
+        return bool(self.warning)
+
+
+def fix_pwsh_command(cmd: str) -> PwshFix | None:
+    """Validate *cmd* with PowerShell quoting rules and repair it if possible.
+
+    Returns a :class:`PwshFix` (``command`` may equal *cmd* when the command
+    is already legal), or ``None`` when the command cannot be repaired.
+    """
+    if not cmd or not cmd.strip():
+        return None
+    # Fast path: no quote/comment/continuation/here-string/stop-parsing
+    # characters at all — the command is valid as-is and cannot affect the
+    # try/catch wrapper.  Avoids the O(n) Python scan for plain commands.
+    if (
+        '"' not in cmd
+        and "'" not in cmd
+        and "#" not in cmd
+        and "`" not in cmd
+        and "@" not in cmd
+        and "--%" not in cmd
+    ):
+        return PwshFix(cmd, "")
+    return _PwshScanner(cmd).fix()
+
+
+class _PwshScanner:
+    """Single-pass tokenizer implementing PowerShell's quoting rules."""
+
+    __slots__ = ("s", "n")
+
+    def __init__(self, s: str) -> None:
+        self.s = s
+        self.n = len(s)
+
+    # -- helpers used while skipping $(...) sub-expressions -----------------
+
+    def _skip_sq(self, start: int) -> int:
+        """Skip a single-quoted string starting at *start*; index after it."""
+        s, n = self.s, self.n
+        i = start + 1
+        while i < n:
+            if s[i] == "'":
+                if i + 1 < n and s[i + 1] == "'":
+                    i += 2  # '' -> literal single quote
+                else:
+                    return i + 1  # closing quote
+            else:
+                i += 1
+        return i
+
+    def _skip_dq(self, start: int) -> int:
+        """Skip a double-quoted string starting at *start*; index after it."""
+        s, n = self.s, self.n
+        i = start + 1
+        while i < n:
+            ch = s[i]
+            if ch == "`":
+                i += 2 if i + 1 < n else 1
+            elif ch == '"':
+                if i + 1 < n and s[i + 1] == '"':
+                    i += 2  # "" -> literal double quote
+                else:
+                    return i + 1  # closing quote
+            elif ch == "$" and i + 1 < n and s[i + 1] == "(":
+                i = self._skip_subexpr(i)
+            else:
+                i += 1
+        return i
+
+    def _skip_block(self, start: int) -> int:
+        """Skip a block comment starting at *start*; index after it.
+
+        PowerShell closes block comments at the first ``#>`` — they do not
+        nest (verified empirically with pwsh 7.6.2).
+        """
+        s, n = self.s, self.n
+        i = start + 2
+        while i < n:
+            if s[i] == "#" and i + 1 < n and s[i + 1] == ">":
+                return i + 2
+            i += 1
+        return i
+
+    def _skip_subexpr(self, start: int) -> int:
+        """Skip a ``$( ... )`` sub-expression starting at *start*.
+
+        Iterative (no recursion) so deeply nested ``$(...)`` cannot hit the
+        interpreter recursion limit.  Nested ``$(...)`` are handled by the
+        paren-depth counter; strings and comments are skipped before the
+        parens are counted, so a ``)`` inside a string is never mistaken for
+        the closing paren.
+
+        Returns the index *after* the matching ``)`` (or ``n`` when the
+        sub-expression never closes — the caller then treats the enclosing
+        string as unclosed).
+        """
+        s, n = self.s, self.n
+        i = start + 2
+        depth = 1
+        while i < n and depth:
+            ch = s[i]
+            if ch == "(":
+                depth += 1
+                i += 1
+            elif ch == ")":
+                depth -= 1
+                i += 1
+            elif ch == "'":
+                i = self._skip_sq(i)
+            elif ch == '"':
+                i = self._skip_dq(i)
+            elif ch == "`":
+                i += 2 if i + 1 < n else 1
+            elif ch == "#":
+                if self._at_token_start(i):
+                    while i < n and s[i] != "\n":
+                        i += 1
+                else:
+                    i += 1
+            elif ch == "<" and i + 1 < n and s[i + 1] == "#":
+                i = self._skip_block(i)
+            else:
+                i += 1
+        return i
+
+    # -- token-boundary predicate -------------------------------------------
+
+    def _at_token_start(self, i: int) -> bool:
+        """True when *i* starts a fresh token (not glued to a word/identifier)."""
+        return i == 0 or not (self.s[i - 1].isalnum() or self.s[i - 1] == "_")
+
+    # -- EOF repair ----------------------------------------------------------
+
+    def _dq_closer(self) -> str:
+        """Closing quote for an unclosed double-quoted string.
+
+        A trailing backtick would escape a single appended ``"``, so an odd
+        run of trailing backticks needs two quotes (one escaped, one closing).
+        """
+        k = 0
+        for ch in reversed(self.s):
+            if ch == "`":
+                k += 1
+            else:
+                break
+        return '""' if k % 2 == 1 else '"'
+
+    # -- main scan -----------------------------------------------------------
+
+    def fix(self) -> PwshFix | None:
+        s, n = self.s, self.n
+        mode = _NORMAL
+        here_quote = ""   # opening quote of the current here-string
+        line_start = 0    # start of the current line inside a here-string
+        saw_code = False  # any real statement code seen (not comments/whitespace)
+        last_cont_target = -1  # index after the last backtick-newline continuation
+        i = 0
+        while i < n:
+            ch = s[i]
+            if mode == _NORMAL:
+                if ch == '"':
+                    saw_code = True
+                    mode = _DQ
+                    i += 1
+                elif ch == "'":
+                    saw_code = True
+                    mode = _SQ
+                    i += 1
+                elif ch == "`":
+                    if i + 1 < n:
+                        saw_code = True
+                        if s[i + 1] == "\n":
+                            last_cont_target = i + 2
+                        i += 2  # escaped char (or line continuation)
+                    else:
+                        # Dangling line-continuation backtick: PowerShell
+                        # rejects a backtick with nothing after it.
+                        return None
+                elif ch == "#" and self._at_token_start(i):
+                    mode = _COMMENT
+                    i += 1
+                elif ch == "<" and i + 1 < n and s[i + 1] == "#":
+                    mode = _BLOCK
+                    i += 2
+                elif (
+                    ch == "@"
+                    and i + 1 < n
+                    and s[i + 1] in ("'", '"')
+                    and self._at_token_start(i)
+                ):
+                    # Here-string opener: @' or @" followed by only
+                    # whitespace until end-of-line (or end of input).
+                    j = i + 2
+                    while j < n and s[j] in " \t\r":
+                        j += 1
+                    if j == n or s[j] == "\n":
+                        saw_code = True
+                        here_quote = s[i + 1]
+                        mode = _HDQ if here_quote == '"' else _HSQ
+                        line_start = n if j == n else j + 1
+                        i = line_start
+                        continue
+                    saw_code = True
+                    i += 1  # @' / @" with content on the same line: not a here-string
+                elif (
+                    ch == "-"
+                    and s.startswith("--%", i)
+                    and self._at_token_start(i)
+                ):
+                    # --% stop-parsing: the rest of the line is literal.
+                    if not saw_code:
+                        # `--%` with no command before it is a PowerShell
+                        # parse error ("Missing expression after unary
+                        # operator '--'") — nothing to repair.
+                        return None
+                    nl = s.find("\n", i)
+                    if nl == -1:
+                        # The literal region reaches EOF and would swallow the
+                        # try/catch wrapper — terminate the line explicitly.
+                        return PwshFix(s + "\n", _W_STOP_PARSING)
+                    i = nl + 1
+                elif ch == "$" and i + 1 < n and s[i + 1] == "(":
+                    saw_code = True
+                    i = self._skip_subexpr(i)
+                elif ch.isspace():
+                    i += 1
+                else:
+                    saw_code = True
+                    i += 1
+            elif mode == _DQ:
+                if ch == "`":
+                    i += 2 if i + 1 < n else 1
+                elif ch == '"':
+                    if i + 1 < n and s[i + 1] == '"':
+                        i += 2  # "" -> literal double quote
+                    else:
+                        mode = _NORMAL
+                        i += 1
+                elif ch == "$" and i + 1 < n and s[i + 1] == "(":
+                    i = self._skip_subexpr(i)
+                else:
+                    i += 1
+            elif mode == _SQ:
+                if ch == "'":
+                    if i + 1 < n and s[i + 1] == "'":
+                        i += 2  # '' -> literal single quote
+                    else:
+                        mode = _NORMAL
+                        i += 1
+                else:
+                    i += 1
+            elif mode in (_HDQ, _HSQ):
+                if ch == "\n":
+                    line_start = i + 1
+                    i += 1
+                elif (
+                    ch == here_quote
+                    and i + 1 < n
+                    and s[i + 1] == "@"
+                    and s[line_start:i].strip() == ""
+                ):
+                    mode = _NORMAL
+                    i += 2
+                else:
+                    i += 1
+            elif mode == _COMMENT:
+                if ch == "\n":
+                    mode = _NORMAL
+                    i += 1
+                else:
+                    i += 1
+            elif mode == _BLOCK:
+                if ch == "#" and i + 1 < n and s[i + 1] == ">":
+                    mode = _NORMAL
+                    i += 2
+                else:
+                    i += 1
+
+        # -- end of input -----------------------------------------------------
+        # A line-continuation backtick whose target line runs to the end of
+        # the command would join with the try/catch wrapper added by the tool,
+        # silently corrupting the command.  Append a newline so the
+        # continuation ends on an empty line instead.
+        needs_cont_nl = last_cont_target != -1 and s.rfind("\n") < last_cont_target
+        if mode == _NORMAL:
+            if saw_code:
+                if needs_cont_nl:
+                    return PwshFix(s + "\n", _W_TRAILING_CONTINUATION)
+                return PwshFix(s, "")
+            # Only comments/whitespace: give the wrapper a statement to run.
+            return PwshFix(s + "\n$null", _W_COMMENT_ONLY)
+        if mode == _DQ:
+            fixed = s + self._dq_closer()
+            warning = _W_UNCLOSED_DQ
+            if needs_cont_nl:
+                fixed += "\n"
+                warning += "\n" + _W_TRAILING_CONTINUATION
+            return PwshFix(fixed, warning)
+        if mode == _SQ:
+            fixed = s + "'"
+            warning = _W_UNCLOSED_SQ
+            if needs_cont_nl:
+                fixed += "\n"
+                warning += "\n" + _W_TRAILING_CONTINUATION
+            return PwshFix(fixed, warning)
+        if mode == _HDQ:
+            fixed = s + '\n"@'
+            warning = _W_UNCLOSED_HDQ
+            if needs_cont_nl:
+                fixed += "\n"
+                warning += "\n" + _W_TRAILING_CONTINUATION
+            return PwshFix(fixed, warning)
+        if mode == _HSQ:
+            fixed = s + "\n'@"
+            warning = _W_UNCLOSED_HSQ
+            if needs_cont_nl:
+                fixed += "\n"
+                warning += "\n" + _W_TRAILING_CONTINUATION
+            return PwshFix(fixed, warning)
+        if mode == _COMMENT:
+            if saw_code:
+                return PwshFix(s + "\n", _W_TRAILING_COMMENT)
+            return PwshFix(s + "\n$null", _W_COMMENT_ONLY)
+        if mode == _BLOCK:
+            if saw_code:
+                fixed = s + "#>"
+                warning = _W_UNCLOSED_BLOCK
+            else:
+                fixed = s + "#>\n$null"
+                warning = _W_COMMENT_ONLY
+            if needs_cont_nl:
+                fixed += "\n"
+                warning += "\n" + _W_TRAILING_CONTINUATION
+            return PwshFix(fixed, warning)
+        return None  # pragma: no cover - unreachable
+
+
+# ======================================================================
+# process_pwsh.py (kimi-agent) - PS7 to PS5.1 source transform
+# ======================================================================
+
+
+try:
+    import regex as re
+except ImportError:  # pragma: no cover
+    import re  # stdlib: the used patterns are all stdlib-compatible
+
+
+# ===========================================================================
+# Constants
+# ===========================================================================
+
+_PS_KEYWORDS = frozenset({
+    "begin", "break", "catch", "class", "continue", "data", "define", "do",
+    "dynamicparam", "else", "elseif", "end", "enum", "exit", "filter", "finally",
+    "for", "foreach", "from", "function", "hidden", "if", "in", "param",
+    "process", "return", "static", "switch", "throw", "trap", "try", "until",
+    "using", "var", "while",
+})
+
+
+
+_EXPR_STOP = "=;|&,"
+
+_DEPTH_OPEN = "([{"
+_DEPTH_CLOSE = ")]}"
+
+
+# ===========================================================================
+# Low-level scanners — skip over strings, comments, subexpressions
+# ===========================================================================
+
+def _scan_single_quoted(code: str, i: int) -> int:
+    """Skip a single-quoted string starting at *i*; return index after it."""
+    i += 1
+    n = len(code)
+    while i < n:
+        if code[i] == "'":
+            if i + 1 < n and code[i + 1] == "'":
+                i += 2          # escaped '' → literal single-quote
+            else:
+                return i + 1     # closing quote
+        else:
+            i += 1
+    return i
+
+
+def _scan_double_quoted(code: str, i: int) -> int:
+    """Skip a double-quoted string starting at *i*; return index after it."""
+    i += 1
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if ch == "`" and i + 1 < n:
+            i += 2              # backtick-escaped char
+        elif ch == '"':
+            return i + 1         # closing quote
+        elif ch == "$" and i + 1 < n and code[i + 1] == "(":
+            i = _skip_subexpression(code, i)
+        else:
+            i += 1
+    return i
+
+
+def _scan_block_comment(code: str, i: int) -> int:
+    """Skip a block comment ``<# ... #>`` starting at *i*; return index after it."""
+    depth = 1
+    i += 2
+    n = len(code)
+    while i < n and depth:
+        if code[i] == "<" and i + 1 < n and code[i + 1] == "#":
+            depth += 1
+            i += 2
+        elif code[i] == "#" and i + 1 < n and code[i + 1] == ">":
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _skip_subexpression(code: str, start: int) -> int:
+    """Skip past a ``$(...)`` sub-expression starting at *start*.
+
+    Returns the index *after* the closing ``)``.
+    """
+    assert code[start] == "$"
+    i = start + 2
+    depth = 1
+    n = len(code)
+    while i < n and depth:
+        c = code[i]
+        if c == "(":
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+        elif c == "'":
+            i = _scan_single_quoted(code, i)
+        elif c == '"':
+            i = _scan_double_quoted(code, i)
+        elif c == "$" and i + 1 < n and code[i + 1] == "(":
+            i = _skip_subexpression(code, i)
+        else:
+            i += 1
+    return i
+
+
+# ===========================================================================
+# Region finders  (strings, comments, here-strings)
+# ===========================================================================
+
+def _scan_here_string(code: str, start: int) -> int:
+    """Skip a here-string (``@'...'@`` or ``@"..."@``) starting at *start*.
+
+    *start* points to the opening ``@``.
+    Returns the index *after* the closing delimiter.
+    """
+    n = len(code)
+    quote = code[start + 1]
+    i = start + 2
+    seen_newline = False
+    line_begin = start + 2  # start of current line
+    while i < n:
+        if code[i] == "\n":
+            seen_newline = True
+            line_begin = i + 1
+        elif (
+            code[i] == quote
+            and i + 1 < n
+            and code[i + 1] == "@"
+            and seen_newline
+        ):
+            # Closing delimiter must be at the beginning of its own line
+            # (only whitespace may precede it on that line)
+            if code[line_begin:i].strip() == "":
+                return i + 2
+        i += 1
+    return i
+
+
+def _build_region_mask(code: str, *, here_strings: bool = True) -> bytearray:
+    """Build a region mask for *code* in a single pass.
+
+    Returns a bytearray where 1 means outside regions (code) and 0 means
+    inside (strings, comments, here-strings).
+
+    When *here_strings* is False, here-strings are not detected (used for
+    line-level scanning where here-strings cannot be reliably identified).
+    """
+    n = len(code)
+    mask = bytearray(b"\x01" * n)
+    i = 0
+    while i < n:
+        c = code[i]
+        if c == "<" and i + 1 < n and code[i + 1] == "#":
+            start = i
+            i = _scan_block_comment(code, i)
+            mask[start:i] = b"\x00" * (i - start)
+        elif c == "#":
+            start = i
+            while i < n and code[i] != "\n":
+                i += 1
+            mask[start:i] = b"\x00" * (i - start)
+        elif here_strings and c == "@" and i + 1 < n and code[i + 1] in ("'", '"'):
+            # PowerShell here-strings require the closing delimiter at the
+            # beginning of its own line (only whitespace may precede it).
+            j = i + 2
+            while j < n and code[j] in " \t\r":
+                j += 1
+            if j < n and code[j] != "\n":
+                i += 1  # Not a here-string: @' or @" not followed by newline
+                continue
+            start = i
+            i = _scan_here_string(code, i)
+            mask[start:i] = b"\x00" * (i - start)
+        elif c == "'":
+            start = i
+            i = _scan_single_quoted(code, i)
+            mask[start:i] = b"\x00" * (i - start)
+        elif c == '"':
+            start = i
+            i = _scan_double_quoted(code, i)
+            mask[start:i] = b"\x00" * (i - start)
+        else:
+            i += 1
+    return mask
+
+
+def _line_mask(line: str) -> bytearray:
+    """Return a region mask for *line* (here-strings disabled)."""
+    return _build_region_mask(line, here_strings=False)
+
+
+# ===========================================================================
+# Depth tracking  (for matching ternary colon)
+# ===========================================================================
+
+def _compute_depths(line: str, mask: bytearray) -> list[int]:
+    """Return nesting depth of ``()``, ``{}``, ``[]`` before each character."""
+    depths: list[int] = []
+    depth = 0
+    for i, ch in enumerate(line):
+        depths.append(depth)
+        if mask[i]:
+            if ch in _DEPTH_OPEN:
+                depth += 1
+            elif ch in _DEPTH_CLOSE:
+                depth -= 1
+    depths.append(depth)
+    return depths
+
+
+# ===========================================================================
+# Pre-processing: backtick line continuation
+# ===========================================================================
+
+def _join_continuation_lines(code: str) -> str:
+    """Collapse backtick line-continuations into single logical lines."""
+    mask = _build_region_mask(code)
+    n = len(code)
+    result: list[str] = []
+    i = 0
+    while i < n:
+        if code[i] == "`" and mask[i]:
+            j = i + 1
+            while j < n and code[j] in " \t\r":
+                j += 1
+            if j < n and code[j] == "\n":
+                j += 1
+                while j < n and code[j] in " \t\r":
+                    j += 1
+                result.append(" ")
+                i = j
+                continue
+        result.append(code[i])
+        i += 1
+    return "".join(result)
+
+
+# ===========================================================================
+# Assignment detection
+# ===========================================================================
+
+_ASSIGN_RE = re.compile(r"(.*?)(\$\w+(?::\w+)?(?:\.\w+)*)\s*=\s*$")
+_COMMAND_PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\s+")
+
+
+def _match_assignment(before: str) -> tuple[str, str] | None:
+    """Match an assignment prefix like ``$var = `` at the end of *before*."""
+    m = _ASSIGN_RE.match(before.rstrip())
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+def _build_replacement(prefix: str, inner: str) -> str:
+    """Build replacement string, preserving an assignment if one is detected."""
+    assign = _match_assignment(prefix)
+    if assign:
+        p, var = assign
+        return f"{p}{var} = {inner}"
+    return f"{prefix}{inner}"
+
+
+def _strip_command_prefix(expr: str, start: int, *, check_keywords: bool = True) -> tuple[str, int]:
+    """Strip a leading command name (e.g. ``Write-Output ``) from *expr*.
+
+    Returns ``(stripped_expr, adjusted_start)``.
+    When *check_keywords* is True (default), PowerShell keywords (if, foreach, …)
+    are never stripped. When False, any command prefix is stripped.
+    """
+    m = _COMMAND_PREFIX_RE.match(expr)
+    if m:
+        cmd = m.group(0).strip().lower()
+        if not check_keywords or cmd not in _PS_KEYWORDS:
+            expr_part = expr[m.end():]
+            if expr_part and expr_part[0] in '$(["\'@0123456789':
+                return expr_part, start + m.end()
+    return expr, start
+
+
+# ===========================================================================
+# $? adjacency check — shared by all transforms
+# ===========================================================================
+
+def _separate_trailing_comment(line: str, start: int, mask: bytearray
+                         ) -> tuple[int, str]:
+    """Split off a trailing line comment starting at *start*, if present.
+
+    Returns ``(content_end, comment_str)`` where *content_end* is the index
+    at which the content before the comment ends, and *comment_str* is the
+    comment text (including the ``#``) or ``""`` if none.
+    """
+    for ri in range(max(start, 1), len(line)):
+        if mask[ri] == 0 and mask[ri - 1] == 1 and line[ri] == "#":
+            return ri, line[ri:]
+    return len(line), ""
+
+
+def _after_dollar_question(line: str, op_idx: int) -> bool:
+    """Return True if *op_idx* is immediately after ``$?``.
+
+    When True the first ``?`` of the operator at *op_idx* is actually the
+    ``?`` of the ``$?`` automatic variable, so the operator should be skipped.
+
+    Does NOT match ``$$?.`` — ``$$`` is a separate automatic variable.
+    """
+    return (
+        op_idx > 0
+        and line[op_idx - 1] == "$"
+        and not (op_idx > 1 and line[op_idx - 2] == "$")
+    )
+
+
+# ===========================================================================
+# Shared colon-context check
+# ===========================================================================
+
+def _is_scope_colon(line: str, i: int) -> bool:
+    """Return ``True`` if the colon at *i* belongs to a ``$scope:var`` prefix."""
+    # Scan backwards from the colon to find the preceding ``$`` variable prefix.
+    j = i - 1
+    while j >= 0 and (line[j].isalnum() or line[j] == "_"):
+        j -= 1
+    return j >= 0 and line[j] == "$"
+
+
+# ===========================================================================
+# Expression boundary helpers
+# ===========================================================================
+
+def _is_null_conditional_qmark(line: str, i: int) -> bool:
+    """Return True if ``?`` at *i* is part of ``?.`` (null-conditional)."""
+    return i + 1 < len(line) and line[i + 1] == "."
+
+
+def _is_double_colon(line: str, i: int) -> bool:
+    """Return True if ``:`` at *i* is part of ``::`` (static member access)."""
+    return (i + 1 < len(line) and line[i + 1] == ":") or (i > 0 and line[i - 1] == ":")
+
+
+def _find_expr_start(line: str, end: int, mask: bytearray,
+                     extra_stop: str = "") -> int:
+    """Scan backwards from *end* to locate the start of the expression.
+
+    *extra_stop* can contain additional delimiter characters (e.g. ``"?:``
+    for null-conditional base scanning).
+    """
+    depth = 0
+    stop_set = _EXPR_STOP + extra_stop if extra_stop else _EXPR_STOP
+    for i in range(end - 1, -1, -1):
+        if not mask[i]:
+            continue
+        c = line[i]
+        if c in _DEPTH_CLOSE:
+            depth += 1
+        elif c in _DEPTH_OPEN:
+            depth -= 1
+            if depth < 0:
+                return i + 1
+        elif depth == 0 and c in stop_set:
+            if c == "?":
+                if _is_null_conditional_qmark(line, i):
+                    continue
+                if _after_dollar_question(line, i):
+                    continue
+            elif c == ":":
+                if _is_double_colon(line, i) or _is_scope_colon(line, i):
+                    continue
+            return i + 1
+    return 0
+
+
+def _find_expr_end(line: str, start: int, mask: bytearray) -> int:
+    """Scan forwards from *start* to locate the end of the expression."""
+    depth = 0
+    # Track mask value at the previous position to detect region boundaries.
+    prev_mask = 1 if start == 0 else mask[start - 1]
+    for i in range(start, len(line)):
+        c = line[i]
+        cur_mask = mask[i]
+        if not cur_mask:
+            # If we just stepped from outside (mask=1) into a region and the
+            # character is '#', it is the start of a line comment — stop here.
+            if prev_mask and c == "#":
+                return i
+            prev_mask = cur_mask
+            continue
+        prev_mask = cur_mask
+        if c in _DEPTH_OPEN:
+            depth += 1
+        elif c in _DEPTH_CLOSE:
+            depth -= 1
+            if depth < 0:
+                return i
+        elif depth == 0 and c in _EXPR_STOP:
+            return i
+    return len(line)
+
+
+def _expr_left(line: str, pos: int, mask: bytearray,
+               extra_stop: str = "") -> tuple[int, int]:
+    """Return (start, end) of the expression immediately left of *pos*."""
+    end = pos
+    while end > 0 and line[end - 1] == " ":
+        end -= 1
+    start = _find_expr_start(line, end, mask, extra_stop)
+    return start, end
+
+
+def _expr_right(line: str, pos: int, mask: bytearray) -> tuple[int, int]:
+    """Return (start, end) of the expression immediately right of *pos*."""
+    start = pos
+    while start < len(line) and line[start] == " ":
+        start += 1
+    end = _find_expr_end(line, start, mask)
+    return start, end
+
+
+# ===========================================================================
+# Generic operator transform engine
+# ===========================================================================
+
+def _find_next_op(line: str, op: str, mask: bytearray,
+                  skip_dollar_q: bool = False, start: int = 0,
+                  reverse: bool = False) -> int:
+    """Find the next (or rightmost when *reverse* is True) occurrence of *op*
+    in *line* that is outside regions.
+
+    If *skip_dollar_q* is True, skip positions immediately after ``$?``.
+    *start* restricts the search to indices >= *start* (ignored when *reverse*).
+    """
+    search = line.rfind if reverse else line.find
+    idx = search(op, start if not reverse else None)
+    while idx != -1:
+        if mask[idx] and (not skip_dollar_q or not _after_dollar_question(line, idx)):
+            return idx
+        idx = search(op, idx + 1) if not reverse else line.rfind(op, 0, idx)
+    return -1
+
+
+def _transform_operator(
+    line: str,
+    op: str,
+    builder: Callable,
+    *,
+    skip_dollar_q: bool = True,
+) -> tuple[str, list[str]]:
+    """Generic single-operator line transformer.
+
+    *op*          — the operator string to search for (e.g. ``"??"``).
+    *builder*     — callable(left_expr, right_expr, right_extra) → inner_str.
+    *skip_dollar_q* — when True, skip positions immediately after ``$?``.
+
+    Returns ``(transformed_line, warnings)``.
+    """
+    warnings: list[str] = []
+    op_len = len(op)
+    search = 0
+    while True:
+        mask = _line_mask(line)
+        idx = _find_next_op(line, op, mask, skip_dollar_q, search)
+        if idx == -1:
+            break
+
+        left_start, left_end = _expr_left(line, idx, mask)
+        left_expr = line[left_start:left_end].strip()
+        left_expr, left_start = _strip_command_prefix(left_expr, left_start)
+
+        right_start, right_end = _expr_right(line, idx + op_len, mask)
+        right_expr = line[right_start:right_end].strip()
+        right_extra = None
+
+        if not left_expr or not right_expr:
+            search = idx + 1
+            continue
+
+        inner = builder(left_expr, right_expr, right_extra)
+        warnings.append(f"{op} operator `{left_expr} {op} {right_expr}` rewritten to `{inner}`")
+        line = _build_replacement(line[:left_start], inner) + line[right_end:]
+        search = left_start
+    return line, warnings
+
+
+# ===========================================================================
+# Transform: null-coalescing assignment  (??=)
+# ===========================================================================
+
+def _transform_nca_line(line: str) -> tuple[str, list[str]]:
+    """Rewrite null-coalescing assignment ``$var ??= value``.
+
+    Uses the generic expression scanner so braced variables (``${foo}``),
+    property chains (``$obj.Name``) and indexed targets (``$arr[0]``) are
+    all handled correctly.
+    """
+    warnings: list[str] = []
+    search = 0
+    while True:
+        mask = _line_mask(line)
+        idx = _find_next_op(line, "??=", mask, True, search)
+        if idx == -1:
+            break
+
+        left_start, left_end = _expr_left(line, idx, mask)
+        var = line[left_start:left_end].strip()
+        if not var:
+            search = idx + 1
+            continue
+
+        val_start, val_end = _expr_right(line, idx + 3, mask)
+        value = line[val_start:val_end].strip()
+        new_inner = f"if ($null -eq {var}) {{ {var} = {value} }}"
+        warnings.append(
+            f"null-coalescing assignment `{var} ??= {value}` "
+            f"rewritten to `{new_inner}`"
+        )
+        line = _build_replacement(line[:left_start].rstrip(), new_inner) + line[val_end:]
+        search = left_start
+    return line, warnings
+
+
+# ===========================================================================
+# Transform: null-coalescing  (??)
+# ===========================================================================
+
+def _transform_nc_line(line: str) -> tuple[str, list[str]]:
+    """Transform every ``??`` on *line* into PS 5.1 compatible ``if`` form."""
+
+    def _builder(left: str, right: str, _extra: None) -> str:
+        return f"if ($null -ne {left}) {{ {left} }} else {{ {right} }}"
+
+    return _transform_operator(line, "??", _builder)
+
+
+# ===========================================================================
+# Transform: ternary  (? :)
+# ===========================================================================
+
+def _find_matching_colon(line: str, start: int, mask: bytearray,
+                         depth_arr: list[int]) -> int:
+    """Find the colon that separates the true/false branches of a ternary."""
+    for i in range(start, len(line)):
+        if line[i] != ":" or depth_arr[i] != 0 or not mask[i]:
+            continue
+        if _is_double_colon(line, i) or _is_scope_colon(line, i):
+            continue
+        return i
+    return -1
+
+
+def _transform_ternary_line(line: str) -> tuple[str, list[str]]:
+    """Rewrite ternary ``$cond ? $true : $false`` into an ``if`` statement."""
+    warnings: list[str] = []
+    mask = _line_mask(line)
+    depth_arr = _compute_depths(line, mask)
+    pos = 0
+    while pos < len(line):
+        if (
+            line[pos] == "?"
+            and mask[pos]
+            and not _after_dollar_question(line, pos)
+        ):
+            colon_pos = _find_matching_colon(line, pos + 1, mask, depth_arr)
+            if colon_pos != -1:
+                cond_start, cond_end = _expr_left(line, pos, mask)
+                condition = line[cond_start:cond_end].strip()
+                true_expr = line[pos + 1:colon_pos].strip()
+                false_start, false_end = _expr_right(line, colon_pos + 1, mask)
+                false_expr = line[false_start:false_end].strip()
+                if not _match_assignment(line[:cond_start]):
+                    condition, cond_start = _strip_command_prefix(condition, cond_start, check_keywords=False)
+                inner = f"if ({condition}) {{ {true_expr} }} else {{ {false_expr} }}"
+                warnings.append(
+                    f"ternary operator `{condition} ? {true_expr} : {false_expr}` "
+                    f"rewritten to `{inner}`"
+                )
+                suffix = line[false_end:]
+                line = _build_replacement(line[:cond_start], inner) + suffix
+                mask = _line_mask(line)
+                depth_arr = _compute_depths(line, mask)
+                pos = len(line) - len(suffix)
+                continue
+        pos += 1
+    return line, warnings
+
+
+# ===========================================================================
+# Transform: pipeline chain operators  (&& / ||)
+# ===========================================================================
+
+def _transform_chain_line(line: str) -> tuple[str, list[str]]:
+    """Rewrite pipeline chain operators ``&&`` and ``||``.
+
+    Uses rightmost-first to maintain correct right-associative semantics.
+    """
+    warnings: list[str] = []
+    while True:
+        mask = _line_mask(line)
+        and_pos = _find_next_op(line, "&&", mask, reverse=True)
+        or_pos = _find_next_op(line, "||", mask, reverse=True)
+        if and_pos == -1 and or_pos == -1:
+            break
+        if and_pos > or_pos:
+            best_pos, best_op = and_pos, "&&"
+        else:
+            best_pos, best_op = or_pos, "||"
+        condition = "$?" if best_op == "&&" else "-not $?"
+        left = line[:best_pos].strip()
+        right_start = best_pos + 2
+        # Separate a trailing line comment from the right-hand expression
+        # so it stays outside the generated ``{ }`` block (a ``#`` inside
+        # braces would comment out the closing ``}``).
+        right_raw_end, comment = _separate_trailing_comment(line, right_start, mask)
+        right = line[right_start:right_raw_end].strip()
+        new_line = f"{left}; if ({condition}) {{ {right} }}{comment}"
+        warnings.append(
+            f"pipeline chain `{left} {best_op} {right}` "
+            f"rewritten to `{new_line}`"
+        )
+        line = new_line
+    return line, warnings
+
+
+# ===========================================================================
+# Null-conditional helpers
+# ===========================================================================
+
+def _scan_member_name(line: str, ms: int, mask: bytearray) -> int:
+    """Scan a member name starting at *ms*; return the index after it."""
+    if ms >= len(line):
+        return ms
+    c0 = line[ms]
+    if c0 == "'":
+        return _scan_single_quoted(line, ms)
+    if c0 == '"':
+        return _scan_double_quoted(line, ms)
+    if c0 != "$":
+        me = ms
+        while me < len(line) and (line[me].isalnum() or line[me] == "_"):
+            me += 1
+        return me
+    # Variable member ($var, ${var}, $? etc.)
+    me = ms + 1
+    if me >= len(line):
+        return me
+    ch = line[me]
+    if ch == "{":
+        bd = 1
+        me += 1
+        while me < len(line) and bd > 0:
+            if line[me] == "{":
+                bd += 1
+            elif line[me] == "}":
+                bd -= 1
+            me += 1
+    elif ch in "?$^":
+        me += 1  # single-char automatic variables ($? $$ $^)
+    else:
+        while me < len(line) and (line[me].isalnum() or line[me] in "_:"):
+            me += 1
+    return me
+
+
+def _scan_method_args(line: str, start: int, mask: bytearray) -> tuple[str, int]:
+    """If *start* points to ``(``, scan the method argument list.
+
+    Returns ``(args_string, index_after_closing_paren)``.
+    """
+    j = start
+    while j < len(line) and line[j] == " ":
+        j += 1
+    if j >= len(line) or line[j] != "(":
+        return "", start
+    d = 1
+    k = j + 1
+    while k < len(line) and d > 0:
+        if mask[k]:
+            if line[k] == "(":
+                d += 1
+            elif line[k] == ")":
+                d -= 1
+        k += 1
+    return line[j:k], k
+
+
+# ===========================================================================
+# Transform: null-conditional  (?. and ?[)
+# ===========================================================================
+
+def _transform_null_conditional_dot(line: str) -> tuple[str, list[str]]:
+    """Rewrite null-conditional member access (``?.``)."""
+    return _transform_null_conditional_line(line, "?.")
+
+
+def _transform_null_conditional_bracket(line: str) -> tuple[str, list[str]]:
+    """Rewrite null-conditional index access (``?[``)."""
+    return _transform_null_conditional_line(line, "?[")
+
+
+def _transform_null_conditional_line(line: str, op: str) -> tuple[str, list[str]]:
+    """Rewrite null-conditional member access (``?.``) or index access (``?[``)."""
+    warnings: list[str] = []
+    is_dot = op == "?."
+    op_len = len(op)
+    search = 0
+    while True:
+        mask = _line_mask(line)
+        idx = _find_next_op(line, op, mask, True, search)
+        if idx == -1:
+            return line, warnings
+
+        expr_start, expr_end = _expr_left(line, idx, mask, "?:")
+        base = line[expr_start:expr_end].strip()
+        base, expr_start = _strip_command_prefix(base, expr_start)
+        if not base:
+            search = idx + op_len
+            continue
+
+        if is_dot:
+            segments: list[tuple[str, int]] = []  # (member_expr, end_pos)
+            prefixes = [base]  # accumulated dotted prefixes
+            cur = idx
+            while cur < len(line) - 1 and line[cur:cur + 2] == "?.":
+                ms = cur + 2
+                while ms < len(line) and line[ms] == " ":
+                    ms += 1
+                me = _scan_member_name(line, ms, mask)
+                if me == ms:
+                    break
+                mem = line[ms:me]
+                args, me = _scan_method_args(line, me, mask)
+                segments.append((f".{mem}{args}", me))
+                prefixes.append(prefixes[-1] + segments[-1][0])
+                cur = me
+            if not segments:
+                search = idx + op_len
+                continue
+            # Build nested if chain from innermost to outermost
+            full_expr = prefixes[-1]  # full dotted expression
+            for pfx in reversed(prefixes[:-1]):
+                full_expr = f"if ($null -ne {pfx}) {{ {full_expr} }}"
+            inner = f"$({full_expr})"
+            end_pos = segments[-1][1]
+            orig_expr = base + "?." + "?.".join(seg[0][1:] for seg in segments)
+        else:
+            bracket_depth = 1
+            bracket_end = idx + 2
+            while bracket_end < len(line) and bracket_depth > 0:
+                c = line[bracket_end]
+                if mask[bracket_end]:
+                    if c == "[":
+                        bracket_depth += 1
+                    elif c == "]":
+                        bracket_depth -= 1
+                bracket_end += 1
+            index_expr = line[idx + 2:bracket_end - 1]
+            inner = f"$(if ($null -ne {base}) {{ {base}[{index_expr}] }})"
+            end_pos = bracket_end
+            orig_expr = f"{base}?[{index_expr}]"
+
+        kind = "member access" if is_dot else "index"
+        warnings.append(
+            f"null-conditional {kind} `{orig_expr}` "
+            f"rewritten to `{inner}`"
+        )
+        line = _build_replacement(line[:expr_start], inner) + line[end_pos:]
+        search = 0
+
+
+# ===========================================================================
+# Transform dispatch
+# ===========================================================================
+
+_TRANSFORMS = (
+    _transform_nca_line,
+    _transform_null_conditional_dot,
+    _transform_null_conditional_bracket,
+    _transform_nc_line,
+    _transform_ternary_line,
+    _transform_chain_line,
+)
+
+
+# ===========================================================================
+# Public API
+# ===========================================================================
+
+def pwsh_transform(code: str) -> tuple[str, list[str]]:
+    """Transform PowerShell 7.x syntax into PowerShell 5.1 compatible syntax.
+
+    Returns ``(transformed_code, warnings)`` where *warnings* is a list of
+    human-readable messages describing each transformation that was applied.
+    """
+    code = _join_continuation_lines(code)
+    lines = code.split("\n")
+    mask = _build_region_mask(code)
+    multi = _find_multiline_regions(code, mask, lines)
+
+    result: list[str] = []
+    all_warnings: list[str] = []
+
+    for i, line in enumerate(lines):
+        if i in multi:
+            result.append(line)
+            continue
+        for xform in _TRANSFORMS:
+            line, w = xform(line)
+            if w:
+                all_warnings.extend(f"Line {i + 1}: {msg}" for msg in w)
+        result.append(line)
+
+    return "\n".join(result), all_warnings
+
+
+def _find_multiline_regions(code: str, mask: bytearray, lines: list[str]) -> set[int]:
+    """Return a set of line indices that are inside multi-line regions.
+
+    Multi-line regions are strings, comments, or here-strings that span
+    across two or more lines. Lines wholly inside such regions must be
+    skipped by line-level transforms.
+    """
+    multi: set[int] = set()
+    i = 0
+    n = len(code)
+    line_idx = 0
+    while i < n:
+        if mask[i] == 0:
+            start_line = line_idx
+            while i < n and mask[i] == 0:
+                if code[i] == "\n":
+                    line_idx += 1
+                i += 1
+            if line_idx > start_line:
+                multi.update(range(start_line, line_idx + 1))
+        else:
+            if code[i] == "\n":
+                line_idx += 1
+            i += 1
+    return multi
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:])
+    else:
+        text = sys.stdin.read()
+    result, warnings = pwsh_transform(text)
+    for w in warnings:
+        print(f"[WARNING] {w}", file=sys.stderr)
+    print(result)

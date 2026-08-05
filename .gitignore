@@ -12,6 +12,10 @@ src/kimix/default_config.json
 nul
 src/app/dist
 node_modules/
+# Staged native binaries (runtime_py.pyd + runtime.dll) from kimix-base.
+# The pure-Python shim package bin/kimix_native/ IS tracked (re-included).
+bin/*
+!bin/kimix_native/
 # Test-generated artifacts
 tests/test_result.txt
 tests/output.md

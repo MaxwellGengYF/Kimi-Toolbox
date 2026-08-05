@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import orjson
 import regex as re
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.display import ShellDisplayBlock
@@ -597,16 +601,22 @@ def _process_unquoted(cmd: str) -> str:
     """Convert unquoted backslashes to forward slashes in ``cmd``.
 
     Walks the string in *unquoted mode* (the same rules that apply at the
-    top level of a bash command): a bare ``\\`` followed by a non-metachar
-    is converted to ``/``, while ``\\`` followed by a bash metacharacter,
-    or ``\\`` inside single / double / ANSI-C quotes, is preserved.
+    top level of a bash command): a bare ``\`` followed by a non-metachar
+    is converted to ``/``, while ``\`` followed by a bash metacharacter,
+    or ``\`` inside single / double / ANSI-C quotes, is preserved.
 
     The function also descends into ``$(...)`` and backtick command
     substitutions, processing their *content* in unquoted mode as well
     (because bash runs the content of ``$(...)`` and `` ` ` `` in a
     subshell where it is parsed unquoted — even when the substitution is
     itself nested inside ``"..."``).
+
+    Native acceleration: kimix_native.parse._process_unquoted (byte-exact).
     """
+    if _native_use_native("PARSE"):
+        _mod = _native_get_module("parse")
+        if _mod is not None:
+            return _mod._process_unquoted(cmd)
     result: list[str] = []
     i = 0
     length = len(cmd)

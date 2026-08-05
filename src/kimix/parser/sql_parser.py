@@ -48,6 +48,12 @@ class SqlParser(BaseParser):
     )
 
     def parse(self, source_code: str) -> ParseResult:  # noqa: C901
+        # Native acceleration: kimix_native.parse.parse (sql).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("sql", "SQL", source_code)
+        if native is not None:
+            return native
+        
         """Parse SQL source code and extract comments.
 
         Args:

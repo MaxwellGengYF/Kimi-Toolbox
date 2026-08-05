@@ -45,6 +45,12 @@ class PascalParser(BaseParser):
     )
 
     def parse(self, source_code: str) -> ParseResult:  # noqa: C901
+        # Native acceleration: kimix_native.parse.parse (pascal).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("pascal", "Pascal", source_code)
+        if native is not None:
+            return native
+        
         """Parse Pascal/Delphi source code and extract comments.
 
         Args:

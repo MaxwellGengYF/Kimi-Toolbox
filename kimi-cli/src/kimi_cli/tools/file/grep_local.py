@@ -18,6 +18,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, override
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kaos.path import KaosPath
 from kosong.tooling import (
     FIELD_ALIASES_FILE,
@@ -1380,6 +1384,19 @@ class Grep(CallableTool2[Params]):
                 end_line = content.count("\n", 0, m.end()) + 1
                 for ln in range(start_line, end_line + 1):
                     match_line_nums.add(ln)
+        elif self._use_native_line_scan(content):
+            # Native line scan (kimix_native.tools.scan_lines_cb): offsets/
+            # line-splitting stay native; the regex matcher stays in Python.
+            # Only used when splitlines() == \n-splitting (guard in
+            # _use_native_line_scan), so line numbers match exactly.
+            _mod = _native_get_module("tools")
+            if _mod is not None:
+                def _matcher(line_bytes: bytes, line_index: int) -> bool:
+                    line_text = line_bytes.decode("utf-8", "surrogatepass")
+                    return bool(regex.search(line_text))
+
+                hits = _mod.scan_lines_cb(content, _matcher)
+                match_line_nums = {int(ln) + 1 for ln, _off, _len in hits}
         else:
             for i, line in enumerate(lines, 1):
                 if regex.search(line):
@@ -1409,6 +1426,21 @@ class Grep(CallableTool2[Params]):
                         results.append(f"{file_path}-{text}")
 
         return results
+
+    @staticmethod
+    def _use_native_line_scan(content: str) -> bool:
+        """True when native line scanning is safe for *content*.
+
+        The native kernel splits on \n only; ``str.splitlines`` also splits on
+        \r (alone or in \r\n) and other Unicode line separators. When any of
+        those appear, the Python path runs so line numbers stay identical.
+        """
+        if not _native_use_native("TOOLS"):
+            return False
+        for ch in content:
+            if ch in "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029":
+                return False
+        return True
 
     def _extract_path(self, line: str, output_mode: str) -> str | None:
         if output_mode == "files_with_matches":

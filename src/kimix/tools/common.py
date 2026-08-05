@@ -14,6 +14,11 @@ from typing import Any
 
 from kimi_agent_sdk import ToolReturnValue
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
 
 # ── Standard Error Helpers ────────────────────────────────────────────────
 
@@ -241,6 +246,12 @@ def filter_output(text: str) -> str:
     """
     if not isinstance(text, str):
         raise TypeError("filter_output expects a string")
+    # Native acceleration: kimix_native.stream.filter_output (bit-identical
+    # ANSI-strip + CRLF normalize).
+    if _native_use_native("STREAM"):
+        _mod = _native_get_module("stream")
+        if _mod is not None:
+            return _mod.filter_output(text)
     text = _ANSI_ESCAPE_RE.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return text
@@ -550,6 +561,19 @@ def _dedup_output(
     """
     if not output:
         return ""
+    # Native acceleration: kimix_native.stream.LineProcessor (dedup_mode
+    # 1=counter / 2=block, block_window=max_block_lines).
+    if _native_use_native("STREAM"):
+        _mod = _native_get_module("stream")
+        if _mod is not None:
+            lp = _mod.LineProcessor(
+                strip_ansi=False,
+                dedup_mode=2 if max_block_lines > 1 else 1,
+                threshold=threshold,
+                block_window=max_block_lines,
+            )
+            lp.feed(output)
+            return "\n".join(lp.flush())
     lines = output.splitlines()
 
     if max_block_lines <= 1:

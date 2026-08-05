@@ -50,6 +50,11 @@ The tokenizer is used to decide:
 """
 
 from __future__ import annotations
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
 
 from dataclasses import dataclass
 
@@ -128,6 +133,14 @@ def fix_pwsh_command(cmd: str) -> PwshFix | None:
     """
     if not cmd or not cmd.strip():
         return None
+    # Native acceleration: kimix_native.parse.fix_pwsh_command.
+    if _native_use_native("PARSE"):
+        _mod = _native_get_module("parse")
+        if _mod is not None:
+            result = _mod.fix_pwsh_command(cmd)
+            if result is None:
+                return None
+            return PwshFix(command=result.command, warning=result.warning)
     # Fast path: no quote/comment/continuation/here-string/stop-parsing
     # characters at all — the command is valid as-is and cannot affect the
     # try/catch wrapper.  Avoids the O(n) Python scan for plain commands.

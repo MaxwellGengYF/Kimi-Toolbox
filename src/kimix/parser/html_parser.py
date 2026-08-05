@@ -28,6 +28,12 @@ class HtmlParser(BaseParser):
     _ATTR_SINGLE = 5
 
     def parse(self, source_code: str) -> ParseResult:
+        # Native acceleration: kimix_native.parse.parse (html).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("html", "HTML", source_code)
+        if native is not None:
+            return native
+        
         """Parse *source_code* and return extracted comments.
 
         Args:

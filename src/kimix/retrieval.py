@@ -16,6 +16,15 @@ import numpy as np
 import xxhash
 from numpy.typing import NDArray
 
+try:  # native acceleration (optional; failure-tolerant for isolated envs)
+    from kimix.native_loader import (
+        get_module as _native_get_module,
+        use_native as _native_use_native,
+    )
+except Exception:  # pragma: no cover
+    _native_get_module = lambda name: None
+    _native_use_native = lambda kernel: False
+
 _EMPTY_DOCS: NDArray[np.int32] = np.array([], dtype=np.int32)
 _EMPTY_TFS: NDArray[np.float64] = np.array([], dtype=np.float64)
 
@@ -31,6 +40,11 @@ class NgramTokenizer:
     @staticmethod
     def normalize(text: str) -> str:
         """Lower-case and apply Unicode NFKC normalization."""
+        # Native acceleration: kimix_native.index.NgramTokenizer.normalize.
+        if _native_use_native("INDEX"):
+            _mod = _native_get_module("index")
+            if _mod is not None:
+                return _mod.NgramTokenizer(2).normalize(text)
         lowered = text.lower()
         if lowered.isascii():
             return lowered
@@ -61,6 +75,11 @@ class NgramTokenizer:
 
     def _detect_n(self, text: str) -> int:
         """Auto-detect n-gram size: bigram for CJK, trigram for mixed/code."""
+        # Native acceleration: kimix_native.index.NgramTokenizer.detect_n.
+        if _native_use_native("INDEX"):
+            _mod = _native_get_module("index")
+            if _mod is not None:
+                return _mod.NgramTokenizer(self.n).detect_n(text)
         if not text:
             return self.n
         # Fast path: ASCII text cannot contain CJK, so skip the scan
@@ -85,6 +104,11 @@ class NgramTokenizer:
 
     def tokenize(self, text: str, n: int | None = None) -> list[str]:
         """Generate overlapping character n-grams from *text*."""
+        # Native acceleration: kimix_native.index.NgramTokenizer.tokenize.
+        if _native_use_native("INDEX"):
+            _mod = _native_get_module("index")
+            if _mod is not None:
+                return _mod.NgramTokenizer(self.n).tokenize(text, n)
         text = self.normalize(text).strip()
         if not text:
             return []
@@ -842,6 +866,11 @@ class LevenshteinAutomaton:
     @functools.lru_cache(maxsize=65536)
     def _damerau_levenshtein(s: str, t: str) -> int:
         """Compute Damerau-Levenshtein distance between *s* and *t*."""
+        # Native acceleration: kimix_native.search.damerau_levenshtein.
+        if _native_use_native("SEARCH"):
+            _mod = _native_get_module("search")
+            if _mod is not None:
+                return _mod.damerau_levenshtein(s, t)
         if len(s) < len(t):
             s, t = t, s
         m, n = len(s), len(t)
@@ -885,6 +914,11 @@ class LevenshteinAutomaton:
 
     def _freq_lower_bound(self, term: str) -> int:
         """Lower bound on edit distance based on character frequencies."""
+        # Native acceleration: kimix_native.search.freq_lower_bound.
+        if _native_use_native("SEARCH"):
+            _mod = _native_get_module("search")
+            if _mod is not None:
+                return _mod.freq_lower_bound(self.pattern, term)
         total = 0
         matched = 0
         term_len = len(term)
@@ -1167,6 +1201,11 @@ class Searcher:
 @functools.lru_cache(maxsize=65536)
 def jaro_similarity(s: str, t: str) -> float:
     """Return Jaro similarity between *s* and *t* (0.0–1.0)."""
+    # Native acceleration: kimix_native.search.jaro_similarity.
+    if _native_use_native("SEARCH"):
+        _mod = _native_get_module("search")
+        if _mod is not None:
+            return _mod.jaro_similarity(s, t)
     if s == t:
         return 1.0
     len_s, len_t = len(s), len(t)
@@ -1208,6 +1247,13 @@ def jaro_similarity(s: str, t: str) -> float:
 @functools.lru_cache(maxsize=65536)
 def jaro_winkler_similarity(s: str, t: str, p: float = 0.1, max_prefix: int = 4) -> float:
     """Return Jaro–Winkler similarity, boosting prefix matches."""
+    # Native acceleration: kimix_native.search.jaro_winkler (kernel fixes the
+    # prefix window at 4, matching this function's default; non-default
+    # max_prefix keeps the pure-Python path).
+    if max_prefix == 4 and _native_use_native("SEARCH"):
+        _mod = _native_get_module("search")
+        if _mod is not None:
+            return _mod.jaro_winkler(s, t, p)
     jaro = jaro_similarity(s, t)
     prefix = 0
     limit = min(max_prefix, len(s), len(t))
@@ -1222,6 +1268,11 @@ def jaro_winkler_similarity(s: str, t: str, p: float = 0.1, max_prefix: int = 4)
 @functools.lru_cache(maxsize=65536)
 def sorensen_dice_coefficient(s: str, t: str) -> float:
     """Return Sørensen–Dice coefficient based on bigram overlap."""
+    # Native acceleration: kimix_native.search.sorensen_dice.
+    if _native_use_native("SEARCH"):
+        _mod = _native_get_module("search")
+        if _mod is not None:
+            return _mod.sorensen_dice(s, t)
     if not s and not t:
         return 1.0
     if not s or not t:
@@ -1236,6 +1287,11 @@ def sorensen_dice_coefficient(s: str, t: str) -> float:
 @functools.lru_cache(maxsize=65536)
 def ngram_overlap(s: str, t: str, n: int = 2) -> float:
     """Return n-gram overlap ratio (intersection / union)."""
+    # Native acceleration: kimix_native.search.ngram_overlap.
+    if _native_use_native("SEARCH"):
+        _mod = _native_get_module("search")
+        if _mod is not None:
+            return _mod.ngram_overlap(s, t, n)
     if not s or not t:
         return 0.0
     s_grams = {s[i : i + n] for i in range(len(s) - n + 1)} if len(s) >= n else {s}

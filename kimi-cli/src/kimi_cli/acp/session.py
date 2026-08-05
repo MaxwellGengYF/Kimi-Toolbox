@@ -17,6 +17,10 @@ from kimi_cli.acp.convert import (
 )
 from kimi_cli.acp.types import ACPContentBlock
 from kimi_cli.app import KimiCLI
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled
 from kimi_cli.tools import extract_key_argument
 from kimi_cli.utils.logging import logger
@@ -86,9 +90,19 @@ class _ToolCallState:
         self.tool_call = tool_call
         self.args = tool_call.function.arguments or ""
         self.lexer = streamingjson.Lexer()
+        self._native_lexer = None
+        if _native_use_native("JSON"):
+            _mod = _native_get_module("json")
+            if _mod is not None:
+                # Native incremental lexer: feed() accepts bytes; buffer()
+                # mirrors every byte fed (like streamingjson.complete_json()
+                # returns the accumulated string).
+                self._native_lexer = _mod.IncrementalJsonLexer()
         self._work_dir = work_dir
         if tool_call.function.arguments is not None:
             self.lexer.append_string(tool_call.function.arguments)
+            if self._native_lexer is not None:
+                self._native_lexer.feed(tool_call.function.arguments.encode("utf-8", "surrogatepass"))
 
     @property
     def acp_tool_call_id(self) -> str:
@@ -104,11 +118,20 @@ class _ToolCallState:
         """Append a new arguments part to the accumulated args and lexer."""
         self.args += args_part
         self.lexer.append_string(args_part)
+        if self._native_lexer is not None:
+            self._native_lexer.feed(args_part.encode("utf-8", "surrogatepass"))
 
     def get_title(self) -> str:
         """Get the current title with subtitle if available."""
         tool_name = self.tool_call.function.name
-        subtitle = extract_key_argument(self.lexer, tool_name, self._work_dir)
+        if self._native_lexer is not None:
+            # buffer() == every byte fed == the accumulated args string, so
+            # feeding the decoded text to extract_key_argument (which accepts
+            # a plain string) is behavior-identical to the streamingjson path.
+            json_str = self._native_lexer.buffer().decode("utf-8", "surrogatepass")
+            subtitle = extract_key_argument(json_str, tool_name, self._work_dir)
+        else:
+            subtitle = extract_key_argument(self.lexer, tool_name, self._work_dir)
         if subtitle:
             return f"{tool_name}: {subtitle}"
         return tool_name

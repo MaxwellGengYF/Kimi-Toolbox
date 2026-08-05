@@ -31,6 +31,12 @@ class ShellParser(BaseParser):
     DOLLAR_PAREN = 6
 
     def parse(self, source_code: str) -> ParseResult:
+        # Native acceleration: kimix_native.parse.parse (shell).
+        from kimix.parser.base import native_parse_result
+        native = native_parse_result("shell", "Shell", source_code)
+        if native is not None:
+            return native
+        
         """Parse Shell source and extract all comments."""
         comments: list[Comment] = []
         i = 0

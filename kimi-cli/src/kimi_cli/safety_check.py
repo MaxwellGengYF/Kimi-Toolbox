@@ -1,6 +1,11 @@
 import regex as re
 import unicodedata
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
 """
 Text safety utilities: clean hidden/invisible characters and prevent tokenization failures.
 """
@@ -25,6 +30,12 @@ def clean_text(text: str, keep_newlines: bool = True) -> str:
     """
     if not isinstance(text, str):
         text = str(text)
+
+    # Native acceleration: kimix_native.text.clean_text (bit-identical).
+    if _native_use_native("TEXT"):
+        _mod = _native_get_module("text")
+        if _mod is not None:
+            return _mod.clean_text(text, keep_newlines)
 
     # Step 1: Remove zero-width and format characters explicitly
     text = re.sub(
@@ -129,6 +140,17 @@ def sanitize_for_tokenizer(
     """
     if not isinstance(text, str):
         text = str(text)
+
+    # Native acceleration: kimix_native.text.sanitize_for_tokenizer.
+    if _native_use_native("TEXT"):
+        _mod = _native_get_module("text")
+        if _mod is not None:
+            return _mod.sanitize_for_tokenizer(
+                text,
+                max_chars=max_chars,
+                max_repeat=max_repeat,
+                truncate_msg=truncate_msg,
+            )
 
     # 2. Strip surrogates (invalid scalar values)
     text = _strip_surrogates(text)

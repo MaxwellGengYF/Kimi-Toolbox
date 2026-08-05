@@ -17,6 +17,12 @@ from kimi_cli.soul.message import is_system_reminder_message, system
 from kimi_cli.utils.message import message_stringify
 from kimi_cli.utils.path import sanitize_cli_path
 from kimi_cli.utils.string import shorten
+
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
 from kimi_cli.wire.types import (
     AudioURLPart,
     ContentPart,
@@ -228,6 +234,26 @@ def _format_turn_md(messages: list[Message], turn_number: int) -> str:
     return "\n".join(lines)
 
 
+def _message_to_export_dict(msg: Message) -> dict:
+    """Message -> plain dict bridge for the native export builder.
+
+    ``Message.model_dump`` collapses a single text part into a bare string;
+    the native kernel (like the reference helpers) expects ``content`` to be
+    a list of part dicts, so the parts are dumped individually.
+    """
+    out: dict = {"role": msg.role}
+    content = msg.content
+    if isinstance(content, str):
+        out["content"] = [{"type": "text", "text": content}]
+    elif content is not None:
+        out["content"] = [part.model_dump(exclude_none=True) for part in content]
+    if msg.tool_call_id is not None:
+        out["tool_call_id"] = msg.tool_call_id
+    if msg.tool_calls:
+        out["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in msg.tool_calls]
+    return out
+
+
 def build_export_jsonl(
     session_id: str,
     work_dir: str,
@@ -297,6 +323,20 @@ def build_export_markdown(
     now: pendulum.DateTime,
 ) -> str:
     """Build the full export markdown string."""
+    # Native acceleration: kimix_native.tools.build_export_markdown. The
+    # native kernel consumes plain-dict history (message-view bridge via
+    # _messages_to_dicts below); pydantic validation stays in Python.
+    if _native_use_native("TOOLS"):
+        _mod = _native_get_module("tools")
+        if _mod is not None:
+            opts = {
+                "session_id": session_id,
+                "exported_at": now.isoformat(timespec="seconds"),
+                "work_dir": work_dir,
+                "token_count": token_count,
+            }
+            history_dicts = [_message_to_export_dict(m) for m in history]
+            return _mod.build_export_markdown(history_dicts, opts).decode("utf-8")
     lines: list[str] = [
         "---",
         f"session_id: {session_id}",

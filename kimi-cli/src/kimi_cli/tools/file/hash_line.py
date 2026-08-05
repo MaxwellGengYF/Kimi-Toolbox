@@ -63,7 +63,11 @@ def compute_line_hash(line_num: int, line: str, prev_hash: str | None) -> str:
     else:
         seed = line_num
 
-    # Compute xxHash32 of the normalized content, take lower 8 bits
+    # NOTE: the per-line native kernel (kimix_native.tools.line_hash) is not
+    # wired here: benchmarks show the Python->C boundary dominates for
+    # per-line calls (0.5x vs xxhash.xxh32 which is itself a C extension).
+    # The bulk kernel (tools.line_hashes / compute_line_hashes) stays
+    # available for whole-file hashing if a caller ever needs it.
     data = "".join(chars).encode("utf-8")
     hash_val = xxhash.xxh32(data, seed).intdigest() & 0xFF
     return _NIBBLE_LOOKUP[hash_val]
