@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 
+import orjson
+
 from . import _native, use_native
 from .json import _compat_indent2
 from .soul import _build_structure
@@ -43,8 +45,9 @@ HASH_SEED = 0
 # _compat: pure-Python mirrors of the reference algorithms
 # ---------------------------------------------------------------------------
 
-def _compat_xxh32(data: bytes, seed: int = 0) -> int:
-    """Canonical XXH32 (public domain, Yann Collet) - mirror of xxhash.xxh32."""
+def _py_xxh32(data: bytes, seed: int = 0) -> int:
+    """Canonical XXH32 (public domain, Yann Collet) - pure-Python reference
+    mirror of xxhash.xxh32 (kept for fallback + parity checks)."""
     PRIME1 = 0x9E3779B1
     PRIME2 = 0x85EBCA77
     PRIME3 = 0xC2B2AE3D
@@ -93,6 +96,17 @@ def _compat_xxh32(data: bytes, seed: int = 0) -> int:
     h = (h * PRIME3) & MASK
     h ^= h >> 16
     return h & MASK
+
+
+def _compat_xxh32(data: bytes, seed: int = 0) -> int:
+    """Canonical XXH32 via the xxhash package (bit-identical to _py_xxh32;
+    the C implementation is ~100x faster on the line-hash hot path)."""
+    try:
+        import xxhash
+
+        return xxhash.xxh32(data, seed).intdigest()
+    except ImportError:  # pragma: no cover - xxhash is a declared dependency
+        return _py_xxh32(data, seed)
 
 
 def _compat_compute_line_hash(line_num: int, line: str, prev_hash: str | None) -> str:
@@ -341,9 +355,18 @@ def _exp_internal_user(msg: dict) -> bool:
 _EXP_HINT_KEYS = ("path", "file_path", "command", "query", "url", "name", "pattern")
 
 
+def _loads(s: str | bytes):
+    """orjson-fast parse (str or bytes); stdlib fallback keeps lone-surrogate
+    parity."""
+    try:
+        return orjson.loads(s)
+    except ValueError:
+        return json.loads(s)
+
+
 def _exp_extract_hint(args_json: str) -> str:
     try:
-        parsed = json.loads(args_json)
+        parsed = _loads(args_json)
     except ValueError:
         return ""
     if not isinstance(parsed, dict):
@@ -365,7 +388,7 @@ def _exp_format_tool_call_md(tc: dict) -> str:
     if hint:
         title += " (`" + hint + "`)"
     try:
-        parsed = json.loads(args_raw)
+        parsed = _loads(args_raw)
         args_formatted = _compat_indent2(parsed).decode("utf-8", "surrogatepass")
     except ValueError:
         args_formatted = args_raw

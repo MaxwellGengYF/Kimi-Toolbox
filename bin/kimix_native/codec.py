@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 
+import orjson
+
 from . import _native, use_native
 
 # ---------------------------------------------------------------------------
@@ -40,10 +42,17 @@ def _dec(b: bytes) -> str:
 
 
 def _compact(obj) -> bytes:
-    """orjson-like compact JSON bytes (no spaces, raw UTF-8)."""
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8", "surrogatepass"
-    )
+    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
+
+    Falls back to the stdlib serializer for values orjson rejects (lone
+    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
+    """
+    try:
+        return orjson.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogatepass"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -59,19 +68,28 @@ def _sort_json_value(value):
     return value
 
 
-def _compat_serialize_envelope(type_name: str, payload: bytes) -> bytes:
-    text = payload.decode("utf-8", "surrogatepass")
+def _loads(data: bytes):
+    """orjson-fast parse; stdlib fallback keeps lone-surrogate parity
+    (orjson rejects CESU-8 lone surrogates with JSONDecodeError)."""
     try:
-        parsed = json.loads(text)
+        return orjson.loads(data)
+    except ValueError:
+        return json.loads(data.decode("utf-8", "surrogatepass"))
+
+
+def _compat_serialize_envelope(type_name: str, payload: bytes) -> bytes:
+    try:
+        parsed = _loads(payload)
     except ValueError:
         # Invalid payload JSON -> embed as an escaped string (kernel rule).
+        text = payload.decode("utf-8", "surrogatepass")
         return _compact({"type": type_name, "payload": text})
     return _compact({"type": type_name, "payload": parsed})
 
 
 def _compat_deserialize_envelope(frame: bytes):
     try:
-        obj = json.loads(frame.decode("utf-8", "surrogatepass"))
+        obj = _loads(frame)
     except ValueError:
         return None
     if not isinstance(obj, dict):
@@ -85,7 +103,7 @@ def _compat_deserialize_envelope(frame: bytes):
 
 def _compat_canonicalize_payload(data: bytes):
     try:
-        obj = json.loads(data.decode("utf-8", "surrogatepass"))
+        obj = _loads(data)
     except ValueError:
         return None
     return _compact(_sort_json_value(obj))

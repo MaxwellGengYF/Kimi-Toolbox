@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import json
 
+import orjson
+
 from . import _native, use_native
 from ._prompt_texts import (
     BALANCED_MODE_GUIDANCE,
@@ -63,10 +65,25 @@ def _dec(b: bytes) -> str:
 
 
 def _compact(obj) -> bytes:
-    """orjson-like compact JSON bytes (no spaces, raw UTF-8)."""
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8", "surrogatepass"
-    )
+    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
+
+    Falls back to the stdlib serializer for values orjson rejects (lone
+    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
+    """
+    try:
+        return orjson.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogatepass"
+        )
+
+
+def _loads(data: bytes):
+    """orjson-fast parse; stdlib fallback keeps lone-surrogate parity."""
+    try:
+        return orjson.loads(data)
+    except ValueError:
+        return json.loads(_dec(data))
 
 
 _ROLE_TO_INT = {"system": 0, "user": 1, "assistant": 2, "tool": 3}
@@ -622,7 +639,7 @@ def apply_normalize_plan(history: list[dict], plan: list[tuple]) -> list[dict]:
 
 def apply_id_fixes(history: list[dict], fixes: list[tuple]) -> list[dict]:
     """Apply normalize_tool_call_ids fixes (deep-copied messages)."""
-    out = [json.loads(_compact(m).decode("utf-8", "surrogatepass")) for m in history]
+    out = [_loads(_compact(m)) for m in history]
     for msg_index, call_index, new_id in fixes:
         new_id = _dec(bytes(new_id))
         if call_index == -1:

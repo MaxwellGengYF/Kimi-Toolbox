@@ -200,6 +200,10 @@ class _CompatInvertedIndex:
         #   | u32 meta_count + (u32 doc_id, u32 len)*
         #   | u32 seg_count | per segment: u32 term_count,
         #     (u32 len + bytes)*, (u32 offset)*(term_count+1), u32 pc, (u32,u32)*
+        # NOTE: this layout is pinned to the C++ kernel (KNIDX1), so the
+        # stdlib ``struct`` module is deliberately retained here instead of
+        # msgspec — msgspec's Struct encoding cannot express the variable-
+        # length term/postings sections of this wire format.
         import struct
 
         self.finalize()

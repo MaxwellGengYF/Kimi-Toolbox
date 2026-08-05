@@ -23,6 +23,8 @@ from __future__ import annotations
 import contextlib
 import json
 
+import orjson
+
 from . import _native, use_native
 
 
@@ -35,10 +37,26 @@ def _dec(b: bytes) -> str:
 
 
 def _compact(obj) -> bytes:
-    """orjson-like compact JSON bytes (no spaces, raw UTF-8)."""
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8", "surrogatepass"
-    )
+    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
+
+    Falls back to the stdlib serializer for values orjson rejects (lone
+    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
+    """
+    try:
+        return orjson.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogatepass"
+        )
+
+
+def _loads(data: bytes):
+    """orjson-fast parse; stdlib fallback keeps lone-surrogate parity
+    (orjson rejects CESU-8 lone surrogates with JSONDecodeError)."""
+    try:
+        return orjson.loads(data)
+    except ValueError:
+        return json.loads(_dec(data))
 
 _USE = use_native("JSON") and _native is not None
 
@@ -592,7 +610,7 @@ class JsonStore:
             self._native.load(bytes(data))
             return
         try:
-            parsed = json.loads(_dec(bytes(data)))
+            parsed = _loads(bytes(data))
         except ValueError:
             self._doc = {}
             return
@@ -603,7 +621,7 @@ class JsonStore:
             self._native.update(bytes(data))
             return
         try:
-            parsed = json.loads(_dec(bytes(data)))
+            parsed = _loads(bytes(data))
         except ValueError:
             return
         if isinstance(parsed, dict):
@@ -651,64 +669,73 @@ def _deep_merge(dst: dict, src: dict) -> dict:
 
 
 def _compat_indent2(obj) -> bytes:
-    """orjson OPT_INDENT_2-style pretty bytes (2-space indent, raw UTF-8)."""
+    """orjson OPT_INDENT_2-style pretty bytes (2-space indent, raw UTF-8).
 
-    def esc(s: str) -> str:
-        out = []
-        for ch in s:
-            o = ord(ch)
-            if ch == '"':
-                out.append('\\"')
-            elif ch == "\\":
-                out.append("\\\\")
-            elif ch == "\b":
-                out.append("\b")
-            elif ch == "\f":
-                out.append("\f")
-            elif ch == "\n":
-                out.append("\n")
-            elif ch == "\r":
-                out.append("\r")
-            elif ch == "\t":
-                out.append("\t")
-            elif o < 0x20:
-                out.append("\\u%04x" % o)
-            else:
-                out.append(ch)
-        return "".join(out)
+    Uses orjson's OPT_INDENT_2 directly when possible (byte-identical to the
+    native serializer for JSON-able values); falls back to the hand-rolled
+    renderer for values orjson rejects (lone surrogates, >64-bit ints).
+    """
+    try:
+        return orjson.dumps(obj, option=orjson.OPT_INDENT_2)
+    except (TypeError, ValueError):
+        return _enc(_render_indent2(obj, 0))
 
-    def render(v, level: int) -> str:
-        if v is None:
-            return "null"
-        if v is True:
-            return "true"
-        if v is False:
-            return "false"
-        if isinstance(v, (int, float)):
-            if isinstance(v, float):
-                r = repr(v)
-                if "e" not in r and "E" not in r and "." not in r:
-                    r += ".0"
-                return r
-            return str(v)
-        if isinstance(v, str):
-            return '"' + esc(v) + '"'
-        if isinstance(v, list):
-            if not v:
-                return "[]"
-            pad = "  " * (level + 1)
-            items = [pad + render(x, level + 1) for x in v]
-            return "[\n" + ",\n".join(items) + "\n" + "  " * level + "]"
-        if isinstance(v, dict):
-            if not v:
-                return "{}"
-            pad = "  " * (level + 1)
-            items = [pad + '"' + esc(str(k)) + '": ' + render(x, level + 1)
-                     for k, x in v.items()]
-            return "{\n" + ",\n".join(items) + "\n" + "  " * level + "}"
-        return '"' + esc(str(v)) + '"'
 
-    return _enc(render(obj, 0))
+def _esc_indent2(s: str) -> str:
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 0x20:
+            out.append("\\u%04x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _render_indent2(v, level: int) -> str:
+    if v is None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, (int, float)):
+        if isinstance(v, float):
+            r = repr(v)
+            if "e" not in r and "E" not in r and "." not in r:
+                r += ".0"
+            return r
+        return str(v)
+    if isinstance(v, str):
+        return '"' + _esc_indent2(v) + '"'
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        pad = "  " * (level + 1)
+        items = [pad + _render_indent2(x, level + 1) for x in v]
+        return "[\n" + ",\n".join(items) + "\n" + "  " * level + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        pad = "  " * (level + 1)
+        items = [pad + '"' + _esc_indent2(str(k)) + '": ' + _render_indent2(x, level + 1)
+                 for k, x in v.items()]
+        return "{\n" + ",\n".join(items) + "\n" + "  " * level + "}"
+    return '"' + _esc_indent2(str(v)) + '"'
 
 
 def _compat_atomic_write(path: str, blob: bytes) -> None:
@@ -751,7 +778,7 @@ def scan_notifications(jsonl: bytes, now_ms: int = 0) -> list[dict]:
         if not line:
             continue
         try:
-            view = json.loads(_dec(line))
+            view = _loads(line)
         except ValueError:
             continue
         event = view.get("event")
@@ -774,7 +801,7 @@ def deref_json_schema(schema: bytes, registry: list[bytes] | None = None) -> byt
     if _USE:
         reg = list(registry) if registry is not None else []
         return bytes(_native.json.deref_json_schema(bytes(schema), reg))
-    return _compact(_compat_deref_json_schema(json.loads(_dec(bytes(schema)))))
+    return _compact(_compat_deref_json_schema(_loads(bytes(schema))))
 
 
 def _compat_deref_json_schema(schema: dict) -> dict:
@@ -859,7 +886,7 @@ def ensure_property_types(schema: bytes) -> bytes:
     """Deep copy with an explicit `type` on every nested property schema."""
     if _USE:
         return bytes(_native.json.ensure_property_types(bytes(schema)))
-    return _compact(_compat_ensure_property_types(json.loads(_dec(bytes(schema)))))
+    return _compact(_compat_ensure_property_types(_loads(bytes(schema))))
 
 
 _TYPE_SKIP_KEYS = {"$ref", "allOf", "anyOf", "else", "if", "not", "oneOf", "then"}

@@ -24,7 +24,10 @@ split (the real pipeline normalizes to LF first).
 
 from __future__ import annotations
 
-import re as _re
+try:
+    import regex as _re  # faster ANSI scanning; identical semantics on this pattern
+except ImportError:  # pragma: no cover - regex is a declared dependency
+    import re as _re
 
 from . import _native, use_native
 
