@@ -1113,6 +1113,43 @@ class TestTodoListInternals:
             ]
         ) == ["A", "B"]
 
+    def test_merge_one_updates_notes_and_code_when_filled_and_different(self):
+        """_merge_one replaces notes/code when the new value is filled and different."""
+        from kimi_cli.tools.todo import TodoList
+
+        old = Todo(title="A", status="pending", notes="old notes", code="old code")
+        new = Todo(title="A", status="done", notes="new notes", code="new code")
+        merged = TodoList._merge_one(old, new)
+        assert merged.title == "A"
+        assert merged.status == "done"
+        assert merged.notes == "new notes"
+        assert merged.code == "new code"
+
+    def test_merge_one_keeps_old_notes_and_code_when_new_none_or_empty(self):
+        """_merge_one keeps old notes/code when the new value is None or empty."""
+        from kimi_cli.tools.todo import TodoList
+
+        old = Todo(title="A", status="pending", notes="old notes", code="old code")
+        for new_notes, new_code in [
+            (None, None),
+            ("", ""),
+            ("   ", "   "),
+        ]:
+            new = Todo(title="A", status="done", notes=new_notes, code=new_code)
+            merged = TodoList._merge_one(old, new)
+            assert merged.notes == "old notes", f"notes lost for {new_notes!r}"
+            assert merged.code == "old code", f"code lost for {new_code!r}"
+            assert merged.status == "done"
+
+    def test_merge_one_keeps_old_notes_but_updates_code(self):
+        """_merge_one can update one field while preserving the other."""
+        from kimi_cli.tools.todo import TodoList
+
+        old = Todo(title="A", status="pending", notes="old notes", code="old code")
+        merged = TodoList._merge_one(old, Todo(title="A", status="pending", notes="", code="new code"))
+        assert merged.notes == "old notes"
+        assert merged.code == "new code"
+
     def test_merge_todos_empty_old(self):
         """_merge_todos with empty old returns new."""
         from kimi_cli.tools.todo import TodoList

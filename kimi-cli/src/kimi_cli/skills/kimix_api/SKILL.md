@@ -1,11 +1,60 @@
 ---
-name: api
-description: Guide for using Kimi API utilities covering kimix, kimix.utils, kimix.base, kimix.dag, kimix.network, kimix.server, kimix.parser, kimix.tools, kimix.cot, kimix.retrieval, kimix.summarize, and kimi_agent_sdk.
+name: kimix_api
+description: Guide for using KimiX API utilities covering kimix, kimix.utils, kimix.base, kimix.dag, kimix.network, kimix.server, kimix.parser, kimix.tools, kimix.cot, kimix.retrieval, kimix.summarize, and kimi_agent_sdk.
 ---
 
 # Kimi API Utilities Guide
 
 This guide explains how to use the utility functions from `kimix.utils`, `kimix.base`, and the full public API surface of `src/kimix` and `src/kimi_agent_sdk`.
+
+## Initialization (kimix.utils.config)
+
+### init
+
+Initialize kimix global state. **Must be called before `prompt()` in non-CLI scripts.**
+
+```python
+# File: src/kimix/utils/config.py
+from kimix.utils import init
+
+init(
+    config_path="config.json",       # Optional: path to a JSON config file (provider settings)
+    config_json=None,                # Optional: JSON string with provider settings (alternative to config_path)
+    yolo=True,                       # Enable YOLO mode (auto-approve tool calls)
+    think=True,                      # Enable thinking mode
+    skill_dir=None,                  # Optional: additional skill directories to load
+    ralph=None,                      # Optional: Ralph mode iteration limit
+    manually_cot=False,              # Enable manually CoT mode
+    colorful_print=True,             # Enable ANSI-colorful output
+    clean=False,                     # Delete session cache after quit
+)
+```
+
+**What `init` does (in order):**
+1. Disposes the existing default session (if any) via `close_session`.
+2. Resets base globals: `_colorful_print`, `set_default_thinking(think)`, `set_default_yolo(yolo)`, `set_default_manually_cot(manually_cot)`, `_default_ralph = ralph`.
+3. Sets `CLEAN_MODE` when `clean=True` (deletes cache after quit).
+4. Resets skill dirs to empty, auto-loads `.kimix/skill.json` (key `skill_dir`, relative paths resolved against CWD), then appends any explicit `skill_dir` entries.
+5. Loads provider config from `config_path` / `config_json`, or falls back to `src/kimix/default_config.json`. `sub_provider`/`sub_providers` entries are normalized (missing required keys `type`/`max_context_size`/`model`/`url` are dropped, empty `role` defaults to `sub_agent`); if the root lacks `model`, a sub-provider is promoted to main provider (priority: no role → `sub_agent` → `planner`).
+6. Applies the `ralph` override into `loop_control.max_ralph_iterations` of the provider dict.
+
+### _create_config
+
+Build a validated `kimi_agent_sdk.Config` from a provider dict (used internally by `create_session`).
+
+```python
+# File: src/kimix/utils/config.py
+from kimix.utils import _create_config
+
+cfg, provider_dict = _create_config(provider_dict)  # provider_dict=None → uses base._default_provider
+```
+
+- Asserts required provider keys: `type`, `max_context_size`, `model` (str), and `url` or `base_url`.
+- Applies the provider's `env` dict entries into `os.environ`.
+- Resolves `api_key` from the dict, else `KIMI_API_KEY`, else `KIMIX_API_KEY` env vars.
+- Builds `LLMModel` / `LLMProvider` from declared fields (with special handling for `base_url`/`url`, `api_key` as `SecretStr`, `oauth` as `OAuthRef`, `openai_settings` as `OpenAISettings`).
+- Warns about unrecognized provider keys.
+- Applies `base._default_ralph` when `loop_control.max_ralph_iterations` is not set in the dict.
 
 ## Session Management (kimix.utils)
 
@@ -33,6 +82,7 @@ session = create_session(
     extra_system_prompt=None,          # Optional: additional system prompt text
     max_ralph_iterations=None,         # Optional: max Ralph loop iterations
     anonymous=False,                   # Optional: anonymous session mode
+    custom_data=None,                  # Optional: arbitrary dict stored on the session
 )
 
 # Close session when done
@@ -55,6 +105,7 @@ session = await _create_session_async(
     resume=True,
     max_ralph_iterations=None,
     anonymous=False,
+    custom_data={"foo": "bar"},  # Optional: arbitrary dict stored on the session
     # ... same parameters as create_session
 )
 ```
@@ -70,7 +121,9 @@ from kimix.utils import create_supervisor_session
 session = create_supervisor_session(
     session_id="supervisor_session",
     resume=True,
-    # ... accepts same parameters as create_session
+    # ... accepts most parameters of create_session, except:
+    #     agent_file and agent_type are fixed internally to
+    #     '<agent_dir>/agent_boss.json' and SystemPromptType.Supervisor
 )
 ```
 
@@ -106,19 +159,29 @@ prompt(
     info_print=True,                   # Optional: print context usage after completion
     cancel_callable=None,              # Optional: callable that returns True to cancel
     close_session_after_prompt=False,  # Optional: close session after prompt completes
-    merge_wire_messages=None           # Optional: merge wire messages for output_function (defaults to True when output_function is set)
+    merge_wire_messages=None,          # Optional: merge wire messages for output_function (defaults to True when output_function is set)
+    ensure_todo_finished=True,         # Optional: run TodoList reminder rounds after the prompt
+    export_todo_list_path=None,        # Optional: Path ending in .json — export the session's todos there after the prompt
+    format_output=False,               # Optional: render text chunks as formatted markdown (used by prompt_plan)
+    timeout=None,                      # Optional: max seconds for the whole prompt incl. retries; raises TimeoutError when reached
 )
 
-# Async version (coroutine)
+# Async version (coroutine) — same signature as prompt()
 await prompt_async("Analyze this code", session=session)
+
+# Get or create the global default session in async code
+from kimix.utils import _create_default_session_async
+session = await _create_default_session_async(resume=True)
 ```
 
 **Automatic behaviors:**
 - File paths in the prompt are automatically detected and wrapped in backticks via `escape_file_paths()`.
 - Prompts longer than 65536 characters are automatically exported to a temp file and replaced with a `read and execute: <file>` instruction.
 - When `output_function` is provided, `merge_wire_messages` defaults to `True`.
-- HTTP API errors are retried with exponential backoff at the underlying chat-provider layer; `prompt()` itself does not add an extra retry loop.
-- After a successful prompt, unfinished todos are collected and sent back as a system reminder (`_maybe_build_todo_reminder`).
+- **Retries:** non-API exceptions are retried up to 3 times with a 1s sleep (`APIStatusError` and timeouts are raised immediately). HTTP API errors are also retried with exponential backoff at the underlying chat-provider/soul layer.
+- **Timeout:** when `timeout` is set, `asyncio.wait_for` guards each prompt attempt and `TimeoutError` propagates immediately (not retried); the session is cancelled.
+- **Todo reminders (`ensure_todo_finished=True`):** after a successful prompt, unfinished `TodoList` items are collected and sent back as system reminders — up to `cli_closing_reminder_rounds` rounds (default 1; later rounds use a `strong=True` message). Todo items with attached `code` are auto-verified via `kimi_cli.tools.todo.verify.verify_code_todos`; failures are sent back as "Code check..." reminders.
+- **Cleanup:** on finish the session's todos are cleared (`_clear_session_todos`, persisted to `SessionState` or the subagent `state.json`), optionally exported to `export_todo_list_path` (must end in `.json`), and the session is closed when `close_session_after_prompt=True`.
 
 ### Cancel Prompt
 
@@ -139,9 +202,13 @@ event = get_cancel_event(session)
 # File: src/kimix/utils/session.py
 from kimix.utils import (
     clear_default_context, compact_default_context,
+    print_usage, delete_session_dir, context_path,
+)
+# NOTE: clear_context/compact_context and their async variants live in
+# kimix.utils.session — they are NOT re-exported at the kimix.utils top level.
+from kimix.utils.session import (
     clear_context, clear_context_async,
     compact_context, compact_context_async,
-    print_usage, delete_session_dir, context_path,
 )
 
 # Clear current context and start fresh
@@ -150,7 +217,7 @@ clear_default_context(force_create=True, resume=True, print_info=True)
 # Compact context to reduce token usage
 compact_default_context()
 
-# Compact any session (sync/async)
+# Compact any session (sync/async) — only compacts when context usage > 1e-8
 compact_context(session)
 await compact_context_async(session)
 
@@ -158,8 +225,9 @@ await compact_context_async(session)
 clear_context(session)
 await clear_context_async(session)
 
-# Print current context usage
+# Print current context usage (session=None creates the default session)
 print_usage(session)
+print_usage()  # uses the default session
 
 # Get the default session context storage path
 path = context_path()  # Returns ~/.kimi/sessions
@@ -203,6 +271,16 @@ SystemPromptType.Thinker          # Thinker agent (thinks in <thinking> tags, se
 SystemPromptType.TrivialSubAgent  # Read-only sub-agent (rejects write/edit tasks)
 SystemPromptType.Supervisor       # Supervisor agent (outlines, decomposes, dispatches, tracks, verifies)
 SystemPromptType.Reader           # Read-only agent for retrieval/analysis tasks
+SystemPromptType.SwarmLeader      # Swarm orchestrator (parallelizes a request via the AgentSwarm tool)
+
+# Role-prompt rules per type (built into get_system_prompt):
+# - TodoMaker: "Plan only. Do not implement." — records plans via WritePlan/EditPlan, cannot write files or run commands
+# - Thinker:   thinks in <thinking>...</thinking>, ends with <quit/>, self-verifies
+# - TrivialSubAgent: calls the `ask_parent` tool for clarification, then stops
+# - Reader:    reports a concise summary only — no commands, edits, or questions
+# - Supervisor: outline → decompose → dispatch → track → accept/inquire/correct → verify
+# - SwarmLeader: splits a request into homogeneous sub-tasks and dispatches via `AgentSwarm` with
+#                subagent_type (coder/explore/plan), a prompt_template containing {{item}}, and items
 
 # Build a custom system prompt callback
 class MyCallback(SystemPromptCallback):
@@ -442,12 +520,12 @@ await prompt_plan_async("Build a web application", plan_file=Path("plan.md"))
 ```
 
 **Flow:**
-1. Deletes any existing `plan_file`.
-2. Creates a planner session with `agent_type=SystemPromptType.TodoMaker` and `agent_file='agent_planner.json'`.
-3. Asks the planner to generate a comprehensive plan and save it via the `WritePlan` tool.
+1. Deletes any existing `plan_file` and enables plan mode (`note._enable_plan = True`).
+2. Creates a planner session with `agent_type=SystemPromptType.TodoMaker` and `agent_file='agent_planner.json'`; it uses the `planner` sub-provider when configured (falls back to the main provider), disables budget/context-meter/compact/todo/target-churn reminders in `loop_control`, and is locked **read-only** so it cannot touch the filesystem.
+3. Asks the planner to generate a comprehensive plan and save it via the `WritePlan` tool — up to 3 attempts, retrying when the plan file is not produced.
 4. Opens the generated plan with the system default application.
-5. Interactively asks whether to implement the plan and supports revision rounds.
-6. Closes the planner session and runs the implementation in the default Worker session.
+5. Interactively asks whether to implement the plan; `y` proceeds, otherwise the user gives revision feedback (fed back to the planner via `WritePlan`/`EditPlan` and the plan is re-opened), or `/quit` aborts.
+6. Closes the planner session and runs the implementation in the default Worker session (`ensure_todo_finished=False`, `format_output=True`). Large plans (>100 KiB) are referenced by file path instead of inlined.
 7. Sends a follow-up review prompt to verify all tasks are completed.
 
 **Parameters:**
@@ -552,17 +630,22 @@ from kimix.utils.prompt_str import escape_file_paths, clean_text
 # strip invalid unicode surrogates/noncharacters/PUA, remove invisible chars,
 # normalize Unicode (NFKC), convert full-width to half-width, remove emojis,
 # collapse repeated punctuation, dedupe long character runs, and normalize whitespace.
+# Paths already inside quotes/backticks/brackets, URLs, pure fractions and bare dates
+# are left untouched; markdown fenced/inline code is preserved verbatim.
 safe_text = escape_file_paths(
     raw_text,
     max_chars=0,           # Optional (keyword-only): truncate after N chars (0 = no limit)
     max_repeat=100,        # Optional (keyword-only): collapse repeated char runs longer than N
     truncate_msg="",       # Optional (keyword-only): suffix when truncating
-    case_mode="",          # Optional (keyword-only): "lower" or "title"
+    case_mode="",          # Optional (keyword-only): "lower" or "title" — applies to non-code text
 )
+# case_mode="lower"/"title" runs str.lower()/str.title() outside code blocks.
+# When the optional `opencc` package is installed, Traditional → Simplified
+# conversion is also applied during sanitization.
 
 # Clean invisible/hidden characters from text
 # Targets zero-width chars, control chars, soft hyphens, directional marks.
-cleaned = clean_text(text, keep_newlines=True)
+cleaned = clean_text(text, keep_newlines=True)  # keep_newlines=False strips \n\r\t too
 ```
 
 ## Windows Environment (kimix.utils.windows_env)
@@ -631,10 +714,11 @@ finally:
 # File: src/kimix/utils/__init__.py
 # Core utilities (kimix.utils.__all__)
 from kimix.utils import (
+    init,
     create_session, close_session, close_session_async,
     create_supervisor_session,
     prompt, prompt_async, clear_default_context, compact_default_context, print_usage,
-    get_default_session, _create_default_session, _create_session_async,
+    get_default_session, _create_default_session, _create_default_session_async, _create_session_async,
     get_tool_call_errors,
     cancel_prompt, get_cancel_event,
     prompt_path, prompt_plan, prompt_plan_async,
@@ -643,10 +727,16 @@ from kimix.utils import (
     set_ralph_loop,
     refresh_env_from_registry,
     # Internal/advanced
-    _create_config, _ensure_skill_dirs,
+    _create_config, _ensure_skill_dirs, _print_usage,
     _default_session, _should_print_usage,
+    _cli_sessions, _add_cli_session, _remove_cli_session, _refresh_cli_sessions,
     _SYSTEM_PROMP, get_system_prompt,
 )
+# NOTE: clear_context / compact_context / clear_context_async / compact_context_async
+# are defined in kimix.utils.session but NOT re-exported from kimix.utils — import
+# them from kimix.utils.session directly.
+# _cli_sessions / _add_cli_session / _remove_cli_session / _refresh_cli_sessions are
+# session-state internals originating in kimix.utils._globals (re-exported via __all__).
 from kimix.utils.system_prompt import SystemPromptType, SystemPromptCallback
 from kimix.utils.fix_error import fix_error_async  # Not in top-level __all__
 from kimix.utils.prompt_str import escape_file_paths, clean_text  # Not in top-level __all__
@@ -1195,10 +1285,12 @@ Each prune pass logs:
 | `kimix.server` | Opencode-style HTTP server with FastAPI + SSE (`create_app`, `KimixAsyncClient`, `SessionManager`) |
 | `kimix.summarize` | Context compaction / summarization helpers |
 | `kimix.tools` | Built-in agent tools: shell, Python, file ops, OCR, PDF/DOCX conversion, linting, planning |
-| `kimix.utils` | High-level session management, prompting, plan execution, error fixing, search, prompt string utilities |
-| `kimix.utils.fix_error` | Iterative error detection and auto-fix loop |
-| `kimix.utils.prompt` | Prompt helpers, plan generation/implementation (`prompt_plan`, `prompt_path`) |
+| `kimix.utils` | High-level session management, prompting, plan execution, error fixing, initialization, and prompt string utilities |
+| `kimix.utils._globals` | Module-level session state: `_default_session`, `_should_print_usage`, and the `_cli_sessions` cache with `_add/_remove/_refresh` accessors |
+| `kimix.utils.config` | Kimix global initialization (`init`) and `Config` construction from provider dicts (`_create_config`) |
+| `kimix.utils.fix_error` | Iterative error detection and auto-fix loop (`fix_error`, `fix_error_async`, `async_prompt`, `async_fix_error`) |
+| `kimix.utils.prompt` | Prompt helpers, plan generation/implementation (`prompt_plan`, `prompt_path`, `prompt`, `prompt_async`) |
 | `kimix.utils.prompt_str` | Prompt sanitization: escape file paths, clean invisible characters |
-| `kimix.utils.session` | Session creation, resumption, context management, and lifecycle |
+| `kimix.utils.session` | Session creation, resumption, context management, and lifecycle (incl. `clear_context`/`compact_context` — not top-level re-exports) |
 | `kimix.utils.system_prompt` | System prompt types and builders for different agent roles |
 | `kimix.utils.windows_env` | Windows registry environment refresh helpers |

@@ -38,9 +38,9 @@
 
 #### 阶段 1：计划生成
 
-1. **创建 Planner 会话**：使用 `agent_planner.json` 配置和 `TodoMaker` 系统提示词创建专用会话。
-2. **指定计划文件**：若未提供文件路径，则在当前目录的 `.kimix_cache/` 下自动生成 `plan_<uuid>.md`；若指定的文件已存在，会先删除。
-3. **生成计划**：Planner 读取任务需求，将任务拆解为步骤列表，并通过 `WritePlan` 工具写入计划文件。生成过程最多尝试 **3 次**，确保计划被正确写入。
+1. **创建 Planner 会话**：优先使用子 Provider 中 `role="planner"` 的配置创建专用会话（未配置时回退到主 Provider），使用 `agent_planner.json` 配置和 `TodoMaker` 系统提示词。该会话被设为**只读**（不能写文件或执行命令），并禁用 budget / context / compact / todo / target_churn 等循环提醒；同时启用计划工具（`WritePlan` / `EditPlan`）。
+2. **指定计划文件**：若未提供文件路径，则在当前目录的 `.kimix_cache/` 下自动生成 `plan_<随机hex>.md`；若指定的文件已存在，会先删除。
+3. **生成计划**：Planner 读取任务需求，将任务拆解为步骤列表，并通过 `WritePlan` 工具写入计划文件。生成过程最多尝试 **3 次**，每次结束后检查计划文件是否存在且非空，确保计划被正确写入。
 4. **打开审阅**：计划生成后会用系统默认程序打开该文件，供用户查看。
 
 #### 阶段 2：审阅与修订
@@ -56,12 +56,12 @@
 
 #### 阶段 3：执行与复核
 
-1. **关闭 Planner 会话**：用户确认后，Planner 会话会被关闭。
-2. **创建 Worker 会话**：使用默认的 Worker Agent 创建常规会话。
-3. **发送实现提示**：
+1. **创建 Worker 会话**：使用默认的 Worker Agent 创建常规会话（`_create_default_session_async`）。
+2. **发送实现提示**：
    - 若计划文件小于 **100 KB**，会直接将计划内容嵌入提示词；
-   - 若计划文件大于 **100 KB**，则提示 Agent 读取计划文件并执行。
-4. **追加复核提示**：实现完成后，再发送一次 review 提示，要求 Agent 检查计划是否全部完成。
+   - 若计划文件大于 **100 KB**，则提示 Agent 读取计划文件并执行（实现前要求先研究并调用 `TodoList` 记录步骤）。
+3. **追加复核提示**：实现完成后，再发送一次 review 提示，要求 Agent 检查计划是否全部完成。
+4. **收尾**：Planner 会话在整条流程结束后（`finally`）才被关闭——用户确认后即进入执行阶段，Planner 会话在执行与复核期间仍保持打开；若用户选择 `/quit` 放弃，则不创建 Worker 会话。
 
 ### 指定计划输出文件
 
@@ -87,23 +87,35 @@
 
 ### 自动截断超长提示词
 
-当输入的提示词超过 **65536 字符**时，系统会自动将其导出到临时文件，并将提示词替换为 `read and execute: <temp_file>`，避免超出模型上下文限制。
+当输入的提示词超过 **65536 字符**时，系统会自动将其导出到临时文件，并将提示词替换为 ``read and execute: `<temp_file>` ``，避免超出模型上下文限制。待办提醒、代码检查提醒若超过该长度，同样会先导出到临时文件。
 
 ### 自动重试机制
 
-`prompt_async` 内置了最多 **5 次**的重试逻辑，遇到以下 HTTP 状态码时会自动指数退避等待：
+`prompt_async` 通过 `_run_single_prompt` 执行单次提示，内置**最多 3 次**尝试（`max_retries = 3`），各分支行为如下：
 
-| 状态码 | 行为 |
-|--------|------|
-| `429` | 请求过快，按 `min(2^attempt, 60)` 秒等待后重试 |
-| `400`, `500`, `502`, `503` | 服务端错误，同样触发指数退避 |
-| 其他异常 | 等待 1 秒后重试，最后一次直接抛出 |
+| 情形 | 行为 |
+|------|------|
+| 会话取消事件已设置 | 直接返回失败，不发起请求 |
+| `KeyboardInterrupt` | 取消当前会话，返回失败 |
+| 超时（`asyncio.TimeoutError` / `TimeoutError`） | 立即抛出，不重试 |
+| HTTP API 错误（`APIStatusError`，如 4xx/5xx） | 立即抛出，不在本层重试——指数退避与重试由底层 chat-provider/soul 层负责 |
+| 其他异常 | 取消会话；若还有剩余尝试则等待 **1 秒**后重试，最后一次尝试仍失败则直接抛出 |
 
-这意味着在 `/plan` 的长时间执行过程中，偶发的网络波动或 API 限流通常会被自动恢复，无需手动干预。
+> 说明：`429` 限流、`5xx` 服务端错误等 HTTP 状态码的指数退避（如 `min(2^attempt, 60)` 秒）发生在**底层 chat-provider/soul 层**（`kosong.chat_provider` / `kimi_cli`），`prompt.py` 不再叠加一层重试。
 
-### 待办提醒
+此外可通过 `timeout` 参数为整个提示（含重试）设置最长执行时间，超时后抛出 `TimeoutError`。
 
-每次主提示执行结束后，系统会检查当前会话中是否存在未完成的 `todos`。若存在，会自动追加一条 `<system-reminder>` 提醒 Agent 先完成所有 pending / in_progress 的待办事项再结束。该机制与 `TodoList` 工具配合，确保长任务不会遗漏中间步骤。
+### 待办提醒（ensure_todo_finished）
+
+默认情况下（`ensure_todo_finished=True`），主提示成功后进入「待办收尾」循环：
+
+1. **待办提醒轮次**：由 `loop_control.cli_closing_reminder_rounds` 控制（默认 `1`，范围 0–5）。每轮检查会话中未完成的 `todos`（含子待办与备注，并带上截断后的原始请求作为上下文）：
+   - 第 1 轮以「Todo review...」提示；后续轮次（`strong=True`）以「Final todo review...」发出 CRITICAL 强提醒，要求先把所有待办标记为 `done` 再结束。
+   - 若所有待办均已完成，则无需提醒。
+2. **代码待办检查**：随后还有一轮代码检查循环，通过 `kimi_cli.tools.todo.verify.verify_code_todos` **自动运行**待办项附带的验证代码（`code` 字段）——通过验证的待办会自动标记为 `done`，失败的汇总为提醒再次提示 Agent 修复。
+3. **收尾清理**：全部结束后清除会话中的待办（`_clear_session_todos`）；若指定了 `export_todo_list_path`（须以 `.json` 结尾），会先把待办列表导出为 JSON 再清理；若 `close_session_after_prompt=True` 还会关闭会话。
+
+该机制与 `TodoList` 工具配合，确保长任务不会遗漏中间步骤，并自动验证「带验证代码的待办」是否真正通过。
 
 ---
 
@@ -122,11 +134,14 @@
 
 ```python
 class Todo:
-    title: str           # 待办事项标题
-    status: str          # 状态："pending" | "in_progress" | "done"
+    title: str                # 待办事项标题
+    status: str               # 状态："pending" | "in_progress" | "done"
+    notes: str | None         # 备注（可选）
+    code: str | None          # 验证代码（可选）：内联 Python、.py 路径、
+                              # 以 `!` 开头的 shell 命令、或 .sh/.ps1 路径
 
 class Params:
-    todos: list[Todo] | None  # 为 null 时读取，提供时写入
+    todos: list[Todo] | Todo | None  # 省略或 null 时读取；提供时写入（也接受别名 items）
 ```
 
 ### 显示效果
@@ -155,9 +170,9 @@ CLI 中以可视化卡片形式展示：
 | **执行方式** | 串行执行 |
 | **任务拆分** | 线性步骤列表 |
 | **断点续传** | ❌ 不支持（当前实现会在一次流程中完成生成、审阅、执行与复核） |
-| **进度跟踪** | Steps 可视化 |
+| **进度跟踪** | TodoList 待办可视化 |
 | **适用场景** | 步骤明确、顺序依赖的任务 |
-| **调用开销** | 较低（单会话） |
+| **调用开销** | 中等（Planner + Worker 两个会话） |
 | **典型用例** | 功能实现、代码重构 |
 
 ### 选择建议

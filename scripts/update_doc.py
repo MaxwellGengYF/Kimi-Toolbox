@@ -9,7 +9,7 @@ src/kimix/utils/
 ''')
 prompt('''
 according to python files under `src/kimix/utils`,
-update `.agents/skills/api/SKILL.md`
+update `kimi-cli/src/kimi_cli/skills/kimix_api/SKILL.md`
 ''', session = create_session(), close_session_after_prompt=True)
 
 prompt('''

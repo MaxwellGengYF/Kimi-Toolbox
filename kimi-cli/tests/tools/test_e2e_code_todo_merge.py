@@ -122,6 +122,42 @@ class TestE2ECodeTodo:
         else:
             pytest.fail("Todo not found")
 
+    async def test_merge_empty_notes_code_keeps_old_values(self, todo_list_tool: TodoList) -> None:
+        """Updating a title with None/empty notes & code keeps the previously stored values."""
+        await todo_list_tool(Params(
+            todos=[Todo(title="KeepNotesCode", status="pending", notes="keep notes", code="print('keep')")]
+        ))
+        await todo_list_tool(Params(
+            todos=[Todo(title="KeepNotesCode", status="done", notes="", code="")]
+        ))
+        todos = todo_list_tool._load_todos()
+        for t in todos:
+            if t.title == "KeepNotesCode":
+                assert t.code == "print('keep')"
+                assert t.notes == "keep notes"
+                assert t.status == "done"
+                break
+        else:
+            pytest.fail("Todo not found")
+
+    async def test_merge_changed_notes_code_replaces_old_values(self, todo_list_tool: TodoList) -> None:
+        """Updating a title with filled, different notes/code replaces the old values."""
+        await todo_list_tool(Params(
+            todos=[Todo(title="ChangeNotesCode", status="pending", notes="old notes", code="print('old')")]
+        ))
+        await todo_list_tool(Params(
+            todos=[Todo(title="ChangeNotesCode", status="in_progress", notes="new notes", code="print('new')")]
+        ))
+        todos = todo_list_tool._load_todos()
+        for t in todos:
+            if t.title == "ChangeNotesCode":
+                assert t.code == "print('new')"
+                assert t.notes == "new notes"
+                assert t.status == "in_progress"
+                break
+        else:
+            pytest.fail("Todo not found")
+
     # ---- E2E: Display block includes code ----
 
     async def test_display_block_includes_code(self, todo_list_tool: TodoList) -> None:

@@ -104,7 +104,7 @@ def _code_field_description(kind: Literal["bash", "powershell"]) -> str:
         f"{run_note} "
         "Todos involving code changes should attach verification code. "
         "Omit if this todo has no executable code. "
-        "Pass empty string to clear previously set code. "
+        "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
         "Accepts `code` or `code_file`."
     )
 
@@ -281,7 +281,7 @@ class Todo(BaseModel):
             "prefixed with `!` (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
             "Todos involving code changes should attach verification code. "
             "Omit if this todo has no executable code. "
-            "Pass empty string to clear previously set code. "
+            "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
             "Accepts `code` or `code_file`."
         ),
     )
@@ -1026,12 +1026,25 @@ class TodoList(CallableTool2[Params]):
 
     @staticmethod
     def _merge_one(old: Todo, new: Todo) -> Todo:
-        """Produce an updated todo preserving old notes/code when new omits them."""
+        """Produce an updated todo preserving old notes/code when new omits them.
+
+        For a same-title update, ``notes``/``code`` are replaced only when the
+        new value is neither ``None`` nor empty/whitespace-only; otherwise the
+        previously stored value is kept.
+        """
         return Todo(
             title=old.title,
             status=new.status,
-            notes=new.notes if new.notes is not None else old.notes,
-            code=new.code if new.code is not None else old.code,
+            notes=(
+                new.notes
+                if new.notes is not None and new.notes.strip()
+                else old.notes
+            ),
+            code=(
+                new.code
+                if new.code is not None and new.code.strip()
+                else old.code
+            ),
         )
 
     @staticmethod

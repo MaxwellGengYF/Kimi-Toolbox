@@ -139,8 +139,10 @@ Kimix 的命令行接口分为「子命令」「启动参数」和「交互命�
 
 | 子命令 | 说明 | 常用选项 |
 |--------|------|----------|
-| `serve` | 启动 Kimix HTTP 服务器（OpenCode 风格） | `--host`（默认 `127.0.0.1`）、`--port`（默认 `4096`） |
-| `ssecli` | 启动 SSE CLI 调试器，连接 `kimix serve` 进行交互式测试。内部支持 `/new`、`/abort`、`/status`、`/sessions`、`/messages`、`/clear`、`/compact[:N]`、`/export[:path]`、`/help` 等命令；按 `Ctrl+C` 或输入 `EOF`（`Ctrl+D` / `Ctrl+Z`）退出 | `--host`、`--port`、`--debug`（保存原始事件日志为 `sse_log_<YYYYMMDD_HHMMSS>.txt`） |
+| `serve` | 启动 Kimix HTTP 服务器（OpenCode 风格） | `--host`/`--hostname`（默认 `127.0.0.1`）、`--port`（默认 `4096`） |
+| `gui` | 启动 Kimix 后端 + TypeScript/Vite 前端开发服务器 | `--host`/`--hostname`（默认 `127.0.0.1`）、`--port`（后端端口，默认 `4096`）、`--fe-port`（前端端口，默认 `5173`）、`--build`（启动前先执行 `npm run build`）、`--no-fe`（仅启动后端，跳过前端；适合未安装 Node.js/npm 的环境） |
+| `ssecli` | 启动 SSE CLI 调试器，连接 `kimix serve` 进行交互式测试。内部支持 `/help`、`/new`、`/abort`、`/status`、`/sessions`、`/messages`、`/clear`、`/export[:path]`、`/compact[:N]` 等命令；按 `Ctrl+C` 或输入 `EOF`（`Ctrl+D` / `Ctrl+Z`）退出 | `--host`、`--port`、`--debug`（保存原始事件日志为 `sse_log_<YYYYMMDD_HHMMSS>.txt`） |
+| `mcp` | MCP（Model Context Protocol）服务器管理：`mcp serve`（将 Kimix 作为 MCP 服务器对外提供服务）、`mcp list`（列出已配置的服务器）、`mcp test <name>`（测试连接） | 详见「六、MCP」 |
 
 **示例：**
 
@@ -148,34 +150,44 @@ Kimix 的命令行接口分为「子命令」「启动参数」和「交互命�
 # 启动 HTTP 服务
 uv run kimix serve --port 4096
 
+# 启动 GUI（后端 + 前端开发服务器）
+uv run kimix gui --port 4096 --fe-port 5173
+
+# 仅启动 GUI 后端（本机未安装 Node.js/npm 时）
+uv run kimix gui --no-fe
+
 # 使用 SSE CLI 调试
 uv run kimix ssecli --host 127.0.0.1 --port 4096 --debug
+
+# 管理 MCP 服务器
+uv run kimix mcp list
+uv run kimix mcp test my-server
 ```
 
 ### 5.2 初始化 LLM 配置
 
-Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--config` 指定自定义配置，将自动使用项目内置的默认配置（`src/kimix/default_config.json`）。
+Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--config` 指定自定义配置，将自动加载 `src/kimix/default_config.json`（由 `/init` 生成）；若该文件不存在，则回退到内置的默认配置模板（模型 `kimi-for-coding`，见 `src/kimix/cli_impl/init.py`）。
 
-如果默认配置文件不存在，首次启动时会自动提示是否进行初始化；你也可以在交互终端中随时执行 `/init`，按提示逐项填写模型名称、类型、API Key、上下文长度、最大 token 数、思考力度（thinking effort）、模型能力（capabilities）、URL、温度等参数，配置将自动保存至 `src/kimix/default_config.json`：
+如果默认配置文件不存在，首次启动时会自动提示是否进行初始化；你也可以在交互终端中随时执行 `/init`，按提示逐项填写模型名称、类型、API Key、上下文长度、最大 token 数、思考力度（thinking effort）、模型能力（capabilities）、URL，以及可选的子 Agent Provider（sub_provider）等参数，配置将自动保存至 `src/kimix/default_config.json`：
 
 ```
 /init
 ```
 
-示例中的模型名称为 `kimi-for-coding-highspeed`，`kimi-for-coding` 同样受支持，可根据需要选择：
+示例中的模型名称为 `kimi-for-coding`，`kimi-for-coding-highspeed` 同样受支持，可根据需要选择。配置采用扁平结构（即 `src/kimix/default_config.json` 的实际格式）：
 
 ```json
 {
-    "model": {
-        "model": "kimi-for-coding-highspeed",
-        "max_context_size": 262144,
-        "capabilities": ["thinking"]
-    },
-    "provider": {
-        "type": "kimi",
-        "base_url": "https://api.kimi.com/coding/v1",
-        "api_key": "your-api-key"
-    },
+    "model": "kimi-for-coding",
+    "max_context_size": 1048576,
+    "capabilities": ["thinking", "image_in"],
+    "url": "https://api.kimi.com/coding/v1",
+    "type": "kimi",
+    "api_key": "your-api-key",
+    "max_tokens": 131072,
+    "show_thinking_stream": true,
+    "thinking_effort": "max",
+    "temperature": 1.0,
     "loop_control": {
         "max_steps_per_turn": 5000,
         "max_retries_per_step": 3,
@@ -183,23 +195,17 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
         "reserved_context_size": 50000,
         "compaction_trigger_ratio": 0.85
     },
-    "max_tokens": 131072,
-    "show_thinking_stream": true,
-    "thinking_effort": "low",
-    "temperature": 1.0,
-    "background": {
-        "max_running_tasks": 4,
-        "read_max_bytes": 30000,
-        "notification_tail_lines": 20,
-        "notification_tail_chars": 3000,
-        "wait_poll_interval_ms": 500,
-        "worker_heartbeat_interval_ms": 5000,
-        "worker_stale_after_ms": 15000,
-        "kill_grace_period_ms": 2000,
-        "keep_alive_on_exit": false,
-        "agent_task_timeout_s": 900,
-        "print_wait_ceiling_s": 3600
-    }
+    "sub_providers": [
+        {
+            "role": "sub_agent",
+            "model": "kimi-for-coding",
+            "max_context_size": 1048576,
+            "capabilities": ["thinking"],
+            "url": "https://api.kimi.com/coding/v1",
+            "type": "kimi",
+            "api_key": "your-api-key"
+        }
+    ]
 }
 ```
 
@@ -220,6 +226,7 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 | `show_thinking_stream` | 否 | 是否流式展示思考过程 |
 | `thinking_effort` | 否 | 思考力度，可选 `off`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `temperature` | 否 | 采样温度，范围 `[0.0, 2.0]` |
+| `sub_provider` / `sub_providers` | 否 | 子 Agent 使用的 Provider。`sub_provider` 为单个 dict，`sub_providers` 为 dict 数组；每个条目需包含 `type`、`max_context_size`、`model`、`url`，可选 `role`（`sub_agent` 或 `planner`，缺省 `sub_agent`）及 `api_key` 等。当顶层缺少 `model` 时，会按优先级（无 `role` > `sub_agent` > `planner`）从子 Provider 中挑选一个作为主 Provider |
 | `background` | 否 | 后台任务相关配置 |
 | `notifications` | 否 | 通知配置 |
 | `mcp` | 否 | MCP (Model Context Protocol) 配置 |
@@ -229,20 +236,16 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 
 ```json
 {
-    "model": {
-        "model": "minimax-m2.7",
-        "max_context_size": 200000,
-        "capabilities": ["thinking"]
-    },
-    "provider": {
-        "type": "anthropic",
-        "base_url": "https://api.minimaxi.com/anthropic",
-        "api_key": "your-api-key",
-        "custom_headers": {},
-        "oauth": {
-            "storage": "file",
-            "key": "my-key"
-        }
+    "model": "minimax-m2.7",
+    "max_context_size": 204800,
+    "capabilities": ["thinking"],
+    "url": "https://api.minimaxi.com/anthropic",
+    "type": "anthropic",
+    "api_key": "your-api-key",
+    "custom_headers": {},
+    "oauth": {
+        "storage": "file",
+        "key": "my-key"
     }
 }
 ```
@@ -278,9 +281,9 @@ uv run kimix --clean --manually-cot
 |------|------|
 | `<path>` | 直接输入文件路径即可加载。`.py` 文件会直接执行（执行时 `__file__` 变量指向该文件）；其他文件会读取全部内容作为单条提示词发送 |
 | `/file:<path>` | 读取指定文件的全部内容作为单条提示词发送 |
-| `/todo:<path>` | 扫描代码文件中的 TODO 注释，并提示 Agent 实现。支持 `.py`、C/C++ 系（`.c/.cpp/.h/.java/.js/.ts/.go/.rs` 等）、Shell（`.sh/.bash/.zsh`）、HTML/XML、Pascal、Lisp、SQL 等后缀 |
+| `/todo:<path>` | 扫描代码文件中的 TODO 注释，并提示 Agent 实现。支持 `.py`；C 系（`.c/.cpp/.cc/.cxx/.h/.hpp/.java/.js/.ts/.jsx/.tsx/.cs/.go/.rs`）；Shell（`.sh/.bash/.zsh`）；HTML/XML（`.html/.htm/.xml/.svg`）；Pascal（`.pas/.pp/.inc/.dpr`）；Lisp（`.lisp/.lsp/.clj/.scm/.ss/.el`）；SQL（`.sql`） |
 | `/clear` | 清空当前对话上下文 |
-| `/summarize` | 将对话上下文总结并写入记忆 |
+| `/sessions` | 列出当前工作目录下可恢复的会话（含更新时间与上下文占用率，`*` 标记当前会话）；`/sessions:<name>` 创建并切换到新的命名会话 |
 | `/exit` | 退出程序 |
 | `/help` | 显示帮助信息 |
 | `/context` | 打印当前上下文的使用情况 |
@@ -295,6 +298,7 @@ uv run kimix --clean --manually-cot
 | `/ralph:on` / `/ralph:off` / `/ralph:<num>` | 设置 Ralph 模式循环次数 |
 | `/supervisor` | 进入多行输入模式，以 Supervisor 角色创建会话并执行一次任务（以 `/end` 结束，`/cancel` 取消） |
 | `/plan` / `/plan:<file>` | 使用 TodoMaker Agent 生成任务计划。任务需求通过多行输入提供（以 `/end` 结束）；`<file>` 用于指定计划输出文件路径，若该文件已存在会被覆盖。生成后支持用户审阅、修改，确认后再执行，执行后会追加一次 review 提示 |
+| `/swarm` | 进入多行输入模式，创建 Swarm 会话（SwarmLeader 角色）将请求并行分发给多个同质子 Agent（以 `/end` 结束，`/cancel` 取消） |
 | `/cmd:<command>` | 执行系统命令 |
 | `/code:<path> [args...]` | 运行脚本文件（支持 `.py` 和其他可执行文件），可附带参数 |
 
@@ -311,21 +315,37 @@ Kimix 同时支持作为 MCP 客户端和 MCP 服务器使用。
 
 将外部 MCP 服务器添加到 Kimix，使其工具、资源和提示词对 Agent 可用：
 
+MCP 服务器通过 JSON 配置文件注册（CLI 提供 `mcp list` 与 `mcp test`，不提供 `mcp add` 命令）：
+
+- **全局配置**：`~/.kimi/mcp.json`
+- **项目配置**：`.kimix/mcp.json`（可纳入版本控制，启动时由 `src/kimix/cli_impl/args.py` 自动加载并合并进会话）
+
+两种配置中的 `mcpServers` 对象会被自动合并，优先级为：显式 > 项目 > 全局。stdio 服务器使用 `command` + `args` 描述，streamable HTTP 服务器使用 `url` + `transport` 描述：
+
+```json
+{
+    "mcpServers": {
+        "my-stdio-server": {
+            "command": "npx",
+            "args": ["-y", "@example/mcp-server"]
+        },
+        "my-http-server": {
+            "url": "https://api.example.com/mcp",
+            "transport": "streamable-http"
+        }
+    }
+}
+```
+
+列出与测试已配置的服务器：
+
 ```bash
-# stdio 服务器
-kimix mcp add --transport stdio my-server -- npx -y @example/mcp-server
-
-# streamable HTTP 服务器
-kimix mcp add --transport http my-server https://api.example.com/mcp
-
 # 列出已配置的服务器
 kimix mcp list
 
-# 测试连接
+# 测试连接并列出其工具
 kimix mcp test my-server
 ```
-
-项目级 MCP 服务器也可以放入版本控制中的 `.kimix/mcp.json`。Kimix 会自动合并全局配置（`~/.kimi/mcp.json`）、项目配置（`.kimix/mcp.json`）以及显式传入的配置，优先级为：显式 > 项目 > 全局。
 
 ### 将 Kimix 作为 MCP 服务器对外提供服务
 
@@ -338,6 +358,8 @@ kimix mcp serve --transport stdio
 # streamable HTTP 传输
 kimix mcp serve --transport http --host 127.0.0.1 --port 4097
 ```
+
+`mcp serve` 支持的选项：`--transport`（`stdio` / `http`，默认 `stdio`）、`--host`（默认 `127.0.0.1`）、`--port`（默认 `4097`）、`--work-dir`（工作目录，默认当前目录）、`--agent-file`（指定 Agent 配置文件）、`--no-resource`（不暴露文件资源）、`--no-prompt`（不暴露提示词）。
 
 默认情况下，MCP 服务器会暴露：
 
