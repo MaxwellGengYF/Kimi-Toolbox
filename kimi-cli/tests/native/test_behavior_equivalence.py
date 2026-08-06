@@ -14,6 +14,8 @@ native extension is unavailable the suite skips with a clear message
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kimi_cli.native_loader import NATIVE_AVAILABLE
@@ -138,6 +140,157 @@ def test_sanitize_for_tokenizer_equivalence(text, max_chars, max_repeat, truncat
     finally:
         restore()
     _assert_equivalent(native, python, (text, max_chars, max_repeat, truncate_msg))
+
+
+# ---------------------------------------------------------------------------
+# GLOB kernels (gitignore parsing / matching)
+# ---------------------------------------------------------------------------
+
+
+def _rules_to_tuples(rules):
+    """Strip the optional native cache so Python vs native rules compare equal."""
+    return [(r.pattern, r.negated, r.anchored, r.is_dir_only) for r in rules]
+
+
+GITIGNORE_CONTENTS = [
+    "",
+    "*.pyc\n",
+    "*.pyc\n!important.pyc\n",
+    ".venv/\n",
+    ".venv/\n!.venv/\n",
+    "build/\ndist/\n*.egg-info/\n",
+    "/anchored.txt\n",
+    "**/foo.bar\n",
+    "src/**/*.log\n",
+    "# comment\n\n*.tmp\n",
+    "node_modules\n",
+    "*.py[co]\n__pycache__/\n",
+]
+
+
+@pytest.mark.parametrize("content", GITIGNORE_CONTENTS)
+def test_parse_gitignore_equivalence(content, tmp_path):
+    import kimi_cli.tools.file.glob as mod
+
+    source_dir = tmp_path
+    restore = _native_on(mod, True)
+    try:
+        native = _rules_to_tuples(mod._parse_gitignore(content, source_dir))
+    finally:
+        restore()
+    restore = _native_on(mod, False)
+    try:
+        python = _rules_to_tuples(mod._parse_gitignore(content, source_dir))
+    finally:
+        restore()
+    _assert_equivalent(native, python, content)
+
+
+def _make_path(tmp_path: Path, rel_path: str, is_dir: bool):
+    path = tmp_path / rel_path.replace("/", "\\")  # Windows-safe
+    if is_dir:
+        path.mkdir(parents=True, exist_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    return path
+
+
+GITIGNORE_MATCH_CASES = [
+    ("*.pyc\n", "foo.pyc", False, True),
+    ("*.pyc\n", "foo.py", False, False),
+    ("*.pyc\n!important.pyc\n", "important.pyc", False, False),
+    (".venv/\n", ".venv", True, True),
+    (".venv/\n", ".venv/a.py", False, True),
+    (".venv/\n!.venv/\n", ".venv/a.py", False, False),
+    ("/anchored.txt\n", "anchored.txt", False, True),
+    ("/anchored.txt\n", "sub/anchored.txt", False, False),
+    ("**/foo.bar\n", "foo.bar", False, True),
+    ("**/foo.bar\n", "a/b/foo.bar", False, True),
+    ("src/**/*.log\n", "src/a/b.log", False, True),
+    ("src/**/*.log\n", "a/b.log", False, False),
+    ("node_modules\n", "node_modules", True, True),
+    ("node_modules\n", "node_modules/pkg.js", False, True),
+    ("build/\ndist/\n*.egg-info/\n", "dist", True, True),
+    ("build/\ndist/\n*.egg-info/\n", "pkg.egg-info/PKG-INFO", False, True),
+]
+
+
+@pytest.mark.parametrize("content,rel_path,is_dir,expected", GITIGNORE_MATCH_CASES)
+def test_is_ignored_by_gitignore_equivalence(content, rel_path, is_dir, expected, tmp_path):
+    import kimi_cli.tools.file.glob as mod
+
+    def evaluate(native: bool):
+        restore = _native_on(mod, native)
+        try:
+            rules = mod._parse_gitignore(content, tmp_path)
+            path = _make_path(tmp_path, rel_path, is_dir)
+            return mod._is_ignored_by_gitignore(path, rules, tmp_path)
+        finally:
+            restore()
+
+    native = evaluate(True)
+    python = evaluate(False)
+    _assert_equivalent(native, python, (content, rel_path, is_dir))
+    assert native == expected
+
+
+def test_is_ignored_by_gitignore_case_sensitivity_equivalence(tmp_path):
+    """Case-sensitive patterns must agree between native and Python paths.
+
+    On Windows the Python fallback uses fnmatch (case-insensitive) while the
+    native kernel uses fnmatchcase (case-sensitive).  The implementation
+    therefore delegates matching to native only on case-sensitive platforms,
+    so both paths must still agree everywhere.
+    """
+    import kimi_cli.tools.file.glob as mod
+
+    content = "*.PYC\n"
+    rel_path = "foo.pyc"
+    path = _make_path(tmp_path, rel_path, False)
+
+    def evaluate(native: bool):
+        restore = _native_on(mod, native)
+        try:
+            rules = mod._parse_gitignore(content, tmp_path)
+            return mod._is_ignored_by_gitignore(path, rules, tmp_path)
+        finally:
+            restore()
+
+    native = evaluate(True)
+    python = evaluate(False)
+    _assert_equivalent(native, python, (content, rel_path))
+
+
+def test_is_ignored_by_gitignore_multi_source_dir_equivalence(tmp_path):
+    """When multiple .gitignore files apply, matching falls back to Python.
+
+    Both native-on and native-off must still agree.
+    """
+    import kimi_cli.tools.file.glob as mod
+
+    (tmp_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".gitignore").write_text("!keep.pyc\n", encoding="utf-8")
+
+    def evaluate(native: bool):
+        restore = _native_on(mod, native)
+        try:
+            # Clear the module cache so rules are parsed under the current gate.
+            mod._GITIGNORE_CACHE.clear()
+            rules = mod._get_gitignore_rules(tmp_path)
+            path = sub / "keep.pyc"
+            path.write_text("x", encoding="utf-8")
+            return mod._is_ignored_by_gitignore(path, rules, tmp_path)
+        finally:
+            restore()
+
+    native = evaluate(True)
+    python = evaluate(False)
+    _assert_equivalent(native, python, "multi-source-dir negation")
+    # root ignores *.pyc, sub un-ignores keep.pyc
+    assert native is False
 
 
 # ---------------------------------------------------------------------------

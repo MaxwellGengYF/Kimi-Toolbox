@@ -52,10 +52,8 @@ _KIND_NAMES = ("line", "block", "doc")
 # ``bash_fix.py``).  This keeps behaviour bit-identical without waiting for a
 # kernel rebuild.
 _POST_KERNEL_FALLBACKS = frozenset({
-    "netcat",
-    "copy", "move", "del", "erase", "ren", "rename", "rd", "md", "chdir",
-    "cls", "xcopy", "mklink", "findstr", "fc", "where", "tasklist", "taskkill",
-    "systeminfo", "watch", "killall", "pidof", "column",
+    # Empty: all post-kernel fallback aliases have been promoted into the
+    # native scanner.  This set is kept as a documented extension point.
 })
 _POST_KERNEL_RE = re.compile(
     r"(?:^|[\s;|&(){}!\n])"

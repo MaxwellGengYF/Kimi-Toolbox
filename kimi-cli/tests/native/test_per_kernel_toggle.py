@@ -24,6 +24,7 @@ KERNEL_PROBES = {
     "CODEC": "n.use_native('CODEC')",
     "JSON": "n.use_native('JSON')",
     "CONCURRENCY": "n.use_native('CONCURRENCY')",
+    "GLOB": "n.use_native('GLOB')",
 }
 
 ALL_KERNELS = list(KERNEL_PROBES)

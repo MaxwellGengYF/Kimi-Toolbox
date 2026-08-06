@@ -357,8 +357,11 @@ def _compat_is_notification(msg: dict) -> bool:
 
 
 def _compat_text(msg: dict) -> str:
-    return "".join(p.get("text", "") for p in (msg.get("content") or [])
-                   if p.get("type") == "text")
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(p.get("text", "") for p in (content or [])
+                   if isinstance(p, dict) and p.get("type") == "text")
 
 
 def _compat_is_task_snapshot(msg: dict) -> bool:

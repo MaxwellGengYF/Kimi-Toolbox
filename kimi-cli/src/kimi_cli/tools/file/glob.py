@@ -3,6 +3,7 @@
 import asyncio
 import fnmatch
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
@@ -11,6 +12,10 @@ from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.file.output_utils import fold_lines, truncate_line
 from kimi_cli.tools.utils import load_desc
@@ -23,6 +28,12 @@ from .utils import resolve_vfs
 MAX_MATCHES = 1000
 MAX_BYTES = 100 << 10  # 100KB
 GLOB_DESC_PATH = Path(__file__).parent / "glob.md"
+
+# The native glob matcher uses fnmatchcase (case-sensitive).  The Python
+# fallback uses fnmatch, which is case-insensitive on Windows.  To keep
+# bit-identical outputs we only delegate matching to native on platforms where
+# the two agree; native parsing is still used everywhere.
+_NATIVE_GLOB_MATCH_CASE_SENSITIVE = not sys.platform.startswith("win")
 
 
 def _is_unsafe_recursive_pattern(pattern: str) -> bool:
@@ -70,6 +81,9 @@ class _GitignoreRule:
     anchored: bool  # True if pattern contains '/' (not just trailing)
     is_dir_only: bool  # True if pattern ends with '/'
     source_dir: Path  # Directory containing the .gitignore
+    _native: tuple[str, bool, bool, bool] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass
@@ -93,6 +107,29 @@ def _description_for_os(os_kind: str) -> str:
 
 def _parse_gitignore(content: str, source_dir: Path) -> list[_GitignoreRule]:
     """Parse a .gitignore file into a list of rules."""
+    # Native fast path: kimix_native.glob.parse_gitignore (bit-identical).
+    if _native_use_native("GLOB"):
+        _mod = _native_get_module("glob")
+        if _mod is not None:
+            try:
+                native_rules = _mod.parse_gitignore(
+                    content.encode("utf-8"), str(source_dir)
+                )
+                return [
+                    _GitignoreRule(
+                        pattern=pattern,
+                        negated=negated,
+                        anchored=anchored,
+                        is_dir_only=is_dir_only,
+                        source_dir=source_dir,
+                        _native=(pattern, negated, anchored, is_dir_only),
+                    )
+                    for pattern, negated, anchored, is_dir_only in native_rules
+                ]
+            except Exception:
+                pass
+
+    # Pure-Python fallback.
     rules: list[_GitignoreRule] = []
     for raw_line in content.splitlines():
         line = raw_line.rstrip()
@@ -200,9 +237,35 @@ def _is_ignored_by_gitignore(
     path: Path, rules: list[_GitignoreRule], root_dir: Path
 ) -> bool:
     """Check if a path is ignored by any gitignore rule (with negation support)."""
-    # Find the deepest .gitignore that applies (i.e., closest ancestor)
-    # Standard gitignore behavior: later rules override earlier ones
-    # We process all rules in order of discovery (root-first, then deeper)
+    # Native fast path: when all rules come from a single .gitignore file we
+    # can evaluate the whole list in one native call.  Multi-source-dir cases
+    # keep the Python loop because the native is_ignored() API consumes one
+    # rel_path and one flat rules list.
+    if rules and _native_use_native("GLOB") and _NATIVE_GLOB_MATCH_CASE_SENSITIVE:
+        _mod = _native_get_module("glob")
+        if _mod is not None:
+            source_dir = rules[0].source_dir
+            if all(rule.source_dir == source_dir for rule in rules):
+                try:
+                    rel_path = str(path.relative_to(source_dir)).replace("\\", "/")
+                    is_dir = path.is_dir()
+                    native_rules = [
+                        rule._native
+                        if rule._native is not None
+                        else (
+                            rule.pattern,
+                            rule.negated,
+                            rule.anchored,
+                            rule.is_dir_only,
+                        )
+                        for rule in rules
+                    ]
+                    return _mod.is_ignored(rel_path, is_dir, native_rules)
+                except Exception:
+                    pass
+
+    # Standard gitignore behavior: later rules override earlier ones.
+    # We process all rules in order of discovery (root-first, then deeper).
     ignored = False
     for rule in rules:
         try:

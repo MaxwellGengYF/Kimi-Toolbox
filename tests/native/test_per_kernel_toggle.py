@@ -23,6 +23,7 @@ ALL_KERNELS = [
     "CODEC",
     "JSON",
     "CONCURRENCY",
+    "GLOB",
 ]
 
 
