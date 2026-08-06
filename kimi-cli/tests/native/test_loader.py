@@ -89,6 +89,43 @@ def test_use_native_consistent_with_availability():
         assert knl.use_native(kernel) is (knl.NATIVE_AVAILABLE and True)
 
 
+def test_use_native_case_variants():
+    """Upper/lower/title spellings of a known kernel resolve identically."""
+    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "SOUL", "TOOLS", "STREAM",
+                   "CODEC", "JSON", "CONCURRENCY", "DIFF", "GLOB", "IMAGE",
+                   "TODO", "WORKSPACE"):
+        expected = knl.use_native(kernel)
+        assert knl.use_native(kernel.lower()) is expected
+        assert knl.use_native(kernel.title()) is expected
+
+
+def test_use_native_unknown_kernel_memoized():
+    """Unknown kernels delegate to the shared loader and return a stable bool."""
+    first = knl.use_native("FROBNICATE")
+    assert isinstance(first, bool)
+    assert knl.use_native("FROBNICATE") is first
+
+
+def test_kernel_module_eager():
+    """kernel_module is exposed eagerly on the wrapper and delegates."""
+    assert "kernel_module" in knl.__all__
+    mod = knl.kernel_module("SOUL")
+    assert mod is (knl.get_module("soul") if knl.use_native("SOUL") else None)
+
+
+def test_get_module_unknown_returns_none():
+    assert knl.get_module("does_not_exist") is None
+
+
+def test_hot_call_sites_hoist_native_modules():
+    """kimi-cli consumers resolve native submodules once at import time."""
+    import kimi_cli.utils.diff as diff
+    import kimi_cli.utils.tokens as tokens
+
+    assert tokens._NATIVE_TEXT is knl.get_module("text")
+    assert diff._NATIVE_DIFF is knl.get_module("diff")
+
+
 def test_attribute_submodule_access():
     if knl.NATIVE_AVAILABLE:
         assert knl.text is not None

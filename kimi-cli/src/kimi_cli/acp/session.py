@@ -55,6 +55,9 @@ from kimi_cli.wire.types import (
     TurnEnd,
 )
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_JSON = _native_get_module("json")
+
 _current_turn_id = ContextVar[str | None]("current_turn_id", default=None)
 _terminal_tool_call_ids = ContextVar[set[str] | None]("terminal_tool_call_ids", default=None)
 
@@ -91,13 +94,11 @@ class _ToolCallState:
         self.args = tool_call.function.arguments or ""
         self.lexer = streamingjson.Lexer()
         self._native_lexer = None
-        if _native_use_native("JSON"):
-            _mod = _native_get_module("json")
-            if _mod is not None:
-                # Native incremental lexer: feed() accepts bytes; buffer()
-                # mirrors every byte fed (like streamingjson.complete_json()
-                # returns the accumulated string).
-                self._native_lexer = _mod.IncrementalJsonLexer()
+        if _native_use_native("JSON") and _NATIVE_JSON is not None:
+            # Native incremental lexer: feed() accepts bytes; buffer()
+            # mirrors every byte fed (like streamingjson.complete_json()
+            # returns the accumulated string).
+            self._native_lexer = _NATIVE_JSON.IncrementalJsonLexer()
         self._work_dir = work_dir
         if tool_call.function.arguments is not None:
             self.lexer.append_string(tool_call.function.arguments)

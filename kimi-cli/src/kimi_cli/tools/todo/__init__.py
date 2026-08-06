@@ -21,10 +21,17 @@ from pydantic import (
 from pydantic.json_schema import GenerateJsonSchema
 
 from kimi_cli import logger
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.session_state import TodoItemState, TodoStatus
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TODO = _native_get_module("todo")
 
 
 @functools.lru_cache(maxsize=1)
@@ -1110,6 +1117,12 @@ class TodoList(CallableTool2[Params]):
     @staticmethod
     def _status_counts(todos: list[Todo]) -> dict[TodoStatus, int]:
         """Count todos by status."""
+        # Native acceleration: kimix_native.todo.status_counts counts canonical
+        # statuses (todos are already pydantic-validated, so every status is
+        # canonical); the pure-Python body is unchanged.
+        if _native_use_native("TODO") and _NATIVE_TODO is not None:
+            raw = _NATIVE_TODO.status_counts([{"title": t.title, "status": t.status} for t in todos])
+            return {"pending": raw["pending"], "in_progress": raw["in_progress"], "done": raw["done"]}
         counts: dict[TodoStatus, int] = {"pending": 0, "in_progress": 0, "done": 0}
         for t in todos:
             counts[t.status] += 1

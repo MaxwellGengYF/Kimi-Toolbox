@@ -10,9 +10,16 @@ import aiofiles
 import orjson
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.utils.logging import logger
 from kimi_cli.wire.protocol import WIRE_PROTOCOL_LEGACY_VERSION, WIRE_PROTOCOL_VERSION
 from kimi_cli.wire.types import WireMessage, WireMessageEnvelope
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_CODEC = _native_get_module("codec")
 
 
 class WireFileMetadata(BaseModel):
@@ -153,7 +160,12 @@ class WireFile:
 
 
 def _dump_line(model: BaseModel) -> str:
-    return orjson.dumps(model.model_dump(mode="json")).decode("utf-8") + "\n"
+    blob = orjson.dumps(model.model_dump(mode="json"))
+    # Native acceleration: kimix_native.codec.JsonlRecorder is byte-identical
+    # (frame + newline); the pure-Python body is unchanged.
+    if _native_use_native("CODEC") and _NATIVE_CODEC is not None:
+        return _NATIVE_CODEC.JsonlRecorder().record(blob).decode("utf-8")
+    return blob.decode("utf-8") + "\n"
 
 
 def _load_protocol_version(path: Path) -> str | None:

@@ -44,6 +44,9 @@ from kimix.tools.file.bash.bash_fix import (
     fix_bash_command,
 )
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_PARSE = _native_get_module("parse")
+
 if TYPE_CHECKING:
     from kimix.tools.background.utils import BackgroundStream
 
@@ -613,10 +616,8 @@ def _process_unquoted(cmd: str) -> str:
 
     Native acceleration: kimix_native.parse._process_unquoted (byte-exact).
     """
-    if _native_use_native("PARSE"):
-        _mod = _native_get_module("parse")
-        if _mod is not None:
-            return _mod._process_unquoted(cmd)
+    if _native_use_native("PARSE") and _NATIVE_PARSE is not None:
+        return _NATIVE_PARSE._process_unquoted(cmd)
     result: list[str] = []
     i = 0
     length = len(cmd)

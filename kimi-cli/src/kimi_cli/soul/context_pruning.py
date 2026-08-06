@@ -712,6 +712,7 @@ class ContextPruner:
         # Build result
         result_messages: list[Message] = []
         elided_records: list[ElidedRecord] = []
+        removed_indices: list[int] = []  # every index dropped (Tier A + elided)
         changes: set[int] = set()
 
         for i, msg in enumerate(history):
@@ -987,6 +988,7 @@ class ContextPruner:
 
             if i not in elided_by_index:
                 # Tier A drop
+                removed_indices.append(i)
                 continue
 
             rec = elided_by_index[i]
@@ -1014,7 +1016,8 @@ class ContextPruner:
 
         self._ref_counter += len(elided_records)
 
-        earliest = min({rec.index for rec in elided_records}) if elided_records else None
+        removed_indices.extend(rec.index for rec in elided_records)
+        earliest = min(removed_indices) if removed_indices else None
 
         return PruningResult(
             messages=out_messages,

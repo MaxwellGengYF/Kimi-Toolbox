@@ -25,6 +25,9 @@ from kimi_cli.vfs import VFS
 
 from .utils import resolve_vfs
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_GLOB = _native_get_module("glob")
+
 MAX_MATCHES = 1000
 MAX_BYTES = 100 << 10  # 100KB
 GLOB_DESC_PATH = Path(__file__).parent / "glob.md"
@@ -108,25 +111,23 @@ def _description_for_os(os_kind: str) -> str:
 def _parse_gitignore(content: str, source_dir: Path) -> list[_GitignoreRule]:
     """Parse a .gitignore file into a list of rules."""
     # Native fast path: kimix_native.glob.parse_gitignore (bit-identical).
-    if _native_use_native("GLOB"):
-        _mod = _native_get_module("glob")
-        if _mod is not None:
-            try:
-                native_rules = _mod.parse_gitignore(
-                    content.encode("utf-8"), str(source_dir)
+    if _native_use_native("GLOB") and _NATIVE_GLOB is not None:
+        try:
+            native_rules = _NATIVE_GLOB.parse_gitignore(
+                content.encode("utf-8"), str(source_dir)
+            )
+            return [
+                _GitignoreRule(
+                    pattern=pattern,
+                    negated=negated,
+                    anchored=anchored,
+                    is_dir_only=is_dir_only,
+                    source_dir=source_dir,
+                    _native=(pattern, negated, anchored, is_dir_only),
                 )
-                return [
-                    _GitignoreRule(
-                        pattern=pattern,
-                        negated=negated,
-                        anchored=anchored,
-                        is_dir_only=is_dir_only,
-                        source_dir=source_dir,
-                        _native=(pattern, negated, anchored, is_dir_only),
-                    )
-                    for pattern, negated, anchored, is_dir_only in native_rules
-                ]
-            except Exception:
+                for pattern, negated, anchored, is_dir_only in native_rules
+            ]
+        except Exception:
                 pass
 
     # Pure-Python fallback.
@@ -241,28 +242,31 @@ def _is_ignored_by_gitignore(
     # can evaluate the whole list in one native call.  Multi-source-dir cases
     # keep the Python loop because the native is_ignored() API consumes one
     # rel_path and one flat rules list.
-    if rules and _native_use_native("GLOB") and _NATIVE_GLOB_MATCH_CASE_SENSITIVE:
-        _mod = _native_get_module("glob")
-        if _mod is not None:
-            source_dir = rules[0].source_dir
-            if all(rule.source_dir == source_dir for rule in rules):
-                try:
-                    rel_path = str(path.relative_to(source_dir)).replace("\\", "/")
-                    is_dir = path.is_dir()
-                    native_rules = [
-                        rule._native
-                        if rule._native is not None
-                        else (
-                            rule.pattern,
-                            rule.negated,
-                            rule.anchored,
-                            rule.is_dir_only,
-                        )
-                        for rule in rules
-                    ]
-                    return _mod.is_ignored(rel_path, is_dir, native_rules)
-                except Exception:
-                    pass
+    if (
+        rules
+        and _native_use_native("GLOB")
+        and _NATIVE_GLOB is not None
+        and _NATIVE_GLOB_MATCH_CASE_SENSITIVE
+    ):
+        source_dir = rules[0].source_dir
+        if all(rule.source_dir == source_dir for rule in rules):
+            try:
+                rel_path = str(path.relative_to(source_dir)).replace("\\", "/")
+                is_dir = path.is_dir()
+                native_rules = [
+                    rule._native
+                    if rule._native is not None
+                    else (
+                        rule.pattern,
+                        rule.negated,
+                        rule.anchored,
+                        rule.is_dir_only,
+                    )
+                    for rule in rules
+                ]
+                return _NATIVE_GLOB.is_ignored(rel_path, is_dir, native_rules)
+            except Exception:
+                pass
 
     # Standard gitignore behavior: later rules override earlier ones.
     # We process all rules in order of discovery (root-first, then deeper).

@@ -324,7 +324,7 @@ def _install_rtk() -> tuple[bool, bool]:
 #   kimix_base-<platform>-<arch>-<version>.zip
 # e.g. kimix_base-windows-x64-0.1.0.zip under
 # https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/...
-KIMIX_BASE_VERSION = "0.2.0"
+KIMIX_BASE_VERSION = "0.3.0"
 KIMIX_BASE_RELEASE_URL = (
     "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release"
 )

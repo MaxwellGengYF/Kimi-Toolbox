@@ -63,6 +63,9 @@ from kimi_cli.utils.path import (
 from kimi_cli.utils.sensitive import is_sensitive_file, sensitive_file_warning
 from kimi_cli.vfs import VFS
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 # Output mode map — only canonical values accepted
 _OUTPUT_MODE_MAP: dict[str, Literal["files_with_matches", "count_matches", "content"]] = {
     "files_with_matches": "files_with_matches",
@@ -1389,13 +1392,12 @@ class Grep(CallableTool2[Params]):
             # line-splitting stay native; the regex matcher stays in Python.
             # Only used when splitlines() == \n-splitting (guard in
             # _use_native_line_scan), so line numbers match exactly.
-            _mod = _native_get_module("tools")
-            if _mod is not None:
+            if _NATIVE_TOOLS is not None:
                 def _matcher(line_bytes: bytes, line_index: int) -> bool:
                     line_text = line_bytes.decode("utf-8", "surrogatepass")
                     return bool(regex.search(line_text))
 
-                hits = _mod.scan_lines_cb(content, _matcher)
+                hits = _NATIVE_TOOLS.scan_lines_cb(content, _matcher)
                 match_line_nums = {int(ln) + 1 for ln, _off, _len in hits}
         else:
             for i, line in enumerate(lines, 1):
@@ -1435,7 +1437,7 @@ class Grep(CallableTool2[Params]):
         \r (alone or in \r\n) and other Unicode line separators. When any of
         those appear, the Python path runs so line numbers stay identical.
         """
-        if not _native_use_native("TOOLS"):
+        if not _native_use_native("TOOLS") or _NATIVE_TOOLS is None:
             return False
         for ch in content:
             if ch in "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029":

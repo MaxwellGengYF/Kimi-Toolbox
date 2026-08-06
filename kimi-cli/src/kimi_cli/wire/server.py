@@ -13,6 +13,10 @@ from kosong.utils.typing import JsonType
 
 from kimi_cli.approval_runtime import ApprovalRuntime
 from kimi_cli.constant import USER_AGENT
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, SessionRestartRequired, Soul, run_soul
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.toolset import KimiToolset, WireExternalTool
@@ -56,6 +60,9 @@ from .jsonrpc import (
     Statuses,
 )
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_CODEC = _native_get_module("codec")
+
 # Maximum buffer size for the asyncio StreamReader used for stdio.
 # Passed as the `limit` argument to `acp.stdio_streams`, this caps how much
 # data can be buffered when reading from stdin (e.g., large tool or model
@@ -63,6 +70,17 @@ from .jsonrpc import (
 # interactive use while still protecting the process from unbounded memory
 # growth or buffer-overrun errors when peers send unexpectedly large payloads.
 STDIO_BUFFER_LIMIT = 100 * 1024 * 1024
+
+
+def _frame_jsonrpc(payload: bytes) -> bytes:
+    """Newline-terminate a JSON-RPC payload: ``payload + b"\n"``.
+
+    Native acceleration: ``kimix_native.codec.JsonRpcFrameWriter`` is
+    byte-identical (payload + newline); the pure-Python body is unchanged.
+    """
+    if _native_use_native("CODEC") and _NATIVE_CODEC is not None:
+        return _NATIVE_CODEC.JsonRpcFrameWriter().write(payload)
+    return payload + b"\n"
 
 
 def _is_oauth_session(runtime: Any) -> bool:

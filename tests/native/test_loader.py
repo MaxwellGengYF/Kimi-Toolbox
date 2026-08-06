@@ -87,6 +87,53 @@ def test_use_native_consistent_with_availability():
         assert knl.use_native(kernel) is (knl.NATIVE_AVAILABLE and True)
 
 
+def test_use_native_case_variants():
+    """Upper/lower/title spellings of a known kernel resolve identically."""
+    for kernel in knl._KERNELS:
+        expected = knl.use_native(kernel)
+        assert knl.use_native(kernel.lower()) is expected
+        assert knl.use_native(kernel.title()) is expected
+
+
+def test_kernel_table_precomputed():
+    """The precomputed kernel table matches use_native for every spelling."""
+    table = knl._KERNEL_TABLE
+    assert table is not None
+    for kernel in knl._KERNELS:
+        expected = knl.use_native(kernel)
+        assert table[kernel] is expected
+        assert table[kernel.lower()] is expected
+        assert table[kernel.title()] is expected
+
+
+def test_module_table_precomputed():
+    """The precomputed module table holds resolved submodules (or None)."""
+    table = knl._MODULE_TABLE
+    assert knl.get_module("index") is table["index"]
+    assert knl.get_module("does_not_exist") is None
+    if knl.NATIVE_AVAILABLE:
+        assert table["index"] is not None
+        assert callable(getattr(table["search"], "jaro_similarity", None))
+    else:
+        assert table["index"] is None
+
+
+def test_use_native_unknown_kernel_memoized():
+    """Unknown kernel names resolve via the shim and are memoized."""
+    first = knl.use_native("FROBNICATE")
+    assert isinstance(first, bool)
+    assert knl._KERNEL_TABLE["FROBNICATE"] is first
+    assert knl.use_native("FROBNICATE") is first
+
+
+def test_hot_call_sites_hoist_native_modules():
+    """Consuming modules resolve native submodules once at import time."""
+    import kimix.retrieval as retrieval
+
+    assert retrieval._NATIVE_INDEX is knl.get_module("index")
+    assert retrieval._NATIVE_SEARCH is knl.get_module("search")
+
+
 def test_attribute_submodule_access():
     if knl.NATIVE_AVAILABLE:
         assert knl.stream is not None

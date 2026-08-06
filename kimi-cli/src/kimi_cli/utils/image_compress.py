@@ -38,7 +38,14 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, Literal
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.utils.image_format_policy import normalize_image_mime
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_IMAGE = _native_get_module("image")
 
 if TYPE_CHECKING:
     import numpy as np
@@ -148,6 +155,10 @@ def resolve_read_image_byte_budget() -> int:
 
 def format_byte_size(n: int) -> str:
     """Human-readable byte size: ``640 B`` / ``128 KB`` / ``3.8 MB``."""
+    # Native acceleration: kimix_native.image.format_byte_size is
+    # byte-identical (B / KB / MB formatting); the Python body is unchanged.
+    if _native_use_native("IMAGE") and _NATIVE_IMAGE is not None:
+        return _NATIVE_IMAGE.format_byte_size(n)
     if n < 1024:
         return f"{n} B"
     if n < 1024 * 1024:
@@ -184,6 +195,15 @@ def sniff_image_dimensions(data: bytes) -> ImageDimensions | None:
     swapped to match what decoders (and this codebase's crop regions and
     compression captions) actually operate in.
     """
+    # Native acceleration: kimix_native.image.sniff_dimensions returns the
+    # same (width, height, transposed) triple the header-scan below computes;
+    # the pure-Python body is unchanged.
+    if _native_use_native("IMAGE") and _NATIVE_IMAGE is not None:
+        dims = _NATIVE_IMAGE.sniff_dimensions(data)
+        if dims is None:
+            return None
+        width, height, transposed = dims
+        return ImageDimensions(width=width, height=height, transposed=bool(transposed))
     # PNG — IHDR is the first chunk; width/height are big-endian uint32
     # at offsets 16 and 20.
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
@@ -313,6 +333,9 @@ def _is_animated_webp(data: bytes) -> bool:
     the ANIM flag. Animated WebP must be passed through, not re-encoded:
     decoding yields a single frame and would silently destroy the animation
     (the same reason GIF is passed through)."""
+    # Native acceleration: kimix_native.image.is_animated_webp (bit-identical).
+    if _native_use_native("IMAGE") and _NATIVE_IMAGE is not None:
+        return _NATIVE_IMAGE.is_animated_webp(data)
     return (
         len(data) >= 21
         and data[0:4] == b"RIFF"

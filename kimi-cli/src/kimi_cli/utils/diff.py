@@ -5,7 +5,14 @@ from difflib import SequenceMatcher, unified_diff
 
 from kosong.tooling import DisplayBlock
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.tools.display import DiffDisplayBlock
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_DIFF = _native_get_module("diff")
 
 N_CONTEXT_LINES = 3
 
@@ -32,6 +39,17 @@ def format_unified_diff(
     Returns:
         A unified diff string.
     """
+    # Native acceleration: kimix_native.diff.unified_diff is byte-identical
+    # to the difflib body below (same line splitting, trailing-newline fix and
+    # ---/+++ header handling); the pure-Python body is unchanged.
+    if _native_use_native("DIFF") and _NATIVE_DIFF is not None:
+        return _NATIVE_DIFF.unified_diff(
+            old_text.encode("utf-8", "surrogatepass"),
+            new_text.encode("utf-8", "surrogatepass"),
+            path,
+            include_file_header,
+            "\n",
+        ).decode("utf-8", "surrogatepass")
     old_lines = old_text.splitlines(keepends=True)
     new_lines = new_text.splitlines(keepends=True)
 
@@ -95,6 +113,26 @@ def _build_diff_blocks_sync(
                 new_start=1,
                 is_summary=True,
             )
+        ]
+
+    # Native acceleration: kimix_native.diff.diff_hunks replicates the
+    # SequenceMatcher.get_grouped_opcodes(n=N_CONTEXT_LINES) grouping below;
+    # the pure-Python body is unchanged.
+    if _native_use_native("DIFF") and _NATIVE_DIFF is not None:
+        hunks = _NATIVE_DIFF.diff_hunks(
+            old_text.encode("utf-8", "surrogatepass"),
+            new_text.encode("utf-8", "surrogatepass"),
+            N_CONTEXT_LINES,
+        )
+        return [
+            DiffDisplayBlock(
+                path=path,
+                old_text="\n".join(h["old_lines"]),
+                new_text="\n".join(h["new_lines"]),
+                old_start=h["old_start"],
+                new_start=h["new_start"],
+            )
+            for h in hunks
         ]
 
     matcher = SequenceMatcher(None, old_lines, new_lines, autojunk=False)

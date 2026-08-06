@@ -7,6 +7,9 @@ from kimix.native_loader import (
 )
 from kimix.tools.common import _maybe_export_output
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 
 class FindStrParams(BaseModel):
     content: str = Field(
@@ -116,16 +119,15 @@ class FindStr(CallableTool2):
             # differently from the Python per-line scan).
             if (
                 _native_use_native("TOOLS")
+                and _NATIVE_TOOLS is not None
                 and "\n" not in search_content
                 and "\r" not in search_content
             ):
-                _mod = _native_get_module("tools")
-                if _mod is not None:
-                    content = "".join(lines)
-                    if content.isascii() and search_content.isascii():
-                        return _mod.find_in_file(
-                            content, search_content, case_sensitive, file_path
-                        )
+                content = "".join(lines)
+                if content.isascii() and search_content.isascii():
+                    return _NATIVE_TOOLS.find_in_file(
+                        content, search_content, case_sensitive, file_path
+                    )
 
             if not case_sensitive:
                 search_lower = search_content.lower()

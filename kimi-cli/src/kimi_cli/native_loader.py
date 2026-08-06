@@ -30,19 +30,11 @@ __all__ = [
     "use_native",
     "version",
     "get_module",
+    "kernel_module",
 ]
 
 _impl = None
 _FAILED = False
-
-# Fast-path caches: per-kernel gate decisions and per-module resolutions are
-# resolved once and cached. Env toggles are fixed at process start; runtime
-# toggling is done via fresh subprocesses or by monkeypatching these
-# functions in tests.
-_MISSING = object()
-_kernel_cache: dict[str, bool] = {}
-_module_cache: dict[str, object] = {}
-_kernel_module_cache: dict[str, object] = {}
 
 
 def _candidate_loader_files() -> list[str]:
@@ -97,17 +89,14 @@ def _get_impl():
 def use_native(kernel: str) -> bool:
     """Per-kernel gate: True when native is active for *kernel*.
 
-    Fast path: per-kernel decision cached after first resolution (env
-    toggles are fixed at process start; tests toggle via subprocesses).
+    Delegates straight to the shared kimix loader, which precomputes every
+    per-kernel decision at import time — the hot path there is a single dict
+    lookup (no per-call ``.upper()`` allocation, no extra cache layer here).
+    Env toggles are fixed at process start; tests toggle via subprocesses or
+    by monkeypatching the consuming modules' ``_native_use_native`` binding.
     """
-    key = kernel.upper()
-    cached = _kernel_cache.get(key, _MISSING)
-    if cached is not _MISSING:
-        return cached
     impl = _get_impl()
-    result = bool(impl.use_native(key)) if impl is not None else False
-    _kernel_cache[key] = result
-    return result
+    return impl.use_native(kernel) if impl is not None else False
 
 
 def _fallback_version() -> str:
@@ -139,29 +128,22 @@ def version() -> str:
 def get_module(name: str):
     """Return the ``kimix_native.<name>`` submodule, or None when unavailable.
 
-    Fast path: resolved once and cached (single dict lookup afterwards).
+    Delegates straight to the shared kimix loader (precomputed module table
+    — single dict lookup on the hot path).
     """
-    cached = _module_cache.get(name, _MISSING)
-    if cached is not _MISSING:
-        return cached
     impl = _get_impl()
-    mod = impl.get_module(name) if impl is not None else None
-    _module_cache[name] = mod
-    return mod
+    return impl.get_module(name) if impl is not None else None
 
 
 def kernel_module(kernel: str):
-    """Cached combined gate+module accessor for hot loops (see
+    """Cached combined gate+module accessor for hot loops.
+
+    Delegates straight to the shared kimix loader (see
     kimix.native_loader.kernel_module): the native submodule for *kernel* or
-    None when the gate is off / native unavailable."""
-    key = kernel.upper()
-    cached = _kernel_module_cache.get(key, _MISSING)
-    if cached is not _MISSING:
-        return cached
+    None when the gate is off / native unavailable.
+    """
     impl = _get_impl()
-    mod = impl.kernel_module(key) if impl is not None else None
-    _kernel_module_cache[key] = mod
-    return mod
+    return impl.kernel_module(kernel) if impl is not None else None
 
 
 def __getattr__(name: str):

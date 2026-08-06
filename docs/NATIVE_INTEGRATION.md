@@ -57,24 +57,39 @@ bit-identical outputs.
 ## Gate hot-path optimization
 
 `use_native(kernel)` and `get_module(name)` are called on every hot-path
-invocation (each token count / sanitize / ANSI-strip / parser call). Both
-loaders cache their resolutions so the steady-state cost is a single dict
-lookup per call:
+invocation (each token count / sanitize / ANSI-strip / parser call). The
+runtime environment is stable (env toggles are fixed at process start, the
+shim import is cached), so **every per-kernel gate decision and per-module
+resolution is computed once at loader import time** and stored in
+precomputed tables. The steady-state hot path is a single dict lookup with
+no per-call `.upper()` allocation and no repeated availability checks:
 
-- `kimix/native_loader.py` + `kimi-cli/native_loader.py`: per-kernel gate
-  decisions (`_kernel_cache`) and per-module imports (`_module_cache`) are
-  resolved once and cached; `kernel_module(kernel)` is a combined one-lookup
-  accessor for new hot code.
+- `kimix/native_loader.py`: `_KERNEL_TABLE` (each known kernel under its
+  upper/lower/title spellings) and `_MODULE_TABLE` (each known submodule
+  resolved to its module object or `None`) are built once by
+  `_build_kernel_table()` / `_build_module_table()`; unknown kernel/module
+  names fall back to the shim / `importlib` and are memoized into the same
+  tables. `kernel_module(kernel)` is a combined one-lookup accessor for new
+  hot code.
+- `kimi-cli/native_loader.py`: delegates straight to the shared kimix
+  loader (its own per-call cache layer was removed — the precomputed tables
+  make it redundant); `kernel_module` is exposed eagerly.
+- Hot call sites hoist the module resolution to import time
+  (`_NATIVE_TEXT = _native_get_module("text")` once per module) and check
+  `if _native_use_native("TEXT") and _NATIVE_TEXT is not None:` per item —
+  one gate lookup + one attribute check per call instead of two function
+  calls.
 - Env toggles are fixed at process start; tests toggle them via fresh
   subprocesses (mode-matrix / per-kernel-toggle suites) or by monkeypatching
-  the loader functions in-process — the caches are per-process and never
-  consulted after a monkeypatch replaces the function.
+  the consuming modules' `_native_use_native` binding in-process — the gate
+  is still consulted per call, so a monkeypatched gate keeps working.
 - The shim (`kimix_native`) itself stays uncached on purpose: kimix-base's
   parity tests flip `KIMIX_NATIVE` **in-process**, which would go stale.
 
-Measured on this machine (release build, 200k iterations):
-`use_native` 0.81 → 0.10 µs, `get_module` 0.47 → 0.07 µs, gate+module pair
-1.28 → 0.16 µs per call (~8×).
+Measured on this machine (release build, 300k iterations,
+`tools/bench_native_gate.py`): `use_native` ≈ 0.09 µs and `get_module`
+≈ 0.10 µs per call; the old two-call gate+module pattern ≈ 0.35 µs vs the
+new hoisted call-site pattern ≈ 0.15 µs (~2×).
 
 ## Env toggles (mode matrix)
 
@@ -91,16 +106,18 @@ changes — each kernel has a bit-identical Python fallback.
 
 ## Integration pattern
 
-Each hot function keeps its old body and gains a lazy gate:
+Each hot function keeps its old body and gains a lazy gate. New code should
+hoist the module resolution to import time and keep the per-item gate check:
 
 ```python
 from kimix.native_loader import get_module as _native_get_module, use_native as _native_use_native
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TEXT = _native_get_module("text")
+
 def count_tokens(text, model=None):
-    if _native_use_native("TEXT"):
-        _mod = _native_get_module("text")
-        if _mod is not None:
-            return _mod.count_tokens(...)
+    if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
+        return _NATIVE_TEXT.count_tokens(...)
     <existing pure-Python body unchanged>
 ```
 
@@ -120,26 +137,33 @@ behavior-equivalence tests:
 | JSON | `kimi_cli/acp/session.py` `_ToolCallState` incremental tool-args lexer | `json.IncrementalJsonLexer` | — |
 | WORKSPACE | `src/kimix/tools/swarm/best_of_n.py` workspace snapshot/diff/changed-files | `workspace.snapshot`/`diff_snapshots`/`changed_files` | — |
 | GLOB | `kimi_cli/tools/file/glob.py` gitignore parsing / single-source-dir matching | `glob.parse_gitignore` / `glob.is_ignored` | — |
+| DIFF | `kimi_cli/utils/diff.py` `format_unified_diff`/`_build_diff_blocks_sync` | `diff.unified_diff`/`diff_hunks` | — |
+| IMAGE | `kimi_cli/utils/image_compress.py` `format_byte_size`/`sniff_image_dimensions`/`_is_animated_webp` | `image.format_byte_size`/`sniff_dimensions`/`is_animated_webp` | — |
+| CODEC | `kimi_cli/wire/server.py` `_frame_jsonrpc` (JSON-RPC framing); `kimi_cli/wire/file.py` `_dump_line` (jsonl record) | `codec.JsonRpcFrameWriter`/`JsonlRecorder` | — |
+| TODO | `kimi_cli/tools/todo/__init__.py` `TodoList._status_counts` | `todo.status_counts` | — |
+| SOUL | `kimi_cli/soul/context_pruning.py` `ContextPruner.prune` native fast path | `soul.prune_history` | — |
 
-Equivalence tests: `tests/native/` (102 tests) + `kimi-cli/tests/native/`
-(177 tests) — every wired kernel is run through the SAME corpus with the gate
-forced on vs off and outputs asserted identical (return values, bytes,
-errors, determinism, thread-safety smoke).
+Equivalence tests: `tests/native/` (130 tests) + `kimi-cli/tests/native/`
+(186 tests, incl. `test_additional_kernels_equivalence.py`) — every wired kernel
+is run through the SAME corpus with the gate forced on vs off and outputs
+asserted identical (return values, bytes, errors, determinism, thread-safety
+smoke). kimix-base `python/tests/` adds per-kernel parity tests (incl.
+`test_diff.py` / `test_image.py` / `test_todo.py`) and the C++ kernels are
+tested by `tests/unit/native/test_{diff,image,todo}.cpp`.
 
-## Additional shim modules (not yet wired to app code)
+## Additional shim modules (exposed + parity-tested, not wired to app code)
 
-These modules exist in `bin\kimix_native\` and are usable directly (e.g.
-`from kimix_native import codec` or `native_loader.get_module("codec")`), but
-the main app paths still use their existing Python implementations:
+These modules are usable directly (e.g. `from kimix_native import codec` or
+`native_loader.get_module("codec")`) and are covered by native↔Python parity
+tests, but the main app paths still use their existing Python implementations
+because the native contracts do not match the app's data model bit-for-bit:
 
 | module | public API | why it is shim-only |
 |---|---|---|
-| `codec` | `serialize_envelope`/`deserialize_envelope`, `canonicalize_payload`, `WireMergeBuffer`, `ArgsBuffer`, `JsonRpcFrameWriter`, `JsonlRecorder`, `RecvBuffer`, `build_sse_frame` | the app wire/server layers are pydantic-model-centric; the codec is bytes-in/bytes-out and not yet plumbed in |
-| `concurrency` | `MpscEventBus`, `IdGenerator` | the app SSE / bus layers use string ids (`evt_<hex>`) and different event semantics; the native primitives are available but not yet adopted |
-| `diff` | `unified_diff`, `diff_hunks`, `inline_diff_ranges` | no app hot path currently consumes these; available for future UI/diff features |
-| `image` | `sniff_dimensions`, `read_exif_orientation`, `is_animated_webp`, `format_byte_size` | available for future image-pipeline acceleration |
-| `soul` | `build_payload`, `normalize_tool_call_ids`, `prune_scan`, `count_leading_reminders`, `build_normalize_plan`, `build_compaction_prompt`, `apply_normalize_plan`, `apply_id_fixes` | the soul flows operate on pydantic `Message` objects with option-dependent behavior; the shim works on plain-dict plans and is kept for future parity work |
-| `todo` | `merge`, `status_counts`, `format_summary` | available for future todo-tool acceleration |
+| `concurrency` | `MpscEventBus`, `IdGenerator` | the app SSE / bus layers (`src/kimix/server/bus.py`) use string ids (`evt_<hex>`) and `asyncio.Queue` semantics; `MpscEventBus` is a bounded DROP_OLDEST ring with offset-based subscribers and `IdGenerator` yields ints — wiring them would change the wire format, so they stay shim-only (parity-tested in kimix-base `python/tests/test_concurrency.py`) |
+| `codec` | `serialize_envelope`/`deserialize_envelope`, `canonicalize_payload`, `WireMergeBuffer`, `ArgsBuffer`, `RecvBuffer`, `build_sse_frame` | the app's envelope/tool-call paths are pydantic-model-centric; the codec is bytes-in/bytes-out. The JSON-RPC framing (`JsonRpcFrameWriter`) and jsonl record (`JsonlRecorder`) kernels ARE wired (see the table above); the envelope/buffer kernels are exposed for future server work |
+| `soul` | `build_payload`, `normalize_tool_call_ids`, `prune_scan`, `count_leading_reminders`, `build_normalize_plan`, `build_compaction_prompt`, `apply_normalize_plan`, `apply_id_fixes` | `prune_history` is wired in `context_pruning.py`; the remaining functions have no matching app call site (the soul flows operate on pydantic `Message` objects with option-dependent behavior; the shim works on plain-dict plans) and stay shim-only for future parity work |
+| `diff` | `inline_diff_ranges` | `unified_diff`/`diff_hunks` are wired in `utils/diff.py`; `inline_diff_ranges` targets the rich diff renderer's rendered-text offsets (`_build_offset_map(raw, rendered, tab_size)`) whose contract differs from the shim's plain-string variant — kept shim-only |
 
 ## Deliberately NOT integrated (and why)
 

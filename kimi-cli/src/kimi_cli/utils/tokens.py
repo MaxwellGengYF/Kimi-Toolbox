@@ -9,6 +9,9 @@ from kimi_cli.native_loader import (
     use_native as _native_use_native,
 )
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TEXT = _native_get_module("text")
+
 if TYPE_CHECKING:
     from kosong.message import Message
 
@@ -28,10 +31,8 @@ _CJK_RE = re.compile(
 def _is_cjk_text(text: str, threshold: float = 0.15) -> bool:
     """Return True if the fraction of CJK characters exceeds *threshold*."""
     # Native acceleration: kimix_native.text.is_cjk_text (bit-identical).
-    if _native_use_native("TEXT"):
-        _mod = _native_get_module("text")
-        if _mod is not None:
-            return _mod.is_cjk_text(text, threshold)
+    if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
+        return _NATIVE_TEXT.is_cjk_text(text, threshold)
     if not text:
         return False
     cjk_count = len(_CJK_RE.findall(text))
@@ -49,10 +50,8 @@ def _estimate_chars_tokens(text: str) -> int:
     if not text:
         return 0
     # Native acceleration: kimix_native.text.estimate_chars_tokens.
-    if _native_use_native("TEXT"):
-        _mod = _native_get_module("text")
-        if _mod is not None:
-            return _mod.estimate_chars_tokens(text)
+    if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
+        return _NATIVE_TEXT.estimate_chars_tokens(text)
     total = len(text)
     ascii_count = sum(1 for c in text if ord(c) < 128)
     ascii_ratio = ascii_count / total

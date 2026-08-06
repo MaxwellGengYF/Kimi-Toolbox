@@ -484,6 +484,9 @@ from kimix.native_loader import (
     use_native as _native_use_native,
 )
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_PARSE = _native_get_module("parse")
+
 
 def _fallback_definition(name: str) -> str:
     body = _FALLBACK_BODIES[name]
@@ -2003,15 +2006,13 @@ def fix_bash_command(command: str) -> BashFix:
     if sys.platform != "win32" or not command:
         return BashFix(command)
     # Native acceleration: kimix_native.parse.fix_bash_command.
-    if _native_use_native("PARSE"):
-        _mod = _native_get_module("parse")
-        if _mod is not None:
-            result = _mod.fix_bash_command(command)
-            return BashFix(
-                command=result.command,
-                replacements=tuple(result.replacements),
-                path_changes=tuple(result.path_changes),
-            )
+    if _native_use_native("PARSE") and _NATIVE_PARSE is not None:
+        result = _NATIVE_PARSE.fix_bash_command(command)
+        return BashFix(
+            command=result.command,
+            replacements=tuple(result.replacements),
+            path_changes=tuple(result.path_changes),
+        )
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
     # substring fast path would miss legal executable words.  The scanner is

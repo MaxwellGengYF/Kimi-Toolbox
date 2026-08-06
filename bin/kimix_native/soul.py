@@ -875,7 +875,8 @@ def apply_id_fixes(history: list[dict], fixes: list[tuple]) -> list[dict]:
     """Apply normalize_tool_call_ids fixes (deep-copied messages)."""
     out = [_loads(_compact(m)) for m in history]
     for msg_index, call_index, new_id in fixes:
-        new_id = _dec(bytes(new_id))
+        if isinstance(new_id, bytes):
+            new_id = _dec(new_id)
         if call_index == -1:
             out[msg_index] = {**out[msg_index], "tool_call_id": new_id}
         else:

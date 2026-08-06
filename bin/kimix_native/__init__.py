@@ -32,8 +32,17 @@ if USE_NATIVE != "0":
         _native = None
 
 
+def use_native(kernel: str) -> bool:
+    """Per-kernel toggle: module flag, env var, then fallback."""
+    if _native is None:
+        return False
+    flag = os.environ.get(f"KIMIX_NATIVE_{kernel.upper()}", str(USE_NATIVE).lower() != "0")
+    return str(flag).lower() not in ("0", "false", "no", "")
+
+
 def _fallback_version() -> str:
-    """Return the fallback version marker, synced from ``KIMIX_NATIVE_VERSION``."""
+    """Return the fallback version marker, synced from ``KIMIX_NATIVE_VERSION``
+    (a sibling file of the repo root) when present."""
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         version_file = os.path.join(
@@ -49,14 +58,6 @@ def _fallback_version() -> str:
 
 
 _FALLBACK_VERSION = _fallback_version()
-
-
-def use_native(kernel: str) -> bool:
-    """Per-kernel toggle: module flag, env var, then fallback."""
-    if _native is None:
-        return False
-    flag = os.environ.get(f"KIMIX_NATIVE_{kernel.upper()}", str(USE_NATIVE).lower() != "0")
-    return str(flag).lower() not in ("0", "false", "no", "")
 
 
 def version() -> str:

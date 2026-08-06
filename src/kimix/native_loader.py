@@ -199,24 +199,74 @@ _setup()
 # public API
 # ---------------------------------------------------------------------------
 
-# Fast-path caches: the per-module import and the per-kernel gate decision
-# are resolved once and cached. Env toggles are fixed at process start;
-# runtime toggling is done via fresh subprocesses or by monkeypatching these
-# functions in tests (the loader is reloaded there when needed).
+# Fast-path tables: the runtime environment is stable (env toggles are fixed
+# at process start and the shim import is cached), so every per-kernel gate
+# decision and per-module resolution is computed ONCE at import time and
+# stored in precomputed dicts. The hot path is then a single dict lookup —
+# no per-call ``.upper()`` allocation, no repeated NATIVE_AVAILABLE/_shim
+# checks, no sentinel branch. Names outside the tables (e.g. kernels the
+# shim knows but this loader does not) fall back to the dynamic path below
+# and are memoized the same way. Runtime toggling is done via fresh
+# subprocesses or by monkeypatching these functions in tests (the loader is
+# reloaded there when needed).
 _MISSING = object()
-_module_cache: dict[str, object] = {}
+_kernel_cache: dict[str, bool] = {}  # dynamic fallback (unknown kernels)
+_module_cache: dict[str, object] = {}  # dynamic fallback (unknown modules)
 _kernel_module_cache: dict[str, object] = {}
-_kernel_cache: dict[str, bool] = {}
+
+
+def _build_kernel_table() -> dict[str, bool]:
+    """Precompute per-kernel gate results for every known kernel name.
+
+    Each known kernel is stored under its upper/lower/title spellings so
+    callers never pay for a per-call ``.upper()`` on the hot path. Results
+    come straight from the shim's ``use_native`` (env toggles included) and
+    never change while the process lives.
+    """
+    table: dict[str, bool] = {}
+    if NATIVE_AVAILABLE and _shim is not None:
+        for kernel in _KERNELS:
+            result = bool(_shim.use_native(kernel))
+            table[kernel] = result
+            table[kernel.lower()] = result
+            table[kernel.title()] = result
+    return table
+
+
+def _build_module_table() -> dict[str, object]:
+    """Precompute the resolved submodule for every known kernel module name.
+
+    All known submodules (``kimix_native.<kernel.lower()>``) are imported
+    once here; each is a small shim module over the already-loaded
+    ``runtime_py`` extension, so the one-time cost is negligible and the hot
+    path becomes a single dict lookup (module object or None).
+    """
+    table: dict[str, object] = {}
+    if NATIVE_AVAILABLE and _shim is not None:
+        for kernel in _KERNELS:
+            name = kernel.lower()
+            try:
+                table[name] = importlib.import_module(f"kimix_native.{name}")
+            except ImportError:
+                table[name] = None
+    return table
+
+
+_KERNEL_TABLE = _build_kernel_table()
+_MODULE_TABLE = _build_module_table()
 
 
 def use_native(kernel: str) -> bool:
     """Per-kernel gate: True when native is active for *kernel*.
 
-    Fast path: the per-kernel decision is resolved once (delegating to the
-    shim) and cached — a single dict lookup afterwards. Env toggles are
-    fixed at process start; tests toggle via fresh subprocesses or by
-    monkeypatching this function.
+    Hot path: a single lookup into the precomputed kernel table (the runtime
+    environment is stable, so per-kernel decisions never change). Kernels
+    the shim recognizes but that are not in the table are resolved once via
+    the shim and memoized.
     """
+    cached = _KERNEL_TABLE.get(kernel, _MISSING)
+    if cached is not _MISSING:
+        return cached
     if not NATIVE_AVAILABLE or _shim is None:
         return False
     key = kernel.upper()
@@ -225,6 +275,7 @@ def use_native(kernel: str) -> bool:
         return cached
     result = bool(_shim.use_native(key))
     _kernel_cache[key] = result
+    _KERNEL_TABLE[kernel] = result
     return result
 
 
@@ -260,22 +311,22 @@ def version() -> str:
 def get_module(name: str):
     """Return the ``kimix_native.<name>`` submodule, or None when unavailable.
 
-    Submodules are not auto-imported by the shim package, so this uses an
-    explicit ``importlib`` import — resolved once and cached (single dict
-    lookup on the hot path afterwards).
+    Hot path: a single lookup into the precomputed module table (all known
+    submodules resolved at import time). Unknown names are imported on
+    demand and memoized.
     """
+    cached = _MODULE_TABLE.get(name, _MISSING)
+    if cached is not _MISSING:
+        return cached
     if not NATIVE_AVAILABLE or _shim is None:
         return None
     if name in ("_native",) or name.startswith("_"):
         return None
-    cached = _module_cache.get(name, _MISSING)
-    if cached is not _MISSING:
-        return cached
     try:
         mod = importlib.import_module(f"kimix_native.{name}")
     except ImportError:
         mod = None
-    _module_cache[name] = mod
+    _MODULE_TABLE[name] = mod
     return mod
 
 
@@ -295,7 +346,7 @@ def kernel_module(kernel: str):
     if cached is not _MISSING:
         return cached
     mod = None
-    if _shim.use_native(key):
+    if use_native(key):
         mod = get_module(key.lower())
     _kernel_module_cache[key] = mod
     return mod

@@ -22,7 +22,6 @@ from kimi_cli.native_loader import (
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
-
 from kimi_cli.wire.types import (
     AudioURLPart,
     ContentPart,
@@ -35,6 +34,9 @@ from kimi_cli.wire.types import (
 
 if TYPE_CHECKING:
     from kimi_cli.soul.context import Context
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
 
 # ---------------------------------------------------------------------------
 # Export helpers
@@ -326,17 +328,15 @@ def build_export_markdown(
     # Native acceleration: kimix_native.tools.build_export_markdown. The
     # native kernel consumes plain-dict history (message-view bridge via
     # _messages_to_dicts below); pydantic validation stays in Python.
-    if _native_use_native("TOOLS"):
-        _mod = _native_get_module("tools")
-        if _mod is not None:
-            opts = {
-                "session_id": session_id,
-                "exported_at": now.isoformat(timespec="seconds"),
-                "work_dir": work_dir,
-                "token_count": token_count,
-            }
-            history_dicts = [_message_to_export_dict(m) for m in history]
-            return _mod.build_export_markdown(history_dicts, opts).decode("utf-8")
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None:
+        opts = {
+            "session_id": session_id,
+            "exported_at": now.isoformat(timespec="seconds"),
+            "work_dir": work_dir,
+            "token_count": token_count,
+        }
+        history_dicts = [_message_to_export_dict(m) for m in history]
+        return _NATIVE_TOOLS.build_export_markdown(history_dicts, opts).decode("utf-8")
     lines: list[str] = [
         "---",
         f"session_id: {session_id}",

@@ -134,9 +134,18 @@ def _compat_compute_line_hash(line_num: int, line: str, prev_hash: str | None) -
 
 
 def _compat_compute_line_hashes(content: str) -> list[str]:
+    """Mirror of the native kernel: split on '\n' ONLY (a trailing '\r' is
+    stripped per line by _compat_compute_line_hash). str.splitlines() also
+    splits on lone '\r', which would diverge from the kernel's line stream.
+    """
     hashes: list[str] = []
     prev: str | None = None
-    for i, line in enumerate(content.splitlines(), 1):
+    if not content:
+        return hashes
+    lines = content.split("\n")
+    if lines and lines[-1] == "" and content.endswith("\n"):
+        lines.pop()
+    for i, line in enumerate(lines, 1):
         h = _compat_compute_line_hash(i, line, prev)
         hashes.append(h)
         prev = h

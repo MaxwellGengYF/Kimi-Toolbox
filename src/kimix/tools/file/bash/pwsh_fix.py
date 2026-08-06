@@ -58,6 +58,9 @@ from kimix.native_loader import (
 
 from dataclasses import dataclass
 
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_PARSE = _native_get_module("parse")
+
 _NORMAL = "normal"
 _DQ = "double-quoted"
 _SQ = "single-quoted"
@@ -134,13 +137,11 @@ def fix_pwsh_command(cmd: str) -> PwshFix | None:
     if not cmd or not cmd.strip():
         return None
     # Native acceleration: kimix_native.parse.fix_pwsh_command.
-    if _native_use_native("PARSE"):
-        _mod = _native_get_module("parse")
-        if _mod is not None:
-            result = _mod.fix_pwsh_command(cmd)
-            if result is None:
-                return None
-            return PwshFix(command=result.command, warning=result.warning)
+    if _native_use_native("PARSE") and _NATIVE_PARSE is not None:
+        result = _NATIVE_PARSE.fix_pwsh_command(cmd)
+        if result is None:
+            return None
+        return PwshFix(command=result.command, warning=result.warning)
     # Fast path: no quote/comment/continuation/here-string/stop-parsing
     # characters at all — the command is valid as-is and cannot affect the
     # try/catch wrapper.  Avoids the O(n) Python scan for plain commands.

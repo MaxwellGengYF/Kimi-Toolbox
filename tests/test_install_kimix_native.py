@@ -33,8 +33,8 @@ def test_archive_name_rule():
         == f"kimix_base-windows-x64-{version}.zip"
     )
     assert (
-        install_mod._kimix_base_archive_name("linux", "arm64", "0.2.0")
-        == "kimix_base-linux-arm64-0.2.0.zip"
+        install_mod._kimix_base_archive_name("linux", "arm64", "0.3.0")
+        == "kimix_base-linux-arm64-0.3.0.zip"
     )
     assert (
         install_mod._kimix_base_archive_name("macos", "x64")
@@ -293,5 +293,5 @@ def test_sync_kimix_native_version_writes_config(tmp_path, monkeypatch):
     monkeypatch.setattr(
         install_mod, "_kimix_native_version_path", lambda: version_path
     )
-    assert install_mod._sync_kimix_native_version("0.2.0") is True
-    assert version_path.read_text(encoding="utf-8").strip() == "0.2.0"
+    assert install_mod._sync_kimix_native_version("0.3.0") is True
+    assert version_path.read_text(encoding="utf-8").strip() == "0.3.0"
