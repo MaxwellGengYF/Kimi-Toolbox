@@ -1,8 +1,8 @@
 """sync_native — copy the kimix-base native runtime into this project's bin/.
 
-Stages the compiled extension (``runtime_py.pyd``) and its companion
-``runtime.dll`` (plus any runtime DLL dependencies in the same directory) into
-``<work-dir>\\bin`` so the native acceleration path is importable from the
+Stages the compiled extension (``runtime_py.pyd``) and any runtime DLL
+dependencies in the same directory into ``<work-dir>\\bin`` so the native
+acceleration path is importable from the
 running project without any absolute cross-repo path baked in. The
 pure-Python ``kimix_native`` shim package lives in ``bin\\kimix_native`` and is
 tracked by git, so it is NOT copied here.
@@ -50,12 +50,12 @@ def _kimix_base_bin() -> str:
     """kimix-base bin dir (parent of the per-mode build dirs)."""
     return os.path.join(_kimix_base(), "bin")
 
-_NATIVE_FILES = ("runtime_py.pyd", "runtime.dll")
+_NATIVE_FILES = ("runtime_py.pyd",)
 _MODES = ("release", "debug", "releasedbg")
 
 
 def _valid_build(bin_dir: str) -> bool:
-    """A build dir is valid when both native artifacts exist."""
+    """A build dir is valid when the native artifact exists."""
     return all(os.path.isfile(os.path.join(bin_dir, f)) for f in _NATIVE_FILES)
 
 
@@ -97,7 +97,7 @@ def sync(mode: str = "release", dest: str | None = None) -> int:
     if not sources:
         raise FileNotFoundError(
             f"no valid native build found under {_kimix_base_bin()!r} "
-            f"(need runtime_py.pyd + runtime.dll; mode={mode!r})"
+            f"(need runtime_py.pyd; mode={mode!r})"
         )
     src = sources[0]
     os.makedirs(dest, exist_ok=True)

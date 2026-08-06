@@ -46,7 +46,6 @@ def test_source_dirs_uses_override(tmp_path, monkeypatch):
     release = fake / "bin" / "release"
     release.mkdir(parents=True)
     (release / "runtime_py.pyd").write_bytes(b"x")
-    (release / "runtime.dll").write_bytes(b"x")
     monkeypatch.setenv("KIMIX_BASE", str(fake))
     dirs = sync_native._source_dirs("release")
     assert dirs == [str(release)]

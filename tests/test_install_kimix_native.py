@@ -27,9 +27,10 @@ REPO_BIN = REPO_ROOT / "bin"
 
 
 def test_archive_name_rule():
+    version = install_mod.KIMIX_BASE_VERSION
     assert (
         install_mod._kimix_base_archive_name("windows", "x64")
-        == "kimix_base-windows-x64-0.1.0.zip"
+        == f"kimix_base-windows-x64-{version}.zip"
     )
     assert (
         install_mod._kimix_base_archive_name("linux", "arm64", "0.2.0")
@@ -37,15 +38,16 @@ def test_archive_name_rule():
     )
     assert (
         install_mod._kimix_base_archive_name("macos", "x64")
-        == "kimix_base-macos-x64-0.1.0.zip"
+        == f"kimix_base-macos-x64-{version}.zip"
     )
 
 
 def test_download_url():
+    version = install_mod.KIMIX_BASE_VERSION
     url = install_mod._kimix_base_download_url("windows", "x64")
     assert url == (
         "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/"
-        "kimix_base-windows-x64-0.1.0.zip"
+        f"kimix_base-windows-x64-{version}.zip"
     )
 
 
@@ -96,15 +98,13 @@ def test_download_file_file_uri(tmp_path):
 
 
 def _make_release_archive(dest: Path) -> Path:
-    """Build a kimix_base-style zip archive with runtime.dll + runtime_py.pyd."""
-    archive = dest / "kimix_base-windows-x64-0.1.0.zip"
+    """Build a kimix_base-style zip archive with runtime_py.pyd."""
+    archive = dest / f"kimix_base-windows-x64-{install_mod.KIMIX_BASE_VERSION}.zip"
     payload = dest / "payload"
     payload.mkdir(parents=True, exist_ok=True)
     (payload / "runtime_py.pyd").write_bytes(b"# fake runtime_py extension\n")
-    (payload / "runtime.dll").write_bytes(b"MZ fake runtime dll\n")
     with zipfile.ZipFile(archive, "w") as zf:
         zf.write(payload / "runtime_py.pyd", arcname="runtime_py.pyd")
-        zf.write(payload / "runtime.dll", arcname="runtime.dll")
     return archive
 
 
@@ -118,7 +118,6 @@ def test_extract_zip_extracts_members(tmp_path):
     out = tmp_path / "out"
     install_mod._extract_zip(archive, out)
     assert (out / "runtime_py.pyd").read_bytes() == b"# fake runtime_py extension\n"
-    assert (out / "runtime.dll").read_bytes() == b"MZ fake runtime dll\n"
 
 
 def test_extract_zip_rejects_bad_archive(tmp_path):
@@ -138,12 +137,11 @@ def test_stage_native_files_copies_artifacts_and_deps(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "runtime_py.pyd").write_bytes(b"pyd")
-    (src / "runtime.dll").write_bytes(b"dll")
     (src / "vcruntime140.dll").write_bytes(b"dep")
     (src / "notes.txt").write_bytes(b"skip")
     dest = tmp_path / "dest"
     copied = install_mod._stage_native_files(src, dest)
-    assert sorted(copied) == ["runtime.dll", "runtime_py.pyd", "vcruntime140.dll"]
+    assert sorted(copied) == ["runtime_py.pyd", "vcruntime140.dll"]
     assert sorted(p.name for p in dest.iterdir()) == sorted(copied)
     assert not (dest / "notes.txt").exists()
 
@@ -152,17 +150,16 @@ def test_stage_native_files_finds_nested_pyd_dir(tmp_path):
     src = tmp_path / "src" / "release"
     src.mkdir(parents=True)
     (src / "runtime_py.pyd").write_bytes(b"pyd")
-    (src / "runtime.dll").write_bytes(b"dll")
     dest = tmp_path / "dest"
     copied = install_mod._stage_native_files(tmp_path / "src", dest)
-    assert sorted(copied) == ["runtime.dll", "runtime_py.pyd"]
+    assert sorted(copied) == ["runtime_py.pyd"]
     assert (dest / "runtime_py.pyd").read_bytes() == b"pyd"
 
 
 def test_stage_native_files_missing_artifacts_raises(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
-    (src / "runtime_py.pyd").write_bytes(b"pyd")  # runtime.dll missing
+    (src / "other.dll").write_bytes(b"dll")  # runtime_py.pyd missing
     with pytest.raises(RuntimeError, match="does not contain"):
         install_mod._stage_native_files(src, tmp_path / "dest")
 
@@ -171,7 +168,6 @@ def test_stage_native_files_locked_file_reports(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
     (src / "runtime_py.pyd").write_bytes(b"pyd")
-    (src / "runtime.dll").write_bytes(b"dll")
     dest = tmp_path / "dest"
     dest.mkdir()
     (dest / "runtime_py.pyd").write_bytes(b"old")
@@ -217,7 +213,6 @@ def test_verify_native_binaries_rejects_broken_pyd(tmp_path):
         "    return 'broken'\n"
     )
     (tmp_path / "runtime_py.pyd").write_bytes(b"this is not a real extension")
-    (tmp_path / "runtime.dll").write_bytes(b"not a real dll")
     ok, msg = install_mod._verify_native_binaries(tmp_path)
     assert ok is False
     assert msg  # a diagnostic is returned
@@ -229,7 +224,7 @@ def test_verify_native_binaries_repo_bin(tmp_path):
         pytest.skip("native runtime not staged in repo bin/")
     ok, version = install_mod._verify_native_binaries(REPO_BIN)
     assert ok is True
-    assert "0.1.0" in version
+    assert install_mod.KIMIX_BASE_VERSION in version
 
 
 # ---------------------------------------------------------------------------
@@ -259,12 +254,11 @@ def test_install_kimix_native_success_deletes_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(
         install_mod,
         "_verify_native_binaries",
-        lambda d: (True, "kimix-runtime 0.1.0"),
+        lambda d: (True, f"kimix-runtime {install_mod.KIMIX_BASE_VERSION}"),
     )
     ok = install_mod._install_kimix_native(bin_dir=stage_bin, force=True)
     assert ok is True
     assert (stage_bin / "runtime_py.pyd").is_file()
-    assert (stage_bin / "runtime.dll").is_file()
     # The downloaded archive must be deleted on success.
     assert not (download_dir / archive.name).exists()
 
@@ -286,8 +280,18 @@ def test_install_kimix_native_already_installed_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(
         install_mod,
         "_verify_native_binaries",
-        lambda d: (True, "kimix-runtime 0.1.0"),
+        lambda d: (True, f"kimix-runtime {install_mod.KIMIX_BASE_VERSION}"),
     )
     ok = install_mod._install_kimix_native(bin_dir=stage_bin)
     assert ok is True  # skip path: no download attempted
     assert list(download_dir.iterdir()) == []
+
+
+def test_sync_kimix_native_version_writes_config(tmp_path, monkeypatch):
+    """_sync_kimix_native_version writes the version to the repo-root config file."""
+    version_path = tmp_path / "KIMIX_NATIVE_VERSION"
+    monkeypatch.setattr(
+        install_mod, "_kimix_native_version_path", lambda: version_path
+    )
+    assert install_mod._sync_kimix_native_version("0.2.0") is True
+    assert version_path.read_text(encoding="utf-8").strip() == "0.2.0"

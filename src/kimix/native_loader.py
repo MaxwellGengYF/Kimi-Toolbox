@@ -1,8 +1,7 @@
 """kimix.native_loader — resolve and load the ``kimix_native`` shim.
 
-The native acceleration path (``runtime_py.pyd`` + ``runtime.dll`` compiled
-in the kimix-base repo, plus the pure-Python ``kimix_native`` shim that wraps
-them) is OPTIONAL. This module locates the shim using an ordered list of
+The native acceleration path (``runtime_py.pyd`` compiled in the kimix-base
+repo, plus the pure-Python ``kimix_native`` shim that wraps it) is OPTIONAL. This module locates the shim using an ordered list of
 search paths, inserts the first usable directory on ``sys.path`` and imports
 it once (cached). When the binaries are missing the loader degrades to the
 pure-Python fallback — no import-time side effects, never raises (except for
@@ -13,8 +12,8 @@ Search order (first usable directory wins):
 1. ``KIMIX_NATIVE_PATH`` env var — explicit override; when set, only that
    directory is tried.
 2. **default**: ``<repo root>\\bin`` — the current project work-dir where
-   ``tools\\sync_native.py`` stages ``runtime_py.pyd`` + ``runtime.dll`` (the
-   ``kimix_native`` shim package is tracked by git and always present there).
+   ``tools\\sync_native.py`` stages ``runtime_py.pyd`` (the ``kimix_native``
+   shim package is tracked by git and always present there).
    "Repo root" is the parent of
    ``src/kimix`` (falling back to ``os.getcwd()`` when the repo layout is not
    detectable, e.g. an installed wheel).
@@ -229,14 +228,33 @@ def use_native(kernel: str) -> bool:
     return result
 
 
+def _fallback_version() -> str:
+    """Return the fallback version marker, synced from ``KIMIX_NATIVE_VERSION``."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        version_file = os.path.join(
+            os.path.dirname(os.path.dirname(here)), "KIMIX_NATIVE_VERSION"
+        )
+        with open(version_file, "r", encoding="utf-8") as fh:
+            version = fh.read().strip()
+        if version:
+            return f"kimix-native {version} (python fallback)"
+    except Exception:
+        pass
+    return "kimix-native 0.1.0 (python fallback)"
+
+
+_FALLBACK_VERSION = _fallback_version()
+
+
 def version() -> str:
     """Native runtime version, or the fallback marker string."""
-    if NATIVE_AVAILABLE and _shim is not None:
+    if _shim is not None:
         try:
             return str(_shim.version())
         except Exception:
-            return "kimix-native 0.1.0 (python fallback)"
-    return "kimix-native 0.1.0 (python fallback)"
+            pass
+    return _FALLBACK_VERSION
 
 
 def get_module(name: str):

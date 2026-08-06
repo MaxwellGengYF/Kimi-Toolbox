@@ -319,16 +319,45 @@ def _install_rtk() -> tuple[bool, bool]:
 # kimix_base native runtime (download + unpack into bin/)
 # ---------------------------------------------------------------------------
 
-# Release metadata for the kimix_base native runtime (runtime_py.pyd +
-# runtime.dll). The release asset naming rule is:
+# Release metadata for the kimix_base native runtime (runtime_py.pyd).
+# The release asset naming rule is:
 #   kimix_base-<platform>-<arch>-<version>.zip
 # e.g. kimix_base-windows-x64-0.1.0.zip under
 # https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/...
-KIMIX_BASE_VERSION = "0.1.0"
+KIMIX_BASE_VERSION = "0.2.0"
 KIMIX_BASE_RELEASE_URL = (
     "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release"
 )
-KIMIX_BASE_NATIVE_FILES = ("runtime.dll", "runtime_py.pyd")
+KIMIX_BASE_NATIVE_FILES = ("runtime_py.pyd",)
+
+
+def _kimix_native_version_path() -> Path:
+    """Return the path to the repo-root ``KIMIX_NATIVE_VERSION`` config file.
+
+    The shim and loader fallback version strings read this file so the
+    pure-Python fallback reports the same version as the compiled runtime.
+    """
+    return Path(__file__).resolve().parent / "KIMIX_NATIVE_VERSION"
+
+
+def _sync_kimix_native_version(version: str) -> bool:
+    """Write *version* to the repo-root version config file.
+
+    Keeping this file in sync with ``KIMIX_BASE_VERSION`` lets runtime code
+    report a consistent version when the native extension is unavailable.
+    The file is only touched when the version actually changes.
+    """
+    path = _kimix_native_version_path()
+    try:
+        current = path.read_text(encoding="utf-8").strip() if path.exists() else None
+        if current == version:
+            return True
+        path.write_text(f"{version}\n", encoding="utf-8")
+        print(f"✅ Synced kimix-native version file: {path.name} -> {version}")
+        return True
+    except OSError as exc:
+        print(f"⚠️  Could not write {path}: {exc}")
+        return False
 
 
 def _kimix_base_platform_arch() -> tuple[str, str]:
@@ -432,21 +461,20 @@ def _unlink_with_retry(path: Path, attempts: int = 5, delay: float = 1.0) -> Non
 def _stage_native_files(src_dir: Path, dest_dir: Path) -> list[str]:
     """Copy the native artifacts found under *src_dir* into *dest_dir*.
 
-    The release archive may place ``runtime_py.pyd`` + ``runtime.dll`` at the
-    archive root or inside a sub-directory, so the directory holding
-    ``runtime_py.pyd`` is located by walking *src_dir*. ``runtime.dll``,
-    ``runtime_py.pyd`` and any sibling ``*.dll`` runtime dependencies are then
-    copied into *dest_dir* (the same layout contract as tools/sync_native.py:
-    ``runtime.dll`` + ``runtime_py.pyd`` at the root of ``bin/``). Returns the
-    list of copied file names.
+    The release archive may place ``runtime_py.pyd`` at the archive root or
+    inside a sub-directory, so the directory holding ``runtime_py.pyd`` is
+    located by walking *src_dir*. ``runtime_py.pyd`` and any sibling ``*.dll``
+    runtime dependencies are then copied into *dest_dir* (the same layout
+    contract as tools/sync_native.py: ``runtime_py.pyd`` at the root of
+    ``bin/``). Returns the list of copied file names.
     """
     pyd_dirs = sorted(
         d for d in src_dir.rglob("*") if d.is_dir() and (d / "runtime_py.pyd").is_file()
     )
     source = pyd_dirs[0] if pyd_dirs else src_dir
-    if not (source / "runtime_py.pyd").is_file() or not (source / "runtime.dll").is_file():
+    if not (source / "runtime_py.pyd").is_file():
         raise RuntimeError(
-            f"archive does not contain runtime_py.pyd + runtime.dll (checked {source})"
+            f"archive does not contain runtime_py.pyd (checked {source})"
         )
     dest_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -475,10 +503,10 @@ def _stage_native_files(src_dir: Path, dest_dir: Path) -> list[str]:
 def _verify_native_binaries(bin_dir: Path) -> tuple[bool, str]:
     """Verify the staged native runtime in *bin_dir*.
 
-    Checks that ``runtime.dll`` + ``runtime_py.pyd`` exist and that the
-    ``kimix_native`` shim can import the compiled extension. ``KIMIX_NATIVE=1``
-    is forced so a broken/mismatched pyd is an error instead of a silent pure-
-    Python fallback. Returns ``(ok, version_or_error)``.
+    Checks that ``runtime_py.pyd`` exists and that the ``kimix_native`` shim
+    can import the compiled extension. ``KIMIX_NATIVE=1`` is forced so a
+    broken/mismatched pyd is an error instead of a silent pure-Python fallback.
+    Returns ``(ok, version_or_error)``.
     """
     for name in KIMIX_BASE_NATIVE_FILES:
         if not (bin_dir / name).is_file():
@@ -516,9 +544,8 @@ def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> b
     ``kimix_base-<platform>-<arch>-<version>.zip`` (e.g.
     ``kimix_base-windows-x64-0.1.0.zip``). The ``.zip`` is downloaded to a
     temporary location, extracted, staged into *bin_dir* (default
-    ``<repo>\bin`` — the same layout as the current ``runtime.dll`` +
-    ``runtime_py.pyd``), verified by importing the extension, and the
-    downloaded archive is deleted on success.
+    ``<repo>\bin`` — the same layout as ``runtime_py.pyd``), verified by
+    importing the extension, and the downloaded archive is deleted on success.
 
     When the staged runtime already loads and its version matches
     ``KIMIX_BASE_VERSION`` the download is skipped; a version mismatch prompts
@@ -545,7 +572,7 @@ def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> b
             return False
 
     if not _ask_yes_no(
-        "kimix_base native runtime (runtime_py.pyd + runtime.dll) was not found/verified. "
+        "kimix_base native runtime (runtime_py.pyd) was not found/verified. "
         "Download and install it?"
     ):
         print("⏭️  Skipping kimix_base native runtime installation.")
@@ -657,10 +684,14 @@ def main() -> int:
     else:
         print("⏭️  Skipping uv sync. Dependencies may be out of date.")
 
-    # 5. Install the kimix_base native runtime (download + unpack into bin/)
+    # 5. Keep the runtime version config in sync with KIMIX_BASE_VERSION so
+    #    the Python fallback reports the same version as the compiled runtime.
+    _sync_kimix_native_version(KIMIX_BASE_VERSION)
+
+    # 6. Install the kimix_base native runtime (download + unpack into bin/)
     _install_kimix_native()
 
-    # 6. Run uv tool install -e .
+    # 7. Run uv tool install -e .
     if _ask_yes_no("Install tool in editable mode?"):
         if not run_command(["uv", "tool", "install", "-e", "."], "Installing tool in editable mode"):
             print(

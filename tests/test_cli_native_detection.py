@@ -1,7 +1,7 @@
 """Tests for the native-acceleration detection in ``kimix.cli_impl.core``.
 
 ``core._check_native`` logs the status of the optional native library
-(``runtime_py.pyd`` + ``runtime.dll`` wrapped by the ``kimix_native`` shim):
+(``runtime_py.pyd`` wrapped by the ``kimix_native`` shim):
 a concise info log when it loads, a concise warning when the binary is missing
 or the library is invalid, and nothing when the user explicitly opted out with
 ``KIMIX_NATIVE=0``.
@@ -24,7 +24,7 @@ def _unset_kimix_native(monkeypatch: pytest.MonkeyPatch) -> None:
 def _capture(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
     infos: list[str] = []
     warnings: list[str] = []
-    monkeypatch.setattr(core, "print_info", infos.append)
+    monkeypatch.setattr(core, "print_debug", infos.append)
     monkeypatch.setattr(core, "print_warning", warnings.append)
     return infos, warnings
 

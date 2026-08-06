@@ -3,7 +3,7 @@
 The performance-critical pure-Python code in this project can be accelerated
 by the native C++ runtime compiled in the
 [kimix-base](https://github.com/…) repo (a sibling of this checkout by
-default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd` + `runtime.dll`,
+default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd`,
 pybind11 extension with submodules `text` / `index` / `search` / `parse` /
 `soul` / `tools` / `stream` / `codec` / `json` / `concurrency` / `diff` /
 `glob` / `image` / `todo` / `workspace`).
@@ -35,8 +35,8 @@ bit-identical outputs.
    python tools\sync_native.py --mode auto  # newest valid build
    ```
 
-   `sync_native.py` copies `runtime_py.pyd` + `runtime.dll` (plus any runtime
-   DLL deps) into `<repo>\bin\` — the default native path. The
+   `sync_native.py` copies `runtime_py.pyd` (plus any runtime DLL deps) into
+   `<repo>\bin\` — the default native path. The
    `kimix_native` shim package is tracked by git (not ignored), so it is never
    synced. Idempotent; run it before every test/bench run.
 
@@ -155,10 +155,11 @@ the main app paths still use their existing Python implementations:
 
 ## Compatibility caveats
 
-- **DLL shipping**: `runtime.dll` must sit next to `runtime_py.pyd`.
-  `tools\sync_native.py` always copies both together, so the staged copy is
-  consistent by construction. `KIMIX_NATIVE=1` + missing DLL → `ImportError`
-  (documented contract); `auto` → silent Python fallback.
+- **DLL shipping**: any runtime DLL dependencies must sit next to
+  `runtime_py.pyd`. `tools\sync_native.py` copies the `.pyd` plus any sibling
+  `.dll` files, so the staged copy is consistent by construction.
+  `KIMIX_NATIVE=1` + missing `.pyd` → `ImportError` (documented contract);
+  `auto` → silent Python fallback.
 - **Python/arch mismatch** (e.g. 3.13 pyd on 3.14): `ImportError` → fallback.
 - **Hash determinism**: native hash kernels use a fixed XXH3-64 seed (not
   `PYTHONHASHSEED`). `SimHash`/`MinHash` are not wired (see above) — no

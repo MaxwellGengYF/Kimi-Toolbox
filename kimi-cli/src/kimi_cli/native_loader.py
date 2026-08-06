@@ -110,10 +110,30 @@ def use_native(kernel: str) -> bool:
     return result
 
 
+def _fallback_version() -> str:
+    """Return the fallback version marker, synced from ``KIMIX_NATIVE_VERSION``."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        version_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(here))),
+            "KIMIX_NATIVE_VERSION",
+        )
+        with open(version_file, "r", encoding="utf-8") as fh:
+            version = fh.read().strip()
+        if version:
+            return f"kimix-native {version} (python fallback)"
+    except Exception:
+        pass
+    return "kimix-native 0.1.0 (python fallback)"
+
+
+_FALLBACK_VERSION = _fallback_version()
+
+
 def version() -> str:
     """Native runtime version, or the fallback marker string."""
     impl = _get_impl()
-    return impl.version() if impl is not None else "kimix-native 0.1.0 (python fallback)"
+    return impl.version() if impl is not None else _FALLBACK_VERSION
 
 
 def get_module(name: str):
