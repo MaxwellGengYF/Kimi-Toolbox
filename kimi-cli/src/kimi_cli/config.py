@@ -354,11 +354,13 @@ Default is 3."""
     and eligible for elision. Default is 512."""
 
     # Tier C — micro-compress in place (plan.md §8.3, Phase 4)
-    prune_micro_compress_enabled: bool = Field(default=True)
+    prune_micro_compress_enabled: bool = Field(default=False)
     """When true, re-run the deterministic ``micro_compress`` pipeline on
     stale surviving tool messages during the prune pass, shrinking redundant
     whitespace, prefixes, banners and repetition inside text that is
-    otherwise kept verbatim. Default is true (plan.md §10)."""
+    otherwise kept verbatim. Default is false — Tier C mutates the
+    LLM-visible history in place, which invalidates the provider-side
+    KV/prompt cache prefix, so it is opt-in (plan.md §10)."""
     prune_micro_compress_min_saved_chars: int = Field(default=64, ge=1)
     """Minimum characters a message must save for Tier C to rewrite it.
     Default is 64 (~16 tokens)."""

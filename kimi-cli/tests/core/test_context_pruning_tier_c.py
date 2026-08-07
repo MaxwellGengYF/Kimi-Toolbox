@@ -50,6 +50,9 @@ def _default_pruner(**kw) -> ContextPruner:
         recent_messages_protected=0,
         min_free_tokens=0,
         cooldown_steps=0,
+        # Tier C is opt-in by default (config default is False); these tests
+        # exercise the feature, so enable it explicitly.
+        micro_compress_enabled=True,
     )
     defaults.update(kw)
     return ContextPruner(**defaults)

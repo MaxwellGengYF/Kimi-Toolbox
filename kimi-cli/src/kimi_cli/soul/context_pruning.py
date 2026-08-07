@@ -731,7 +731,7 @@ class ContextPruner:
         ephemeral_checkpoint_markers: bool = False,
         substantive_enabled: bool = True,
         tool_output_min_tokens: int = 512,
-        micro_compress_enabled: bool = True,
+        micro_compress_enabled: bool = False,
         micro_compress_min_saved_chars: int = 64,
     ) -> None:
         self._enabled = enabled

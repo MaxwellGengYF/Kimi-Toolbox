@@ -26,7 +26,6 @@ from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.vfs import VFS
 
 from .glob import _get_gitignore_rules, _is_ignored_by_gitignore
-from .micro_compress import MicroCompressConfig, compress, infer_content_kind
 from .utils import resolve_vfs
 
 MAX_LINES = 5000
@@ -553,16 +552,6 @@ class ReadFile(CallableTool2[Params]):
 
             if isinstance(result, ToolOk):
                 if isinstance(result.output, str):
-                    # Micro-compress before the char-offset slice (plan.md §8.1).
-                    # Phase 1: lossless stages only (encoding, control-noise,
-                    # whitespace, line-number compaction) for ReadFile.
-                    kind = infer_content_kind(path=display_path)
-                    result.output = compress(
-                        result.output,
-                        kind=kind,
-                        config=MicroCompressConfig(lossless_only=True),
-                        path=display_path,
-                    )
                     result.output = result.output[char_offset:max_char]
                 self._session.file_mtime.clean_file(raw_path)
             return result
