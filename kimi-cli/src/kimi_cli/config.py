@@ -352,6 +352,16 @@ Default is 3."""
     prune_tool_output_min_tokens: int = Field(default=512, ge=64)
     """Minimum token count for a tool output to be considered oversized
     and eligible for elision. Default is 512."""
+
+    # Tier C — micro-compress in place (plan.md §8.3, Phase 4)
+    prune_micro_compress_enabled: bool = Field(default=True)
+    """When true, re-run the deterministic ``micro_compress`` pipeline on
+    stale surviving tool messages during the prune pass, shrinking redundant
+    whitespace, prefixes, banners and repetition inside text that is
+    otherwise kept verbatim. Default is true (plan.md §10)."""
+    prune_micro_compress_min_saved_chars: int = Field(default=64, ge=1)
+    """Minimum characters a message must save for Tier C to rewrite it.
+    Default is 64 (~16 tokens)."""
     prune_elide_thinking: bool = Field(default=True)
     """When true, elide old reasoning (ThinkPart) content outside the
     recency window. Default is true."""

@@ -251,6 +251,16 @@ def get_default_sub_provider(role: str = "sub_agent") -> dict[str, Any] | None:
     return None
 
 
+def get_default_sub_providers_by_role(role: str = "backup") -> list[dict[str, Any]]:
+    """Return ALL sub-providers matching *role*, preserving declaration order.
+
+    Unlike ``get_default_sub_provider`` which returns only the first match,
+    this returns every entry — essential for ``backup`` failover where
+    multiple backup providers are declared.
+    """
+    return [p for p in _default_sub_providers if p.get("role", "sub_agent") == role]
+
+
 # The failed-list for tool call that
 # tuple: function-name, arguments, output, message
 

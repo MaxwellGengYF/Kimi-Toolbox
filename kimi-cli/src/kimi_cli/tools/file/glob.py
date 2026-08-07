@@ -17,6 +17,10 @@ from kimi_cli.native_loader import (
     use_native as _native_use_native,
 )
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.file.micro_compress import (
+    MicroCompressConfig,
+    compress_lines as _mc_compress_lines,
+)
 from kimi_cli.tools.file.output_utils import fold_lines, truncate_line
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.logging import logger
@@ -591,6 +595,17 @@ class Glob(CallableTool2[Params]):
             if params.max_results:
                 output_lines, omitted_by_fold = fold_lines(
                     output_lines, params.max_results
+                )
+
+            # Micro-compress — lossless stages (1-3, 5) plus the annotated
+            # prefix fold (Stage 4) which factors out a long shared directory
+            # prefix on long result lists.  Near-duplicate collapse (Stage 8)
+            # is disabled: every distinct path must stay visible.
+            if output_lines:
+                output_lines, _ = _mc_compress_lines(
+                    output_lines,
+                    kind="log",
+                    config=MicroCompressConfig(near_dup_collapse=False),
                 )
 
             output = "\n".join(output_lines)

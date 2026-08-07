@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import inspect
 import orjson
+import re
 import sys
 import time
 import typing
@@ -139,6 +140,62 @@ def _truncate_content_parts(parts: list[ContentPart], max_bytes: int) -> list[Co
                 truncated.append(ThinkPart(think=piece))
         break
     return truncated
+
+
+# ── Layer 1 belt-and-suspenders micro-compression (plan.md §8.2) ──────
+
+# TextParts below this size are not worth the compression pipeline.
+_MICRO_COMPRESS_MIN_TEXT = 2_000
+
+# ReadFile-style line-number prefix (mirrors micro_compress Stage 5).
+_MC_LINENO_RE = re.compile(r"^\s*\d+\t")
+
+
+def _looks_like_readfile_text(text: str) -> bool:
+    """True when *text* is ReadFile-style (every substantial line is ``N\t…``)."""
+    substantial = 0
+    numbered = 0
+    for ln in text.split("\n"):
+        if not ln.strip():
+            continue
+        substantial += 1
+        if _MC_LINENO_RE.match(ln):
+            numbered += 1
+    return substantial > 0 and numbered == substantial
+
+
+def _micro_compress_parts(parts: list[ContentPart]) -> list[ContentPart]:
+    """Belt-and-suspenders micro-compression for tools that do not integrate
+    Layer 0 directly (MCP tools, third-party tools; plan.md §8.2).
+
+    Rewrites ``TextPart``(s) whose text exceeds :data:`_MICRO_COMPRESS_MIN_TEXT`
+    characters.  ``<system>`` metadata parts and non-text parts are preserved
+    untouched.  ReadFile-style (line-numbered) text is treated as ``code`` so
+    indentation and the destructive whitespace/prefix stages stay disabled.
+
+    Idempotent — re-running on already-compressed text is a no-op.
+    """
+    from kimi_cli.tools.file.micro_compress import (
+        MicroCompressConfig,
+        compress as _mc_compress,
+    )
+
+    result: list[ContentPart] = []
+    for part in parts:
+        if isinstance(part, TextPart) and len(part.text) >= _MICRO_COMPRESS_MIN_TEXT:
+            text = part.text
+            if text.strip().startswith("<system>"):
+                result.append(part)
+                continue
+            kind = "code" if _looks_like_readfile_text(text) else "log"
+            compressed = _mc_compress(
+                text, kind=kind, config=MicroCompressConfig()
+            )
+            if len(compressed) < len(text):
+                result.append(TextPart(text=compressed))
+                continue
+        result.append(part)
+    return result
 
 
 def set_session_id(sid: str) -> None:
@@ -795,6 +852,27 @@ class KimiToolset:
                             else:
                                 sanitized_parts.append(part)
                         ret.output = sanitized_parts
+                    # Layer 1 belt-and-suspenders micro-compression (plan §8.2):
+                    # cover tools that never integrated Layer 0 (MCP tools).
+                    if isinstance(ret.output, str):
+                        if len(ret.output) >= _MICRO_COMPRESS_MIN_TEXT:
+                            from kimi_cli.tools.file.micro_compress import (
+                                MicroCompressConfig,
+                                compress as _mc_compress_str,
+                            )
+
+                            kind = (
+                                "code"
+                                if _looks_like_readfile_text(ret.output)
+                                else "log"
+                            )
+                            ret.output = _mc_compress_str(
+                                ret.output,
+                                kind=kind,
+                                config=MicroCompressConfig(),
+                            )
+                    elif isinstance(ret.output, list):
+                        ret.output = _micro_compress_parts(ret.output)
                     max_bytes = self._get_max_output_bytes()
                     if isinstance(ret.output, str):
                         output_bytes = ret.output.encode("utf-8")

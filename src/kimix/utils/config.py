@@ -101,7 +101,7 @@ def _normalize_sub_providers(
             entry = dict(entry)
             entry["role"] = "sub_agent"
         role = entry["role"]
-        if role in seen_roles:
+        if role in seen_roles and role != "backup":
             print_debug(f"Multiple sub_providers with role '{role}'; using first match")
         seen_roles.add(role)
         normalized.append(entry)

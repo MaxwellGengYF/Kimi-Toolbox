@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
@@ -313,40 +314,133 @@ async def _export_session_todos(session: Session, path: Path) -> None:
         base.print_error(f"Failed to export todo list to {path}: {exc}")
 
 
-async def _run_single_prompt(
+def _provider_key(provider_dict: dict[str, Any]) -> tuple:
+    """Build a hashable identity key for a provider_dict.
+
+    Used to detect whether a backup provider is already the active one,
+    preventing redundant provider switches.
+    """
+    return (
+        provider_dict.get("type"),
+        provider_dict.get("model"),
+        provider_dict.get("url") or provider_dict.get("base_url"),
+    )
+
+
+def _get_active_provider_dict(session: Session) -> dict[str, Any] | None:
+    """Return the provider_dict currently active on the session.
+
+    Reads from session custom_data; falls back to base._default_provider.
+    """
+    data = session.get_custom_data() if hasattr(session, "get_custom_data") else None
+    if data is not None:
+        active = data.get("_active_provider_dict")
+        if active is not None:
+            return active
+    return base._default_provider
+
+
+def _set_active_provider_dict(session: Session, provider_dict: dict[str, Any]) -> None:
+    """Record the active provider_dict on the session for failover tracking."""
+    data = session.get_custom_data() if hasattr(session, "get_custom_data") else None
+    if data is not None:
+        data["_active_provider_dict"] = provider_dict
+
+
+async def _switch_session_provider(
+    session: Session,
+    provider_dict: dict[str, Any],
+) -> bool:
+    """Swap the session's runtime LLM to a backup provider.
+
+    Builds a new LLM from *provider_dict*, closes the previous chat provider's
+    HTTP client (prevents resource leaks), and assigns the new LLM onto
+    ``session._cli.soul.runtime.llm``. Also updates ``custom_config`` so
+    sub-agents spawned later inherit the backup provider.
+
+    Returns True if the swap succeeded, False if the LLM could not be built.
+    """
+    from kimix.utils.config import _create_config
+    from kimi_cli.llm import create_llm
+
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return False
+    soul = getattr(cli, "soul", None)
+    if soul is None:
+        return False
+    runtime = getattr(soul, "runtime", None) or getattr(soul, "_runtime", None)
+    if runtime is None:
+        return False
+
+    # Build Config + LLM from backup provider_dict
+    cfg, _ = _create_config(provider_dict)
+    if cfg.model is None or cfg.provider is None:
+        return False
+
+    new_llm = create_llm(
+        cfg.provider,
+        cfg.model,
+        session_id=getattr(getattr(cli, "session", None), "id", None),
+        thinking=base._default_thinking,
+        oauth=getattr(runtime, "oauth", None),
+        max_tokens=cfg.max_tokens,
+        temperature=cfg.temperature,
+        top_p=cfg.top_p,
+        top_k=cfg.top_k,
+        thinking_effort=cfg.thinking_effort,
+    )
+    if new_llm is None:
+        return False
+
+    # Close the old chat provider's HTTP client
+    old_llm = getattr(runtime, "llm", None)
+    if old_llm is not None:
+        old_provider = getattr(old_llm, "chat_provider", None)
+        aclose = getattr(old_provider, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+    # Swap the LLM in place
+    runtime.llm = new_llm
+
+    # Update custom_config so sub-agent spawning picks up the new provider
+    custom_config = session.get_custom_config() if hasattr(session, "get_custom_config") else None
+    if custom_config is not None:
+        custom_config["provider_dict"] = provider_dict
+
+    # Track active provider for subsequent prompts
+    _set_active_provider_dict(session, provider_dict)
+    return True
+
+
+async def _run_prompt_attempts(
     session: Session,
     prompt_str: str,
     output_function: Callable[[str, MessageType], Any] | None,
     cancel_callable: Callable[[], bool] | None,
     merge_wire_messages: bool,
     info_print: bool,
+    format_output: bool,
+    deadline: float | None,
     label: str = "Start...",
-    format_output: bool = False,
-    timeout: float | None = None,
-) -> bool:
-    """Send a single prompt to the session with retries and return True on success.
+) -> None:
+    """Run a single prompt with up to max_retries attempts on the CURRENT provider.
 
-    Args:
-        timeout: Maximum seconds for the entire prompt (including retries).
-                 None means no timeout. When reached, raises TimeoutError.
+    Raises on failure (TimeoutError, APIStatusError, or after exhausting retries).
+    Returns normally on success (after printing usage info).
     """
-    if info_print:
-        base._stream.colorful_print_word(f"{label}\n", fg=base.Color.BRIGHT_CYAN, require_new_line=True)
-
     max_retries = 3
-    deadline = None
-    if timeout is not None:
-        deadline = time.monotonic() + timeout
     for attempt in range(max_retries):
         if session._cancel_event is not None and session._cancel_event.is_set():
-            return False
+            return  # caller treats normal return as success; cancel handled by caller
         try:
-            import time
-
             start_time = time.time()
             base._stream._last_char_was_newline = True
 
-            # Wrap the prompt iteration with an optional timeout guard
             async def _run_prompt_iter():
                 async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
                     if cancel_callable is not None and cancel_callable():
@@ -354,16 +448,15 @@ async def _run_single_prompt(
                         break
                     await print_agent_json(message, session, output_function, format_output=format_output)
 
-            if timeout is not None:
-                # Compute remaining time for this attempt
-                remaining = deadline - time.monotonic() if deadline else timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"Prompt timed out after {timeout}s")
+                    raise TimeoutError("Prompt timed out")
                 await asyncio.wait_for(_run_prompt_iter(), timeout=remaining)
             else:
                 await _run_prompt_iter()
 
-            # After finishing, flush any remaining buffered text parts as formatted markdown.
+            # flush output
             if format_output:
                 print_agent_json_flush_text()
                 if not base._stream._last_char_was_newline:
@@ -373,11 +466,11 @@ async def _run_single_prompt(
             if info_print:
                 end_time = time.time()
                 _print_usage(session, end_time - start_time)
-            return True
+            return  # success
         except KeyboardInterrupt:
             if session:
                 session.cancel()
-            return False
+            raise
         except (asyncio.TimeoutError, TimeoutError) as te:
             base._stream.colorful_print_word(
                 f"Prompt timed out: {te}",
@@ -385,7 +478,6 @@ async def _run_single_prompt(
             )
             if session:
                 session.cancel()
-            # Timeout is not retried — propagate immediately
             raise
         except Exception as e:
             base._stream.colorful_print_word(str(e), fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True)
@@ -398,6 +490,115 @@ async def _run_single_prompt(
             if attempt == max_retries - 1:
                 raise
             await asyncio.sleep(1)
+
+
+async def _run_single_prompt(
+    session: Session,
+    prompt_str: str,
+    output_function: Callable[[str, MessageType], Any] | None,
+    cancel_callable: Callable[[], bool] | None,
+    merge_wire_messages: bool,
+    info_print: bool,
+    label: str = "Start...",
+    format_output: bool = False,
+    timeout: float | None = None,
+) -> bool:
+    """Send a single prompt with retries and backup-provider failover.
+
+    Tries the current (active) provider first with up to ``max_retries``
+    attempts. If all attempts fail, iterates through ``sub_providers`` with
+    ``role == "backup"`` (in declaration order), switching the session's
+    LLM to each backup provider and retrying. Once a backup succeeds, the
+    session **stays** on that provider for subsequent prompts.
+
+    Returns True on success, False on KeyboardInterrupt/cancel.
+    Raises on unrecoverable failure (all providers exhausted).
+    """
+    if info_print:
+        base._stream.colorful_print_word(f"{label}\n", fg=base.Color.BRIGHT_CYAN, require_new_line=True)
+
+    # Compute the overall deadline (shared across primary + backups)
+    deadline: float | None = None
+    if timeout is not None:
+        deadline = time.monotonic() + timeout
+
+    # ── Phase A: Try the current (active) provider ──
+    primary_exc: Exception | None = None
+    try:
+        await _run_prompt_attempts(
+            session, prompt_str, output_function, cancel_callable,
+            merge_wire_messages, info_print, format_output, deadline, label,
+        )
+        return True  # success on active provider
+    except KeyboardInterrupt:
+        return False
+    except (asyncio.TimeoutError, TimeoutError) as te:
+        # Timeout: if a deadline was set and we still have time, backups
+        # may help; if the overall deadline passed, propagate.
+        if deadline is not None and (deadline - time.monotonic()) <= 0:
+            raise
+        primary_exc = te
+        # Fall through to backup providers
+    except Exception as exc:
+        # Active provider failed — fall through to backup providers
+        primary_exc = exc
+
+    # ── Phase B: Try backup providers ──
+    backups = base.get_default_sub_providers_by_role("backup")
+    if not backups:
+        # No backups configured — propagate the primary failure.
+        if primary_exc is not None:
+            raise primary_exc
+        return False
+
+    active_key = _provider_key(_get_active_provider_dict(session) or {})
+    last_error: Exception | None = None
+
+    for backup in backups:
+        # Skip the currently active provider (already tried)
+        if _provider_key(backup) == active_key:
+            continue
+        if session._cancel_event is not None and session._cancel_event.is_set():
+            return False
+
+        # Switch the session's LLM to this backup provider
+        switched = await _switch_session_provider(session, backup)
+        if not switched:
+            continue
+
+        # Print a notice about the switch
+        model_name = backup.get("model", "unknown")
+        base._stream.colorful_print_word(
+            f"Switching to backup provider: {model_name}\n",
+            fg=Color.BRIGHT_YELLOW, styles=[Style.BOLD], require_new_line=True,
+        )
+
+        # Update the active key so we don't re-try this backup
+        active_key = _provider_key(backup)
+
+        try:
+            await _run_prompt_attempts(
+                session, prompt_str, output_function, cancel_callable,
+                merge_wire_messages, info_print, format_output, deadline,
+                label=f"Backup ({model_name})...",
+            )
+            return True  # backup succeeded — session stays on this provider
+        except KeyboardInterrupt:
+            return False
+        except (asyncio.TimeoutError, TimeoutError):
+            # This backup timed out — try the next backup if deadline allows
+            if deadline is not None and (deadline - time.monotonic()) <= 0:
+                break  # no time left
+            continue
+        except Exception as exc:
+            last_error = exc
+            continue  # try next backup
+
+    # ── All providers exhausted ──
+    if last_error is not None:
+        raise last_error
+    if primary_exc is not None:
+        raise primary_exc
     return False
 
 

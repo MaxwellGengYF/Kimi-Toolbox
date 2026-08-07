@@ -46,6 +46,10 @@ from kimi_cli._rtk_common import _rtk_binary_name
 from kimi_cli.install import _RTK_DOWNLOAD_LOCK, _download_and_install_rtk
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.file.micro_compress import (
+    MicroCompressConfig,
+    compress_lines as _mc_compress_lines,
+)
 from kimi_cli.tools.file.output_utils import (
     dedup_lines,
     fold_lines,
@@ -1048,6 +1052,19 @@ class Grep(CallableTool2[Params]):
                         "Use max_output_lines=0 or offset to see more."
                     )
                     message = f"{message} {fold_msg}" if message else fold_msg
+
+            # Step 7.5: micro-compress — lossless stages (1-3, 5) plus the
+            # annotated prefix fold (Stage 4) which collapses the repeated
+            # absolute-path prefix on every match.  Near-duplicate collapse
+            # (Stage 8) is disabled: every distinct match must stay visible.
+            if lines:
+                lines, _mc_saved = _mc_compress_lines(
+                    lines,
+                    kind="log",
+                    config=MicroCompressConfig(
+                        lossless_only=False, near_dup_collapse=False
+                    ),
+                )
 
             lines = _normalize_output_lines(lines, params.output_mode)
             # Per-line hygiene before the byte cap: no single line can hog the

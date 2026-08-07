@@ -56,11 +56,11 @@ async def test_read_entire_file(read_file_tool: ReadFile, sample_file: KaosPath)
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     1	Line 1: Hello World
-     2	Line 2: This is a test file
-     3	Line 3: With multiple lines
-     4	Line 4: For testing purposes
-     5	Line 5: End of file\
+1	Line 1: Hello World
+2	Line 2: This is a test file
+3	Line 3: With multiple lines
+4	Line 4: For testing purposes
+5	Line 5: End of file\
 """
     )
     assert result.message.startswith("5 lines read from file starting from line 1. Total lines in file: 5. End of file reached.")
@@ -74,9 +74,9 @@ async def test_read_with_line_offset(read_file_tool: ReadFile, sample_file: Kaos
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     3	Line 3: With multiple lines
-     4	Line 4: For testing purposes
-     5	Line 5: End of file\
+3	Line 3: With multiple lines
+4	Line 4: For testing purposes
+5	Line 5: End of file\
 """
     )
     assert result.message.startswith("3 lines read from file starting from line 3. Total lines in file: 5. End of file reached.")
@@ -90,8 +90,8 @@ async def test_read_with_n_lines(read_file_tool: ReadFile, sample_file: KaosPath
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     1	Line 1: Hello World
-     2	Line 2: This is a test file
+1	Line 1: Hello World
+2	Line 2: This is a test file
 """
     )
     assert result.message.startswith("2 lines read from file starting from line 1.")
@@ -105,8 +105,8 @@ async def test_read_with_line_offset_and_n_lines(read_file_tool: ReadFile, sampl
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     2	Line 2: This is a test file
-     3	Line 3: With multiple lines
+2	Line 2: This is a test file
+3	Line 3: With multiple lines
 """
     )
     assert result.message.startswith("2 lines read from file starting from line 2.")
@@ -142,11 +142,11 @@ async def test_read_with_relative_path(
     assert result.message.startswith("5 lines read from file starting from line 1. Total lines in file: 5. End of file reached.")
     assert result.message.endswith(f" Path: {display_path}")
     assert result.output == snapshot("""\
-     1	Line 1: Hello World
-     2	Line 2: This is a test file
-     3	Line 3: With multiple lines
-     4	Line 4: For testing purposes
-     5	Line 5: End of file\
+1	Line 1: Hello World
+2	Line 2: This is a test file
+3	Line 3: With multiple lines
+4	Line 4: For testing purposes
+5	Line 5: End of file\
 """)
 
 
@@ -243,8 +243,8 @@ async def test_read_unicode_file(read_file_tool: ReadFile, temp_work_dir: KaosPa
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     1	Hello 世界 🌍
-     2	Unicode test: café, naïve, résumé\
+1	Hello 世界 🌍
+2	Unicode test: café, naïve, résumé\
 """
     )
     assert result.message.startswith("2 lines read from file starting from line 1. Total lines in file: 2. End of file reached.")
@@ -259,11 +259,11 @@ async def test_read_edge_cases(read_file_tool: ReadFile, sample_file: KaosPath):
     assert not result.is_error
     assert result.output == snapshot(
         """\
-     1	Line 1: Hello World
-     2	Line 2: This is a test file
-     3	Line 3: With multiple lines
-     4	Line 4: For testing purposes
-     5	Line 5: End of file\
+1	Line 1: Hello World
+2	Line 2: This is a test file
+3	Line 3: With multiple lines
+4	Line 4: For testing purposes
+5	Line 5: End of file\
 """
     )
     assert result.message.startswith("5 lines read from file starting from line 1. Total lines in file: 5. End of file reached.")
@@ -272,14 +272,14 @@ async def test_read_edge_cases(read_file_tool: ReadFile, sample_file: KaosPath):
     # Test reading from line 5 (last line)
     result = await read_file_tool(Params(path=str(sample_file), line_offset=5))
     assert not result.is_error
-    assert result.output == snapshot("     5\tLine 5: End of file")
+    assert result.output == snapshot("5\tLine 5: End of file")
     assert result.message.startswith("1 lines read from file starting from line 5. Total lines in file: 5. End of file reached.")
     assert result.message.endswith(f" Path: {display_path}")
 
     # Test reading with offset and n_lines combined
     result = await read_file_tool(Params(path=str(sample_file), line_offset=2, n_lines=1))
     assert not result.is_error
-    assert result.output == snapshot("     2\tLine 2: This is a test file\n")
+    assert result.output == snapshot("2\tLine 2: This is a test file\n")
     assert result.message.startswith("1 lines read from file starting from line 2.")
     assert result.message.endswith(f" Path: {display_path}")
 
@@ -326,7 +326,7 @@ async def test_line_truncation_and_messaging(read_file_tool: ReadFile, temp_work
     assert endings == snapshot(
         [
             "AAAAAAAAAAAAAAAAA...",
-            "     2\tShort line",
+            "2\tShort line",
             "BBBBBBBBBBBBBBBBB...",
         ]
     )
@@ -509,9 +509,9 @@ async def test_read_tail_basic(read_file_tool: ReadFile, sample_file: KaosPath):
     result = await read_file_tool(Params(path=str(sample_file), line_offset=-3))
     assert not result.is_error
     # Should return lines 3, 4, 5 with absolute line numbers
-    assert "     3\tLine 3: With multiple lines\n" in result.output
-    assert "     4\tLine 4: For testing purposes\n" in result.output
-    assert "     5\tLine 5: End of file" in result.output
+    assert "3\tLine 3: With multiple lines\n" in result.output
+    assert "4\tLine 4: For testing purposes\n" in result.output
+    assert "5\tLine 5: End of file" in result.output
     # Should NOT contain lines 1 or 2
     assert "Line 1:" not in result.output
     assert "Line 2:" not in result.output
@@ -524,8 +524,8 @@ async def test_read_tail_with_n_lines(read_file_tool: ReadFile, sample_file: Kao
     result = await read_file_tool(Params(path=str(sample_file), line_offset=-5, n_lines=2))
     assert not result.is_error
     # -5 on a 5-line file means start from line 1, then n_lines=2 limits to lines 1-2
-    assert "     1\tLine 1: Hello World\n" in result.output
-    assert "     2\tLine 2: This is a test file\n" in result.output
+    assert "1\tLine 1: Hello World\n" in result.output
+    assert "2\tLine 2: This is a test file\n" in result.output
     assert "Line 3:" not in result.output
     assert "Total lines in file: 5." in result.message
 
@@ -535,8 +535,8 @@ async def test_read_tail_exceeds_file(read_file_tool: ReadFile, sample_file: Kao
     result = await read_file_tool(Params(path=str(sample_file), line_offset=-100))
     assert not result.is_error
     # Should return all 5 lines
-    assert "     1\tLine 1: Hello World\n" in result.output
-    assert "     5\tLine 5: End of file" in result.output
+    assert "1\tLine 1: Hello World\n" in result.output
+    assert "5\tLine 5: End of file" in result.output
     assert "Total lines in file: 5." in result.message
 
 
@@ -558,7 +558,7 @@ async def test_read_total_lines_with_positive_offset(
     result = await read_file_tool(Params(path=str(sample_file), line_offset=3, n_lines=1))
     assert not result.is_error
     # Should return only line 3
-    assert "     3\tLine 3: With multiple lines" in result.output
+    assert "3\tLine 3: With multiple lines" in result.output
     assert "Line 1:" not in result.output
     assert "Line 4:" not in result.output
     # Message does not include total lines when eof is not reached
@@ -569,7 +569,7 @@ async def test_read_tail_last_line(read_file_tool: ReadFile, sample_file: KaosPa
     """line_offset=-1 should return only the last line with correct absolute line number."""
     result = await read_file_tool(Params(path=str(sample_file), line_offset=-1))
     assert not result.is_error
-    assert result.output == "     5\tLine 5: End of file"
+    assert result.output == "5\tLine 5: End of file"
     assert "1 lines read from file starting from line 5." in result.message
     assert "Total lines in file: 5." in result.message
     assert "End of file reached." in result.message
@@ -801,21 +801,21 @@ class TestReadFileCharSlicing:
     async def test_char_offset_cuts_beginning(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("1234567890\n")
-        result = await read_file_tool(Params(path=str(f), char_offset=7))
+        result = await read_file_tool(Params(path=str(f), char_offset=2))
         assert not result.is_error
         assert result.output == "1234567890\n"
 
     async def test_max_char_cuts_end(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("1234567890\n")
-        result = await read_file_tool(Params(path=str(f), max_char=12))
+        result = await read_file_tool(Params(path=str(f), max_char=7))
         assert not result.is_error
-        assert result.output == "     1\t12345"
+        assert result.output == "1\t12345"
 
     async def test_char_offset_and_max_char(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("0123456789\n")
-        result = await read_file_tool(Params(path=str(f), char_offset=7, max_char=12))
+        result = await read_file_tool(Params(path=str(f), char_offset=2, max_char=7))
         assert not result.is_error
         assert result.output == "01234"
 
@@ -850,7 +850,7 @@ class TestReadFileCharSlicing:
     async def test_line_offset_with_char_offset(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("line one\nline two\nline three\n")
-        result = await read_file_tool(Params(path=str(f), line_offset=2, char_offset=7))
+        result = await read_file_tool(Params(path=str(f), line_offset=2, char_offset=2))
         assert not result.is_error
         assert result.output.startswith("line two")
 
@@ -871,7 +871,7 @@ class TestReadFileCharSlicing:
     async def test_large_char_offset(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("x" * 100 + "\n")
-        result = await read_file_tool(Params(path=str(f), char_offset=57))
+        result = await read_file_tool(Params(path=str(f), char_offset=52))
         assert not result.is_error
         assert len(result.output) == 51
         assert result.output == "x" * 50 + "\n"
@@ -879,14 +879,14 @@ class TestReadFileCharSlicing:
     async def test_max_char_exact_boundary(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("1234567890\n")
-        result = await read_file_tool(Params(path=str(f), max_char=7))
+        result = await read_file_tool(Params(path=str(f), max_char=2))
         assert not result.is_error
-        assert result.output == "     1\t"
+        assert result.output == "1\t"
 
     async def test_multibyte_utf8_slicing(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
         await f.write_text("你好世界\n")
-        result = await read_file_tool(Params(path=str(f), char_offset=7, max_char=9))
+        result = await read_file_tool(Params(path=str(f), char_offset=2, max_char=4))
         assert not result.is_error
         assert result.output == "你好"
 
@@ -921,7 +921,7 @@ async def test_read_multiple_files_single_string_still_works(
 
     result = await read_file_tool(Params(path=str(a)))
     assert not result.is_error
-    assert result.output == snapshot('     1\tsingle file content')
+    assert result.output == snapshot("1\tsingle file content")
     assert "Read file" in result.brief
 
 
@@ -967,7 +967,7 @@ async def test_read_multiple_files_deduplicated(
     result = await read_file_tool(Params(path=[str(a), str(a)]))
     assert not result.is_error
     # Deduplication leaves a single file, so the single-file output format is used.
-    assert result.output == snapshot('     1\tcontent')
+    assert result.output == snapshot("1\tcontent")
     assert result.output.count("content") == 1
 async def test_read_multiple_files_too_many(
     read_file_tool: ReadFile, temp_work_dir: KaosPath
@@ -1007,12 +1007,12 @@ async def test_read_multiple_files_per_file_limits(
     display_b = str(b).replace("\\", "/")
     # a should contain lines 1-2
     assert f"======== {display_a} ========" in result.output
-    assert "     1\ta1" in result.output
-    assert "     2\ta2" in result.output
+    assert "1\ta1" in result.output
+    assert "2\ta2" in result.output
     # b should contain lines 1-2
     b_section = result.output.split(f"======== {display_b} ========")[1]
-    assert "     1\tb1" in b_section
-    assert "     2\tb2" in b_section
+    assert "1\tb1" in b_section
+    assert "2\tb2" in b_section
 
 
 async def test_read_multiple_files_scalar_options(
@@ -1030,10 +1030,10 @@ async def test_read_multiple_files_scalar_options(
     display_b = str(b).replace("\\", "/")
     a_section = result.output.split(f"======== {display_b} ========")[0]
     b_section = result.output.split(f"======== {display_b} ========")[1]
-    assert "     1\ta1" in a_section
-    assert "     2\ta2" not in a_section
-    assert "     1\tb1" in b_section
-    assert "     2\tb2" not in b_section
+    assert "1\ta1" in a_section
+    assert "2\ta2" not in a_section
+    assert "1\tb1" in b_section
+    assert "2\tb2" not in b_section
 
 
 async def test_read_multiple_files_mismatched_option_length(
@@ -1185,10 +1185,10 @@ class TestReadFileGlob:
         result = await read_file_tool(Params(path="*.md", n_lines=1, glob=True))
 
         assert not result.is_error
-        assert "     1\ta1" in result.output
-        assert "     1\tb1" in result.output
-        assert "     2\ta2" not in result.output
-        assert "     2\tb2" not in result.output
+        assert "1\ta1" in result.output
+        assert "1\tb1" in result.output
+        assert "2\ta2" not in result.output
+        assert "2\tb2" not in result.output
 
     async def test_read_glob_deduplicates(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         """`path=["a.md", "*.md"]` reads `a.md` only once."""
@@ -1270,7 +1270,7 @@ async def test_show_line_numbers_default_true(read_file_tool: ReadFile, sample_f
     """By default, lines are prefixed with line numbers (backward compat)."""
     result = await read_file_tool(Params(path=str(sample_file)))
     assert not result.is_error
-    assert "     1\tLine 1: Hello World" in result.output
+    assert "1\tLine 1: Hello World" in result.output
 
 
 async def test_show_line_numbers_false(read_file_tool: ReadFile, sample_file: KaosPath):

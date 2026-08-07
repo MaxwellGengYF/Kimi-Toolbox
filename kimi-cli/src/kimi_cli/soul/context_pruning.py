@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,7 +9,15 @@ from kosong.message import Message, ToolCall
 
 from kimi_cli.native_loader import kernel_module
 from kimi_cli.notifications.llm import is_notification_message
-from kimi_cli.soul.message import is_system_reminder_message, system
+from kimi_cli.soul.message import (
+    coalesce_tool_metadata,
+    is_system_reminder_message,
+    system,
+)
+from kimi_cli.tools.file.micro_compress import (
+    MicroCompressConfig,
+    compress as _mc_compress,
+)
 from kimi_cli.utils.tokens import count_message_tokens, count_tokens
 from kimi_cli.wire.types import ContentPart, TextPart
 
@@ -473,6 +482,198 @@ def _tier_b_candidates(
 
 
 # ---------------------------------------------------------------------------
+# Tier C — Micro-compress in place (plan.md §8.3, Phase 4)
+# ---------------------------------------------------------------------------
+
+# ReadFile-style line-number prefix (``{n:6d}\t``), mirrored from
+# micro_compress.Stage 5 so history-time detection stays independent.
+_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+
+# Markers emitted by the *annotated* micro-compress stages (3-A3, 4, 6, 7,
+# 8, 9).  Tier C emits an ElidedRecord only when one of these appears in the
+# compressed text; pure-lossless stages (1, 2, 3-A1/A2/A4, 5) are applied
+# silently because they are reversible with no information loss.
+_ANNOTATED_MARKERS = (
+    "[common-indent:",
+    "[prefix:",
+    "[ts-prefix folded",
+    "banner lines dropped",
+    "near-dup",
+    "chars elided]",
+    "license lines elided",
+    "comment lines elided",
+    "lines of generated content",
+)
+
+
+def _looks_like_readfile_output(text: str) -> bool:
+    """True when *text* is ReadFile-style (every substantial line is ``N\t…``)."""
+    lines = text.split("\n")
+    substantial = 0
+    numbered = 0
+    for ln in lines:
+        if not ln.strip():
+            continue
+        substantial += 1
+        if _LINENO_RE.match(ln):
+            numbered += 1
+    return substantial > 0 and numbered == substantial
+
+
+def _output_text(message: Message) -> str:
+    """Concatenate the non-``<system>`` TextPart text of *message*.
+
+    The ``<system>…</system>`` metadata parts are preserved untouched — they
+    are Layer-1 boilerplate handled by ``coalesce_tool_metadata`` instead.
+    """
+    parts: list[str] = []
+    for p in message.content:
+        if isinstance(p, TextPart) and not p.text.strip().startswith("<system>"):
+            parts.append(p.text)
+    return "".join(parts)
+
+
+def _has_annotated_marker(text: str) -> bool:
+    """True when *text* contains a marker from an annotated compression stage."""
+    return any(marker in text for marker in _ANNOTATED_MARKERS)
+
+
+def _text_length(message: Message) -> int:
+    """Total TextPart character length of *message* (for delta accounting)."""
+    return sum(len(p.text) for p in message.content if isinstance(p, TextPart))
+
+
+def _tier_c_candidates(
+    history: Sequence[Message],
+    excluded: set[int],
+    *,
+    min_saved_chars: int = 64,
+) -> list[tuple[int, int, str]]:
+    """Find Tier C (micro-compress in place) candidates.
+
+    For stale ``role="tool"`` messages outside *excluded*, re-runs
+    ``micro_compress.compress`` on the output ``TextPart`` text (system
+    metadata parts are preserved) and keeps messages whose compressed form
+    saves at least *min_saved_chars* characters.
+
+    Because the transform is deterministic and idempotent, re-running on
+    already-compressed text yields zero delta and is skipped automatically —
+    safe to run on every prune pass.
+
+    Returns ``(index, savings_tokens, content_kind)`` tuples.
+    """
+    candidates: list[tuple[int, int, str]] = []
+    for i in range(len(history)):
+        if i in excluded:
+            continue
+        msg = history[i]
+        if msg.role != "tool":
+            continue
+        out_text = _output_text(msg)
+        if not out_text.strip():
+            continue
+        # ReadFile-style content is treated as code: line numbers survive and
+        # the destructive whitespace/prefix stages stay disabled.
+        kind = "code" if _looks_like_readfile_output(out_text) else "log"
+        compressed = _mc_compress(out_text, kind=kind, config=MicroCompressConfig())
+        saved_chars = len(out_text) - len(compressed)
+        if saved_chars >= min_saved_chars:
+            candidates.append((i, max(saved_chars // 4, 1), kind))
+    return candidates
+
+
+def _apply_tier_c(
+    history: Sequence[Message],
+    excluded: set[int],
+    *,
+    min_saved_chars: int = 64,
+    ref_counter: int = 0,
+) -> tuple[list[Message], list[ElidedRecord], int, set[int], int]:
+    """Micro-compress stale tool messages in place (Tier C, plan.md §8.3).
+
+    Every ``role="tool"`` message outside *excluded* whose output text
+    compresses by at least *min_saved_chars* characters is replaced by a
+    deep copy carrying the compacted text.  The message role, ``tool_call_id``
+    and non-text parts (images, thinking) are preserved; only the output
+    ``TextPart``(s) are rewritten.
+
+    An :class:`ElidedRecord` with ``kind="micro_compress"`` is emitted only
+    when an *annotated* stage actually fired (Stages 4/6/7/8 — markers such as
+    ``[prefix: …]``, ``[N banner lines dropped]``, ``[×k near-dup …]``);
+    lossless-only changes (Stages 1-3/5) are applied silently.  The original
+    text is archived on the record so ``Memory``/``HistoryIndex`` retrieval
+    stays lossless.
+
+    Returns ``(work_history, records, freed_tokens, changed_indices, next_ref)``.
+    The caller's *history* is never mutated (changed messages are copies).
+    """
+    candidates = _tier_c_candidates(
+        history, excluded, min_saved_chars=min_saved_chars
+    )
+    if not candidates:
+        return list(history), [], 0, set(), ref_counter
+
+    by_index = {i: kind for i, _, kind in candidates}
+    work: list[Message] = []
+    records: list[ElidedRecord] = []
+    freed = 0
+    changed: set[int] = set()
+
+    for i, msg in enumerate(history):
+        if i not in by_index:
+            work.append(msg)
+            continue
+
+        sys_parts = [
+            p
+            for p in msg.content
+            if isinstance(p, TextPart) and p.text.strip().startswith("<system>")
+        ]
+        out_parts = [
+            p
+            for p in msg.content
+            if isinstance(p, TextPart) and not p.text.strip().startswith("<system>")
+        ]
+        non_text = [p for p in msg.content if not isinstance(p, TextPart)]
+        text = "".join(p.text for p in out_parts)
+
+        compressed = _mc_compress(
+            text, kind=by_index[i], config=MicroCompressConfig()
+        )
+        saved_chars = len(text) - len(compressed)
+        if saved_chars <= 0 or compressed == text:
+            work.append(msg)
+            continue
+
+        new_content: list[ContentPart] = [*sys_parts]
+        if compressed:
+            new_content.append(TextPart(text=compressed))
+        new_content.extend(non_text)
+
+        new_msg = msg.model_copy(deep=True)
+        new_msg.content = new_content
+        work.append(new_msg)
+        freed += max(saved_chars // 4, 1)
+        changed.add(i)
+
+        if _has_annotated_marker(compressed):
+            ref = f"prune_{ref_counter}"
+            ref_counter += 1
+            records.append(
+                ElidedRecord(
+                    index=i,
+                    role=msg.role,
+                    kind="micro_compress",
+                    summary=f"micro-compressed {saved_chars} chars at index {i}",
+                    original_text=text,
+                    ref=ref,
+                )
+            )
+
+    return work, records, freed, changed, ref_counter
+
+
+# ---------------------------------------------------------------------------
 # Main pruner class
 # ---------------------------------------------------------------------------
 
@@ -483,12 +684,19 @@ class ContextPruner:
     Runs inside `_step`, right where ``strip_system_reminders`` already runs,
     so pruning and the existing reminder churn share **one** cache-break event.
 
-    **Two tiers:**
+    **Three tiers:**
 
     * **Tier A — Ephemeral injected messages** (primary, safest, default).
       Drops consumed/superseded accumulating ephemera (notifications, task
       snapshots, D-Mail notices) from the LLM-visible history. No tool pairing,
       negligible long-term value → dropped outright.
+    * **Tier C — Micro-compress in place** (plan.md §8.3, Phase 4). Re-runs
+      the deterministic, idempotent ``micro_compress`` pipeline on *stale*
+      surviving tool messages, shrinking redundant whitespace, prefixes,
+      banners and repetition *inside* text that is otherwise kept verbatim.
+      Lossless-only changes are applied silently; annotated stages emit an
+      ``ElidedRecord`` with ``kind="micro_compress"``. Cheapest tier — runs
+      before Tier B and works with both the native and Python paths.
     * **Tier B — Stale/oversized substantive content** (escalation only).
       Elides (not deletes) superseded reads, oversized tool outputs, resolved
       errors — replaces with a compact stub + retrieval ref.
@@ -523,6 +731,8 @@ class ContextPruner:
         ephemeral_checkpoint_markers: bool = False,
         substantive_enabled: bool = True,
         tool_output_min_tokens: int = 512,
+        micro_compress_enabled: bool = True,
+        micro_compress_min_saved_chars: int = 64,
     ) -> None:
         self._enabled = enabled
         self._trigger_ratio = trigger_ratio
@@ -544,6 +754,10 @@ class ContextPruner:
         # Tier B toggles
         self._substantive_enabled = substantive_enabled
         self._tool_output_min_tokens = tool_output_min_tokens
+
+        # Tier C toggles (micro-compress in place, plan.md §8.3)
+        self._micro_compress_enabled = micro_compress_enabled
+        self._micro_compress_min_saved_chars = micro_compress_min_saved_chars
 
         # Hysteresis state
         self._last_prune_step: int = -1
@@ -619,24 +833,109 @@ class ContextPruner:
         max_prune = int(current_tokens * self._max_fraction_per_pass)
         budget = min(budget, max_prune)
 
-        # Native fast path (GIL-released C++ kernel)
+        # ── Tier C — micro-compress stale tool messages in place (plan §8.3) ──
+        # Cheapest tier: deterministic, idempotent character-level compression
+        # applied *before* any drop/elide decisions, so the A/B tiers operate
+        # on already-compressed history.  Tier B candidates are excluded so
+        # their stubs archive the true (uncompressed) original text.
+        work_history: Sequence[Message] = history
+        tier_c_records: list[ElidedRecord] = []
+        tier_c_freed = 0
+        tier_c_changes: set[int] = set()
+        if self._micro_compress_enabled:
+            protected = _compute_protected_indices(
+                history,
+                stable_prefix_messages=self._stable_prefix_messages,
+                recent_messages_protected=self._recent_messages_protected,
+                current_turn_index=current_turn_index,
+            )
+            excluded = set(protected)
+            if self._substantive_enabled:
+                excluded |= {
+                    idx
+                    for idx, _, _ in _tier_b_candidates(
+                        history,
+                        protected,
+                        min_output_tokens=self._tool_output_min_tokens,
+                    )
+                }
+            work_history, tier_c_records, tier_c_freed, tier_c_changes, next_ref = (
+                _apply_tier_c(
+                    history,
+                    excluded,
+                    min_saved_chars=self._micro_compress_min_saved_chars,
+                    ref_counter=self._ref_counter,
+                )
+            )
+            self._ref_counter = next_ref
+
+        # Native fast path (GIL-released C++ kernel) on the compressed history
         soul_mod = kernel_module("SOUL")
         if soul_mod is not None:
             try:
-                native_result = self._native_prune(
-                    history,
+                base = self._native_prune(
+                    work_history,
                     budget,
                     current_turn_index=current_turn_index,
                 )
             except Exception:
                 # Fall through to the pure-Python implementation on any native
                 # error so pruning never blocks the soul.
-                native_result = None
-            if native_result is not None:
-                if native_result.earliest_removed_index is not None:
-                    self._last_prune_step = current_step
-                    self._last_prune_usage = context_usage
-                return native_result
+                base = self._python_prune(
+                    work_history,
+                    max_context_size=max_context_size,
+                    current_turn_index=current_turn_index,
+                    model=model,
+                )
+        else:
+            base = self._python_prune(
+                work_history,
+                max_context_size=max_context_size,
+                current_turn_index=current_turn_index,
+                model=model,
+            )
+
+        return self._finalize_prune_result(
+            history,
+            base,
+            tier_c_records=tier_c_records,
+            tier_c_freed=tier_c_freed,
+            tier_c_changes=tier_c_changes,
+            current_step=current_step,
+            context_usage=context_usage,
+        )
+
+    def _python_prune(
+        self,
+        history: Sequence[Message],
+        *,
+        max_context_size: int = 128_000,
+        current_turn_index: int | None = None,
+        model: str | None = None,
+    ) -> PruningResult:
+        """Pure-Python Tier A/B prune implementation.
+
+        Operates on *history* (which may already carry Tier C in-place
+        compression).  Returns a ``PruningResult`` for the A/B tiers only —
+        the min-payoff gate and hysteresis are applied by
+        :meth:`_finalize_prune_result` so Tier C savings count towards the
+        combined pass.
+        """
+        target_tokens = int(max_context_size * self._target_ratio)
+        current_tokens = count_message_tokens(history, model=model)
+        budget = current_tokens - target_tokens
+
+        if budget <= 0:
+            return PruningResult(
+                messages=list(history),
+                elided=[],
+                freed_tokens=0,
+                earliest_removed_index=None,
+            )
+
+        # Cap budget by max_fraction_per_pass
+        max_prune = int(current_tokens * self._max_fraction_per_pass)
+        budget = min(budget, max_prune)
 
         # Compute protected set
         protected = _compute_protected_indices(
@@ -686,7 +985,7 @@ class ContextPruner:
             )
 
         # Policy #3: Tail-inward selection — prefer latest-index first
-        # Policy #7: Prefer Tier A over Tier B
+        # Policy #7: Prefer Tier A over Tier B (Tier C already ran as a pre-pass)
         candidates.sort(key=lambda x: (-x[0], 0 if x[2] == "A" else 1, -x[1]))
 
         # Greedy selection
@@ -700,19 +999,9 @@ class ContextPruner:
             selected_indices.add(idx)
             total_freed += savings
 
-        # Policy #5: Min-payoff gate
-        if total_freed < self._min_free_tokens:
-            return PruningResult(
-                messages=list(history),
-                elided=[],
-                freed_tokens=0,
-                earliest_removed_index=None,
-            )
-
         # Build result
         result_messages: list[Message] = []
         elided_records: list[ElidedRecord] = []
-        removed_indices: list[int] = []  # every index dropped (Tier A + elided)
         changes: set[int] = set()
 
         for i, msg in enumerate(history):
@@ -774,15 +1063,77 @@ class ContextPruner:
 
         earliest = min(changes) if changes else None
 
-        # Update hysteresis
-        self._last_prune_step = current_step
-        self._last_prune_usage = context_usage
-
         return PruningResult(
             messages=result_messages,
             elided=elided_records,
             freed_tokens=total_freed,
             earliest_removed_index=earliest,
+        )
+
+    def _finalize_prune_result(
+        self,
+        original_history: Sequence[Message],
+        base: PruningResult,
+        *,
+        tier_c_records: list[ElidedRecord],
+        tier_c_freed: int,
+        tier_c_changes: set[int],
+        current_step: int,
+        context_usage: float,
+    ) -> PruningResult:
+        """Merge Tier C in-place compression and Layer 1 metadata coalescing
+        into the Tier A/B result, then apply the min-payoff gate (policy #5).
+
+        If the *combined* pass (Tier C + A/B + metadata coalescing) fails the
+        gate, the original history is returned untouched — Tier C changes are
+        rolled back with everything else.
+        """
+        messages = base.messages
+        elided = [*tier_c_records, *base.elided]
+        freed = tier_c_freed + base.freed_tokens
+        changes = set(tier_c_changes)
+        if base.earliest_removed_index is not None:
+            changes.add(base.earliest_removed_index)
+
+        if self._micro_compress_enabled:
+            # Layer 1 (plan §8.2) — coalesce adjacent identical <system>
+            # metadata (Class C3).  Operate on deep copies so the caller's
+            # history is never mutated.
+            coalesce_work = [m.model_copy(deep=True) for m in messages]
+            before = [_text_length(m) for m in coalesce_work]
+            removed_parts = coalesce_tool_metadata(coalesce_work)
+            after = [_text_length(m) for m in coalesce_work]
+            coalesced_chars = 0
+            coalesced_first: int | None = None
+            for i, (b, a) in enumerate(zip(before, after)):
+                if b > a:
+                    coalesced_chars += b - a
+                    if coalesced_first is None:
+                        coalesced_first = i
+            if removed_parts and coalesced_chars:
+                messages = coalesce_work
+                freed += max(coalesced_chars // 4, 1)
+                if coalesced_first is not None:
+                    changes.add(coalesced_first)
+
+        # Policy #5: Min-payoff gate (whole pass, including Tier C)
+        if not changes or freed < self._min_free_tokens:
+            return PruningResult(
+                messages=list(original_history),
+                elided=[],
+                freed_tokens=0,
+                earliest_removed_index=None,
+            )
+
+        # Update hysteresis
+        self._last_prune_step = current_step
+        self._last_prune_usage = context_usage
+
+        return PruningResult(
+            messages=messages,
+            elided=elided,
+            freed_tokens=freed,
+            earliest_removed_index=min(changes),
         )
 
     def estimate_after_prune(
@@ -873,6 +1224,8 @@ class ContextPruner:
             ephemeral_checkpoint_markers=self._ephemeral_checkpoint_markers,
             substantive_enabled=substantive_enabled,
             tool_output_min_tokens=self._tool_output_min_tokens,
+            micro_compress_enabled=self._micro_compress_enabled,
+            micro_compress_min_saved_chars=self._micro_compress_min_saved_chars,
         )
         pruner._ref_counter = self._ref_counter
 
@@ -962,13 +1315,8 @@ class ContextPruner:
                 earliest_removed_index=None,
             )
 
-        if result["freed_tokens"] < self._min_free_tokens:
-            return PruningResult(
-                messages=list(history),
-                elided=[],
-                freed_tokens=0,
-                earliest_removed_index=None,
-            )
+        # NOTE: the min-payoff gate is applied in _finalize_prune_result so
+        # Tier C savings count towards the combined pass.
 
         elided_by_index = {rec["index"]: rec for rec in result["elided"]}
         result_messages_dicts = result["messages"]

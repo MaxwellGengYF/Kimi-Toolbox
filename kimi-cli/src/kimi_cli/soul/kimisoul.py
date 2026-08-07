@@ -387,6 +387,8 @@ class KimiSoul:
             ephemeral_checkpoint_markers=self._loop_control.prune_ephemeral_checkpoint_markers,
             substantive_enabled=self._loop_control.prune_substantive_enabled,
             tool_output_min_tokens=self._loop_control.prune_tool_output_min_tokens,
+            micro_compress_enabled=self._loop_control.prune_micro_compress_enabled,
+            micro_compress_min_saved_chars=self._loop_control.prune_micro_compress_min_saved_chars,
         )
         self._recently_restored_refs: set[str] = set()
 

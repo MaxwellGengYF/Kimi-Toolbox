@@ -55,5 +55,18 @@ class FetchURL(CallableTool2[Params]):
                     brief=f"Failed to write {display_path}"
                 )
 
+        # Micro-compress the fetched markdown (plan.md §8.1): prose-mode
+        # compression — encoding normalisation, whitespace collapse, prefix
+        # fold.  Idempotent and annotated (markers keep any fold visible).
+        # Only the model-facing output is compacted; an explicit output_path
+        # still saves the raw fetched content.
+        from kimi_cli.tools.file.micro_compress import (
+            MicroCompressConfig,
+            compress as _mc_compress,
+        )
+
+        markdown = _mc_compress(
+            markdown, kind="prose", config=MicroCompressConfig()
+        )
         output = _maybe_export_output(markdown)
         return ToolOk(output=output, brief=f"Fetched {params.url}")

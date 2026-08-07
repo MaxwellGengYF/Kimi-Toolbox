@@ -1077,6 +1077,21 @@ async def _token_filter_output(
     if not output:
         return output, original_path
 
+    # Step 2.5: Micro-compress — lossless stages (1-3, 5) plus the annotated
+    # stages (4, 6, 7, 8): timestamp/path prefix folding, banner drop,
+    # intra-line repetition and near-duplicate collapse.  All annotated
+    # stages emit count-bearing markers so nothing is hidden silently.
+    if apply_dedup:
+        from kimi_cli.tools.file.micro_compress import (
+            MicroCompressConfig,
+            compress as _mc_compress,
+        )
+        output = _mc_compress(
+            output,
+            kind="log",
+            config=MicroCompressConfig(),
+        )
+
     # Step 3: Dedup (preserves line order)
     if apply_dedup:
         output = _dedup_output(output, max_block_lines=max_block_lines)
