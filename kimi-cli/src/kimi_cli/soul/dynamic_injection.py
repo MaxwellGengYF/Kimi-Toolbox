@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from kosong.message import Message
 
 from kimi_cli.notifications import is_notification_message
+from kimi_cli.soul.message import is_system_reminder_message
 
 if TYPE_CHECKING:
     from kimi_cli.soul.kimisoul import KimiSoul
@@ -64,6 +65,12 @@ def normalize_history(history: Sequence[Message]) -> list[Message]:
     Only ``user`` role messages are merged. Assistant and tool messages
     are never merged because their ``tool_calls`` / ``tool_call_id``
     fields form linked pairs that must stay intact.
+
+    Ephemeral ``<system-reminder>`` user messages are **never** merged (the
+    same exemption as notification messages): they are re-injected fresh on
+    every step, so merging them into a real user message would make the
+    request-time message boundary differ from storage and churn the provider
+    prefix cache on every step.
     """
     if not history:
         return []
@@ -76,6 +83,8 @@ def normalize_history(history: Sequence[Message]) -> list[Message]:
             and msg.role == "user"
             and not is_notification_message(result[-1])
             and not is_notification_message(msg)
+            and not is_system_reminder_message(result[-1])
+            and not is_system_reminder_message(msg)
         ):
             merged_content = list(result[-1].content) + list(msg.content)
             result[-1] = Message(role="user", content=merged_content)

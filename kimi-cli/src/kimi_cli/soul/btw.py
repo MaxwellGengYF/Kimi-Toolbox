@@ -20,7 +20,7 @@ from kosong.tooling import Tool, ToolError, ToolResult
 
 from kimi_cli.soul import LLMNotSet, wire_send
 from kimi_cli.soul.dynamic_injection import normalize_history
-from kimi_cli.soul.message import system_reminder
+from kimi_cli.soul.message import strip_system_reminders, system_reminder
 from kimi_cli.utils.logging import logger
 from kimi_cli.wire.types import BtwBegin, BtwEnd, TextPart
 
@@ -82,8 +82,13 @@ def _build_btw_context(soul: KimiSoul, question: str) -> tuple[str, list[Message
     Uses the same system_prompt, normalize_history(), and tool definitions
     as ``KimiSoul._step`` so the LLM provider can reuse the prompt cache.
     """
+    # Strip stale system-reminder user messages before normalizing, exactly
+    # like the main loop in ``KimiSoul._step`` (2e.2a), so the side-question
+    # request shares the same normalized prefix as the next main-loop step.
     system_prompt = soul._agent.get_system_prompt()  # pyright: ignore[reportPrivateUsage]
-    effective_history = normalize_history(soul.context.history)
+    stripped = list(soul.context.history)
+    strip_system_reminders(stripped)
+    effective_history = normalize_history(stripped)
 
     wrapped = f"{system_reminder(SIDE_QUESTION_SYSTEM_REMINDER).text}\n\n{question}"
     side_message = Message(role="user", content=wrapped)

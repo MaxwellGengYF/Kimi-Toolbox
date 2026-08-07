@@ -237,11 +237,15 @@ def _compute_protected_indices(
     stable_prefix_messages: int,
     recent_messages_protected: int,
     current_turn_index: int | None = None,
+    min_cache_prefix_depth: int | None = None,
 ) -> set[int]:
     """Compute the set of protected indices that must never be pruned.
 
     Includes:
     - First ``stable_prefix_messages`` messages (head stability).
+    - A cache-depth floor (``min_cache_prefix_depth``) protecting the whole
+      cached head: ``min(history_len, max(stable_prefix, floor))`` messages
+      (cache-03). ``None`` keeps the legacy head protection only.
     - Last ``recent_messages_protected`` user/assistant turns + their tool
       messages (recency window).
     - Current turn's user message and anything appended this turn.
@@ -251,8 +255,10 @@ def _compute_protected_indices(
     protected: set[int] = set()
     n = len(history)
 
-    # Head protection
-    for i in range(min(stable_prefix_messages, n)):
+    # Head protection (cache-03): the cache-depth floor never shrinks below
+    # the legacy stable prefix, and never exceeds the history length.
+    head_floor = min(n, max(stable_prefix_messages, min_cache_prefix_depth or 0))
+    for i in range(head_floor):
         protected.add(i)
 
     # Tail protection — find last K user/assistant turns
@@ -709,7 +715,13 @@ class ContextPruner:
     5. Min-payoff gate.
     6. Deterministic + idempotent.
     7. Prefer Tier A over Tier B.
-    8. Piggyback the existing break.
+    8. Real cache economics (cache-03): a prune pass invalidates the
+       provider KV prefix from ``earliest_removed_index`` onward — NOT just
+       the tail chunk like the per-step reminder churn. When
+       ``cache_loss_penalty`` is set, a pass is only applied when
+       ``freed_tokens * (1 + cache_loss_penalty) > cache_loss`` (tokens
+       between the earliest change and the tail); otherwise the caller
+       falls through to compaction (a single, larger break).
     """
 
     def __init__(
@@ -733,6 +745,8 @@ class ContextPruner:
         tool_output_min_tokens: int = 512,
         micro_compress_enabled: bool = False,
         micro_compress_min_saved_chars: int = 64,
+        min_cache_prefix_depth: int | None = None,
+        cache_loss_penalty: float | None = None,
     ) -> None:
         self._enabled = enabled
         self._trigger_ratio = trigger_ratio
@@ -743,6 +757,11 @@ class ContextPruner:
         self._cooldown_steps = cooldown_steps
         self._min_usage_growth = min_usage_growth
         self._max_fraction_per_pass = max_fraction_per_pass
+
+        # cache-03: cache-depth floor (protected head) and invalidation-cost
+        # payoff gate. ``None`` keeps the legacy behavior.
+        self._min_cache_prefix_depth = min_cache_prefix_depth
+        self._cache_loss_penalty = cache_loss_penalty
 
         # Tier A toggles
         self._ephemeral_enabled = ephemeral_enabled
@@ -776,6 +795,7 @@ class ContextPruner:
         context_usage: float = 0.0,
         max_context_size: int = 128_000,
         current_turn_index: int | None = None,
+        min_cache_prefix_depth: int | None = None,
         model: str | None = None,
     ) -> PruningResult:
         """Run a prune pass on *history*.
@@ -786,11 +806,17 @@ class ContextPruner:
             context_usage: Current context usage ratio (0.0 to 1.0).
             max_context_size: Maximum context size in tokens.
             current_turn_index: Index of the current turn's first message.
+            min_cache_prefix_depth: Cache-depth floor for the protected head
+                (cache-03). ``None`` falls back to the value configured on
+                the instance (itself ``None`` = legacy behavior).
             model: Model name for token estimation.
 
         Returns:
             A ``PruningResult`` with the modified message list.
         """
+        if min_cache_prefix_depth is None:
+            min_cache_prefix_depth = self._min_cache_prefix_depth
+
         if not self._enabled:
             return PruningResult(
                 messages=list(history),
@@ -848,6 +874,7 @@ class ContextPruner:
                 stable_prefix_messages=self._stable_prefix_messages,
                 recent_messages_protected=self._recent_messages_protected,
                 current_turn_index=current_turn_index,
+                min_cache_prefix_depth=min_cache_prefix_depth,
             )
             excluded = set(protected)
             if self._substantive_enabled:
@@ -877,6 +904,7 @@ class ContextPruner:
                     work_history,
                     budget,
                     current_turn_index=current_turn_index,
+                    min_cache_prefix_depth=min_cache_prefix_depth,
                 )
             except Exception:
                 # Fall through to the pure-Python implementation on any native
@@ -885,6 +913,7 @@ class ContextPruner:
                     work_history,
                     max_context_size=max_context_size,
                     current_turn_index=current_turn_index,
+                    min_cache_prefix_depth=min_cache_prefix_depth,
                     model=model,
                 )
         else:
@@ -892,6 +921,7 @@ class ContextPruner:
                 work_history,
                 max_context_size=max_context_size,
                 current_turn_index=current_turn_index,
+                min_cache_prefix_depth=min_cache_prefix_depth,
                 model=model,
             )
 
@@ -903,6 +933,7 @@ class ContextPruner:
             tier_c_changes=tier_c_changes,
             current_step=current_step,
             context_usage=context_usage,
+            model=model,
         )
 
     def _python_prune(
@@ -911,6 +942,7 @@ class ContextPruner:
         *,
         max_context_size: int = 128_000,
         current_turn_index: int | None = None,
+        min_cache_prefix_depth: int | None = None,
         model: str | None = None,
     ) -> PruningResult:
         """Pure-Python Tier A/B prune implementation.
@@ -943,6 +975,7 @@ class ContextPruner:
             stable_prefix_messages=self._stable_prefix_messages,
             recent_messages_protected=self._recent_messages_protected,
             current_turn_index=current_turn_index,
+            min_cache_prefix_depth=min_cache_prefix_depth,
         )
 
         # Collect candidates
@@ -986,7 +1019,17 @@ class ContextPruner:
 
         # Policy #3: Tail-inward selection — prefer latest-index first
         # Policy #7: Prefer Tier A over Tier B (Tier C already ran as a pre-pass)
-        candidates.sort(key=lambda x: (-x[0], 0 if x[2] == "A" else 1, -x[1]))
+        # Policy #8 (cache-03): prefer the tail band (last K messages, which the
+        # provider re-computes for the next request regardless) before older
+        # candidates, so drops shift the cache-cut as little as possible.
+        tail_band = max(0, len(history) - self._recent_messages_protected - 2)
+
+        def _cache_key(idx: int) -> int:
+            return 1 if idx >= tail_band else 0  # prefer tail-band candidates
+
+        candidates.sort(
+            key=lambda x: (-_cache_key(x[0]), -x[0], 0 if x[2] == "A" else 1, -x[1])
+        )
 
         # Greedy selection
         selected_indices: set[int] = set()
@@ -1006,7 +1049,6 @@ class ContextPruner:
 
         for i, msg in enumerate(history):
             if i in selected_indices:
-                changes.add(i)
                 # Check if Tier A (drop) or Tier B (elide)
                 is_tier_a = _is_ephemeral_message(
                     history[i],
@@ -1017,47 +1059,57 @@ class ContextPruner:
                 )
                 if is_tier_a:
                     # Tier A: drop the message entirely
+                    changes.add(i)
                     continue
-                else:
-                    # Tier B: elide — replace content with stub
-                    text = ""
-                    for part in msg.content:
-                        if isinstance(part, TextPart):
-                            text += part.text
+                if msg.role != "tool":
+                    # Tier B replaces a message *in place* with a stub of the
+                    # same role, which rewrites the content of a cached
+                    # message. That is acceptable for ``role="tool"`` (index
+                    # alignment preserved), but refuse to elide user/assistant
+                    # messages — they must only be handled by Tier A drops or
+                    # the compaction path (cache-02/03 band policy).
+                    result_messages.append(msg)
+                    continue
+                # Tier B: elide — replace content with stub
+                changes.add(i)
+                text = ""
+                for part in msg.content:
+                    if isinstance(part, TextPart):
+                        text += part.text
 
-                    kind = "elided"
-                    for _idx, _sav, _tier, _kind in candidates:
-                        if _idx == i:
-                            kind = _kind
-                            break
+                kind = "elided"
+                for _idx, _sav, _tier, _kind in candidates:
+                    if _idx == i:
+                        kind = _kind
+                        break
 
-                    ref = f"prune_{self._ref_counter}"
-                    self._ref_counter += 1
+                ref = f"prune_{self._ref_counter}"
+                self._ref_counter += 1
 
-                    stub_text = (
-                        f"<system>[context-elided: {kind} — content elided. "
-                        f"~{savings} tokens freed. "
-                        f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
+                stub_text = (
+                    f"<system>[context-elided: {kind} — content elided. "
+                    f"~{savings} tokens freed. "
+                    f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
+                )
+
+                elided_records.append(
+                    ElidedRecord(
+                        index=i,
+                        role=msg.role,
+                        kind=kind,
+                        summary=f"{kind} at index {i}",
+                        original_text=text,
+                        ref=ref,
                     )
+                )
 
-                    elided_records.append(
-                        ElidedRecord(
-                            index=i,
-                            role=msg.role,
-                            kind=kind,
-                            summary=f"{kind} at index {i}",
-                            original_text=text,
-                            ref=ref,
-                        )
+                result_messages.append(
+                    Message(
+                        role=msg.role,
+                        content=[TextPart(text=stub_text)],
+                        tool_call_id=msg.tool_call_id,
                     )
-
-                    result_messages.append(
-                        Message(
-                            role=msg.role,
-                            content=[TextPart(text=stub_text)],
-                            tool_call_id=msg.tool_call_id,
-                        )
-                    )
+                )
             else:
                 result_messages.append(msg)
 
@@ -1080,12 +1132,14 @@ class ContextPruner:
         tier_c_changes: set[int],
         current_step: int,
         context_usage: float,
+        model: str | None = None,
     ) -> PruningResult:
         """Merge Tier C in-place compression and Layer 1 metadata coalescing
-        into the Tier A/B result, then apply the min-payoff gate (policy #5).
+        into the Tier A/B result, then apply the min-payoff gate (policy #5)
+        and the cache-invalidation payoff gate (policy #8, cache-03).
 
         If the *combined* pass (Tier C + A/B + metadata coalescing) fails the
-        gate, the original history is returned untouched — Tier C changes are
+        gates, the original history is returned untouched — Tier C changes are
         rolled back with everything else.
         """
         messages = base.messages
@@ -1125,6 +1179,25 @@ class ContextPruner:
                 earliest_removed_index=None,
             )
 
+        # Policy #8 (cache-03): cache-invalidation cost gate. A prune pass
+        # invalidates the provider KV prefix from the earliest changed index
+        # to the tail; only apply it when the freed space exceeds that loss
+        # (scaled by the configurable penalty). When disabled (None), legacy
+        # behavior is kept. The head floor itself is enforced earlier in
+        # ``_compute_protected_indices``.
+        if self._cache_loss_penalty is not None:
+            earliest = min(changes)
+            cache_loss = count_message_tokens(
+                original_history[earliest:], model=model
+            )
+            if freed * (1.0 + self._cache_loss_penalty) < cache_loss:
+                return PruningResult(
+                    messages=list(original_history),
+                    elided=[],
+                    freed_tokens=0,
+                    earliest_removed_index=None,
+                )
+
         # Update hysteresis
         self._last_prune_step = current_step
         self._last_prune_usage = context_usage
@@ -1143,6 +1216,8 @@ class ContextPruner:
         context_usage: float = 0.0,
         max_context_size: int = 128_000,
         current_step: int = 0,
+        current_turn_index: int | None = None,
+        min_cache_prefix_depth: int | None = None,
         model: str | None = None,
     ) -> int:
         """Estimate token count after a prune pass without actually pruning.
@@ -1154,6 +1229,8 @@ class ContextPruner:
             current_step=current_step,
             context_usage=context_usage,
             max_context_size=max_context_size,
+            current_turn_index=current_turn_index,
+            min_cache_prefix_depth=min_cache_prefix_depth,
             model=model,
         )
         if result.earliest_removed_index is None:
@@ -1170,6 +1247,8 @@ class ContextPruner:
         target_token_count: int | None = None,
         max_context_size: int = 128_000,
         current_step: int = 0,
+        current_turn_index: int | None = None,
+        min_cache_prefix_depth: int | None = None,
         model: str | None = None,
     ) -> PruningResult:
         """Run a policy-driven prune pass suitable for manual invocation.
@@ -1226,6 +1305,8 @@ class ContextPruner:
             tool_output_min_tokens=self._tool_output_min_tokens,
             micro_compress_enabled=self._micro_compress_enabled,
             micro_compress_min_saved_chars=self._micro_compress_min_saved_chars,
+            min_cache_prefix_depth=self._min_cache_prefix_depth,
+            cache_loss_penalty=self._cache_loss_penalty,
         )
         pruner._ref_counter = self._ref_counter
 
@@ -1234,6 +1315,8 @@ class ContextPruner:
             current_step=current_step,
             context_usage=1.0 if target_ratio > 0 else 0.0,
             max_context_size=max_context_size,
+            current_turn_index=current_turn_index,
+            min_cache_prefix_depth=min_cache_prefix_depth,
             model=model,
         )
 
@@ -1282,8 +1365,15 @@ class ContextPruner:
         budget: int,
         *,
         current_turn_index: int | None = None,
+        min_cache_prefix_depth: int | None = None,
     ) -> PruningResult:
-        """Run the C++ prune_history kernel and convert the result back."""
+        """Run the C++ prune_history kernel and convert the result back.
+
+        The kernel does not know the cache-depth floor (cache-03), so when
+        ``min_cache_prefix_depth`` is set the result is validated here and a
+        violation raises, letting the caller fall back to the pure-Python
+        implementation that enforces the floor.
+        """
         soul_mod = kernel_module("SOUL")
         if soul_mod is None:
             raise RuntimeError("native SOUL module is not available")
@@ -1315,6 +1405,26 @@ class ContextPruner:
                 earliest_removed_index=None,
             )
 
+        # Cache-depth floor validation (cache-03): the kernel does not know
+        # the configured floor and may drop below it — refuse its result so
+        # the Python fallback (which enforces the floor via
+        # ``_compute_protected_indices``) runs.
+        if min_cache_prefix_depth is not None:
+            raw_earliest = result.get("earliest_removed_index")
+            if raw_earliest is None:
+                raw_indices = [rec["index"] for rec in result.get("elided", [])]
+                raw_earliest = min(raw_indices) if raw_indices else None
+            if raw_earliest is not None:
+                head_floor = min(
+                    len(history),
+                    max(self._stable_prefix_messages, min_cache_prefix_depth),
+                )
+                if raw_earliest < head_floor:
+                    raise ValueError(
+                        "native prune_history ignored min_cache_prefix_depth "
+                        f"(earliest={raw_earliest} < head_floor={head_floor})"
+                    )
+
         # NOTE: the min-payoff gate is applied in _finalize_prune_result so
         # Tier C savings count towards the combined pass.
 
@@ -1323,6 +1433,7 @@ class ContextPruner:
         result_idx = 0
         out_messages: list[Message] = []
         elided_records: list[ElidedRecord] = []
+        removed_indices: list[int] = []
         ref_offset = self._ref_counter
 
         for i, orig_dict in enumerate(messages):

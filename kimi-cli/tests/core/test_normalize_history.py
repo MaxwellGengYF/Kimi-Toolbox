@@ -5,6 +5,7 @@ from __future__ import annotations
 from kosong.message import ContentPart, Message, TextPart
 
 from kimi_cli.soul.dynamic_injection import normalize_history
+from kimi_cli.soul.message import system_reminder
 
 
 def _text(part: ContentPart) -> str:
@@ -123,3 +124,68 @@ def test_notification_messages_not_merged_with_user_messages() -> None:
     ]
     result = normalize_history(msgs)
     assert len(result) == 2
+
+
+# ======================================================================
+# cache-01: <system-reminder> messages must never be merged (KV-cache
+# boundary churn — see plans/01-reminder-merge-boundary-churn-cache-miss.md)
+# ======================================================================
+
+
+def test_system_reminder_not_merged_with_user_message() -> None:
+    msgs = [
+        Message(role="user", content=[TextPart(text="u1")]),
+        Message(role="user", content=[system_reminder("inj1")]),
+    ]
+    result = normalize_history(msgs)
+    assert len(result) == 2
+    # The real user message must be byte-identical to normalizing it alone.
+    without = normalize_history(msgs[:1])
+    assert result[0].role == "user"
+    assert result[0].content == without[0].content
+    # The reminder stays a standalone tail message.
+    assert _text(result[1].content[0]).startswith("<system-reminder>")
+
+
+def test_system_reminder_prefix_stable_across_steps() -> None:
+    """Plan cache-01 reproduction: [u0, a0, t0, u1, inj1] keeps u1 and inj1
+    separate, and the first 4 messages equal normalize([u0, a0, t0, u1])."""
+    msgs = [
+        Message(role="user", content=[TextPart(text="u0")]),
+        Message(role="assistant", content=[TextPart(text="a0")]),
+        Message(role="tool", content=[TextPart(text="t0")], tool_call_id="c1"),
+        Message(role="user", content=[TextPart(text="u1")]),
+        Message(role="user", content=[system_reminder("inj1")]),
+    ]
+    result = normalize_history(msgs)
+    assert len(result) == 5  # u1 and inj1 stay separate messages
+
+    base = normalize_history(msgs[:4])
+    assert len(base) == 4
+    for mine, ref in zip(result[:4], base):
+        assert mine.role == ref.role
+        assert mine.content == ref.content
+    assert _text(result[4].content[0]).startswith("<system-reminder>")
+
+
+def test_reminder_between_user_messages_blocks_merge() -> None:
+    """A reminder between two real user messages prevents their merge."""
+    msgs = [
+        Message(role="user", content=[TextPart(text="A")]),
+        Message(role="user", content=[system_reminder("r")]),
+        Message(role="user", content=[TextPart(text="B")]),
+    ]
+    result = normalize_history(msgs)
+    assert len(result) == 3
+    assert _text(result[1].content[0]).startswith("<system-reminder>")
+
+
+def test_adjacent_user_messages_still_merge_without_reminder() -> None:
+    """Regression guard: merging still applies to plain adjacent user messages."""
+    msgs = [
+        Message(role="user", content=[TextPart(text="A")]),
+        Message(role="user", content=[TextPart(text="B")]),
+    ]
+    result = normalize_history(msgs)
+    assert len(result) == 1
+    assert len(result[0].content) == 2

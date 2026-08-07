@@ -25,6 +25,7 @@ from kimi_cli.soul.context_pruning import (
     _compute_protected_indices,
     _protect_tool_pair_indices,
 )
+from kimi_cli.soul.message import is_system_reminder_message
 from kimi_cli.soul import get_wire_or_none, wire_send
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.tokens import count_message_tokens
@@ -32,6 +33,19 @@ from kimi_cli.wire.types import StatusUpdate, TextPart, ThinkPart
 
 if TYPE_CHECKING:
     from kimi_cli.soul.kimisoul import KimiSoul
+
+
+def _current_turn_start_index(history: Sequence[Message]) -> int | None:
+    """Index of the current turn's first *real* user message.
+
+    Scans backwards from the end and skips injected ``<system-reminder>``
+    user messages (mirrors ``KimiSoul._current_turn_start_index``).
+    """
+    for idx in range(len(history) - 1, -1, -1):
+        msg = history[idx]
+        if msg.role == "user" and not is_system_reminder_message(msg):
+            return idx
+    return None
 
 
 class Params(BaseModel):
@@ -120,6 +134,7 @@ class ContextPrune(CallableTool2[Params]):
             pruner=pruner,
             max_context_size=max_context_size,
             model=model_name,
+            current_turn_index=_current_turn_start_index(history),
         )
         if validation_error is not None:
             return validation_error
@@ -132,6 +147,7 @@ class ContextPrune(CallableTool2[Params]):
                 history=history,
                 params=params,
                 pruner=pruner,
+                current_turn_index=_current_turn_start_index(history),
             )
         else:
             result = pruner.prune_with_policy(
@@ -142,6 +158,7 @@ class ContextPrune(CallableTool2[Params]):
                 target_token_count=params.target_token_count,
                 max_context_size=max_context_size,
                 current_step=soul.current_step_no,
+                current_turn_index=_current_turn_start_index(history),
                 model=model_name,
             )
             pruned_messages = result.messages
@@ -237,6 +254,7 @@ class ContextPrune(CallableTool2[Params]):
         history: Sequence[Message],
         params: Params,
         pruner: ContextPruner,
+        current_turn_index: int | None = None,
     ) -> tuple[list[Message], PruningResult]:
         """Build a new history with ThinkPart removed outside the protected tail.
 
@@ -248,7 +266,7 @@ class ContextPrune(CallableTool2[Params]):
             history,
             stable_prefix_messages=pruner._stable_prefix_messages,
             recent_messages_protected=params.keep_recent_turns,
-            current_turn_index=None,
+            current_turn_index=current_turn_index,
         )
         protected = _protect_tool_pair_indices(history, protected)
 
@@ -308,6 +326,7 @@ class ContextPrune(CallableTool2[Params]):
         pruner: ContextPruner,
         max_context_size: int,
         model: str | None,
+        current_turn_index: int | None = None,
     ) -> ToolReturnValue | None:
         """Return a ToolError if the requested operation would violate invariants."""
         if params.mode == "compact":
@@ -330,7 +349,7 @@ class ContextPrune(CallableTool2[Params]):
                 history,
                 stable_prefix_messages=stable_prefix,
                 recent_messages_protected=params.keep_recent_turns,
-                current_turn_index=None,
+                current_turn_index=current_turn_index,
             )
             protected = _protect_tool_pair_indices(history, protected)
             protected_messages = [history[i] for i in sorted(protected)]

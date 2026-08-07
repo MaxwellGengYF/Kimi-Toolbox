@@ -307,6 +307,25 @@ Default is 3."""
     """Number of initial messages to always keep as a stable cached prefix.
     Default is 4."""
 
+    prune_min_cache_prefix_depth: int | None = Field(default=None, ge=0)
+    """Cache-depth floor for the pruner's protected head (cache-03).
+    ``None`` (default) derives a dynamic floor at each step that protects
+    everything except the recent tail band
+    (``len(history) - (prune_recent_messages_protected + 8)`` messages,
+    which the provider re-computes for the next request anyway). A fixed
+    positive value protects that many head messages unconditionally;
+    ``0`` disables the floor (legacy behavior). Default is ``None``."""
+
+    prune_cache_loss_penalty: float | None = Field(default=None, ge=0.0)
+    """Cache-invalidation cost gate (cache-03): when set (>= 0.0), a prune
+    pass is applied only if
+    ``freed_tokens * (1 + prune_cache_loss_penalty) > cache_loss`` where
+    ``cache_loss`` is the estimated token count between the earliest changed
+    index and the tail (the portion of the provider KV prefix the pass
+    invalidates). ``None`` (default) keeps the legacy behavior (no gate).
+    Higher values bias toward preserving the cache; ``0`` requires freed
+    space to strictly exceed the cache loss. Default is ``None``."""
+
     prune_recent_messages_protected: int = Field(default=6, ge=1)
     """Number of recent user/assistant turns (plus their tool messages)
     to protect from pruning. Default is 6."""

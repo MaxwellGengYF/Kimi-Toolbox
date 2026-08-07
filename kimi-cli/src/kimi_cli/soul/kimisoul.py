@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
-import secrets
+import regex as re
 import time
 import uuid
 import weakref
@@ -79,6 +79,7 @@ from kimi_cli.soul.dynamic_injections.todo_reminder import TodoReminderProvider
 from kimi_cli.soul.llm_request_recorder import LLMRequestRecorder
 from kimi_cli.soul.message import (
     check_message,
+    is_system_reminder_message,
     strip_system_reminders,
     system,
     system_reminder,
@@ -92,7 +93,7 @@ from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.export import perform_export
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.slashcmd import SlashCommand, parse_slash_command_call
-from kimi_cli.utils.tokens import count_tokens
+from kimi_cli.utils.tokens import count_message_tokens, count_tokens
 from kimi_cli.wire.file import WireFile
 from kimi_cli.wire.types import (
     CompactionBegin,
@@ -221,6 +222,41 @@ class TurnOutcome:
     step_count: int
 
 
+def _current_turn_start_index(history: Sequence[Message]) -> int | None:
+    """Return the index of the current turn's first *real* user message.
+
+    Scans backwards from the end and stops at the most recent user message
+    that is not an injected ``<system-reminder>`` (mirrors
+    ``VerificationGate._current_turn_history``). Returns ``None`` when no
+    such message exists (e.g. empty history).
+    """
+    for idx in range(len(history) - 1, -1, -1):
+        msg = history[idx]
+        if msg.role == "user" and not is_system_reminder_message(msg):
+            return idx
+    return None
+
+
+def _compaction_export_missing(prompt: str, work_dir: Any) -> bool:
+    """Return True when *prompt* references a compaction export file that no
+    longer exists (cache-05 §3.3).
+
+    Compaction prompts embed the pre-compaction export path (relative to the
+    work dir). Anonymous sessions delete those files on close, so a resumed
+    session must not adopt a persisted prompt pointing at a deleted file.
+    """
+    if ".kimix_cache" not in prompt:
+        return False
+    for match in re.finditer(
+        r"\.kimix_cache[/\\](?:context_compacted|context_[0-9a-f]+)\.md",
+        prompt,
+    ):
+        candidate = Path(str(work_dir)) / match.group(0).replace("\\", "/")
+        if not candidate.exists():
+            return True
+    return False
+
+
 class KimiSoul:
     """The soul of Kimi Code CLI."""
 
@@ -265,6 +301,18 @@ class KimiSoul:
         context._on_append = _on_append
         self._context = context
         self._context.model_name = self.model_name
+
+        # cache-04 §3.2 / cache-05 §3.3: on resume, adopt the exact system
+        # prompt persisted with the context so the first request after resume
+        # reuses the previous process's prompt string (provider prefix-cache
+        # continuity). Skip adoption when the persisted prompt references a
+        # compaction export file that no longer exists (e.g. anonymous session
+        # cleanup) — re-render normally in that case.
+        restored_prompt = self._context.system_prompt
+        if restored_prompt and not _compaction_export_missing(
+            restored_prompt, agent.runtime.session.work_dir
+        ):
+            agent.system_prompt_cached = restored_prompt
 
         if self._loop_control.adaptive_preserve_enabled:
             self._compaction = SimpleCompaction(
@@ -389,6 +437,8 @@ class KimiSoul:
             tool_output_min_tokens=self._loop_control.prune_tool_output_min_tokens,
             micro_compress_enabled=self._loop_control.prune_micro_compress_enabled,
             micro_compress_min_saved_chars=self._loop_control.prune_micro_compress_min_saved_chars,
+            min_cache_prefix_depth=self._loop_control.prune_min_cache_prefix_depth,
+            cache_loss_penalty=self._loop_control.prune_cache_loss_penalty,
         )
         self._recently_restored_refs: set[str] = set()
 
@@ -1134,6 +1184,8 @@ class KimiSoul:
                         context_usage=self.status.context_usage,
                         max_context_size=self._runtime.llm.max_context_size,
                         current_step=self._current_step_no,
+                        current_turn_index=_current_turn_start_index(list(self._context.history)),
+                        min_cache_prefix_depth=self._cache_depth_floor(len(self._context.history)),
                         model=model_name,
                     )
                     if estimated < self._runtime.llm.max_context_size * self._loop_control.compaction_trigger_ratio:
@@ -1256,6 +1308,22 @@ class KimiSoul:
             # Consume any pending steers between steps before next iteration.
             await self._consume_pending_steers()
 
+    def _cache_depth_floor(self, history_len: int) -> int | None:
+        """Compute the pruner's cache-depth floor for a history of *history_len*.
+
+        cache-03: protects the whole provider-cached head from a single prune
+        pass. Uses ``loop_control.prune_min_cache_prefix_depth`` when set
+        (``0`` disables the floor); otherwise derives a dynamic floor that
+        protects everything except the recent tail band — the last
+        ``prune_recent_messages_protected`` turns plus 8 messages, which the
+        provider re-computes for the next request regardless.
+        """
+        config_floor = self._loop_control.prune_min_cache_prefix_depth
+        if config_floor is not None:
+            return config_floor if config_floor > 0 else None
+        tail_band = self._loop_control.prune_recent_messages_protected + 8
+        return max(0, history_len - tail_band)
+
     async def _step(self) -> StepOutcome | None:
         """Run a single step and return a stop outcome, or None to continue.
 
@@ -1356,13 +1424,20 @@ class KimiSoul:
                 context_usage=self.status.context_usage,
                 max_context_size=max_context,
                 model=model_name,
+                current_turn_index=_current_turn_start_index(history_for_llm),
+                min_cache_prefix_depth=self._cache_depth_floor(len(history_for_llm)),
             )
             if prune_result.earliest_removed_index is not None:
+                cache_loss = count_message_tokens(
+                    history_for_llm[prune_result.earliest_removed_index :],
+                    model=model_name,
+                )
                 logger.info(
                     "Context pruner freed {freed} tokens, earliest_removed_index={idx}, "
-                    "Tier B count={tier_b}",
+                    "estimated_cache_loss={cache_loss} tokens, Tier B count={tier_b}",
                     freed=prune_result.freed_tokens,
                     idx=prune_result.earliest_removed_index,
+                    cache_loss=cache_loss,
                     tier_b=len(prune_result.elided),
                 )
                 # Feed Tier B elided records into HistoryIndex for retrieval
@@ -1721,8 +1796,12 @@ class KimiSoul:
         self._history_index.save()
         
         # --- Export pre-compaction context ---
-        
-        rotated_path = self._runtime.session.work_dir / ".kimix_cache" / f"context_{secrets.token_hex(8)}.md"
+        # cache-05: deterministic per-session export slot (one snapshot per
+        # compaction, latest wins) instead of a random ``token_hex`` suffix —
+        # the export path is embedded in the compacting system prompt, so a
+        # random nonce would make every post-compaction prompt unique and
+        # block prefix-cache continuity across runs/compactions.
+        rotated_path = self._runtime.session.work_dir / ".kimix_cache" / "context_compacted.md"
         self._compact_cache_dir.append(rotated_path)
         if rotated_path is not None:
             export_result = await perform_export(
@@ -1745,9 +1824,15 @@ class KimiSoul:
         self._recently_retrieved_turn_ids.clear()
         self._pruner.reset_cooldown()
         await self._context.clear()
+        # cache-05: render the compacting prompt (deterministic — the same
+        # arguments always produce the same string) and promote it to the
+        # persistent cache slot ONLY here, after the export attempt, so the
+        # normal prompt slot is never silently overwritten by a compacting
+        # render.
         system_prompt_text = self._agent.get_system_prompt(
             is_compacting=True, compact_export_path=compact_export_path
         )
+        self._agent.system_prompt_cached = system_prompt_text
         await self._context.write_system_prompt(system_prompt_text)
         await self._checkpoint()
         await self._context.append_message(compaction_result.messages)

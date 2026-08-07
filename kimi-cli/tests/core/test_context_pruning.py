@@ -853,3 +853,327 @@ class TestPruneWithPolicy:
         )
         # Manual policy invocation should ignore hysteresis
         assert result.earliest_removed_index is not None
+
+
+# ======================================================================
+# cache-02: current-turn protection wiring
+# (plans/02-pruner-current-turn-index-unwired-cache-miss.md)
+# ======================================================================
+
+
+def _big_notification(text: str = "n") -> Message:
+    """A notification large enough (~200 tokens) to matter for budget math."""
+    return _notification(text * 100)
+
+
+class TestCurrentTurnProtection:
+    @pytest.fixture(autouse=True)
+    def _force_python_path(self, monkeypatch):
+        """These tests assert exact selection/identity; force the pure-Python
+        policy engine so the native kernel's (opaque) budget math cannot skew
+        the expected outcome."""
+        monkeypatch.setattr(
+            "kimi_cli.soul.context_pruning.kernel_module", lambda name: None
+        )
+
+    def test_current_turn_index_protects_turn(self):
+        """With current_turn_index=k nothing at index >= k may be dropped/elided."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            min_usage_growth=0.0,
+        )
+        history = [
+            _user("u0"),
+            _big_notification("a"),  # idx 1, droppable
+            _user("u1"),
+            _big_notification("b"),  # idx 3, droppable
+            _user("u2"),  # idx 4 — current turn starts here
+            _big_notification("c"),  # idx 5, in turn → protected
+            _user("u3"),
+            _big_notification("d"),  # idx 7, in turn → protected
+        ]
+        k = 4
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=100_000,
+            current_turn_index=k,
+        )
+        assert result.earliest_removed_index is not None
+        assert result.earliest_removed_index < k
+        # Nothing from the current turn onward changed: the trailing suffix of
+        # the result equals the current turn's original messages (in order).
+        turn_tail = history[k:]
+        assert result.messages[-len(turn_tail):] == list(turn_tail)
+
+    def test_without_current_turn_index_drops_turn(self):
+        """Same call without current_turn_index (legacy) drops the turn's own
+        messages — proving the wiring changes behavior."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            min_usage_growth=0.0,
+        )
+        # Pre-turn notifications are small; in-turn notifications are big and
+        # dominate the budget, so the legacy greedy (tail-inward) reaches into
+        # the current turn while the protected call cannot.
+        history = [
+            _user("u0"),
+            _notification("pre1"),  # idx 1, small
+            _user("u1"),
+            _notification("pre2"),  # idx 3, small
+            _user("u2"),  # idx 4 — current turn starts here
+            _big_notification("in1"),  # idx 5, in turn → protected
+            _user("u3"),
+            _big_notification("in2"),  # idx 7, in turn → protected
+        ]
+        with_turn = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=100_000,
+            current_turn_index=4,
+        )
+        without = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=100_000,
+            current_turn_index=None,
+        )
+        # With protection, only the pre-turn notifications (1, 3) are dropped.
+        assert with_turn.earliest_removed_index == 1
+        assert len(with_turn.messages) == len(history) - 2
+        # Legacy behavior drops the two big in-turn notifications (5, 7) first:
+        # the earliest change lands *inside* the current turn (index >= 4).
+        assert without.earliest_removed_index == 5
+        assert len(without.messages) == len(history) - 2
+        # The protected call leaves every in-turn message untouched.
+        turn_tail = history[4:]
+        assert with_turn.messages[-len(turn_tail):] == list(turn_tail)
+
+    def test_prune_with_policy_forwards_current_turn_index(self):
+        """prune_with_policy must forward current_turn_index (tool call site)."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            min_usage_growth=0.0,
+        )
+        history = [
+            _user("u0"),
+            _big_notification("a"),
+            _user("u1"),
+            _big_notification("b"),
+            _user("u2"),
+            _big_notification("c"),
+            _user("u3"),
+            _big_notification("d"),
+        ]
+        result = pruner.prune_with_policy(
+            history,
+            keep_recent_turns=0,
+            target_token_count=1,
+            max_context_size=128_000,
+            current_turn_index=4,
+        )
+        assert result.earliest_removed_index is not None
+        assert result.earliest_removed_index < 4
+        turn_tail = history[4:]
+        assert result.messages[-len(turn_tail):] == list(turn_tail)
+
+    def test_tier_b_refuses_user_assistant_elision(self):
+        """Tier B stubs only tool messages; user/assistant messages outside the
+        protected band must be left untouched (in-place rewrite would change
+        cached content)."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            ephemeral_enabled=False,
+            substantive_enabled=True,
+            tool_output_min_tokens=20,
+        )
+        history = [
+            _assistant("x" * 4000),
+            _user("y" * 4000),
+            _tool("z" * 4000),
+        ]
+        result = pruner.prune(history, context_usage=0.9, max_context_size=100_000)
+        # Only the tool message (index 2) may be elided into a stub.
+        assert result.earliest_removed_index == 2
+        assert is_pruned_stub(result.messages[2])
+        assert not is_pruned_stub(result.messages[0])
+        assert not is_pruned_stub(result.messages[1])
+
+
+# ======================================================================
+# cache-03: cache-depth floor + invalidation-cost payoff gate + tail band
+# (plans/03-pruner-cache-depth-floor-policy.md)
+# ======================================================================
+
+
+class TestCacheDepthFloor:
+    @pytest.fixture(autouse=True)
+    def _force_python_path(self, monkeypatch):
+        """Force the pure-Python policy engine for exact selection assertions."""
+        monkeypatch.setattr(
+            "kimi_cli.soul.context_pruning.kernel_module", lambda name: None
+        )
+
+    def test_floor_protects_head_notification(self):
+        """A notification at index 5 is protected with min_cache_prefix_depth=100;
+        any pass has earliest_removed_index >= 100."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            min_cache_prefix_depth=100,
+        )
+        history = [_user(f"u{i}") for i in range(200)]
+        history[5] = _big_notification("head")
+        history[120] = _big_notification("mid1")
+        history[150] = _big_notification("mid2")
+        history[180] = _big_notification("mid3")
+
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        assert result.earliest_removed_index is not None
+        assert result.earliest_removed_index >= 100
+        # Everything before the floor is untouched (identity preserved).
+        for i in range(100):
+            assert result.messages[i] == history[i]
+
+    def test_floor_disabled_by_default(self):
+        """min_cache_prefix_depth=None keeps legacy behavior: index 5 is prunable."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+        )
+        history = [_user(f"u{i}") for i in range(200)]
+        history[5] = _notification("head")
+        history[120] = _notification("mid1")
+        history[150] = _notification("mid2")
+        history[180] = _notification("mid3")
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        # Legacy: the greedy tail-inward pass reaches index 5.
+        assert result.earliest_removed_index is not None
+        assert result.earliest_removed_index < 100
+
+    def test_payoff_gate_blocks_when_freed_below_cache_loss(self):
+        """When freed < cache_loss, the pass must be rejected entirely."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            cache_loss_penalty=0.0,
+        )
+        # One tiny notification at index 5, then a long tail: dropping it frees
+        # ~few tokens but invalidates the whole tail → no pass.
+        history = [_user(f"u{i}") for i in range(50)]
+        history[5] = _notification("tiny")
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        assert result.earliest_removed_index is None
+        assert result.messages == list(history)
+
+    def test_payoff_gate_allows_high_yield_pass(self):
+        """When freed equals/exceeds the cache loss the pass still applies."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            cache_loss_penalty=0.0,
+        )
+        # A huge notification as the *last* message: freeing it invalidates
+        # only itself (cache_loss == freed), so the gate lets the pass through.
+        history = [_user(f"u{i}") for i in range(20)]
+        history[19] = _notification("huge-tail" * 2000)
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        assert result.earliest_removed_index == 19
+        assert result.freed_tokens > 0
+
+    def test_tail_band_preferred_in_candidate_sort(self):
+        """Given one candidate at index 10 and one at 150 in a 200-message
+        history, the index-150 candidate is selected first (tail-inward /
+        tail-band preference)."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+            max_fraction_per_pass=0.1,
+        )
+        history = [_user(f"u{i}") for i in range(200)]
+        history[10] = _big_notification("old")
+        history[150] = _big_notification("new")
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        assert result.earliest_removed_index is not None
+        assert result.earliest_removed_index == 150
+        assert result.messages[10] == history[10]
+
+    def test_payoff_gate_disabled_by_default(self):
+        """cache_loss_penalty=None keeps legacy behavior (no gate)."""
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=0,
+        )
+        history = [_user(f"u{i}") for i in range(50)]
+        history[5] = _notification("tiny")
+        result = pruner.prune(
+            history,
+            context_usage=0.9,
+            max_context_size=1_000_000,
+        )
+        # Legacy: the tiny notification is dropped despite a large cache loss.
+        assert result.earliest_removed_index == 5

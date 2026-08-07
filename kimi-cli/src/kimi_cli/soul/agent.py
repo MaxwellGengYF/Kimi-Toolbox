@@ -171,6 +171,22 @@ async def load_agents_md(work_dir: KaosPath) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+def _resolve_system_prompt_now(session: Session) -> str:
+    """Return the ``KIMI_NOW`` value for the system prompt (cache-04).
+
+    Persists a coarse (minute-precision) timestamp on first session creation
+    and reuses it on every resume, so the system prompt — the most
+    cache-sensitive part of the request — stays byte-identical across process
+    boundaries instead of embedding a fresh microsecond timestamp per process.
+    """
+    now_value = session.state.system_prompt_now
+    if not now_value:
+        now_value = pendulum.now().format("YYYY-MM-DDTHH:mm")
+        session.state.system_prompt_now = now_value
+        session.save_state()
+    return now_value
+
+
 @dataclass(slots=True, kw_only=True)
 class Runtime:
     """Agent runtime."""
@@ -308,13 +324,14 @@ class Runtime:
             session.context_file.parent / "notifications",
             config.notifications,
         )
+        now_value = _resolve_system_prompt_now(session)
         return Runtime(
             config=config,
             oauth=oauth,
             llm=llm,
             session=session,
             builtin_args=BuiltinSystemPromptArgs(
-                KIMI_NOW=pendulum.now().isoformat(),
+                KIMI_NOW=now_value,
                 KIMI_WORK_DIR=session.work_dir,
                 KIMI_WORK_DIR_LS=ls_output,
                 KIMI_AGENTS_MD=agents_md or "",
@@ -393,23 +410,40 @@ class Agent:
 
     def get_system_prompt(self, is_compacting: bool = False, compact_export_path: str | None = None) -> str:
         if callable(self.system_prompt):
-            if self.system_prompt_cached is None or is_compacting:
-                # Convert compact_export_path to a path relative to the work directory
-                if compact_export_path is not None:
-                    try:
-                        work_dir = self.runtime.builtin_args.KIMI_WORK_DIR
-                        if work_dir is not None:
-                            compact_export_path = str(Path(compact_export_path).relative_to(str(work_dir)))
-                    except ValueError:
-                        # If relpath fails (different drives on Windows), keep absolute
-                        pass
-                sig = inspect.signature(self.system_prompt)
-                if len(sig.parameters) >= 3:
-                    self.system_prompt_cached = self.system_prompt(self.runtime, is_compacting, compact_export_path)
-                else:
-                    self.system_prompt_cached = self.system_prompt(self.runtime, is_compacting)
+            if is_compacting:
+                # cache-05: the compacting render is one-shot and NEVER
+                # overwrites the normal persistent cache slot. compact_context
+                # explicitly promotes it to ``system_prompt_cached`` only after
+                # a successful export.
+                return self._render_system_prompt(
+                    is_compacting=True, compact_export_path=compact_export_path
+                )
+            if self.system_prompt_cached is None:
+                self.system_prompt_cached = self._render_system_prompt(
+                    is_compacting=False, compact_export_path=None
+                )
             return self.system_prompt_cached
         return self.system_prompt
+
+    def _render_system_prompt(self, *, is_compacting: bool, compact_export_path: str | None) -> str:
+        """Render the system-prompt template with *is_compacting* semantics.
+
+        ``compact_export_path`` is converted to a path relative to the work
+        directory (when possible) so the rendered value is stable regardless of
+        the machine-specific absolute prefix.
+        """
+        if compact_export_path is not None:
+            try:
+                work_dir = self.runtime.builtin_args.KIMI_WORK_DIR
+                if work_dir is not None:
+                    compact_export_path = str(Path(compact_export_path).relative_to(str(work_dir)))
+            except ValueError:
+                # If relpath fails (different drives on Windows), keep absolute
+                pass
+        sig = inspect.signature(self.system_prompt)
+        if len(sig.parameters) >= 3:
+            return self.system_prompt(self.runtime, is_compacting, compact_export_path)
+        return self.system_prompt(self.runtime, is_compacting)
 
 
 async def load_agent(

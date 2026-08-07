@@ -11,7 +11,7 @@ This guide explains how to use the utility functions from `kimix.utils`, `kimix.
 
 ### init
 
-Initialize kimix global state. **Must be called before `prompt()` in non-CLI scripts.**
+Initialize kimix global state. **Optional for scripts**: when ``prompt()``/``create_session()`` are called without ``init()`` first, the provider is auto-resolved from ``src/kimix/default_config.json``, then ``KIMI_API_KEY``/``KIMIX_API_KEY`` env vars, then ``~/.kimi`` OAuth credentials (kimi-code). Call ``init()`` when you need to override yolo/think/skill dirs or supply an explicit provider config.
 
 ```python
 # File: src/kimix/utils/config.py

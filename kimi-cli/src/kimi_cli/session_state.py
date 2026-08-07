@@ -37,6 +37,12 @@ class SessionState(BaseModel):
     custom_title: str | None = None
     title_generated: bool = False
     title_generate_attempts: int = 0
+    # System-prompt stability (cache-04): the wall-clock value rendered into
+    # the system prompt, persisted at session creation so every resumed
+    # process reuses the identical value (minute precision) instead of a
+    # fresh microsecond timestamp — keeping the prompt byte-identical across
+    # process boundaries for provider prefix-cache continuity.
+    system_prompt_now: str | None = None
     # Archive state (previously in metadata.json)
     wire_mtime: float | None = None
     archived: bool = False

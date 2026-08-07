@@ -16,7 +16,7 @@ from kimi_cli.soul.approval import Approval
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.dynamic_injection import DynamicInjection
 from kimi_cli.soul.kimisoul import KimiSoul
-from kimi_cli.soul.message import is_system_reminder_message
+from kimi_cli.soul.message import is_system_reminder_message, system_reminder
 from kimi_cli.utils.aioqueue import QueueShutDown
 from kimi_cli.wire import Wire
 from kimi_cli.wire.types import ImageURLPart, SteerInput, StepBegin, TextPart, TurnBegin, TurnEnd
@@ -357,11 +357,82 @@ async def test_step_merges_plain_steer_with_dynamic_injection_in_model_history(
         ),
         Message(role="assistant", content=[TextPart(text="done")]),
     ]
+    # cache-01: system-reminder injections must NOT be merged into the real
+    # user message — the model history keeps the steer and the reminder as
+    # separate messages so the cached prefix boundary stays stable across steps.
+    assert captured_history[-2].role == "user"
+    assert captured_history[-2].content == [TextPart(text="Follow user note")]
     assert captured_history[-1].role == "user"
     assert captured_history[-1].content == [
-        TextPart(text="Follow user note"),
-        TextPart(text="<system-reminder>\nInternal reminder\n</system-reminder>"),
+        TextPart(text="<system-reminder>\nInternal reminder\n</system-reminder>")
     ]
+
+
+class _RecordingPruner:
+    """Stub pruner that records the kwargs of every prune() call."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict | None = None
+
+    def prune(self, history, **kwargs):
+        self.kwargs = dict(kwargs)
+        from kimi_cli.soul.context_pruning import PruningResult
+
+        return PruningResult(
+            messages=list(history),
+            elided=[],
+            freed_tokens=0,
+            earliest_removed_index=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_step_passes_current_turn_index_to_pruner(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cache-02 call-site test: ``_step`` must hand the pruner a non-None
+    ``current_turn_index`` pointing at the current turn's first *real* user
+    message (skipping injected system reminders)."""
+    soul = _make_soul(runtime, tmp_path)
+
+    await soul.context.append_message(
+        [
+            Message(role="user", content=[TextPart(text="u0")]),
+            Message(role="assistant", content=[TextPart(text="a0")]),
+            Message(role="user", content=[TextPart(text="u1")]),
+            # Injected reminder after the real user message — must be skipped.
+            Message(role="user", content=[system_reminder("reminder")]),
+        ]
+    )
+
+    async def fake_kosong_step(chat_provider, system_prompt, toolset, history, **kwargs):
+        return StepResult(
+            id="step-1",
+            message=Message(role="assistant", content=[TextPart(text="done")]),
+            usage=None,
+            tool_calls=[],
+            _tool_result_futures={},
+        )
+
+    async def fake_collect_injections() -> list[DynamicInjection]:
+        return []
+
+    recording = _RecordingPruner()
+    soul._pruner = recording  # type: ignore[assignment]
+
+    monkeypatch.setattr(soul, "_collect_injections", fake_collect_injections)
+    monkeypatch.setattr(kimisoul_module.kosong, "step", fake_kosong_step)
+    monkeypatch.setattr(kimisoul_module, "wire_send", lambda _msg: None)
+
+    outcome = await soul._step()
+
+    assert outcome is not None
+    assert recording.kwargs is not None
+    # History: [u0, a0, u1, reminder] → last real user message is at index 2.
+    assert recording.kwargs.get("current_turn_index") == 2
+    assert recording.kwargs.get("min_cache_prefix_depth") is not None
 
 
 class _SequenceStreamedMessage:

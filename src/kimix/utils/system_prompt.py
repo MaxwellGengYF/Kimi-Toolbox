@@ -72,7 +72,7 @@ def get_system_prompt(
         use_agent_md = False
         use_skills = False
         items.append('Call tools in parallel.')
-        items.append(f'OS: {args.KIMI_OS}, Work-Dir: {args.KIMI_WORK_DIR}')
+        items.append(f'OS: {args.KIMI_OS}')
         if args.KIMI_OS == 'Windows':
             items.append(r'Windows paths use backslashes (`\`). Always use `\` instead of `/` for file paths.')
         def worker_logic(role: str, is_sub_agent: bool = False):
