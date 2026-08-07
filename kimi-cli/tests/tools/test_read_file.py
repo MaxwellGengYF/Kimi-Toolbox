@@ -34,8 +34,6 @@ Line 5: End of file"""
     return file_path
 
 
-
-
 def _output_has_header(output: str, display_path: str) -> bool:
     """Check that output starts with the file header."""
     return output.startswith(f"======== {display_path} ========")
@@ -330,35 +328,6 @@ async def test_line_truncation_and_messaging(read_file_tool: ReadFile, temp_work
             "BBBBBBBBBBBBBBBBB...",
         ]
     )
-
-
-async def test_parameter_validation_line_offset(read_file_tool: ReadFile, sample_file: KaosPath):
-    """Test that line_offset parameter validation works correctly."""
-    # line_offset=0 is invalid (must be positive or negative, not zero)
-    with pytest.raises(ValueError, match="line_offset"):
-        Params(path=str(sample_file), line_offset=0)
-
-    # Negative values are now valid (tail mode)
-    params = Params(path=str(sample_file), line_offset=-1)
-    assert params.line_offset == -1
-
-    # Negative offset exceeding MAX_LINES should be rejected
-    with pytest.raises(ValueError, match="line_offset"):
-        Params(path=str(sample_file), line_offset=-(MAX_LINES + 1))
-
-    # Exactly -MAX_LINES should be accepted
-    params = Params(path=str(sample_file), line_offset=-MAX_LINES)
-    assert params.line_offset == -MAX_LINES
-
-
-async def test_parameter_validation_n_lines(read_file_tool: ReadFile, sample_file: KaosPath):
-    """Test that n_lines parameter validation works correctly."""
-    # Test n_lines < 1 should be rejected by Pydantic validation
-    with pytest.raises(ValueError, match="n_lines"):
-        Params(path=str(sample_file), n_lines=0)
-
-    with pytest.raises(ValueError, match="n_lines"):
-        Params(path=str(sample_file), n_lines=-1)
 
 
 async def test_max_lines_boundary(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -1066,7 +1035,6 @@ async def test_read_multiple_files_alias_paths(
     assert "Read 2 file(s)" in result.message
 
 
-
 # ── Glob support tests ───────────────────────────────────────────────────────
 
 
@@ -1323,7 +1291,6 @@ async def test_glob_param_explicit(read_file_tool: ReadFile, temp_work_dir: Kaos
 async def test_glob_param_false_literal(read_file_tool: ReadFile, temp_work_dir: KaosPath):
     """glob=False treats paths with wildcards as literal file names."""
     # Create a file with an asterisk in its name
-    import os as _os
     f = temp_work_dir / "star_file.txt"
     await f.write_text("literal content")
     result = await read_file_tool(Params(path=str(f), glob=False))

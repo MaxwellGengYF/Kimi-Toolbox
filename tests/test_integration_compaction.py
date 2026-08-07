@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
-from kosong.message import Message
-
 from kimi_cli.soul.compaction import (
     CompactionOptions,
-    CompactionResult,
     CompactMode,
     SimpleCompaction,
     adaptive_preserve_depth,
     should_auto_compact,
 )
 from kimi_cli.utils.tokens import count_message_tokens
-from kimi_cli.wire.types import TextPart, ThinkPart
-from kimix.tools.context import CompactParams
+from kimi_cli.wire.types import TextPart
+from kosong.message import Message
 
 
 class TestIntegrationCompaction:
@@ -63,7 +59,8 @@ class TestIntegrationCompaction:
     def test_system_prompt_stays_under_budget(self):
         from pathlib import Path
         from types import SimpleNamespace
-        from kimix.utils.system_prompt import get_system_prompt, SystemPromptType
+
+        from kimix.utils.system_prompt import SystemPromptType, get_system_prompt
 
         tmp_path = Path("/tmp/fake_work_dir")
         prompt_func = get_system_prompt(
@@ -165,22 +162,3 @@ class TestIntegrationCompaction:
         assert guidance_pos != -1
         assert instruction_pos != -1
         assert guidance_pos < instruction_pos
-
-
-class TestCompactParams:
-    """Unit tests for the Compact tool parameter schema."""
-
-    def test_defaults(self):
-        params = CompactParams()
-        assert params.instruction is None
-        assert params.mode == "auto"  # default resolves dynamically via model_validator
-
-    def test_accepts_all_modes(self):
-        for mode in CompactMode:
-            params = CompactParams(mode=mode)
-            assert params.mode == mode
-
-    def test_instruction_optional(self):
-        params = CompactParams(instruction="Keep the database schema")
-        assert params.instruction == "Keep the database schema"
-        assert params.mode == "auto"  # default resolves dynamically via model_validator

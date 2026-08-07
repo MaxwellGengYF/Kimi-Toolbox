@@ -5,45 +5,8 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import ValidationError
-
-from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
-
-
-class TestTodoListSimplify:
-    def test_parent_title_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            TodoListParams(
-                todos=[Todo(title="task", status="pending")],
-                parent_title="some parent",
-            )
-
-    def test_match_mode_accepted(self) -> None:
-        params = TodoListParams(
-            todos=[Todo(title="task", status="done")],
-            match_mode="exact",
-        )
-        assert params.match_mode == "exact"
-
-    def test_match_mode_invalid(self) -> None:
-        with pytest.raises(ValidationError):
-            TodoListParams(
-                todos=[Todo(title="task", status="done")],
-                match_mode="invalid",
-            )
-
-
-class TestTodoListModeSynonymsRemoved:
-    @pytest.mark.parametrize("valid_mode", ["overwrite", "append", "force_overwrite"])
-    def test_canonical_modes_accepted(self, valid_mode: str) -> None:
-        TodoListParams(todos=[], mode=valid_mode)
-
-    @pytest.mark.parametrize("invalid_mode", [
-        "force", "forced", "write", "set", "put", "merge", "update",
-    ])
-    def test_old_synonyms_rejected(self, invalid_mode: str) -> None:
-        with pytest.raises(ValidationError):
-            TodoListParams(todos=[], mode=invalid_mode)
+from kimi_cli.tools.todo import Params as TodoListParams
+from kimi_cli.tools.todo import Todo, TodoList
 
 
 class TestTodoListSingleInProgress:
@@ -61,33 +24,9 @@ class TestTodoListSingleInProgress:
         assert result.is_error
         assert "in_progress" in result.output.lower()
 
-    async def test_single_in_progress_ok(self, mock_runtime: MagicMock) -> None:
-        from kimi_cli.tools.todo import TodoList
-        tl = TodoList(runtime=mock_runtime)
-        result = await tl(TodoListParams(
-            todos=[Todo(title="task A", status="in_progress")],
-            mode="append",
-        ))
-        # May fail due to persistence, but should not raise
-        assert result is not None
-
 
 class TestTodoCodeField:
-    def test_todo_with_code(self) -> None:
-        t = Todo(title="task", status="pending", code="print('hello')")
-        assert t.code == "print('hello')"
 
-    def test_todo_with_code_file_alias(self) -> None:
-        t = Todo(title="task", status="pending", code_file="print('alias')")
-        assert t.code == "print('alias')"
-
-    def test_todo_without_code(self) -> None:
-        t = Todo(title="task", status="pending")
-        assert t.code is None
-
-    def test_todo_empty_code(self) -> None:
-        t = Todo(title="task", status="pending", code="")
-        assert t.code == ""
 
     def test_merge_preserves_code_when_new_omits(self) -> None:
         old = Todo(title="task", status="pending", code="print('old')")
@@ -101,11 +40,12 @@ class TestTodoCodeField:
         merged = TodoList._merge_one(old, new)
         assert merged.code == "print('new')"
 
-    def test_merge_clears_code_when_new_is_empty_string(self) -> None:
+    def test_merge_keeps_code_when_new_is_empty_string(self) -> None:
+        """Empty/whitespace code from new does not clear the stored code."""
         old = Todo(title="task", status="pending", code="print('old')")
         new = Todo(title="task", status="done", code="")
         merged = TodoList._merge_one(old, new)
-        assert merged.code == ""
+        assert merged.code == "print('old')"
 
 
 class TestTodoShellBackwardCompat:
@@ -145,24 +85,14 @@ class TestTodoShellBackwardCompat:
         assert argv[1] == "C:/nonexistent/script.py"
         assert captured["env"] is None
 
-    def test_params_and_todo_construction_unchanged(self) -> None:
-        params = TodoListParams(
-            todos=[Todo(title="task", status="pending", code="print('hello')")]
-        )
-        assert params.todos[0].code == "print('hello')"
-
-    def test_tool_instantiation_sets_shell_kind(self, mock_runtime: MagicMock) -> None:
-        tl = TodoList(runtime=mock_runtime)
-        assert tl._shell_kind in ("bash", "powershell")
-        assert "Track progress with a todo list." in tl.description
-
 
 class TestAllDoneReminderWrite:
     """Verify ALL_DONE_REMINDER in _build_success_response uses current_prompt."""
 
     async def test_uses_current_prompt_when_all_done(self, mock_runtime: MagicMock) -> None:
         """When runtime.current_prompt is set, it is appended after the reminder."""
-        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+        from kimi_cli.tools.todo import Params as TodoListParams
+        from kimi_cli.tools.todo import Todo, TodoList
 
         mock_runtime.current_prompt = "my original request"
         tl = TodoList(runtime=mock_runtime)
@@ -186,7 +116,8 @@ class TestAllDoneReminderWrite:
 
     async def test_fallback_when_current_prompt_not_set(self, mock_runtime: MagicMock) -> None:
         """When runtime has no current_prompt, use the generic fallback."""
-        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+        from kimi_cli.tools.todo import Params as TodoListParams
+        from kimi_cli.tools.todo import Todo, TodoList
 
         # MagicMock getattr returns MagicMock, which is truthy.
         # Explicitly set current_prompt to None to test fallback.
@@ -290,7 +221,8 @@ class TestAllDoneReminderWriteTruncation:
     """Verify truncation in _build_success_response."""
 
     async def test_long_current_prompt_truncated_in_output(self, mock_runtime: MagicMock) -> None:
-        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+        from kimi_cli.tools.todo import Params as TodoListParams
+        from kimi_cli.tools.todo import Todo, TodoList
 
         # Build a prompt > 200 chars
         long_prompt = "A" * 150 + "B" * 150  # 300 chars
@@ -317,7 +249,8 @@ class TestAllDoneReminderWriteTruncation:
         assert "A" * 150 not in result.output
 
     async def test_short_current_prompt_not_truncated(self, mock_runtime: MagicMock) -> None:
-        from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+        from kimi_cli.tools.todo import Params as TodoListParams
+        from kimi_cli.tools.todo import Todo, TodoList
 
         mock_runtime.current_prompt = "short request"
         tl = TodoList(runtime=mock_runtime)

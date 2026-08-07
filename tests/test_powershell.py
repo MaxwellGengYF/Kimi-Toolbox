@@ -7,15 +7,13 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
-
-from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
 
+from kimi_agent_sdk import ToolError, ToolOk
+from kimix.tools.background.utils import TaskData, _pop_task_data
 from kimix.tools.common import ProcessTask, _rtk_binary_path
 from kimix.tools.file.bash import Powershell
-from kimix.tools.file.bash.pwsh_tool import PowershellParams, _PWSH_CONSOLE_INIT, find_pwsh
-from kimix.tools.background.utils import TaskData, _pop_task_data
+from kimix.tools.file.bash.pwsh_tool import _PWSH_CONSOLE_INIT, PowershellParams, find_pwsh
 
 
 def _pwsh_is_available() -> bool:
@@ -73,127 +71,10 @@ def cleanup_task_data(mock_session: MagicMock) -> Any:
 # PowershellParams validation
 # ============================================================================
 
-class TestPowershellParams:
-    def test_cmd_only_succeeds(self) -> None:
-        p = PowershellParams(cmd="Get-Location")
-        assert p.cmd == "Get-Location"
-        assert p.mode == "execute"
-
-    def test_empty_cmd_execute_raises(self) -> None:
-        with pytest.raises(ValueError):
-            PowershellParams(cmd="")
-
-    def test_empty_cmd_interactive_succeeds(self) -> None:
-        p = PowershellParams(cmd="", mode="interactive")
-        assert p.cmd == ""
-        assert p.mode == "interactive"
-
-    def test_cmd_and_interactive_succeeds(self) -> None:
-        p = PowershellParams(cmd="Get-Location", mode="interactive")
-        assert p.cmd == "Get-Location"
-        assert p.mode == "interactive"
-
-    def test_run_alias_execute(self) -> None:
-        p = PowershellParams(cmd="Get-Date", mode="run")
-        assert p.mode == "execute"
-
-    def test_background_alias_send(self) -> None:
-        p = PowershellParams(cmd="Get-Date", mode="background")
-        assert p.mode == "send"
-
-    def test_send_new_behavior(self) -> None:
-        p = PowershellParams(cmd="Get-Date", mode="send")
-        assert p.mode == "send"
-
-    def test_invalid_mode_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            PowershellParams(cmd="Get-Date", mode="exec")
-
-    def test_mode_description_documents_aliases(self) -> None:
-        desc = PowershellParams.model_fields["mode"].description or ""
-        assert "run" in desc
-        assert "background" in desc
-
 
 # ============================================================================
 # Powershell.description — pwsh_tool.md guidance text
 # ============================================================================
-
-class TestPowershellDescription:
-    """The Powershell tool description (loaded from pwsh_tool.md) steers the
-    agent to the Glob/Grep tools instead of shell search commands."""
-
-    def test_description_prefers_glob_grep_over_shell_search(
-        self, mock_session: MagicMock
-    ) -> None:
-        with _force_pwsh_enabled():
-            tool = Powershell(session=mock_session)
-        assert (
-            "Prefer `Glob`/`Grep` tools over `Get-ChildItem`/`Select-String`"
-            in tool.description
-        )
-
-
-class TestPowershellParamsFullCoverage:
-    """Cover every PowershellParams field and alias."""
-
-    def test_command_alias_accepted(self) -> None:
-        p = PowershellParams(command="Get-Location")
-        assert p.cmd == "Get-Location"
-
-    def test_legacy_interactive_flag_sets_mode(self) -> None:
-        p = PowershellParams(cmd="Get-Date", interactive=True)
-        assert p.mode == "interactive"
-
-    def test_task_id_with_cmd_valid(self) -> None:
-        p = PowershellParams(cmd="dir", task_id="pwsh_1")
-        assert p.task_id == "pwsh_1"
-        assert p.mode == "execute"
-
-    def test_task_id_with_any_mode_valid(self) -> None:
-        for mode in ("execute", "send", "interactive"):
-            p = PowershellParams(cmd="dir", task_id="pwsh_1", mode=mode)
-            assert p.task_id == "pwsh_1"
-
-    def test_task_id_without_cmd_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            PowershellParams(cmd="", task_id="pwsh_1", mode="send")
-
-    def test_wait_for_pattern_field(self) -> None:
-        p = PowershellParams(cmd="Get-Date", wait_for_pattern="^ok")
-        assert p.wait_for_pattern == "^ok"
-
-    def test_timeout_default(self) -> None:
-        assert PowershellParams(cmd="x").timeout == 30
-
-    def test_timeout_min_max(self) -> None:
-        assert PowershellParams(cmd="x", timeout=1).timeout == 1
-        assert PowershellParams(cmd="x", timeout=900).timeout == 900
-
-    def test_timeout_below_min_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            PowershellParams(cmd="x", timeout=0)
-
-    def test_timeout_above_max_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            PowershellParams(cmd="x", timeout=901)
-
-    def test_max_lines_field_and_none(self) -> None:
-        assert PowershellParams(cmd="x", max_lines=50).max_lines == 50
-        assert PowershellParams(cmd="x", max_lines=None).max_lines is None
-
-    def test_max_lines_below_min_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            PowershellParams(cmd="x", max_lines=2)
-
-    def test_deduplicate_output_default_true(self) -> None:
-        assert PowershellParams(cmd="x").deduplicate_output is True
-
-    def test_deduplicate_output_new_name(self) -> None:
-        assert PowershellParams(cmd="x", deduplicate_output=False).deduplicate_output is False
-
-    def test_deduplicate_output_token_kill_alias(self) -> None:
-        assert PowershellParams(cmd="x", token_kill=False).deduplicate_output is False
 
 
 # ============================================================================

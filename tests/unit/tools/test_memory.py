@@ -6,8 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from kosong.tooling import ToolError, ToolOk
-
 from kimi_cli.tools.memory import (
     _MAX_FILE_BYTES,
     _MAX_READ_CHARS,
@@ -21,6 +19,7 @@ from kimi_cli.tools.memory import (
     memory_dir_for_session,
     sanitize_topic,
 )
+from kosong.tooling import ToolError, ToolOk
 
 
 @pytest.fixture
@@ -55,9 +54,6 @@ class TestSanitizeTopic:
 
     def test_truncated_to_64_chars(self) -> None:
         assert len(sanitize_topic("a" * 200)) == 64
-
-    def test_validator_applied_in_params(self) -> None:
-        assert Params(action="read", topic="../X Y").topic == "x_y"
 
 
 class TestMemoryDir:

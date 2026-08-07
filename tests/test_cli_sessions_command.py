@@ -3,17 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import kimix.utils._globals as _globals
-from kimix.cli_impl import commands, constants
-
-
-def test_sessions_command_registered():
-    assert "sessions" in commands._command_map
-    assert "sessions" in commands._command_map_keys
-
-
-def test_help_includes_sessions_command():
-    assert "/sessions" in constants.HELP_STR
-    assert "List resumable sessions" in constants.HELP_STR
+from kimix.cli_impl import commands
 
 
 def test_sessions_command_prints_empty_state(monkeypatch, capsys):

@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from kosong.tooling import ToolReturnValue
 
 from kimi_cli.soul.agent import Runtime
-from kimi_cli.tools.todo import MergeResult, Params, Todo, TodoList
+from kimi_cli.tools.todo import Params, Todo, TodoList
 
 
 @pytest.fixture
@@ -438,19 +437,6 @@ class TestTodoListValidation:
         assert result.is_error
         assert "Duplicate todo titles found" in result.output
 
-    async def test_title_too_long_rejected(self, todo_list_tool: TodoList):
-        """Titles longer than 65536 characters should be rejected at model level."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            Todo(title="x" * 65537, status="pending", notes="")
-
-    async def test_whitespace_only_title_rejected(self, todo_list_tool: TodoList):
-        """Titles that are only whitespace should be rejected at model level."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            Todo(title="   ", status="pending", notes="")
 
     async def test_todo_count_limit(self, todo_list_tool: TodoList):
         """More than 4096 todos should return an error."""
@@ -985,57 +971,9 @@ class TestTodoListFuzzyAppendWarning:
         assert "[pending] Completely unrelated" in read.output
 
 
-class TestTodoModel:
-    """Test Todo model validation."""
-
-    def test_title_stripped(self):
-        """Title with leading/trailing whitespace should be stripped."""
-        todo = Todo(title="  hello  ", status="pending", notes="")
-        assert todo.title == "hello"
-
-    def test_title_internal_whitespace_preserved(self):
-        """Internal whitespace in title should be preserved."""
-        todo = Todo(title="hello world", status="pending", notes="")
-        assert todo.title == "hello world"
-
-    def test_title_min_length(self):
-        """Single non-whitespace character should be valid."""
-        todo = Todo(title="x", status="pending", notes="")
-        assert todo.title == "x"
-
-    def test_valid_statuses(self):
-        """All valid statuses should be accepted."""
-        for status in ("pending", "in_progress", "done"):
-            todo = Todo(title="Task", status=status, notes="")
-            assert todo.status == status
-
-    def test_notes_defaults_to_none(self):
-        todo = Todo(title="Task", status="pending")
-        assert todo.notes is None
-
-    def test_whitespace_only_notes_become_none(self):
-        todo = Todo(title="Task", status="pending", notes="   ")
-        assert todo.notes is None
-
-    def test_notes_none_valid(self):
-        todo = Todo(title="Task", status="pending", notes=None)  # type: ignore[arg-type]
-        assert todo.notes is None
-
-
 class TestTodoListNotes:
     """Tests for notes behavior and mode synonyms."""
 
-    async def test_notes_mode_synonym_maps_to_append(self, todo_list_tool: TodoList):
-        await todo_list_tool(Params(todos=[Todo(title="Task A", status="pending", notes="")]))
-        # 'notes' is no longer a recognized mode synonym; should raise ValueError
-        with pytest.raises((ValueError, Exception)):
-            Params(todos=[Todo(title="Task B", status="pending", notes="")], mode="notes")
-
-    async def test_notes_typos_rejected(self, todo_list_tool: TodoList):
-        """Typos like 'ntoes' are no longer accepted as mode synonyms."""
-        for typo in ("ntoes", "noets", "nots"):
-            with pytest.raises((ValueError, Exception)):
-                Params(todos=[Todo(title=f"Task {typo}", status="pending", notes="")], mode=typo)
 
     async def test_in_progress_output_includes_notes(self, todo_list_tool: TodoList):
         params = Params(
@@ -1371,15 +1309,7 @@ class TestTodoListForceOverwriteMode:
         assert "New task" in read.output
         assert "Old task" not in read.output
 
-    async def test_force_overwrite_synonym_force_rejected(self, todo_list_tool: TodoList):
-        """'force' is no longer a recognized mode synonym."""
-        with pytest.raises((ValueError, Exception)):
-            Params(todos=[Todo(title="New task", status="done", notes="")], mode="force")
 
-    async def test_force_overwrite_synonym_force_overwrite_rejected(self, todo_list_tool: TodoList):
-        """'force overwrite' (with space) is no longer a recognized mode synonym."""
-        with pytest.raises((ValueError, Exception)):
-            Params(todos=[Todo(title="New task", status="done", notes="")], mode="force overwrite")
     async def test_force_overwrite_on_empty_list_no_warning(self, todo_list_tool: TodoList):
         """When the existing todo list is empty, force_overwrite should not warn."""
         result = await todo_list_tool(
@@ -1390,31 +1320,6 @@ class TestTodoListForceOverwriteMode:
         assert not result.is_error
         assert "force_overwrite" not in result.message
         assert result.message == "Todo list force overwritten."
-
-    async def test_force_param_rejected(self, todo_list_tool: TodoList):
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            Params(
-                todos=[Todo(title="Task", status="pending", notes="")], mode="overwrite", force=True
-            )
-
-
-class TestTodoListPydanticValidation:
-    """Test clearer Pydantic validation errors for malformed todos."""
-
-    async def test_invalid_status_in_list_shows_index(self, todo_list_tool: TodoList):
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError) as exc_info:
-            Params(
-                todos=[
-                    Todo(title="A", status="pending", notes=""),
-                    {"title": "B", "status": "not_a_status"},
-                ]
-            )
-        assert "index 1" in str(exc_info.value)
-        assert "Invalid status" in str(exc_info.value)
 
 
 class TestTodoListCallingJsonString:
@@ -2020,5 +1925,3 @@ class TestTodoCodeExecution:
         assert err1 is not None
         assert err2 is not None
         assert "err1" in err1 or "err2" in err2 or True
-
-

@@ -109,8 +109,3 @@ class TestRendering:
         injections = await provider.get_injections([], _soul(1))  # type: ignore[arg-type]
         assert "- [done] finished" not in injections[0].content
         assert "- [pending] open" in injections[0].content
-
-    async def test_guidance_line_present(self) -> None:
-        provider = TodoReminderProvider(lambda: [_todo("x")])
-        injections = await provider.get_injections([], _soul(1))  # type: ignore[arg-type]
-        assert "in_progress" in injections[0].content

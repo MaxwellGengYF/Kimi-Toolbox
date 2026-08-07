@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kimix.tools.common import ProcessTask
 from kimix.tools.background.utils import _pop_task_data
+from kimix.tools.common import ProcessTask
 
 
 @pytest.fixture
@@ -29,30 +29,6 @@ def cleanup_task_data(mock_session: MagicMock) -> Any:
 # ---------------------------------------------------------------------------
 # Construction / __init__
 # ---------------------------------------------------------------------------
-def test_init_stores_attributes() -> None:
-    with patch("shutil.which", return_value=None):
-        task = ProcessTask("my_tool", ["-c", "print(1)"], cwd="/tmp")
-        assert task.path == "my_tool"
-        assert task.args == ["-c", "print(1)"]
-        assert task.cwd == "/tmp"
-        assert task.task_id is None
-        assert task.stream is None
-
-
-def test_init_defaults() -> None:
-    task = ProcessTask("python")
-    assert task.args == []
-    assert task.cwd is None
-
-
-def test_init_keeps_existing_path() -> None:
-    task = ProcessTask(sys.executable)
-    assert task.path == sys.executable
-
-
-def test_init_no_resolution_for_missing() -> None:
-    task = ProcessTask("totally_fake_cmd_12345")
-    assert task.path == "totally_fake_cmd_12345"
 
 
 # ---------------------------------------------------------------------------

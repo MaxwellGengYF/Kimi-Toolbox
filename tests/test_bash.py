@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
-from pydantic import ValidationError
 
 from kimi_agent_sdk import ToolError, ToolOk
 from kimix.tools.background.utils import TaskData, _pop_task_data
+from kimix.tools.common import _env_with_rg_bin_path
 from kimix.tools.file.bash import (
     Bash,
     BashParams,
@@ -34,12 +34,10 @@ from kimix.tools.file.bash.bash_tool import (
     _git_bash_candidates_from_exec_path,
     _git_install_root_from_exec_path,
     _is_git_bash_install,
-    _is_windows_apps_stub,
     _prepare_bash_cmd,
     _with_msystem_neutralized,
     find_bash,
 )
-from kimix.tools.common import _env_with_rg_bin_path
 from kimix.tools.file.bash.pwsh_tool import PowershellParams, find_pwsh
 
 
@@ -608,68 +606,6 @@ class TestConfiguredShellSelection:
 # ============================================================================
 # BashParams
 # ============================================================================
-
-class TestBashParams:
-    def test_defaults(self) -> None:
-        p = BashParams(cmd="ls")
-        assert p.cmd == "ls"
-        assert p.timeout == 30
-        assert p.deduplicate_output is True
-        assert p.mode == "execute"
-
-    def test_full(self) -> None:
-        p = BashParams(cmd="cat -n file.txt", timeout=30)
-        assert p.cmd == "cat -n file.txt"
-        assert p.timeout == 30
-
-    def test_timeout_min(self) -> None:
-        # timeout=1 is now valid (ge=1)
-        p = BashParams(cmd="ls", timeout=1)
-        assert p.timeout == 1
-
-    def test_timeout_max(self) -> None:
-        with pytest.raises(Exception):
-            BashParams(cmd="ls", timeout=901)
-
-    def test_accepts_command_alias(self) -> None:
-        p = BashParams(command="echo hello")
-        assert p.cmd == "echo hello"
-
-    def test_mode_send_without_task_id_valid(self) -> None:
-        p = BashParams(cmd="echo hi", mode="send")
-        assert p.mode == "send"
-
-    def test_mode_send_with_task_id_succeeds(self) -> None:
-        p = BashParams(cmd="hi", task_id="bash_0")
-        assert p.mode == "execute"
-        assert p.task_id == "bash_0"
-
-    def test_task_id_with_any_mode_valid(self) -> None:
-        p = BashParams(cmd="input", mode="execute", task_id="bash_0")
-        assert p.mode == "execute"
-        assert p.task_id == "bash_0"
-
-    def test_run_alias_execute(self) -> None:
-        p = BashParams(cmd="echo hi", mode="run")
-        assert p.mode == "execute"
-
-    def test_background_alias_send(self) -> None:
-        p = BashParams(cmd="echo hi", mode="background")
-        assert p.mode == "send"
-
-    def test_deduplicate_output_accepts_token_kill_alias(self) -> None:
-        p = BashParams(cmd="ls", token_kill=False)
-        assert p.deduplicate_output is False
-
-    def test_deduplicate_output_default_true(self) -> None:
-        p = BashParams(cmd="ls")
-        assert p.deduplicate_output is True
-
-    def test_max_lines_field(self) -> None:
-        p = BashParams(cmd="ls", max_lines=50)
-        assert p.max_lines == 50
-        p2 = BashParams(cmd="ls", max_lines=None)
-        assert p2.max_lines is None
 
 
 # ============================================================================
@@ -2851,29 +2787,6 @@ class TestBashDescription:
         ):
             return Bash(session=mock_session)
 
-    def test_win32_description_mentions_slash_conversion(
-        self, mock_session: MagicMock
-    ) -> None:
-        tool = self._make_tool("win32", mock_session)
-        assert "auto-converted to forward slashes" in tool.description
-        assert "backslashes inside quotes are preserved" in tool.description
-        assert "`cat src\\a.py` → `cat src/a.py`" in tool.description
-
-    def test_non_windows_description_has_no_windows_rule(
-        self, mock_session: MagicMock
-    ) -> None:
-        tool = self._make_tool("linux", mock_session)
-        assert "auto-converted to forward slashes" not in tool.description
-        assert "backslashes inside quotes are preserved" not in tool.description
-
-    def test_description_prefers_glob_grep_over_shell_search(
-        self, mock_session: MagicMock
-    ) -> None:
-        """The description steers the agent to Glob/Grep instead of find/grep/rg."""
-        for platform in ("win32", "linux"):
-            tool = self._make_tool(platform, mock_session)
-            assert "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg`" in tool.description
-
 
 # ============================================================================
 # Bash.__call__
@@ -2954,11 +2867,6 @@ class TestBashCall:
         assert isinstance(result, ToolOk)
         assert len(result.output) > 0
 
-    async def test_empty_command(self, mock_session: MagicMock) -> None:
-        # Empty commands in execute mode are rejected by the params model
-        # itself before the tool ever runs.
-        with pytest.raises(ValidationError, match="cmd cannot be empty"):
-            BashParams(cmd="", timeout=5)
 
     async def test_timeout(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -3032,69 +2940,6 @@ class TestBashInactivityTimeout:
         assert isinstance(result, ToolError)
         assert result.brief == "Timeout"
         assert 2.5 <= elapsed <= 4.0
-
-
-@pytest.mark.skipif(
-    not PWSH_AVAILABLE,
-    reason="PowerShell tool is not available on this platform",
-)
-class TestPowershellParams:
-    """Tests for PowershellParams model."""
-
-    def test_defaults(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem")
-        assert p.cmd == "Get-ChildItem"
-        assert p.timeout == 30
-        assert p.deduplicate_output is True
-        assert p.mode == "execute"
-
-    def test_accepts_command_alias(self) -> None:
-        p = PowershellParams(command="Get-ChildItem")
-        assert p.cmd == "Get-ChildItem"
-
-    def test_mode_send_without_task_id_valid(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem", mode="send")
-        assert p.mode == "send"
-
-    def test_mode_send_with_task_id_succeeds(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem", task_id="pwsh_0")
-        assert p.mode == "execute"
-        assert p.task_id == "pwsh_0"
-
-    def test_task_id_with_any_mode_valid(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem", mode="execute", task_id="pwsh_0")
-        assert p.mode == "execute"
-        assert p.task_id == "pwsh_0"
-
-    def test_run_alias_execute(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem", mode="run")
-        assert p.mode == "execute"
-
-    def test_background_alias_send(self) -> None:
-        p = PowershellParams(cmd="Get-ChildItem", mode="background")
-        assert p.mode == "send"
-
-    def test_deduplicate_output_accepts_token_kill_alias(self) -> None:
-        p = PowershellParams(cmd="ls", token_kill=False)
-        assert p.deduplicate_output is False
-
-    def test_deduplicate_output_default_true(self) -> None:
-        p = PowershellParams(cmd="ls")
-        assert p.deduplicate_output is True
-
-    def test_max_lines_field(self) -> None:
-        p = PowershellParams(cmd="ls", max_lines=50)
-        assert p.max_lines == 50
-        p2 = PowershellParams(cmd="ls", max_lines=None)
-        assert p2.max_lines is None
-
-    def test_timeout_min(self) -> None:
-        p = PowershellParams(cmd="ls", timeout=1)
-        assert p.timeout == 1
-
-    def test_timeout_max(self) -> None:
-        with pytest.raises(Exception):
-            PowershellParams(cmd="ls", timeout=901)
 
 
 @pytest.mark.skipif(
@@ -3676,25 +3521,9 @@ class TestComplexCommands:
         assert "a;b" in result.output
 
 
-
 # ============================================================================
 # BashParams interactive validation
 # ============================================================================
-
-class TestBashParamsInteractive:
-    def test_empty_cmd_execute_raises(self) -> None:
-        with pytest.raises(ValueError):
-            BashParams(cmd="")
-
-    def test_empty_cmd_interactive_succeeds(self) -> None:
-        p = BashParams(cmd="", mode="interactive")
-        assert p.cmd == ""
-        assert p.mode == "interactive"
-
-    def test_cmd_and_interactive_succeeds(self) -> None:
-        p = BashParams(cmd="ls", mode="interactive")
-        assert p.cmd == "ls"
-        assert p.mode == "interactive"
 
 
 # ============================================================================

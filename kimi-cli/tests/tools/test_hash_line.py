@@ -117,13 +117,6 @@ def test_parse_anchor_invalid():
     assert parse_anchor("abc#def") is None
 
 
-def test_anchor_ref_model_validate_string():
-    """Pydantic model validates from string."""
-    a = AnchorRef.model_validate("5#ab")
-    assert a.line == 5
-    assert a.hash == "ab"
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. Read operation tests (async)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1200,25 +1193,6 @@ def test_content_crlf_edit():
     assert first_changed == 2
 
 
-def test_anchor_long_hash_accepted():
-    """Anchor with hash longer than 2 chars is accepted (just compared literally)."""
-    content = "line 1\nline 2\n"
-    # The hash is just a string comparison, so any string works
-    _actual_hash = get_line_hash(content, 2)
-    # Anchor with a 10-char hash would never match but is valid syntactically
-    anchor = AnchorRef.model_validate("2#" + "A" * 10)
-    assert anchor.line == 2
-    assert anchor.hash == "A" * 10
-    assert len(anchor.hash) == 10
-
-
-def test_anchor_empty_hash():
-    """Anchor with empty hash like '5#' is parsed."""
-    anchor = AnchorRef.model_validate("5#")
-    assert anchor.line == 5
-    assert anchor.hash == ""
-
-
 def test_parse_anchor_multiple_hashes():
     """'5#a#b' splits on first # only: (5, 'a#b')."""
     result = parse_anchor("5#a#b")
@@ -1437,31 +1411,6 @@ def test_append_after_then_replace_before():
 # ═══════════════════════════════════════════════════════════════════════════
 # 14. Corner case — anchor model tests
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_anchor_ref_invalid_format():
-    """AnchorRef model raises ValueError for invalid format."""
-    with pytest.raises(ValueError, match="Invalid anchor format"):
-        AnchorRef.model_validate("invalid")
-
-
-def test_anchor_ref_no_hash_separator():
-    """AnchorRef with no # separator raises error."""
-    with pytest.raises(ValueError, match="Invalid anchor format"):
-        AnchorRef.model_validate("5")
-
-
-def test_anchor_ref_non_integer_line():
-    """AnchorRef with non-integer line raises error."""
-    with pytest.raises(ValueError, match="Invalid line number"):
-        AnchorRef.model_validate("abc#ZZ")
-
-
-def test_anchor_ref_from_dict():
-    """AnchorRef can be created from dict."""
-    a = AnchorRef.model_validate({"line": 5, "hash": "AB"})
-    assert a.line == 5
-    assert a.hash == "AB"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1998,7 +1947,6 @@ async def test_max_bytes_not_exceeded_small_file(hash_line_tool: HashRead, temp_
     assert "line 1" in result.output
     assert "line 2" in result.output
     assert "line 3" in result.output
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════

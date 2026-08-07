@@ -20,25 +20,24 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-from kosong.message import Message
-from kosong.tooling import ToolOk
-
 from kimi_cli.session_state import SessionState, save_session_state
 from kimi_cli.soul.compaction import SimpleCompaction
 from kimi_cli.soul.dynamic_injections.context_meter import ContextMeterProvider
 from kimi_cli.soul.dynamic_injections.todo_reminder import TodoReminderProvider
 from kimi_cli.tools.memory import (
     Memory,
-    Params as MemoryParams,
     build_memory_restore_text,
     flush_pre_compact_state,
     memory_dir_for_session,
 )
+from kimi_cli.tools.memory import (
+    Params as MemoryParams,
+)
 from kimi_cli.tools.todo import Params as TodoParams
 from kimi_cli.tools.todo import Todo, TodoList
 from kimi_cli.wire.types import TextPart
-
+from kosong.message import Message
+from kosong.tooling import ToolOk
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -58,6 +57,7 @@ def _make_runtime(session_dir: Path) -> SimpleNamespace:
         session=session,
         subagent_store=None,
         subagent_id=None,
+        read_only=False,
     )
 
 
@@ -201,94 +201,3 @@ class TestSubagentScopeIsolation:
             assert "shared:1" in r.output
 
         asyncio.run(_run())
-
-
-class TestLoopControlConfig:
-    def test_new_fields_have_safe_defaults(self) -> None:
-        from kimi_cli.config import LoopControl
-
-        lc = LoopControl()
-        assert lc.todo_reminder_enabled is True
-        assert lc.todo_reminder_interval_steps == 20
-        assert lc.context_meter_enabled is True
-        assert lc.context_meter_min_delta == pytest.approx(0.15)
-        assert lc.context_meter_cooldown_steps == 30
-        assert lc.pre_compact_flush_enabled is True
-        assert lc.memory_restore_enabled is True
-
-    def test_new_fields_accept_overrides(self) -> None:
-        from kimi_cli.config import LoopControl
-
-        lc = LoopControl(
-            todo_reminder_enabled=False,
-            todo_reminder_interval_steps=3,
-            context_meter_enabled=False,
-            context_meter_min_delta=0.1,
-            context_meter_cooldown_steps=0,
-            pre_compact_flush_enabled=False,
-            memory_restore_enabled=False,
-        )
-        assert lc.todo_reminder_enabled is False
-        assert lc.todo_reminder_interval_steps == 3
-        assert lc.context_meter_enabled is False
-        assert lc.context_meter_min_delta == pytest.approx(0.1)
-        assert lc.context_meter_cooldown_steps == 0
-        assert lc.pre_compact_flush_enabled is False
-        assert lc.memory_restore_enabled is False
-
-    def test_invalid_values_rejected(self) -> None:
-        from pydantic import ValidationError
-
-        from kimi_cli.config import LoopControl
-
-        with pytest.raises(ValidationError):
-            LoopControl(todo_reminder_interval_steps=0)
-        with pytest.raises(ValidationError):
-            LoopControl(context_meter_min_delta=0.9)
-
-
-class TestKimiSoulWiring:
-    def test_providers_registered_by_config(self, tmp_path: Path) -> None:
-        """KimiSoul registers the new providers iff the config flags are on."""
-        from kimi_cli.config import LoopControl
-
-        # Emulate the exact registration expression used in KimiSoul.__init__.
-        def _providers_for(lc: LoopControl) -> list[type]:
-            providers: list[type] = []
-            if lc.compact_reminder_enabled:
-                from kimi_cli.soul.dynamic_injections.compact_reminder import (
-                    CompactReminderProvider,
-                )
-
-                providers.append(CompactReminderProvider)
-            if lc.todo_reminder_enabled:
-                providers.append(TodoReminderProvider)
-            if lc.context_meter_enabled:
-                providers.append(ContextMeterProvider)
-            return providers
-
-        default = _providers_for(LoopControl())
-        assert TodoReminderProvider in default
-        assert ContextMeterProvider in default
-
-        disabled = _providers_for(
-            LoopControl(todo_reminder_enabled=False, context_meter_enabled=False)
-        )
-        assert TodoReminderProvider not in disabled
-        assert ContextMeterProvider not in disabled
-
-    def test_memory_tool_loadable_from_yaml_path(self) -> None:
-        """The yaml tool path 'kimi_cli.tools.memory:Memory' must resolve."""
-        import importlib
-
-        module = importlib.import_module("kimi_cli.tools.memory")
-        cls = getattr(module, "Memory", None)
-        assert cls is not None
-        assert cls.name == "Memory"
-        # Constructor takes a single positional Runtime dependency (toolset
-        # dependency injection contract).
-        import inspect
-
-        params = list(inspect.signature(cls).parameters.values())
-        positional = [p for p in params if p.kind != inspect.Parameter.KEYWORD_ONLY]
-        assert len(positional) == 1

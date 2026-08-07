@@ -2,21 +2,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
-from kimix.cli_impl import commands, constants
+from kimix.cli_impl import commands
 from kimix.utils.system_prompt import SystemPromptType
-
-
-def test_swarm_command_registered():
-    assert "swarm" in commands._command_map
-    assert "swarm" in commands._command_map_keys
-    assert commands._command_arg_types.get("swarm") == "swarm"
-
-
-def test_help_includes_swarm_command():
-    assert "/swarm" in constants.HELP_STR
-    assert "swarm" in constants.HELP_STR.lower()
 
 
 def test_swarm_command_cancelled(monkeypatch, capsys):

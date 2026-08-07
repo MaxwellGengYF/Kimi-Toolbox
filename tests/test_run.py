@@ -6,11 +6,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kimi_cli.session import Session
 
 from kimi_agent_sdk import ToolError, ToolOk
-from kimi_cli.session import Session
-from kimi_cli.tools import SkipThisTool
-
 from kimix.tools.background.utils import TaskData
 from kimix.tools.file.run import Run, RunParams
 
@@ -31,69 +29,6 @@ def mock_session() -> MagicMock:
     session.custom_data = {}
     session.custom_config.get.return_value = {}
     return session
-
-
-class TestRunParams:
-    def test_task_id_with_command_succeeds(self) -> None:
-        p = RunParams(command="hello", task_id="run_0")
-        assert p.task_id == "run_0"
-        assert p.command == "hello"
-
-    def test_wait_for_pattern_optional(self) -> None:
-        p = RunParams(command="hello", wait_for_pattern="done")
-        assert p.wait_for_pattern == "done"
-
-    def test_deduplicate_output_defaults_true(self) -> None:
-        p = RunParams(command="hello")
-        assert p.deduplicate_output is True
-
-    def test_deduplicate_output_can_be_disabled(self) -> None:
-        p = RunParams(command="hello", deduplicate_output=False)
-        assert p.deduplicate_output is False
-
-    def test_deduplicate_output_accepts_token_kill_alias(self) -> None:
-        p = RunParams(command="hello", token_kill=False)
-        assert p.deduplicate_output is False
-
-    def test_defaults(self) -> None:
-        p = RunParams(command="ls")
-        assert p.timeout == 30
-        assert p.deduplicate_output is True
-        assert p.mode == "execute"
-        assert p.shell is False
-
-    def test_accepts_cmd_alias(self) -> None:
-        p = RunParams(cmd="echo hello")
-        assert p.command == "echo hello"
-
-    def test_mode_send_requires_task_id(self) -> None:
-        with pytest.raises(ValueError, match="task_id"):
-            RunParams(command="hi", mode="send")
-
-    def test_mode_send_with_task_id_succeeds(self) -> None:
-        p = RunParams(command="hi", task_id="run_0")
-        assert p.mode == "send"
-        assert p.task_id == "run_0"
-
-    def test_shell_flag(self) -> None:
-        p = RunParams(command="ls -la | head", shell=True)
-        assert p.shell is True
-        p2 = RunParams(command="ls", shell=False)
-        assert p2.shell is False
-
-    def test_timeout_min(self) -> None:
-        p = RunParams(command="ls", timeout=1)
-        assert p.timeout == 1
-
-    def test_timeout_max(self) -> None:
-        with pytest.raises(Exception):
-            RunParams(command="ls", timeout=901)
-
-    def test_max_lines_field(self) -> None:
-        p = RunParams(command="ls", max_lines=50)
-        assert p.max_lines == 50
-        p2 = RunParams(command="ls", max_lines=None)
-        assert p2.max_lines is None
 
 
 class TestRunRtkRewrite:

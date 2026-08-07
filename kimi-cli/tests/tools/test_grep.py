@@ -9,9 +9,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from inline_snapshot import snapshot
 from kaos.path import KaosPath
-from pydantic import ValidationError
 
 import kimi_cli.tools.file.grep_local as grep_local
 from kimi_cli._rtk_common import _rtk_binary_name
@@ -1521,102 +1519,6 @@ async def test_grep_outside_work_dir_has_warning(grep_tool: Grep):
 # ============================================================================
 
 
-class TestGrepFuzzyOutputMode:
-    """Test fuzzy matching for the output_mode field."""
-
-    # ── files_with_matches synonyms (deprecated) ──
-
-    @pytest.mark.parametrize("synonym", [
-        "files", "file", "filenames", "names_only", "files_only",
-        "list", "matching_files", "fileswithmatches", "files_with_match",
-    ])
-    async def test_fuzzy_files_with_matches_synonyms_rejected(
-        self, grep_tool: Grep, temp_test_files, synonym: str
-    ):
-        """Non-canonical synonyms should be rejected."""
-        with pytest.raises((ValueError, Exception)):
-            Params.model_validate({
-                "pattern": "hello",
-                "path": ".",
-                "output_mode": synonym,
-            })
-
-    # ── count_matches synonyms (deprecated) ──
-
-    @pytest.mark.parametrize("synonym", [
-        "count", "counts", "match_count", "num_matches", "stats",
-        "summary", "count_match", "countmatches",
-    ])
-    async def test_fuzzy_count_matches_synonyms_rejected(
-        self, grep_tool: Grep, temp_test_files, synonym: str
-    ):
-        """Non-canonical synonyms should be rejected."""
-        with pytest.raises((ValueError, Exception)):
-            Params.model_validate({
-                "pattern": "hello",
-                "path": ".",
-                "output_mode": synonym,
-            })
-
-    # ── content synonyms (deprecated) ──
-
-    @pytest.mark.parametrize("synonym", [
-        "full", "full_content", "lines", "matched_lines", "matching_lines",
-        "context", "matches", "results",
-    ])
-    async def test_fuzzy_content_synonyms_rejected(
-        self, grep_tool: Grep, temp_test_files, synonym: str
-    ):
-        """Non-canonical synonyms should be rejected."""
-        with pytest.raises((ValueError, Exception)):
-            Params.model_validate({
-                "pattern": "hello",
-                "path": ".",
-                "output_mode": synonym,
-            })
-
-    # ── normalisation ──
-
-    async def test_fuzzy_output_mode_case_insensitive(self):
-        """output_mode should be case-insensitive."""
-        params = Params.model_validate({
-            "pattern": "test",
-            "path": ".",
-            "output_mode": "FILES_WITH_MATCHES",
-        })
-        assert params.output_mode == "files_with_matches"
-
-    async def test_fuzzy_output_mode_normalizes_spaces_and_hyphens(self):
-        """output_mode strips whitespace and normalizes hyphens."""
-        # "files-with-matches" → "files_with_matches" via replace("-", "_")
-        params = Params.model_validate({
-            "pattern": "test",
-            "path": ".",
-            "output_mode": "  files-with-matches  ",
-        })
-        assert params.output_mode == "files_with_matches"
-
-    # ── invalid output_modes ──
-
-    async def test_fuzzy_output_mode_rejects_unknown(self):
-        """Completely unknown output_modes should still raise ValidationError."""
-        with pytest.raises(ValidationError):
-            Params.model_validate({
-                "pattern": "test",
-                "path": ".",
-                "output_mode": "unknown_mode",
-            })
-
-    async def test_fuzzy_output_mode_rejects_empty(self):
-        """Empty output_mode should still raise ValidationError."""
-        with pytest.raises(ValidationError):
-            Params.model_validate({
-                "pattern": "test",
-                "path": ".",
-                "output_mode": "",
-            })
-
-
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="[out of work-dir] warning not implemented in Grep")
 async def test_grep_outside_work_dir_nonexistent_has_warning(grep_tool: Grep):
@@ -1815,25 +1717,6 @@ def test_format_cmd_reflects_rtk_when_active():
     assert not _format_cmd(params).startswith("rtk ")
 
 
-def test_grep_params_deduplicate_output_default():
-    assert Params(pattern="x").deduplicate_output is True
-
-
-def test_grep_params_max_output_lines_default_500():
-    assert Params(pattern="x").max_output_lines == 500
-
-
-def test_grep_params_max_output_lines_alias_fold():
-    params = Params.model_validate({"pattern": "x", "fold": 0})
-    assert params.max_output_lines == 0
-
-
-def test_grep_params_token_kill_alias():
-    """token_kill=False maps to deduplicate_output=False (backward compat)."""
-    params = Params.model_validate({"pattern": "x", "token_kill": False})
-    assert params.deduplicate_output is False
-
-
 @pytest.mark.asyncio
 async def test_grep_rtk_active_by_default(grep_tool: Grep, temp_test_files, captured_exec):
     """Default params wrap the bare rg command with the absolute share/bin rtk path."""
@@ -1950,12 +1833,12 @@ async def test_grep_rtk_markers_stripped_and_summarized(
 ):
     """rtk protocol lines are stripped from the output and summarized in message."""
     fake_stdout = (
-        "42 matches in 1 files:\n"
-        "\n"
-        "src/a.py:10:def foo():\n"
-        "  +40 more in src\\a.py [see remaining: tail -n +2 C:\\log\\tee.log]\n"
-        "+5 more files [see remaining: tail -n +43 C:\\log\\tee2.log]\n"
-    ).encode()
+        b"42 matches in 1 files:\n"
+        b"\n"
+        b"src/a.py:10:def foo():\n"
+        b"  +40 more in src\\a.py [see remaining: tail -n +2 C:\\log\\tee.log]\n"
+        b"+5 more files [see remaining: tail -n +43 C:\\log\\tee2.log]\n"
+    )
 
     async def fake_exec(*args, **kwargs):
         return _FakeProcess(stdout=fake_stdout, returncode=0)

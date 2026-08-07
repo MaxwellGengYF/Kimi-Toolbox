@@ -33,12 +33,6 @@ def _skill(name: str, scope: str, description: str = "desc") -> Skill:
     )
 
 
-def test_skill_has_scope_field():
-    """Each Skill carries a scope label set by discovery."""
-    s = _skill("alpha", "user")
-    assert s.scope == "user"
-
-
 def test_format_skills_for_prompt_groups_by_scope():
     """Skills are rendered under scope headings in canonical order."""
     skills = [

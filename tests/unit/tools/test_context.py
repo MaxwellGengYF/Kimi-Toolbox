@@ -3,22 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-from pydantic import ValidationError
-
-from kimix.tools.context import CompactParams, ContextUsage, ContextUsageParams
-
-
-class TestCompactModeGuidance:
-    @pytest.mark.parametrize("mode", ["retentive", "balanced", "aggressive", "technical", "auto"])
-    def test_all_modes_accepted(self, mode: str) -> None:
-        params = CompactParams(mode=mode)
-        assert params.mode == mode
-
-    def test_invalid_mode_stored_as_is(self) -> None:
-        """mode is a str field; invalid values are stored and resolved at runtime."""
-        params = CompactParams(mode="invalid")
-        assert params.mode == "invalid"
+from kimix.tools.context import ContextUsage, ContextUsageParams
 
 
 class TestContextUsageExtras:

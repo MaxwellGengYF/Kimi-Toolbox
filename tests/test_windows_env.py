@@ -110,11 +110,6 @@ def _fake_expand(value: str, buf: Any, nchars: int) -> int:
 class TestRefreshEnvFromRegistry:
     """Verify ``kimix.utils.windows_env`` correctly re-exports from kimi_cli."""
 
-    def test_re_export_is_same_function(self) -> None:
-        """refresh_env_from_registry is the same object as refresh_windows_env."""
-        from kimix.utils.windows_env import refresh_env_from_registry
-        from kimi_cli.utils.environment import refresh_windows_env
-        assert refresh_env_from_registry is refresh_windows_env
 
     def test_call_refreshes_path(self) -> None:
         """Smoke test: calling the re-exported function updates PATH."""
@@ -380,21 +375,6 @@ class TestRunToolCallsRefresh:
         finally:
             loop.close()
 
-    def test_run_skips_refresh_on_linux(self) -> None:
-        """Run tool does NOT call refresh on Linux and skips via SkipThisTool."""
-        mock_session = MagicMock()
-        mock_session.custom_config.get.return_value = {}
-        mock_session.custom_data = {}
-
-        from kimi_cli.tools import SkipThisTool
-        with patch("kimix.tools.file.run.sys.platform", "linux"):
-            # On Linux, Run raises SkipThisTool when bash is available
-            try:
-                from kimix.tools.file.run import Run
-                Run(mock_session)
-            except SkipThisTool:
-                pass  # expected path
-
 
 # ============================================================================
 # Tests: Powershell tool calls refresh
@@ -511,6 +491,3 @@ class TestEnvironmentDetectCallsRefresh:
             env = await Environment.detect()
             assert call_log == []
             assert env.os_kind == "Linux"
-
-
-

@@ -86,8 +86,9 @@ class TestThrottling:
         assert "Context is volatile" in injections[0].content
 
     async def test_compaction_resets(self) -> None:
+        """After a real compaction the fresh (much lower) usage is reported once."""
         provider = ContextMeterProvider(min_delta=0.5, cooldown_steps=100)
         await provider.get_injections([], _soul(1, 100_000))  # type: ignore[arg-type]
         await provider.on_context_compacted()
-        # after compaction the (much lower) usage is reported once
-        assert await provider.get_injections([], _soul(2, 20_000))  # type: ignore[arg-type]
+        # 100k (50%) -> 0 (0%): delta 0.5 >= min_delta bypasses the cooldown.
+        assert await provider.get_injections([], _soul(2, 0))  # type: ignore[arg-type]

@@ -8,7 +8,6 @@ from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
 from pydantic import SecretStr
 
 from kimi_cli.config import LLMModel, LLMProvider, OpenAISettings
-from kimi_cli.constant import USER_AGENT
 from kimi_cli.llm import augment_provider_with_env_vars, create_llm
 
 
@@ -467,8 +466,6 @@ def test_create_llm_custom_headers_isolated_between_instances():
     assert provider.custom_headers["X-Custom"] == "original"
 
 
-def test_create_llm_no_custom_headers_includes_user_agent():
-    """When custom_headers is None, the default KimiX User-Agent is still sent."""
 def test_create_llm_no_custom_headers_has_empty_headers():
     from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
 

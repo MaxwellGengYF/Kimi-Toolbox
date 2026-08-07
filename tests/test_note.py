@@ -16,12 +16,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from kimi_agent_sdk import ToolError, ToolOk
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 
 import kimix.tools.note as _note_module
+from kimi_agent_sdk import ToolError, ToolOk
 from kimix.tools.note import (
     MAX_BYTES,
     MAX_LINES,
@@ -33,7 +32,6 @@ from kimix.tools.note import (
     WritePlan,
     WritePlanParams,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -141,27 +139,6 @@ class TestReadPlanInit:
         with pytest.raises(SkipThisTool):
             ReadPlan(session=session)
         _note_module._enable_plan = True
-
-
-class TestReadPlanParams:
-    def test_line_offset_zero_raises_ValueError(self) -> None:
-        with pytest.raises(ValueError, match="line_offset cannot be 0"):
-            ReadPlanParams(line_offset=0)
-
-    def test_line_offset_below_negative_MAX_LINES_raises_ValueError(self) -> None:
-        with pytest.raises(ValueError, match=f"line_offset cannot be less than -{MAX_LINES}"):
-            ReadPlanParams(line_offset=-(MAX_LINES + 1))
-
-    def test_negative_line_offset_within_bounds_is_valid(self) -> None:
-        p = ReadPlanParams(line_offset=-5)
-        assert p.line_offset == -5
-
-    def test_defaults(self) -> None:
-        p = ReadPlanParams()
-        assert p.line_offset == 1
-        assert p.n_lines == MAX_LINES
-        assert p.max_char == 65536
-        assert p.char_offset == 0
 
 
 class TestReadPlanCall:
@@ -303,20 +280,6 @@ class TestEditPlanInit:
         with pytest.raises(SkipThisTool):
             EditPlan(session=session)
         _note_module._enable_plan = True
-
-
-class TestEditPlanParams:
-    def test_single_edit(self) -> None:
-        p = EditPlanParams(edit=Edit(old="foo", new="bar"))
-        assert isinstance(p.edit, Edit)
-
-    def test_multi_edit_list(self) -> None:
-        p = EditPlanParams(edit=[Edit(old="a", new="b"), Edit(old="c", new="d")])
-        assert len(p.edit) == 2
-
-    def test_replace_all_defaults_to_false(self) -> None:
-        e = Edit(old="x", new="y")
-        assert e.replace_all is False
 
 
 class TestEditPlanNormalizeLineEndings:

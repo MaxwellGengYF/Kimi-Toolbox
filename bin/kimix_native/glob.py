@@ -6,11 +6,17 @@ algorithms exactly:
 
 - ``_parse_gitignore`` / ``_gitignore_match`` -- kimi_cli/tools/file/glob.py
 - ``is_ignored`` / ``_parse_ls_files_output`` -- kimi_cli/utils/file_filter.py
+
+Pattern matching mirrors ``fnmatch.fnmatch`` platform semantics: case-
+insensitive on Windows (via os.path.normcase folding), case-sensitive on
+POSIX.  An explicit ``case_insensitive`` flag is supported by both the native
+and ``_compat`` implementations so they stay bit-identical on every platform.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 
 from . import _native, use_native
@@ -132,7 +138,26 @@ def _compat_parse_gitignore(content: bytes, source_dir: str) -> list[tuple[str, 
     return rules
 
 
-def _compat_gitignore_match(rel_path: str, is_dir: bool, rule: tuple[str, bool, bool, bool]) -> bool:
+def _match(pattern: str, text: str, case_insensitive: bool | None) -> bool:
+    """fnmatch.fnmatch semantics with an explicit platform override.
+
+    When *case_insensitive* is None the platform default applies
+    (case-insensitive on Windows, case-sensitive on POSIX), which is exactly
+    what fnmatch.fnmatch does via os.path.normcase.  Folding both sides then
+    using fnmatchcase keeps the backslash-escaping behaviour of fnmatchcase on
+    every platform, so native and compat results agree bit-for-bit.
+    """
+    if case_insensitive is None:
+        case_insensitive = os.name == "nt"
+    if case_insensitive:
+        return fnmatch.fnmatchcase(text.lower(), pattern.lower())
+    return fnmatch.fnmatchcase(text, pattern)
+
+
+def _compat_gitignore_match(
+    rel_path: str, is_dir: bool, rule: tuple[str, bool, bool, bool],
+    case_insensitive: bool | None = None,
+) -> bool:
     """Check if a relative path matches a single gitignore rule."""
     rel_path = rel_path.replace("\\", "/")
     pattern, negated, anchored, dir_only = rule
@@ -141,7 +166,7 @@ def _compat_gitignore_match(rel_path: str, is_dir: bool, rule: tuple[str, bool, 
         parts = rel_path.split("/")
         for i in range(1, len(parts)):
             prefix = "/".join(parts[:i])
-            if _compat_gitignore_match(prefix, True, rule):
+            if _compat_gitignore_match(prefix, True, rule, case_insensitive):
                 return True
         return False
 
@@ -154,7 +179,9 @@ def _compat_gitignore_match(rel_path: str, is_dir: bool, rule: tuple[str, bool, 
             suffix = pattern[3:]
             for i in range(len(parts)):
                 sub = "/".join(parts[i:])
-                if fnmatch.fnmatchcase(sub, suffix) or fnmatch.fnmatchcase(parts[-1], suffix):
+                if _match(suffix, sub, case_insensitive) or _match(
+                    suffix, parts[-1], case_insensitive
+                ):
                     return True
             return False
         if pattern.endswith("/**"):
@@ -169,29 +196,37 @@ def _compat_gitignore_match(rel_path: str, is_dir: bool, rule: tuple[str, bool, 
                 rest_parts = rest.split("/")
                 for i in range(len(rest_parts)):
                     sub = "/".join(rest_parts[i:])
-                    if fnmatch.fnmatchcase(sub, suffix) or fnmatch.fnmatchcase(rest_parts[-1], suffix):
+                    if _match(suffix, sub, case_insensitive) or _match(
+                        suffix, rest_parts[-1], case_insensitive
+                    ):
                         return True
             return False
 
         simple_pattern = pattern.replace("**", "*")
-        return fnmatch.fnmatchcase(rel_path, simple_pattern) or fnmatch.fnmatchcase(
-            rel_path.split("/")[-1], simple_pattern
+        return _match(simple_pattern, rel_path, case_insensitive) or _match(
+            simple_pattern, rel_path.split("/")[-1], case_insensitive
         )
 
     if anchored:
-        return fnmatch.fnmatchcase(rel_path, pattern)
+        return _match(pattern, rel_path, case_insensitive)
     else:
         basename = rel_path.split("/")[-1]
-        if fnmatch.fnmatchcase(basename, pattern):
+        if _match(pattern, basename, case_insensitive):
             return True
-        return any(fnmatch.fnmatchcase(part, pattern) for part in rel_path.split("/")[:-1])
+        return any(
+            _match(pattern, part, case_insensitive)
+            for part in rel_path.split("/")[:-1]
+        )
 
 
-def _compat_is_ignored(rel_path: str, is_dir: bool, rules: list[tuple[str, bool, bool, bool]]) -> bool:
+def _compat_is_ignored(
+    rel_path: str, is_dir: bool, rules: list[tuple[str, bool, bool, bool]],
+    case_insensitive: bool | None = None,
+) -> bool:
     """Check if a path is ignored by any gitignore rule (with negation support)."""
     ignored = False
     for rule in rules:
-        if _compat_gitignore_match(rel_path, is_dir, rule):
+        if _compat_gitignore_match(rel_path, is_dir, rule, case_insensitive):
             ignored = not rule[1]
     return ignored
 
@@ -200,8 +235,12 @@ def _compat_filter_paths(
     paths: list[str],
     is_dir_mask: list[bool],
     rules: list[tuple[str, bool, bool, bool]],
+    case_insensitive: bool | None = None,
 ) -> list[bool]:
-    return [_compat_is_ignored(p, d, rules) for p, d in zip(paths, is_dir_mask)]
+    return [
+        _compat_is_ignored(p, d, rules, case_insensitive)
+        for p, d in zip(paths, is_dir_mask)
+    ]
 
 
 def _compat_is_ignored_name(name: str) -> bool:
@@ -257,20 +296,26 @@ def parse_gitignore(content: bytes, source_dir: str) -> list[tuple[str, bool, bo
     return _native.glob.parse_gitignore(content, source_dir)
 
 
-def is_ignored(rel_path: str, is_dir: bool, rules: list[tuple[str, bool, bool, bool]]) -> bool:
+def is_ignored(
+    rel_path: str,
+    is_dir: bool,
+    rules: list[tuple[str, bool, bool, bool]],
+    case_insensitive: bool | None = None,
+) -> bool:
     if not use_native("GLOB") or _native is None:
-        return _compat_is_ignored(rel_path, is_dir, rules)
-    return _native.glob.is_ignored(rel_path, is_dir, rules)
+        return _compat_is_ignored(rel_path, is_dir, rules, case_insensitive)
+    return _native.glob.is_ignored(rel_path, is_dir, rules, case_insensitive)
 
 
 def filter_paths(
     paths: list[str],
     is_dir_mask: list[bool],
     rules: list[tuple[str, bool, bool, bool]],
+    case_insensitive: bool | None = None,
 ) -> list[bool]:
     if not use_native("GLOB") or _native is None:
-        return _compat_filter_paths(paths, is_dir_mask, rules)
-    return _native.glob.filter_paths(paths, is_dir_mask, rules)
+        return _compat_filter_paths(paths, is_dir_mask, rules, case_insensitive)
+    return _native.glob.filter_paths(paths, is_dir_mask, rules, case_insensitive)
 
 
 def is_ignored_name(name: str) -> bool:

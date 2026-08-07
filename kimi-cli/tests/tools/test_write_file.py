@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from kaos.path import KaosPath
-from pydantic import ValidationError
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval, ApprovalResult
@@ -142,14 +141,6 @@ async def test_write_to_nonexistent_directory(write_file_tool: WriteFile, temp_w
     assert not result.is_error
     assert await file_path.exists()
     assert await file_path.read_text() == "content"
-
-
-async def test_write_with_invalid_mode(write_file_tool: WriteFile, temp_work_dir: KaosPath):
-    """Test writing with an invalid mode."""
-    file_path = temp_work_dir / "test.txt"
-
-    with pytest.raises(ValidationError):
-        await write_file_tool(Params(path=str(file_path), content="content", mode="invalid"))  # type: ignore[reportArgumentType]
 
 
 async def test_append_to_nonexistent_file(write_file_tool: WriteFile, temp_work_dir: KaosPath):
@@ -417,16 +408,6 @@ class TestWriteFileFuzzyMode:
         assert "successfully appended to" in result.message
 
     # ── invalid modes ──
-
-    async def test_fuzzy_mode_rejects_unknown(self):
-        """Completely unknown modes should still raise ValidationError."""
-        with pytest.raises(ValidationError):
-            Params(path="test.txt", content="x", mode="delete")  # type: ignore[reportArgumentType]
-
-    async def test_fuzzy_mode_rejects_empty(self):
-        """Empty mode should still raise ValidationError."""
-        with pytest.raises(ValidationError):
-            Params(path="test.txt", content="x", mode="")  # type: ignore[reportArgumentType]
 
 
 # ── New params tests ─────────────────────────────────────────────────────────

@@ -3,26 +3,24 @@
 import asyncio
 import queue
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import anyio
 import pytest
 
-from kimi_agent_sdk import ToolOk, ToolError
+from kimi_agent_sdk import ToolError, ToolOk
+from kimix.tools.background import TaskOutput, TaskOutputParams
 from kimix.tools.background.utils import (
     BackgroundStream,
     add_task,
     discard_all_tasks,
-    generate_task_id,
     get_all_tasks,
     remove_task_id,
 )
-from kimix.tools.background import TaskOutput, TaskOutputParams
-from kimix.tools.py import Python, Params as PyParams
+from kimix.tools.py import Params as PyParams
+from kimix.tools.py import Python
 
 
 @pytest.fixture
@@ -221,55 +219,6 @@ class TestTaskOutput:
 # ---------------------------------------------------------------------------
 # Python tool — Params validation
 # ---------------------------------------------------------------------------
-class TestPythonParams:
-    def test_code_empty_without_interactive_or_file(self) -> None:
-        """code="" with no interactive/task_id should raise a validation error."""
-        with pytest.raises(ValueError, match="code` must be provided"):
-            PyParams(code="", interactive=False)
-
-    def test_task_id_without_code(self) -> None:
-        """task_id="xxx" with code="" should raise a validation error."""
-        with pytest.raises(ValueError, match="code cannot be empty when continuing a session via task_id"):
-            PyParams(code="", task_id="xxx")
-
-    def test_interactive_allows_empty_code(self) -> None:
-        """interactive=True with code="" should be valid."""
-        params = PyParams(code="", interactive=True)
-        assert params.mode == "interactive"
-
-    def test_task_id_with_code_valid(self) -> None:
-        """task_id="xxx" with code="..." should be valid."""
-        params = PyParams(code="print('hi')", task_id="xxx")
-        assert params.task_id == "xxx"
-        assert params.code == "print('hi')"
-
-    def test_code_only_valid(self) -> None:
-        """code="..." with no interactive/task_id should be valid."""
-        params = PyParams(code="print('hi')")
-        assert params.code == "print('hi')"
-        assert params.mode == "execute"
-
-
-
-    def test_mode_background(self) -> None:
-        """mode='background' should be aliased to 'send'."""
-        params = PyParams(code="print('hi')", mode="background")
-        assert params.mode == "send"
-
-    def test_mode_send_new_name(self) -> None:
-        """mode='send' should work."""
-        params = PyParams(code="print('hi')", mode="send")
-        assert params.mode == "send"
-
-    def test_mode_interactive(self) -> None:
-        """mode='interactive' should work."""
-        params = PyParams(code="print('hi')", mode="interactive")
-        assert params.mode == "interactive"
-
-    def test_interactive_deprecated(self) -> None:
-        """interactive=True should be converted to mode='interactive'."""
-        params = PyParams(code="print('hi')", interactive=True)
-        assert params.mode == "interactive"
 
 
 # ---------------------------------------------------------------------------

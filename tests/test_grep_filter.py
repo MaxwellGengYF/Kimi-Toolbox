@@ -1,23 +1,15 @@
 """Tests for OUTPUT_LIMIT (16384) and original file saving."""
 
-import pytest
 
 from kimix.tools.common import (
     OUTPUT_LIMIT,
-    _maybe_export_output_async,
     _build_session_output_block,
+    _maybe_export_output_async,
 )
-
 
 # ---------------------------------------------------------------------------
 # OUTPUT_LIMIT
 # ---------------------------------------------------------------------------
-
-def test_output_limit_is_16384() -> None:
-    """OUTPUT_LIMIT must be 16384."""
-    assert OUTPUT_LIMIT == 16384, (
-        f"OUTPUT_LIMIT expected 16384, got {OUTPUT_LIMIT}"
-    )
 
 
 async def test_output_under_limit_not_exported() -> None:
@@ -57,4 +49,3 @@ def test_build_block_original_path_null_when_none() -> None:
         output="hello",
     )
     assert "original_path: null" in block
-

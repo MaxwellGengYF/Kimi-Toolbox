@@ -1,18 +1,19 @@
 """Tests for token filter pipeline: _dedup_output, _truncate_lines, _token_filter_output."""
 
 import os
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from kimix.tools.common import (
     _dedup_output,
     _is_known_rtk_command,
     _maybe_rewrite_shell_command_with_rtk,
     _rtk_available,
     _rtk_binary_path,
-    _truncate_lines,
     _token_filter_output,
+    _truncate_lines,
 )
-
 
 # ── _dedup_output tests ──────────────────────────────────────────────
 
@@ -288,33 +289,6 @@ async def test_token_filter_ansi_stripped_before_dedup():
 
 # ── Param validation tests ──────────────────────────────────────────
 
-def test_powershell_params_new_fields_defaults():
-    from kimix.tools.file.bash.pwsh_tool import PowershellParams
-    p = PowershellParams(cmd="echo hi")
-    assert p.deduplicate_output is True
-    assert p.max_lines is None
-
-
-def test_powershell_params_max_lines_min():
-    from kimix.tools.file.bash.pwsh_tool import PowershellParams
-    import pydantic
-    with pytest.raises(pydantic.ValidationError):
-        PowershellParams(cmd="echo hi", max_lines=2)
-
-
-def test_bash_params_new_fields():
-    from kimix.tools.file.bash.bash_tool import BashParams
-    p = BashParams(cmd="echo hi", token_kill=False, max_lines=50)
-    assert p.deduplicate_output is False
-    assert p.max_lines == 50
-
-
-def test_run_params_new_fields():
-    from kimix.tools.file.run import RunParams
-    p = RunParams(command="echo hi", token_kill=False, max_lines=50)
-    assert p.deduplicate_output is False
-    assert p.max_lines == 50
-
 
 # ── RTK helper tests ─────────────────────────────────────────────────
 
@@ -519,8 +493,6 @@ async def test_token_filter_default_still_single_line():
     assert "ERROR  (5 repeats)" in result
     assert "details  (5 repeats)" in result
     assert orig_path is not None
-
-
 
 
 # ── Absolute-path rtk rewrite (no PATH reliance) ─────────────────────

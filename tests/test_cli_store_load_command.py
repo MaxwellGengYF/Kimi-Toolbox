@@ -5,17 +5,17 @@ import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from kaos.path import KaosPath
-from kosong.message import Message
-
-from kimix.cli_impl import commands, constants
 from kimi_cli.session import Session as CliSession
 from kimi_cli.wire.file import WireFileMetadata, WireMessageRecord
 from kimi_cli.wire.protocol import WIRE_PROTOCOL_VERSION
 from kimi_cli.wire.types import TextPart, TurnBegin
+from kosong.message import Message
+
+from kimix.cli_impl import commands
 
 
 def _make_globals(
@@ -87,27 +87,6 @@ def isolated_cli_share_dir(monkeypatch, tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Registration / help
 # ---------------------------------------------------------------------------
-
-
-def test_store_command_registered():
-    assert "store" in commands._command_map
-    assert "store" in commands._command_map_keys
-
-
-def test_load_command_registered():
-    assert "load" in commands._command_map
-    assert "load" in commands._command_map_keys
-
-
-def test_rename_command_removed():
-    assert "rename" not in commands._command_map
-    assert "rename" not in commands._command_map_keys
-
-
-def test_help_includes_store_and_load_and_excludes_rename():
-    assert "/store:<id>" in constants.HELP_STR
-    assert "/load:<id>" in constants.HELP_STR
-    assert "/rename:<id>" not in constants.HELP_STR
 
 
 # ---------------------------------------------------------------------------

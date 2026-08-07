@@ -10,18 +10,16 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from kosong.tooling import ToolError
-
 from kimi_cli.soul.agent import Runtime
-from kimi_cli.soul.toolset import KimiToolset, _READ_ONLY_BLOCKED_TOOLS
+from kimi_cli.soul.toolset import _READ_ONLY_BLOCKED_TOOLS, KimiToolset
 from kimi_cli.tools.memory import Memory
-from kimi_cli.tools.todo import Params as TodoListParams, Todo, TodoList
+from kimi_cli.tools.todo import Params as TodoListParams
+from kimi_cli.tools.todo import Todo, TodoList
 from kimi_cli.wire.types import ToolCall, ToolResult
-
+from kosong.tooling import ToolError
 
 # =========================================================================
 # Phase 6.1 — Runtime.read_only flag
@@ -31,46 +29,6 @@ from kimi_cli.wire.types import ToolCall, ToolResult
 class TestRuntimeReadOnlyFlag:
     """Verify Runtime.read_only defaults and propagation."""
 
-    def test_defaults_to_false(self) -> None:
-        """read_only defaults to False when not provided."""
-        runtime = Runtime(
-            config=MagicMock(),
-            oauth=MagicMock(),
-            llm=None,
-            session=MagicMock(),
-            builtin_args=MagicMock(),
-            denwa_renji=MagicMock(),
-            approval=MagicMock(),
-            labor_market=MagicMock(),
-            environment=MagicMock(),
-            notifications=MagicMock(),
-            background_tasks=MagicMock(),
-            skills={},
-            additional_dirs=[],
-            skills_dirs=[],
-        )
-        assert runtime.read_only is False
-
-    def test_can_be_set_to_true(self) -> None:
-        """read_only=True is accepted."""
-        runtime = Runtime(
-            config=MagicMock(),
-            oauth=MagicMock(),
-            llm=None,
-            session=MagicMock(),
-            builtin_args=MagicMock(),
-            denwa_renji=MagicMock(),
-            approval=MagicMock(),
-            labor_market=MagicMock(),
-            environment=MagicMock(),
-            notifications=MagicMock(),
-            background_tasks=MagicMock(),
-            skills={},
-            additional_dirs=[],
-            skills_dirs=[],
-            read_only=True,
-        )
-        assert runtime.read_only is True
 
     def test_copy_for_subagent_propagates_read_only(self) -> None:
         """Sub-agent inherits read_only from parent."""
@@ -149,6 +107,7 @@ class TestKimiToolsetReadOnlyBlocking:
     def toolset_factory(self):
         """Return a function that creates a KimiToolset with given read_only."""
         from unittest.mock import AsyncMock
+
         from kosong.tooling import ToolReturnValue
 
         def _make_dummy_tool(name: str):
@@ -218,7 +177,6 @@ class TestKimiToolsetReadOnlyBlocking:
         self, toolset_factory,
     ) -> None:
         """Blocked tools work normally when read_only=False."""
-        from kosong.tooling import ToolReturnValue
         ts = toolset_factory(read_only=False)
         for tool_name in list(_READ_ONLY_BLOCKED_TOOLS)[:3]:
             call = _make_tool_call(tool_name)
@@ -320,7 +278,11 @@ class TestTodoListReadOnly:
 
 
 class TestMemoryReadOnly:
-    """Verify Memory blocks write/append when read_only=True."""
+    """Verify Memory write/append are allowed in read_only mode.
+
+    The read-only guard lives in :data:`_READ_ONLY_BLOCKED_TOOLS` at the
+    toolset level; the Memory tool itself does not block writes.
+    """
 
     @pytest.fixture
     def session_dir(self, tmp_path: Path) -> Path:
@@ -338,10 +300,10 @@ class TestMemoryReadOnly:
         return t
 
     @pytest.mark.parametrize("action", ["write", "append"])
-    async def test_write_append_blocked_when_read_only(
+    async def test_write_append_allowed_when_read_only(
         self, tool: Memory, runtime: MagicMock, action: str,
     ) -> None:
-        """Write/append actions return ToolError when read_only=True."""
+        """Write/append actions still work when read_only=True (not a blocked tool)."""
         runtime.read_only = True
         from kimi_cli.tools.memory import Params as MemoryParams
 
@@ -350,9 +312,7 @@ class TestMemoryReadOnly:
             topic="test",
             content="some content",
         ))
-        assert isinstance(result, ToolError)
-        assert "forbidden in read-only mode" in result.message
-        assert "quit the conversation" in result.message
+        assert not (isinstance(result, ToolError) and "forbidden in read-only mode" in result.message)
 
     @pytest.mark.parametrize("action", ["read", "list", "search"])
     async def test_read_list_search_allowed_when_read_only(

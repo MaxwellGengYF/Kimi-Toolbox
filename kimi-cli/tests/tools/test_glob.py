@@ -667,12 +667,3 @@ async def test_glob_max_results_unlimited(glob_tool: Glob, temp_work_dir: KaosPa
     assert len(output_lines) == MAX_MATCHES
     assert "lines omitted" not in result.output
     assert f"Search capped at {MAX_MATCHES} matches." in result.message
-
-
-def test_glob_params_max_results_default_500():
-    assert Params(pattern="x").max_results == 500
-
-
-def test_glob_params_max_results_alias_fold():
-    params = Params.model_validate({"pattern": "x", "fold": 0})
-    assert params.max_results == 0

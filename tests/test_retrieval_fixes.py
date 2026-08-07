@@ -20,7 +20,6 @@ Covers all issues described in retrieval.md:
 from __future__ import annotations
 
 import math
-import struct
 import tempfile
 from pathlib import Path
 
@@ -37,7 +36,6 @@ from kimix.retrieval import (
     _dcg,
     _ndcg,
 )
-
 
 # ---------------------------------------------------------------------------
 # Issue #1 – Doc-ID / array-index mismatch
@@ -326,24 +324,9 @@ class TestTruncatedForwardChunk:
 # ---------------------------------------------------------------------------
 
 
-class TestDeadCodeRemoved:
-    def test_ensure_term_to_id_removed(self) -> None:
-        assert not hasattr(InvertedIndex, "_ensure_term_to_id")
-
-
 # ---------------------------------------------------------------------------
 # Issue #13 – Redundant _posting_docs / _posting_tfs removed
 # ---------------------------------------------------------------------------
-
-
-class TestRedundantAttributesRemoved:
-    def test_posting_docs_removed(self) -> None:
-        idx = InvertedIndex()
-        assert not hasattr(idx, "_posting_docs")
-
-    def test_posting_tfs_removed(self) -> None:
-        idx = InvertedIndex()
-        assert not hasattr(idx, "_posting_tfs")
 
 
 # ---------------------------------------------------------------------------

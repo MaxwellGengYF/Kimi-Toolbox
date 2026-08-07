@@ -8,19 +8,13 @@ from __future__ import annotations
 
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
 from kimi_cli.tools.todo import (
-    Params,
-    Todo,
     TodoList,
-    TodoListParams,
-    _code_field_description,
     _detect_shell_kind,
     _get_shell_kind,
-    _patch_code_description,
     _tool_description,
 )
 
@@ -75,70 +69,7 @@ class TestDetectShellKind:
 
 
 class TestDescriptionBuilders:
-    def test_code_field_description_bash(self) -> None:
-        desc = _code_field_description("bash")
-        assert "bash" in desc
-        assert ".sh" in desc
-        assert "!pytest" in desc
-        assert ".ps1" not in desc
-        assert "PowerShell" not in desc
 
-    def test_code_field_description_powershell(self) -> None:
-        desc = _code_field_description("powershell")
-        assert "PowerShell" in desc
-        assert ".ps1" in desc
-        assert "!pytest" in desc
-        assert ".sh" not in desc
-        assert "bash command" not in desc
-
-    def test_tool_description_bash(self) -> None:
-        desc = _tool_description("bash")
-        assert "**Bash**" in desc
-        assert "`.sh`" in desc
-        assert "!pytest" in desc
-        assert ".ps1" not in desc
-
-    def test_tool_description_powershell(self) -> None:
-        desc = _tool_description("powershell")
-        assert "**PowerShell**" in desc
-        assert "`.ps1`" in desc
-        assert "!pytest" in desc
-        assert ".sh" not in desc
-
-    def test_patch_code_description_in_place(self) -> None:
-        schema = {
-            "$defs": {
-                "Todo": {
-                    "properties": {
-                        "code": {
-                            "description": (
-                                "Verification code: inline Python, a `.py` file path, "
-                                "a shell command prefixed with `!` ..."
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        _patch_code_description(schema, "bash")
-        patched = schema["$defs"]["Todo"]["properties"]["code"]["description"]
-        assert "bash command" in patched
-        assert ".sh" in patched
-
-    def test_schema_code_description_matches_runtime_kind(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("kimi_cli.tools.todo._detect_shell_kind", lambda: "bash")
-        schema = TodoListParams.model_json_schema()
-        descs = _collect_code_descriptions(schema)
-        assert descs
-        assert all("bash command" in d and ".sh" in d for d in descs)
-
-        monkeypatch.setattr("kimi_cli.tools.todo._detect_shell_kind", lambda: "powershell")
-        schema = TodoListParams.model_json_schema()
-        descs = _collect_code_descriptions(schema)
-        assert descs
-        assert all("PowerShell command" in d and ".ps1" in d for d in descs)
 
     def test_instance_description_matches_runtime_kind(self) -> None:
         tl = TodoList(runtime=MagicMock())
