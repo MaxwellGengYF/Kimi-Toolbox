@@ -1,6 +1,7 @@
 """Comprehensive tests for BackgroundStream and task utilities."""
 
 import asyncio
+import io
 import queue
 import re
 import threading
@@ -17,6 +18,8 @@ from kimix.tools.background.utils import (
     _get_task_data,
     _pop_task_data,
     add_task,
+    bounded_append,
+    bounded_put,
     discard_all_tasks,
     generate_task_id,
     get_all_tasks,
@@ -605,3 +608,107 @@ async def test_wait_for_output_no_pattern_waits_for_completion(stream: Backgroun
     assert matched is False
     assert output == "done"
     assert elapsed >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# bounded_append / bounded_put / output truncation (WP4)
+# ---------------------------------------------------------------------------
+def test_bounded_append_under_cap_no_op() -> None:
+    buf = io.StringIO()
+    assert bounded_append(buf, "hello world", 1000) is False
+    assert buf.getvalue() == "hello world"
+
+
+def test_bounded_append_over_cap_head_tail_marker() -> None:
+    buf = io.StringIO()
+    cap = 1000
+    assert bounded_append(buf, "x" * 3000, cap) is True
+    value = buf.getvalue()
+    assert value.startswith("x" * 400)  # head 40% of cap
+    assert value.endswith("x" * 600)  # tail 60% of cap
+    assert "keeping first 400 and last 600 chars" in value
+    assert "(output truncated" in value
+    # Retained content stays bounded (cap + marker + margins).
+    assert len(value) < cap + 200
+
+
+def test_bounded_append_accumulates_and_truncates() -> None:
+    buf = io.StringIO()
+    cap = 1000
+    assert bounded_append(buf, "a" * 600, cap) is False
+    assert bounded_append(buf, "b" * 600, cap) is True  # 1200 > 1000
+    value = buf.getvalue()
+    assert value.startswith("a" * 400)
+    assert value.endswith("b" * 600)
+    assert len(value) < cap + 200
+
+
+def test_bounded_put_drops_oldest() -> None:
+    q: queue.Queue[str] = queue.Queue()
+    for i in range(3):
+        bounded_put(q, f"chunk{i}", max_chunks=3)
+    assert q.qsize() == 3
+    # Adding a 4th chunk evicts the oldest.
+    bounded_put(q, "chunk3", max_chunks=3)
+    assert q.qsize() == 3
+    items: list[str] = []
+    while True:
+        try:
+            items.append(q.get_nowait())
+        except queue.Empty:
+            break
+    assert items == ["chunk1", "chunk2", "chunk3"]
+
+
+def test_bounded_put_default_max_chunks() -> None:
+    q: queue.Queue[str] = queue.Queue()
+    for i in range(5):
+        bounded_put(q, f"c{i}")
+    assert q.qsize() == 5  # well under the default 10_000 → nothing dropped
+
+
+async def test_get_output_bounded_with_truncation_flag(
+    stream: BackgroundStream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "kimix.tools.background.utils.BACKGROUND_MAX_OUTPUT_CHARS", 1000
+    )
+
+    def worker(q: queue.Queue[str]) -> None:
+        for _ in range(200):
+            q.put("y" * 100)  # 20,000 chars total, far above the 1,000 cap
+
+    await stream.start(worker, stop_function=lambda: None)
+    await stream.wait()
+    output = await stream.get_output()
+    assert len(output) < 1200
+    assert "(output truncated" in output
+    assert stream.output_truncated is True
+
+
+async def test_output_truncated_false_under_cap(stream: BackgroundStream) -> None:
+    def worker(q: queue.Queue[str]) -> None:
+        q.put("small output")
+
+    await stream.start(worker, stop_function=lambda: None)
+    await stream.wait()
+    output = await stream.get_output()
+    assert output == "small output"
+    assert stream.output_truncated is False
+
+
+async def test_output_truncated_sticky_after_pop(
+    stream: BackgroundStream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "kimix.tools.background.utils.BACKGROUND_MAX_OUTPUT_CHARS", 1000
+    )
+
+    def worker(q: queue.Queue[str]) -> None:
+        for _ in range(200):
+            q.put("z" * 100)
+
+    await stream.start(worker, stop_function=lambda: None)
+    await stream.wait()
+    await stream.pop_output()
+    assert stream.output_truncated is True

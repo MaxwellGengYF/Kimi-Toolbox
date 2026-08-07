@@ -4,7 +4,7 @@ import asyncio
 import shutil
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from kimi_cli.session import Session
@@ -487,3 +487,75 @@ class TestPowershellRtkRewrite:
                 args = mock_pt.call_args
                 assert "& rtk git status; & rtk cargo test" in args[0][1][-1]
                 assert "rtk" in result.message
+
+
+# ============================================================================
+# Shell enhancement wiring: hardline floor + cwd/workdir (WP1/WP2)
+# ============================================================================
+
+class TestPowershellSafetyWiring:
+    @pytest.fixture(autouse=True)
+    def _pwsh_enabled(self) -> Any:
+        with _force_pwsh_enabled():
+            yield
+
+    @pytest.fixture
+    def pwsh_instance(self, mock_session: MagicMock) -> Powershell:
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.find_pwsh",
+            return_value=r"C:\pwsh\pwsh.exe",
+        ):
+            return Powershell(session=mock_session)
+
+    async def test_cwd_and_workdir_alias_accepted(self) -> None:
+        params = PowershellParams(cmd="Get-Location", cwd=r"C:\work")
+        assert params.cwd == r"C:\work"
+        params2 = PowershellParams(cmd="Get-Location", workdir="/tmp/work")
+        assert params2.cwd == "/tmp/work"
+
+    async def test_dangerous_cwd_returns_error_without_spawning(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(PowershellParams(cmd="Get-Location", cwd="a;b"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Invalid workdir"
+        assert "Invalid workdir" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_process_task_receives_cwd(self, pwsh_instance: Powershell) -> None:
+        mock_instance = MagicMock()
+        mock_instance.start = AsyncMock(return_value="pwsh-cwd-id")
+        mock_instance.wait_with_monitor = AsyncMock(return_value=None)
+        mock_instance.thread_is_alive = AsyncMock(return_value=False)
+        mock_instance.stream = MagicMock()
+        mock_instance.stream.pop_output = AsyncMock(return_value="")
+        mock_instance.stream.success = AsyncMock(return_value=True)
+        mock_instance.stream.exit_code = 0
+        mock_instance.stream.process_elapsed = None
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.ProcessTask",
+            return_value=mock_instance,
+        ) as mock_pt:
+            result = await pwsh_instance(
+                PowershellParams(cmd="Get-Location", cwd=r"C:\work")
+            )
+        assert isinstance(result, ToolOk)
+        assert mock_pt.call_args.args[2] == r"C:\work"
+
+    async def test_hardline_blocked_before_process_task(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(PowershellParams(cmd="rm -rf /"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (hardline)"
+        assert "hardline" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_hardline_obfuscated_blocked(self, pwsh_instance: Powershell) -> None:
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(PowershellParams(cmd="Rm -Rf /"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (hardline)"
+        mock_pt.assert_not_called()

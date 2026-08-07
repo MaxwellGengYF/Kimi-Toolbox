@@ -1,16 +1,22 @@
+from __future__ import annotations
+
 import asyncio
+import os
+from collections.abc import AsyncIterable
+from contextlib import suppress
 from pathlib import Path
 from typing import override
 
 from kaos.path import KaosPath
 from kosong.tooling import (
+    _COMMON_FIELD_ALIASES,
     CallableTool2,
     ToolError,
     ToolOk,
     ToolReturnValue,
-    _COMMON_FIELD_ALIASES,
 )
 from pydantic import BaseModel, Field, model_validator
+from rapidfuzz import fuzz
 
 from kimi_cli.session import Session
 from kimi_cli.soul.agent import Runtime
@@ -25,7 +31,16 @@ from kimi_cli.utils.path import (
 from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.vfs import VFS
 
-from .glob import _get_gitignore_rules, _is_ignored_by_gitignore
+from .glob import (
+    _get_gitignore_rules,
+    _is_ignored_by_gitignore,
+    _is_unsafe_recursive_pattern,
+)
+from .read_extract import (
+    ExtractionError,
+    extract_document_text,
+    is_extractable_document,
+)
 from .utils import resolve_vfs
 
 MAX_LINES = 5000
@@ -36,6 +51,14 @@ _DEFAULT_READ_MAX_BYTES = 100 << 10  # 100 KiB fallback
 
 MAX_BYTES = _DEFAULT_READ_MAX_BYTES  # kept for backward compatibility
 
+# Documents larger than this are never extracted into text.
+MAX_EXTRACT_BYTES = 50 * 1024 * 1024
+
+# Similar-file suggestion tuning for the "does not exist" branch.
+_PARENT_LISTING_CAP = 200
+_MAX_SUGGESTIONS = 3
+_SIMILARITY_CUTOFF = 65
+
 
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
@@ -45,37 +68,42 @@ class Params(BaseModel):
         description=(
             "File path, or a list of file paths. Accepts `path` or `file_path`. "
             "When `glob=True`, the final path component may contain wildcards "
-            "(`*`, `?`, `[...]`), and recursive patterns starting with `**` are not allowed. "
-            "Absolute for files outside working directory."
-        )
+            "(`*`, `?`, `[...]`); recursive patterns like `src/**/*.ts` are "
+            "supported, only unsafe all-wildcard patterns (e.g. `**`, `**/*`) "
+            "are rejected. Absolute for files outside working directory."
+        ),
     )
-    line_offset: int = Field(
+    line_offset: int | list[int] = Field(
         default=1,
         description=(
             "Start line, 1-based. Negative reads from end. "
-            f"Max abs {MAX_LINES}. Applies to all files in multi-file reads."
+            f"Max abs {MAX_LINES}. May be a scalar applied to all files, "
+            "or a list with one value per file path."
         ),
     )
-    n_lines: int = Field(
+    n_lines: int | list[int] = Field(
         default=MAX_LINES,
         description=(
             f"Lines to read, max {MAX_LINES}. "
-            "Applies to all files in multi-file reads."
+            "May be a scalar applied to all files, "
+            "or a list with one value per file path."
         ),
     )
-    max_char: int = Field(
+    max_char: int | list[int] = Field(
         default=16000,
         description=(
-            "Maximum number of characters to return. "
-            "Applies to all files in multi-file reads. "
+            "Maximum number of characters to return (starting from char_offset). "
+            "May be a scalar applied to all files, "
+            "or a list with one value per file path. "
             "Default 16K balances completeness with context efficiency."
         ),
     )
-    char_offset: int = Field(
+    char_offset: int | list[int] = Field(
         default=0,
         description=(
             "Character offset to start returning from. "
-            "Applies to all files in multi-file reads."
+            "May be a scalar applied to all files, "
+            "or a list with one value per file path."
         ),
     )
     glob: bool = Field(
@@ -95,34 +123,44 @@ class Params(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate(self) -> "Params":
+    def _validate(self) -> Params:
         n = len(self.path) if isinstance(self.path, list) else 1
 
         if n > MAX_FILES:
             raise ValueError(f"Cannot read more than {MAX_FILES} files in one call.")
 
-        fields: list[tuple[str, int, int]] = [
-            ("line_offset", self.line_offset, -MAX_LINES),
-            ("n_lines", self.n_lines, 1),
-            ("max_char", self.max_char, 0),
-            ("char_offset", self.char_offset, 0),
-        ]
-        for name, value, min_value in fields:
-            if name == "line_offset":
-                if value == 0:
+        for name in ("line_offset", "n_lines", "max_char", "char_offset"):
+            value = getattr(self, name)
+            if isinstance(value, list):
+                if len(value) != n:
                     raise ValueError(
-                        f"{name} cannot be 0; use 1 for the first line "
-                        "or -1 for the last line"
+                        f"{name} must be a scalar or a list with one value per "
+                        f"file path ({len(value)} values given for {n} file(s))."
                     )
-                if value < -MAX_LINES:
-                    raise ValueError(
-                        f"{name} cannot be less than -{MAX_LINES}. "
-                        "Use a positive line_offset with the total line count "
-                        "to read from a specific position."
-                    )
-            elif value < min_value:
-                raise ValueError(f"{name} must be >= {min_value}.")
+                values = value
+            else:
+                values = [value]
+            for v in values:
+                self._validate_value(name, v)
         return self
+
+    @staticmethod
+    def _validate_value(name: str, value: int) -> None:
+        if name == "line_offset":
+            if value == 0:
+                raise ValueError(
+                    f"{name} cannot be 0; use 1 for the first line or -1 for the last line"
+                )
+            if value < -MAX_LINES:
+                raise ValueError(
+                    f"{name} cannot be less than -{MAX_LINES}. "
+                    "Use a positive line_offset with the total line count "
+                    "to read from a specific position."
+                )
+            return
+        min_value = {"n_lines": 1, "max_char": 0, "char_offset": 0}[name]
+        if value < min_value:
+            raise ValueError(f"{name} must be >= {min_value}.")
 
 
 _GLOB_META = frozenset("*?[")
@@ -153,6 +191,63 @@ def _split_glob_path(raw: str) -> tuple[str, str]:
         base = "."
     pattern = raw[sep_idx + 1 :]
     return base, pattern
+
+
+def _broadcast_option(value: int | list[int], n: int) -> list[int]:
+    """Broadcast a scalar option to *n* entries, or return the per-file list."""
+    return value if isinstance(value, list) else [value] * n
+
+
+def _similar_names(
+    parent: Path,
+    requested: str,
+    cap: int,
+    top_n: int,
+    cutoff: int,
+) -> list[str]:
+    """Rank sibling file names by fuzzy similarity to *requested*.
+
+    Only regular files are considered (the requested name itself is skipped)
+    and the listing is capped at *cap* entries. Scoring is extension-aware:
+    both the full basename and the basename-without-suffix are compared with
+    rapidfuzz. Returns at most *top_n* names with score >= *cutoff*.
+    """
+    candidates: list[str] = []
+    try:
+        with os.scandir(parent) as it:
+            for i, entry in enumerate(it):
+                if i >= cap:
+                    break
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                name = entry.name
+                if name == requested:
+                    continue
+                candidates.append(name)
+    except OSError:
+        return []
+    if not candidates:
+        return []
+
+    requested_stem = Path(requested).stem
+
+    def _score(choice: str) -> float:
+        # Extension-aware scoring: full basename and basename-without-suffix.
+        return max(
+            fuzz.ratio(requested, choice),
+            fuzz.ratio(requested_stem, Path(choice).stem),
+        )
+
+    # NOTE: rapidfuzz's ``process.extract`` treats a Python callable scorer's
+    # return value as a 0..1 normalized similarity and rescales it, so a
+    # 0..100 scorer always comes back as 100.0 and the cutoff is defeated.
+    # Score manually instead so ``cutoff`` is honored.
+    scored = ((_score(choice), choice) for choice in candidates)
+    best = sorted((s for s in scored if s[0] >= cutoff), key=lambda t: t[0], reverse=True)
+    return [choice for _score, choice in best[:top_n]]
 
 
 class ReadFile(CallableTool2[Params]):
@@ -187,9 +282,7 @@ class ReadFile(CallableTool2[Params]):
         self._additional_dirs = runtime.additional_dirs
         self._vfs = vfs
 
-    async def _validate_path(
-        self, path: KaosPath, raw_path: str
-    ) -> ToolError | None:
+    async def _validate_path(self, path: KaosPath, raw_path: str) -> ToolError | None:
         """Validate that the path is safe to read."""
         resolved_path = path.canonical()
         original_is_absolute = kaos_path_from_user_input(raw_path).is_absolute()
@@ -208,9 +301,12 @@ class ReadFile(CallableTool2[Params]):
                 brief="Invalid path",
             )
 
-        protected_paths = self._session.custom_config.get("config_json", {}).get("protected_read_paths")
+        protected_paths = self._session.custom_config.get("config_json", {}).get(
+            "protected_read_paths"
+        )
         if protected_paths:
             from .utils import check_path_protected
+
             if matched := check_path_protected(resolved_path, protected_paths, self._work_dir):
                 return ToolError(
                     message=f"Reading `{path}` is blocked by protected path rule: `{matched}`.",
@@ -240,9 +336,12 @@ class ReadFile(CallableTool2[Params]):
                 brief="Invalid path",
             )
 
-        protected_paths = self._session.custom_config.get("config_json", {}).get("protected_read_paths")
+        protected_paths = self._session.custom_config.get("config_json", {}).get(
+            "protected_read_paths"
+        )
         if protected_paths:
             from .utils import check_path_protected
+
             if matched := check_path_protected(resolved_path, protected_paths, self._work_dir):
                 return ToolError(
                     message=f"Reading `{raw_path}` is blocked by protected path rule: `{matched}`.",
@@ -258,10 +357,13 @@ class ReadFile(CallableTool2[Params]):
         """Expand a single glob path into concrete (path_string, options) entries."""
         base_str, pattern = _split_glob_path(raw_path)
 
-        # Reject recursive patterns that start with **, matching Glob's safety rule.
-        if pattern.replace("\\", "/").startswith("**"):
+        # Reject unsafe all-wildcard recursive patterns (e.g. `**`, `**/*`),
+        # matching Glob's safety rule. `src/**/*.ts` etc. are allowed.
+        if _is_unsafe_recursive_pattern(raw_path):
             return [], ToolError(
-                message=f"Pattern `{raw_path}` starts with `**`, which is disallowed.",
+                message=(
+                    f"Pattern `{raw_path}` is an unsafe recursive pattern, which is disallowed."
+                ),
                 brief="Unsafe glob pattern",
             )
 
@@ -288,9 +390,7 @@ class ReadFile(CallableTool2[Params]):
             gitignore_rules: list = []
             try:
                 resolved_base = Path(str(base)).resolve()
-                gitignore_rules = await asyncio.to_thread(
-                    _get_gitignore_rules, resolved_base
-                )
+                gitignore_rules = await asyncio.to_thread(_get_gitignore_rules, resolved_base)
             except Exception:
                 pass
 
@@ -301,9 +401,7 @@ class ReadFile(CallableTool2[Params]):
                 if gitignore_rules:
                     try:
                         match_resolved = Path(str(match)).resolve()
-                        if _is_ignored_by_gitignore(
-                            match_resolved, gitignore_rules, resolved_base
-                        ):
+                        if _is_ignored_by_gitignore(match_resolved, gitignore_rules, resolved_base):
                             continue
                     except Exception:
                         pass
@@ -321,15 +419,17 @@ class ReadFile(CallableTool2[Params]):
             entries: list[tuple[str, tuple[int, int, int, int]]] = []
             for match in matches:
                 display = str(match)
-                try:
+                with suppress(Exception):
                     display = str(match.relative_to(self._work_dir))
-                except Exception:
-                    pass
                 entries.append((display, options))
             return entries, None
 
         except Exception as e:
-            logger.warning("ReadFile glob expansion failed: {path}: {error}", path=raw_path, error=e)
+            logger.warning(
+                "ReadFile glob expansion failed: {path}: {error}",
+                path=raw_path,
+                error=e,
+            )
             return [], ToolError(
                 message=f"Failed to expand glob `{raw_path}`: {e}",
                 brief="Glob expansion failed",
@@ -350,17 +450,22 @@ class ReadFile(CallableTool2[Params]):
                 brief="Too many files",
             )
 
-        # Common options for all files (scalar params broadcast)
-        options = (
-            params.line_offset,
-            params.n_lines,
-            params.max_char,
-            params.char_offset,
-        )
+        # Per-entry options: scalars broadcast, lists apply per file path.
+        n_raw = len(raw_paths)
+        line_offsets = _broadcast_option(params.line_offset, n_raw)
+        n_lines_values = _broadcast_option(params.n_lines, n_raw)
+        max_char_values = _broadcast_option(params.max_char, n_raw)
+        char_offset_values = _broadcast_option(params.char_offset, n_raw)
 
         # Expand any glob paths into concrete file entries while preserving order.
         entries: list[tuple[str, tuple[int, int, int, int], str | ToolError]] = []
         for i, raw_path in enumerate(raw_paths):
+            options = (
+                line_offsets[i],
+                n_lines_values[i],
+                max_char_values[i],
+                char_offset_values[i],
+            )
             if params.glob:
                 # Explicit glob mode: always expand
                 if _is_glob_pattern(raw_path):
@@ -374,12 +479,15 @@ class ReadFile(CallableTool2[Params]):
                 else:
                     for path_str, opts in concrete:
                         try:
-                            canonical = str(kaos_path_from_tool_input(path_str, self._work_dir).canonical())
+                            canonical = str(
+                                kaos_path_from_tool_input(path_str, self._work_dir).canonical()
+                            )
                             entries.append((path_str, opts, canonical))
                         except Exception as e:
                             logger.warning(
                                 "ReadFile path resolution failed: {path}: {error}",
-                                path=path_str, error=e,
+                                path=path_str,
+                                error=e,
                             )
                             err = ToolError(
                                 message=f"Invalid path `{path_str}`: {e}",
@@ -394,7 +502,8 @@ class ReadFile(CallableTool2[Params]):
                 except Exception as e:
                     logger.warning(
                         "ReadFile path resolution failed: {path}: {error}",
-                        path=raw_path, error=e,
+                        path=raw_path,
+                        error=e,
                     )
                     err = ToolError(
                         message=f"Invalid path `{raw_path}`: {e}",
@@ -413,9 +522,7 @@ class ReadFile(CallableTool2[Params]):
                 seen_canonical.add(marker)
                 deduped_entries.append((path_str, options, marker))
 
-        file_count = sum(
-            1 for _, _, marker in deduped_entries if not isinstance(marker, ToolError)
-        )
+        file_count = sum(1 for _, _, marker in deduped_entries if not isinstance(marker, ToolError))
         if file_count > MAX_FILES:
             return ToolError(
                 message=f"Cannot read more than {MAX_FILES} files in one call.",
@@ -433,7 +540,11 @@ class ReadFile(CallableTool2[Params]):
             else:
                 line_offset, n_lines, max_char, char_offset = opts
                 result = await self._read_single_file(
-                    path_str, line_offset, n_lines, char_offset, max_char,
+                    path_str,
+                    line_offset,
+                    n_lines,
+                    char_offset,
+                    max_char,
                     show_line_numbers=params.show_line_numbers,
                 )
                 if result.is_error:
@@ -455,7 +566,7 @@ class ReadFile(CallableTool2[Params]):
             )
 
         parts: list[str] = []
-        for idx, (display_path, result) in enumerate(zip(display_paths, results)):
+        for idx, (display_path, result) in enumerate(zip(display_paths, results, strict=False)):
             parts.append(f"======== {display_path} ========")
             if result.is_error:
                 parts.append(result.message)
@@ -466,7 +577,9 @@ class ReadFile(CallableTool2[Params]):
         final_output = "\n".join(parts)
 
         messages = [r.message for r in results]
-        final_message = f"Read {success_count} file(s), {error_count} error(s). " + " ".join(messages)
+        final_message = f"Read {success_count} file(s), {error_count} error(s). " + " ".join(
+            messages
+        )
         return ToolOk(
             output=final_output,
             message=final_message,
@@ -509,15 +622,16 @@ class ReadFile(CallableTool2[Params]):
                 )
 
             if not await p.exists():
+                suggestions = await self._similar_file_suggestions(p)
+                message = f"`{display_path}` does not exist."
+                if suggestions:
+                    message += "\n\nDid you mean:\n  " + "\n  ".join(suggestions)
                 return ToolError(
-                    message=f"`{display_path}` does not exist.",
+                    message=message,
                     brief="File not found",
                 )
             if not await p.is_file():
-                return ToolError(
-                    message=f"`{display_path}` is not a file.",
-                    brief="Invalid path"
-                )
+                return ToolError(message=f"`{display_path}` is not a file.", brief="Invalid path")
 
             header = await p.read_bytes(MEDIA_SNIFF_BYTES)
             file_type = detect_file_type(str(logical_path), header=header)
@@ -529,6 +643,44 @@ class ReadFile(CallableTool2[Params]):
                     ),
                     brief="Unsupported file type",
                 )
+
+            if is_extractable_document(str(logical_path)):
+                suffix = Path(str(logical_path)).suffix.lower()
+                try:
+                    stat_result = await p.stat()
+                except Exception:
+                    stat_result = None
+                if stat_result is not None and stat_result.st_size > MAX_EXTRACT_BYTES:
+                    return ToolError(
+                        message=(
+                            f"`{display_path}` is a {suffix} document larger than "
+                            f"{MAX_EXTRACT_BYTES} bytes and cannot be extracted as text."
+                        ),
+                        brief="File not readable",
+                    )
+                try:
+                    extracted = await asyncio.to_thread(extract_document_text, str(p))
+                except ExtractionError as e:
+                    return ToolError(
+                        message=(
+                            f"`{display_path}` is a {suffix} document but could not "
+                            f"be extracted: {e}"
+                        ),
+                        brief="Document extraction failed",
+                    )
+                result = await self._read_content(
+                    extracted,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    char_offset,
+                    max_char,
+                    show_line_numbers=show_line_numbers,
+                    suffix=suffix,
+                )
+                if isinstance(result, ToolOk):
+                    self._session.file_mtime.clean_file(raw_path)
+                return result
 
             if file_type.kind == "unknown":
                 return ToolError(
@@ -546,13 +698,26 @@ class ReadFile(CallableTool2[Params]):
             assert line_offset != 0
 
             if line_offset < 0:
-                result = await self._read_tail(p, display_path, line_offset, n_lines, show_line_numbers=show_line_numbers)
+                result = await self._read_tail(
+                    p,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    show_line_numbers=show_line_numbers,
+                )
             else:
-                result = await self._read_forward(p, display_path, line_offset, n_lines, show_line_numbers=show_line_numbers)
+                result = await self._read_forward(
+                    p,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    show_line_numbers=show_line_numbers,
+                )
 
             if isinstance(result, ToolOk):
                 if isinstance(result.output, str):
-                    result.output = result.output[char_offset:max_char]
+                    # char_offset = start position; max_char = MAX chars to RETURN.
+                    result.output = result.output[char_offset : char_offset + max_char]
                 self._session.file_mtime.clean_file(raw_path)
             return result
         except Exception as e:
@@ -562,39 +727,124 @@ class ReadFile(CallableTool2[Params]):
                 brief="Failed to read file",
             )
 
-    async def _read_forward(
+    async def _similar_file_suggestions(
         self,
         p: KaosPath,
+        *,
+        cap: int = _PARENT_LISTING_CAP,
+        top_n: int = _MAX_SUGGESTIONS,
+        cutoff: int = _SIMILARITY_CUTOFF,
+    ) -> list[str]:
+        """Suggest similarly-named sibling files for a missing path.
+
+        Never raises: returns an empty list on any error. The requested name
+        itself is skipped and only regular files are considered.
+        """
+        try:
+            parent = Path(str(p)).parent
+            requested = Path(str(p)).name
+            if not parent.is_dir():
+                return []
+            return await asyncio.to_thread(_similar_names, parent, requested, cap, top_n, cutoff)
+        except Exception:
+            return []
+
+    async def _read_content(
+        self,
+        text: str,
         display_path: str,
         line_offset: int,
         n_lines: int,
-        *,  # keyword-only
+        char_offset: int,
+        max_char: int,
+        *,
         show_line_numbers: bool = True,
+        suffix: str = "",
     ) -> ToolReturnValue:
-        """Read file from a positive line_offset."""
-        lines_with_no: list[str] = []
+        """Render in-memory text (e.g. extracted documents) like a normal read."""
+
+        async def _text_lines() -> AsyncIterable[str]:
+            for line in text.splitlines(keepends=True):
+                yield line
+
+        note = f" (extracted from {suffix} document)" if suffix else ""
+        result = await self._render_lines(
+            _text_lines(),
+            display_path,
+            line_offset,
+            n_lines,
+            show_line_numbers=show_line_numbers,
+            note=note,
+        )
+        if isinstance(result, ToolOk) and isinstance(result.output, str):
+            result.output = result.output[char_offset : char_offset + max_char]
+        return result
+
+    async def _render_lines(
+        self,
+        lines: AsyncIterable[str],
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        *,
+        show_line_numbers: bool = True,
+        note: str = "",
+    ) -> ToolReturnValue:
+        """Render an async iterable of lines (line endings included).
+
+        Positive ``line_offset`` reads forward; negative reads the tail window.
+        ``note`` is appended to the success message (e.g. the
+        document-extraction notice). Shared by file reads and extracted text.
+        """
+        assert n_lines >= 1
+        assert line_offset != 0
+
+        if line_offset < 0:
+            return await self._render_tail(
+                lines,
+                display_path,
+                line_offset,
+                n_lines,
+                show_line_numbers=show_line_numbers,
+                note=note,
+            )
+        return await self._render_forward(
+            lines,
+            display_path,
+            line_offset,
+            n_lines,
+            show_line_numbers=show_line_numbers,
+            note=note,
+        )
+
+    async def _render_forward(
+        self,
+        lines: AsyncIterable[str],
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        *,
+        show_line_numbers: bool = True,
+        note: str = "",
+    ) -> ToolReturnValue:
+        """Render lines forward from a positive line_offset with line/byte budgets."""
+        entries: list[tuple[int, str, bool, int]] = []
         n_bytes = 0
-        truncated_line_numbers: list[int] = []
         max_lines_reached = False
         max_bytes_reached = False
         current_line_no = 0
         target_lines = min(n_lines, MAX_LINES)
         eof_reached = True
 
-        async for line in p.read_lines(errors="replace"):
+        async for line in lines:
             current_line_no += 1
             if current_line_no < line_offset:
                 continue
             truncated = truncate_line(line, MAX_LINE_LENGTH)
-            if truncated != line:
-                truncated_line_numbers.append(current_line_no)
             b_len = len(truncated.encode("utf-8"))
-            if show_line_numbers:
-                lines_with_no.append(f"{current_line_no:6d}\t{truncated}")
-            else:
-                lines_with_no.append(truncated)
+            entries.append((current_line_no, truncated, truncated != line, b_len))
             n_bytes += b_len
-            if len(lines_with_no) >= target_lines:
+            if len(entries) >= target_lines:
                 max_lines_reached = target_lines >= MAX_LINES
                 eof_reached = False
                 break
@@ -603,47 +853,37 @@ class ReadFile(CallableTool2[Params]):
                 eof_reached = False
                 break
 
-        start_line = line_offset
-
-        message = (
-            f"{len(lines_with_no)} lines read from file starting from line {start_line}."
-            if len(lines_with_no) > 0
-            else "No lines read from file."
-        )
-        if eof_reached:
-            message += f" Total lines in file: {current_line_no}."
-        if max_lines_reached:
-            message += f" Max {MAX_LINES} lines reached."
-        elif max_bytes_reached:
-            message += f" Max {MAX_BYTES} bytes reached."
-        elif len(lines_with_no) < n_lines:
-            message += " End of file reached."
-        if truncated_line_numbers:
-            message += f" Lines {truncated_line_numbers} were truncated."
-        message += f" Path: {display_path}"
-        return ToolOk(
-            output="".join(lines_with_no),
-            message=message,
-            brief="Read file",
+        return self._render_result(
+            entries,
+            display_path,
+            n_lines,
+            line_offset,
+            show_line_numbers=show_line_numbers,
+            total_lines=current_line_no if eof_reached else None,
+            max_lines_reached=max_lines_reached,
+            max_bytes_reached=max_bytes_reached,
+            end_of_file=len(entries) < n_lines,
+            note=note,
         )
 
-    async def _read_tail(
+    async def _render_tail(
         self,
-        p: KaosPath,
+        lines: AsyncIterable[str],
         display_path: str,
         line_offset: int,
         n_lines: int,
-        *,  # keyword-only
+        *,
         show_line_numbers: bool = True,
+        note: str = "",
     ) -> ToolReturnValue:
-        """Read file from a negative line_offset (tail mode)."""
+        """Render the tail window (negative line_offset) with line/byte budgets."""
         tail_count = abs(line_offset)
         line_limit = min(n_lines, MAX_LINES)
 
         # Bounded list keeping the last `tail_count` lines.
         tail_buf: list[tuple[int, str, bool, int]] = []
         current_line_no = 0
-        async for line in p.read_lines(errors="replace"):
+        async for line in lines:
             current_line_no += 1
             truncated = truncate_line(line, MAX_LINE_LENGTH)
             b_len = len(truncated.encode("utf-8"))
@@ -676,7 +916,35 @@ class ReadFile(CallableTool2[Params]):
         else:
             max_bytes_reached = False
 
-        # Build output directly.
+        start_line = candidates[0][0] if candidates else total_lines + 1
+        return self._render_result(
+            candidates,
+            display_path,
+            n_lines,
+            start_line,
+            show_line_numbers=show_line_numbers,
+            total_lines=total_lines,
+            max_lines_reached=max_lines_reached,
+            max_bytes_reached=max_bytes_reached,
+            end_of_file=len(candidates) < n_lines,
+            note=note,
+        )
+
+    def _render_result(
+        self,
+        candidates: list[tuple[int, str, bool, int]],
+        display_path: str,
+        n_lines: int,
+        start_line: int,
+        *,
+        show_line_numbers: bool,
+        total_lines: int | None,
+        max_lines_reached: bool,
+        max_bytes_reached: bool,
+        end_of_file: bool,
+        note: str = "",
+    ) -> ToolOk:
+        """Build the final ToolOk (output + message) from budgeted candidates."""
         lines_with_no: list[str] = []
         truncated_line_numbers: list[int] = []
         for line_no, truncated, was_truncated, _ in candidates:
@@ -687,24 +955,62 @@ class ReadFile(CallableTool2[Params]):
             else:
                 lines_with_no.append(truncated)
 
-        start_line = candidates[0][0] if candidates else total_lines + 1
         message = (
             f"{len(lines_with_no)} lines read from file starting from line {start_line}."
             if len(lines_with_no) > 0
             else "No lines read from file."
         )
-        message += f" Total lines in file: {total_lines}."
+        if total_lines is not None:
+            message += f" Total lines in file: {total_lines}."
         if max_lines_reached:
             message += f" Max {MAX_LINES} lines reached."
         elif max_bytes_reached:
-            message += f" Max {max_bytes} bytes reached."
-        elif len(lines_with_no) < n_lines:
+            message += f" Max {MAX_BYTES} bytes reached."
+        elif end_of_file:
             message += " End of file reached."
         if truncated_line_numbers:
             message += f" Lines {truncated_line_numbers} were truncated."
         message += f" Path: {display_path}"
+        if note:
+            message += note
         return ToolOk(
             output="".join(lines_with_no),
             message=message,
             brief="Read file",
+        )
+
+    async def _read_forward(
+        self,
+        p: KaosPath,
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        *,  # keyword-only
+        show_line_numbers: bool = True,
+    ) -> ToolReturnValue:
+        """Read file from a positive line_offset."""
+        return await self._render_lines(
+            p.read_lines(errors="replace"),
+            display_path,
+            line_offset,
+            n_lines,
+            show_line_numbers=show_line_numbers,
+        )
+
+    async def _read_tail(
+        self,
+        p: KaosPath,
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        *,  # keyword-only
+        show_line_numbers: bool = True,
+    ) -> ToolReturnValue:
+        """Read file from a negative line_offset (tail mode)."""
+        return await self._render_lines(
+            p.read_lines(errors="replace"),
+            display_path,
+            line_offset,
+            n_lines,
+            show_line_numbers=show_line_numbers,
         )

@@ -78,6 +78,42 @@ _OUTPUT_MODE_MAP: dict[str, Literal["files_with_matches", "count_matches", "cont
 }
 
 
+# Matches a regex ``\n`` escape (odd number of backslashes before ``n``).
+# Even backslashes, e.g. ``\\n``, mean a literal backslash+n search.
+_REGEX_NEWLINE_ESCAPE_RE = re.compile(r"(?<!\\)(?:\\\\)*\\n")
+
+
+def _pattern_has_regex_newline(pattern: str) -> bool:
+    """Return True when a search regex tries to match a newline.
+
+    The tool normally runs in line-oriented mode, so newline regexes cannot
+    match across lines.  Detect both a literal newline already decoded into
+    the pattern and a regex ``\n`` escape (odd number of backslashes before
+    ``n``).  Even backslashes, e.g. ``\\n``, mean a literal backslash+n
+    search and should stay line-oriented.
+    """
+    return "\n" in pattern or bool(_REGEX_NEWLINE_ESCAPE_RE.search(pattern))
+
+
+def _multiline_pattern(pattern: str) -> str:
+    """Rewrite newline constructs in *pattern* so they also match CRLF.
+
+    ripgrep's ``--multiline`` mode matches raw file bytes, so on CRLF files
+    (the Windows default) a multi-line pattern written with ``\n`` silently
+    finds nothing.  Rewriting newlines to ``\\r?\\n`` (optional carriage
+    return) makes the same pattern match both LF and CRLF files.  Only
+    called when multiline mode is active.
+    """
+    if "\n" not in pattern and not _REGEX_NEWLINE_ESCAPE_RE.search(pattern):
+        return pattern
+    # Normalize explicit CRLF in the pattern, then rewrite real newlines and
+    # regex ``\n`` escapes to ``\r?\n``.  Lambdas keep the replacement text
+    # literal (re.sub would otherwise interpret ``\r``/``\n`` escapes).
+    p = pattern.replace("\r\n", "\n")
+    p = _REGEX_NEWLINE_ESCAPE_RE.sub(lambda _m: r"\r?\n", p)
+    return p.replace("\n", r"\r?\n")
+
+
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
@@ -147,7 +183,8 @@ class Params(BaseModel):
         ge=0,
     )
     multiline: bool = Field(
-        description="Multiline regex mode.",
+        description="Multiline regex mode. Patterns containing a newline or a "
+        "`\\n` regex escape automatically enable multiline mode.",
         default=False,
     )
     include_ignored: bool = Field(
@@ -341,7 +378,8 @@ def _build_rg_args(
     # Search options
     if params.ignore_case:
         args.append("--ignore-case")
-    if params.multiline:
+    use_multiline = params.multiline or _pattern_has_regex_newline(params.pattern)
+    if use_multiline:
         args.extend(["--multiline", "--multiline-dotall"])
 
     # Content display options (only for content mode)
@@ -383,7 +421,7 @@ def _build_rg_args(
 
     # Separate pattern from flags to avoid ambiguity (e.g. pattern starting with -)
     args.append("--")
-    args.append(params.pattern)
+    args.append(_multiline_pattern(params.pattern) if use_multiline else params.pattern)
     # Use the resolved path when available so ripgrep's output matches the
     # search_base used for prefix stripping (fixes Windows short/long path
     # mismatches with tempfile directories).
@@ -1112,11 +1150,13 @@ class Grep(CallableTool2[Params]):
             flags = 0
             if params.ignore_case:
                 flags |= re.IGNORECASE
-            if params.multiline:
+            use_multiline = params.multiline or _pattern_has_regex_newline(params.pattern)
+            if use_multiline:
                 flags |= re.DOTALL
+            pattern = _multiline_pattern(params.pattern) if use_multiline else params.pattern
 
             try:
-                regex = _compile_regex_cached(params.pattern, flags)
+                regex = _compile_regex_cached(pattern, flags)
             except re.error as e:
                 return ToolError(
                     message=f"Invalid regex pattern: {e}",
@@ -1398,7 +1438,8 @@ class Grep(CallableTool2[Params]):
         lines = content.splitlines()
         match_line_nums: set[int] = set()
 
-        if params.multiline:
+        use_multiline = params.multiline or _pattern_has_regex_newline(params.pattern)
+        if use_multiline:
             for m in regex.finditer(content):
                 start_line = content.count("\n", 0, m.start()) + 1
                 end_line = content.count("\n", 0, m.end()) + 1

@@ -205,3 +205,60 @@ class TestRunStartModes:
             assert "run_bg" in result.output
             assert "status: running" in result.output
             assert "wait_matched: true" in result.output
+
+
+# ============================================================================
+# Shell enhancement wiring: hardline floor, workdir, real exit code (WP1/2/6)
+# ============================================================================
+
+class TestRunSafetyWiring:
+    async def test_hardline_blocked(self, mock_session: MagicMock) -> None:
+        run = _run_instance(mock_session)
+        with patch("kimix.tools.file.run.ProcessTask") as mock_pt:
+            result = await run(RunParams(command="rm -rf /"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (hardline)"
+        assert "hardline" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_dangerous_cwd_returns_error(self, mock_session: MagicMock) -> None:
+        run = _run_instance(mock_session)
+        with patch("kimix.tools.file.run.ProcessTask") as mock_pt:
+            result = await run(RunParams(command="python -c print(1)", cwd="a;b"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Invalid workdir"
+        assert "Invalid workdir" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_exactly_one_run_class(self) -> None:
+        """The module exposes exactly one Run class — the real one with a
+        ``params`` attribute (the dead duplicate was removed, WP6)."""
+        from kimix.tools.file.run import Run as RunImported
+
+        assert RunImported is Run
+        assert getattr(Run, "params", None) is RunParams
+
+    async def test_failure_block_carries_real_exit_code(
+        self, mock_session: MagicMock
+    ) -> None:
+        run = _run_instance(mock_session)
+        with (
+            patch("kimix.tools.file.run.ProcessTask") as mock_pt,
+            patch("kimix.tools.file.run.shutil.which", return_value="/fake/python"),
+            patch("kimix.tools.file.run.Path.is_file", return_value=True),
+        ):
+            instance = MagicMock()
+            instance.start = AsyncMock(return_value="run_fail")
+            instance.wait = AsyncMock(return_value=None)
+            instance.thread_is_alive = AsyncMock(return_value=False)
+            instance.stream = AsyncMock()
+            instance.stream.pop_output = AsyncMock(return_value="some error output")
+            instance.stream.success = AsyncMock(return_value=False)
+            instance.stream.exit_code = 42
+            instance.stream.process_elapsed = None
+            mock_pt.return_value = instance
+
+            result = await run(RunParams(command="python -c print(1)"))
+
+        assert isinstance(result, ToolError)
+        assert "exit_code: 42" in result.output

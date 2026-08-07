@@ -82,6 +82,11 @@ class Params(BaseModel):
                     "Accepts `deduplicate_output` or `token_kill`. "
                     "Set to False to see raw, unfiltered output.",
     )
+    cwd: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("cwd", "workdir"),
+        description="Working directory for the script (absolute or relative path).",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -123,7 +128,13 @@ class Python(CallableTool2[Params]):
         "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
         "the backend interpreter). To install packages for scripts run by this tool, use "
         "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
-        "'uv pip install <pkg>' in the project directory — not bare 'pip install'."
+        "'uv pip install <pkg>' in the project directory — not bare 'pip install'. "
+        "Set `cwd` (or `workdir`) to run the script in a specific working directory. "
+        "By default the child environment is scrubbed of secret-looking variables "
+        "(AWS_*, *KEY*, *TOKEN*, *SECRET*, *PASSWORD*, ...) and captured output is "
+        "redacted for secrets — set `python.env_passthrough=true` (or "
+        "`python.scrub_env=false`) to disable env scrubbing and "
+        "`python.redact_secrets=false` to disable output redaction in config_json."
         " "
         + _interactive_scope_text(is_shell=False)
     )
@@ -186,16 +197,26 @@ class Python(CallableTool2[Params]):
         return sys.executable
 
     @staticmethod
-    def _build_env(python_exe: str) -> dict[str, str] | None:
+    def _build_env(python_exe: str, scrub_env: bool = False) -> dict[str, str] | None:
         """Build a child-process env that pins pip/python to the resolved venv.
 
         The shared ``bin`` directory is always prepended to PATH so that any
         ``rtk`` invoked from user scripts resolves to our binary first.
 
+        When ``scrub_env`` is True the base snapshot starts from
+        ``scrub_child_env(os.environ)`` so credential-looking variables are
+        removed *before* the PATH/VIRTUAL_ENV tweaks are applied.  This matters
+        because the returned dict is a *complete* environment snapshot: if it
+        were built from the raw ``os.environ`` it would re-introduce every
+        variable that ``ProcessTask``'s own base scrubbing removed.
+
         Returns None when the interpreter is not inside a virtualenv (e.g. the
         ``sys.executable`` fallback) and the shared ``bin`` directory is already
         first in PATH, preserving the zero-copy fast path.
         """
+        from kimix.tools.security import scrub_child_env
+
+        base_env = scrub_child_env(dict(os.environ)) if scrub_env else dict(os.environ)
         bin_dir = str(get_share_dir() / "bin")
         path_sep = os.pathsep
         current_path = os.environ.get("PATH", "")
@@ -217,9 +238,9 @@ class Python(CallableTool2[Params]):
         )
 
         if not is_venv:
-            return None if already_first else _prepend(os.environ.copy())
+            return None if already_first else _prepend(base_env)
 
-        env = dict(os.environ)
+        env = base_env
         env["VIRTUAL_ENV"] = str(exe.parent.parent)
         venv_bin_dir = str(exe.parent)
         entries = [e for e in current_path.split(path_sep) if e and e != bin_dir]
@@ -237,6 +258,70 @@ class Python(CallableTool2[Params]):
             "the package with plain 'pip install', it may have gone to a different "
             f"environment. Retry with '{python_exe}' -m pip install {match.group(1)}."
         )
+
+    def _python_config(self) -> dict:
+        """Read the ``python`` section of the session's ``config_json``.
+
+        Dict-guarded: a missing/undict ``config_json`` (or ``python`` section)
+        falls back to ``{}`` so every consumer uses the documented defaults.
+        """
+        try:
+            raw = self._session.custom_config.get("config_json", {})
+        except AttributeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        cfg = raw.get("python", {})
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _syntax_check_error(
+        self, params: Params, script_path: str | None, is_file_mode: bool
+    ) -> ToolError | None:
+        """Fail-fast compile pre-check of the script source.
+
+        Compiles the source (inline ``params.code`` or the file-mode script
+        content) before any subprocess spawn, catching ``SyntaxError`` and
+        ``ValueError`` (e.g. null bytes) with line/column info.  Gated by the
+        ``python.check_syntax`` config (default True).  Never runs for a pure
+        interactive REPL (no initial code) and is never called from
+        ``_continue_session``.
+
+        Returns a ``ToolError`` when the source is not valid Python, else None.
+        """
+        cfg = self._python_config()
+        if not cfg.get("check_syntax", True):
+            return None
+        if script_path is None:
+            # Pure interactive REPL with no initial code.
+            return None
+        if is_file_mode:
+            try:
+                source = Path(script_path).read_text(encoding="utf-8")
+            except OSError as e:
+                return ToolError(
+                    output="",
+                    message=f"Failed to read script source for syntax check: {e}",
+                    brief="Syntax check failed",
+                )
+        else:
+            source = params.code
+        try:
+            compile(source, "<inline>" if not is_file_mode else script_path, "exec")
+        except (SyntaxError, ValueError) as e:
+            location = ""
+            lineno = getattr(e, "lineno", None)
+            offset = getattr(e, "offset", None)
+            if lineno is not None:
+                location = f" (line {lineno}"
+                if offset is not None:
+                    location += f", column {offset}"
+                location += ")"
+            return ToolError(
+                output="",
+                message=f"Syntax error detected before execution: {e}{location}",
+                brief="Syntax error",
+            )
+        return None
 
 
 
@@ -274,6 +359,14 @@ class Python(CallableTool2[Params]):
         if params.task_id is not None:
             return await self._continue_session(params)
 
+        # Validate the working directory before any dispatch: a bad cwd must
+        # fail fast without spawning a subprocess.
+        if params.cwd:
+            from kimix.tools.security import validate_workdir
+            err = validate_workdir(params.cwd)
+            if err:
+                return ToolError(message=err, brief="Invalid workdir")
+
         async with self._semaphore:
             if params.mode == "interactive":
                 return await self._start_interactive(params)
@@ -286,7 +379,12 @@ class Python(CallableTool2[Params]):
     async def _start_interactive(self, params: Params) -> ToolReturnValue:
         """Start an interactive Python session."""
         # Determine script path from `code` (auto-detect .py file or inline code)
-        script_path, _ = self._resolve_script_source(params)
+        script_path, is_file_mode = self._resolve_script_source(params)
+
+        # Fail-fast syntax pre-check before spawning (config-gated).
+        syntax_error = self._syntax_check_error(params, script_path, is_file_mode)
+        if syntax_error is not None:
+            return syntax_error
 
         if script_path is not None:
             args = ["-i", script_path]
@@ -299,8 +397,17 @@ class Python(CallableTool2[Params]):
             return pattern
 
         python_exe = self._resolve_python(params)
+        cfg = self._python_config()
+        scrub_on = bool(cfg.get("scrub_env", True)) and not bool(cfg.get("env_passthrough", False))
+        redact_on = bool(cfg.get("redact_secrets", True))
         process_task = ProcessTask(
-            python_exe, args, env=self._build_env(python_exe), append_newline=True
+            python_exe,
+            args,
+            cwd=params.cwd,
+            env=self._build_env(python_exe, scrub_env=scrub_on),
+            scrub_env=scrub_on,
+            redact=redact_on,
+            append_newline=True,
         )
         task_id = await process_task.start(self._session, "python")
 
@@ -345,6 +452,11 @@ class Python(CallableTool2[Params]):
         script_path, is_file_mode = self._resolve_script_source(params)
         display_script_path = script_path.replace("\\", "/") if script_path else ""
 
+        # Fail-fast syntax pre-check before any subprocess spawn (config-gated).
+        syntax_error = self._syntax_check_error(params, script_path, is_file_mode)
+        if syntax_error is not None:
+            return syntax_error
+
         if is_file_mode:
             source_label = "File"
         elif script_path is not None:
@@ -359,7 +471,17 @@ class Python(CallableTool2[Params]):
         python_exe = self._resolve_python(params)
         args = [script_path]
 
-        process_task = ProcessTask(python_exe, args, env=self._build_env(python_exe))
+        cfg = self._python_config()
+        scrub_on = bool(cfg.get("scrub_env", True)) and not bool(cfg.get("env_passthrough", False))
+        redact_on = bool(cfg.get("redact_secrets", True))
+        process_task = ProcessTask(
+            python_exe,
+            args,
+            cwd=params.cwd,
+            env=self._build_env(python_exe, scrub_env=scrub_on),
+            scrub_env=scrub_on,
+            redact=redact_on,
+        )
         task_id = await process_task.start(self._session, "python")
 
         if background:
@@ -561,10 +683,15 @@ class Python(CallableTool2[Params]):
         )
         output_truncated = False
         if len(output) > 65536:
-            # Use the source (file path or inline code) as context for summarization
-            source_context = params.code
-            output = await _summarize_long_output_async(self._session, source_context, output)
-            output_truncated = True
+            if self._python_config().get("summarize_long_output", True):
+                # Use the source (file path or inline code) as context for summarization
+                source_context = params.code
+                output = await _summarize_long_output_async(self._session, source_context, output)
+                output_truncated = True
+            else:
+                # Summarization disabled by config: still export, but don't
+                # burn an LLM call on the (already token-filtered) output.
+                output_truncated = True
         output = await _maybe_export_output_async(output)
         output_path = _extract_export_path(output)
         return output, output_path, output_truncated, original_path

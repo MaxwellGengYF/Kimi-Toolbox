@@ -32,6 +32,16 @@ from kimix.tools.common import (
     _token_filter_output,
     ProcessTask,
 )
+from kimix.tools.file.bash.output_enhance import (
+    annotate_failure,
+    interpret_exit_code,
+    redact_sensitive_output,
+)
+from kimix.tools.file.bash.safety import (
+    check_hardline_blocked,
+    foreground_background_guidance,
+    validate_workdir,
+)
 
 if TYPE_CHECKING:
     from kimi_agent_sdk import CallableTool2 as _CallableTool2
@@ -230,6 +240,11 @@ class PowershellParams(BaseModel):
         description="Deduplicate repeated output lines from known commands (git, npm, etc.). "
                     "Set to False to see raw, unfiltered output.",
     )
+    cwd: str | None = Field(
+        default=None,
+        alias="workdir",  # LLM can use "workdir" instead of "cwd"
+        description="Working directory for the command (absolute or relative path).",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -264,6 +279,7 @@ class Powershell(CallableTool2[PowershellParams]):
         super().__init__(description=desc)
         self.description += (
             " Accepts `cmd` or `command` parameter. "
+            "`cwd`/`workdir` sets the working directory for this command. "
             "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
             "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
             + _interactive_scope_text(is_shell=True)
@@ -296,6 +312,38 @@ class Powershell(CallableTool2[PowershellParams]):
                 seen.add(normalized)
                 self._forbidden_keywords.append(normalized)
 
+        # Config gates for the hardline safety floor and secret redaction
+        # (both default on; explicitly set False to disable).
+        shell_cfg = self._session.custom_config.get("config_json", {}).get("shell", {})
+        if isinstance(shell_cfg, dict):
+            self._hardline_enabled = shell_cfg.get("hardline", True)
+            self._redact_secrets = shell_cfg.get("redact_secrets", True)
+        else:
+            self._hardline_enabled = True
+            self._redact_secrets = True
+
+    def _hardline_blocked(self, command: str) -> ToolError | None:
+        r"""Return a ToolError when *command* hits the unconditional hardline floor.
+
+        Applies deobfuscation variants (quotes/backslash-escapes/case tricks)
+        before matching, so ``r\m -rf /``, ``rm "" -rf /`` and ``Rm -Rf /``
+        are all blocked.  Skipped entirely when the ``shell.hardline`` config
+        gate is explicitly ``False``.
+        """
+        if not self._hardline_enabled or not command:
+            return None
+        blocked, desc = check_hardline_blocked(command)
+        if not blocked:
+            return None
+        return ToolError(
+            output="",
+            message=(
+                f"Blocked (hardline): {desc}. This command cannot be executed "
+                "via the agent."
+            ),
+            brief="Blocked (hardline)",
+        )
+
     def _resolve_pwsh(self) -> None:
         """Resolve the PowerShell executable paths on first use."""
         if self._pwsh_resolved:
@@ -322,6 +370,15 @@ class Powershell(CallableTool2[PowershellParams]):
         Returns:
             ToolOk on success, ToolError on failure or timeout.
         """
+        # Hardline safety floor: never spawn a process for destructive commands.
+        blocked = self._hardline_blocked(params.cmd)
+        if blocked is not None:
+            return blocked
+
+        workdir_err = validate_workdir(params.cwd)
+        if workdir_err is not None:
+            return ToolError(message=workdir_err, brief="Invalid workdir")
+
         # Early dispatch: continue an existing session
         if params.task_id is not None:
             return await self._continue_session(params)
@@ -406,6 +463,10 @@ class Powershell(CallableTool2[PowershellParams]):
                         message=f"`{cmd}` is forbidden by config rule." + transform_warning,
                         brief="Forbidden command",
                     )
+        # Re-check the prepared text (rtk-rewritten / PS5.1-transformed) too.
+        blocked = self._hardline_blocked(cmd)
+        if blocked is not None:
+            return blocked
         # Refresh PATH/PATHEXT from registry so that tools installed
         # since the last command (e.g. via WinGet) are discoverable.
         if sys.platform == "win32":
@@ -418,7 +479,7 @@ class Powershell(CallableTool2[PowershellParams]):
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT + cmd])
             else:
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT])
-            process_task = ProcessTask(executable, ps_args, None, _env_with_rg_bin_path(), append_newline=True)
+            process_task = ProcessTask(executable, ps_args, params.cwd, _env_with_rg_bin_path(), append_newline=True)
             task_id = await process_task.start(self._session, "pwsh")
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -465,7 +526,7 @@ class Powershell(CallableTool2[PowershellParams]):
         process_task = ProcessTask(
             executable,
             [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
-            None,
+            params.cwd,
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
@@ -509,9 +570,13 @@ class Powershell(CallableTool2[PowershellParams]):
         if await process_task.thread_is_alive():
             output = await process_task.stream.pop_output() if process_task.stream else ""
             output = await _maybe_export_output_async(output)
+            guidance = foreground_background_guidance(params.cmd)
+            message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`."
+            if guidance:
+                message += f" {guidance}"
             return ToolError(
                 output=output,
-                message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`." + transform_warning,
+                message=message + transform_warning,
                 brief="Timeout",
             )
 
@@ -523,6 +588,11 @@ class Powershell(CallableTool2[PowershellParams]):
         success = await stream.success() if stream else False
         real_exit_code = stream.exit_code if stream else None
 
+        # Exit-code semantics + failure hints run on the raw output (the
+        # redacted text is what gets displayed/exported below).
+        meaning = interpret_exit_code(params.cmd, real_exit_code)
+        hint = annotate_failure(output, params.cmd, real_exit_code)
+
         # Unify success/error path: always pass the real exit code.
         processed, output_path, output_truncated, original_path = await self._process_output(
             cmd, params, output, rtk_rewritten=rtk_rewritten
@@ -532,6 +602,8 @@ class Powershell(CallableTool2[PowershellParams]):
             status="completed",
             output=processed,
             exit_code=real_exit_code,
+            exit_code_meaning=meaning,
+            failure_hint=hint,
             wait_matched=wait_matched,
             elapsed_seconds=elapsed_seconds,
             output_path=output_path,
@@ -541,7 +613,7 @@ class Powershell(CallableTool2[PowershellParams]):
         elapsed = stream.process_elapsed if stream else None
 
         if not success:
-            msg = "failed"
+            msg = "failed" + (f" Hint: {hint}" if hint else "")
             return ToolError(output=block, message=msg + transform_warning, brief="Command execution failed")
 
         msg = "[rtk] success" if rtk_rewritten else "success"
@@ -631,6 +703,9 @@ class Powershell(CallableTool2[PowershellParams]):
             if fix.changed:
                 cmd = fix.command
                 note = "\n[WARNING] " + fix.warning
+        blocked = self._hardline_blocked(cmd)
+        if blocked is not None:
+            return blocked
         self._resolve_pwsh()
         executable = self._pwsh_path if self._pwsh_path else (self._pwsh_fallback_path or "powershell")
         from kimix.tools.file.bash import shell_common
@@ -640,7 +715,7 @@ class Powershell(CallableTool2[PowershellParams]):
         process_task = ProcessTask(
             executable,
             [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
-            None,
+            params.cwd,
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
@@ -714,6 +789,10 @@ class Powershell(CallableTool2[PowershellParams]):
         self, command: str, params: PowershellParams, output: str, rtk_rewritten: bool = False
     ) -> tuple[str, str | None, bool, str | None]:
         """Summarize/export long output. Returns (display_output, path, truncated, original_path)."""
+        # Secret redaction runs first (config-gated) so the dedup/export/
+        # summarize pipeline never sees credentials.
+        if self._redact_secrets and output:
+            output = redact_sensitive_output(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
@@ -742,6 +821,8 @@ class Powershell(CallableTool2[PowershellParams]):
         message: str,
         brief: str,
         rtk_rewritten: bool = False,
+        exit_code_meaning: str | None = None,
+        failure_hint: str | None = None,
     ) -> ToolReturnValue:
         """Build a ToolOk response with a structured output block."""
         processed, output_path, output_truncated, original_path = await self._process_output(
@@ -753,11 +834,15 @@ class Powershell(CallableTool2[PowershellParams]):
             real_exit_code = stream.exit_code if stream else None
             if real_exit_code is None:
                 real_exit_code = 0 if await stream.success() else None
+        if exit_code_meaning is None and real_exit_code is not None:
+            exit_code_meaning = interpret_exit_code(params.cmd, real_exit_code)
         block = _build_session_output_block(
             task_id=task_id,
             status=status,
             output=processed,
             exit_code=real_exit_code,
+            exit_code_meaning=exit_code_meaning,
+            failure_hint=failure_hint,
             wait_matched=wait_matched,
             elapsed_seconds=elapsed_seconds,
             output_path=output_path,

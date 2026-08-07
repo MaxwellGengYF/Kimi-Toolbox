@@ -173,6 +173,13 @@ Default is 3."""
     todo_reminder_interval_steps: int = Field(default=20, ge=1)
     """Minimum number of steps between repeated todo reminder injections when
     the todo list has not changed. Default is 20."""
+    todo_compact_injection_enabled: bool = Field(default=True)
+    """When true, the active (unfinished) TodoList plan is deterministically
+    appended to the context-compaction output under a stable header, so the
+    plan survives summarization. Default is true."""
+    todo_compact_injection_max_items: int = Field(default=20, ge=1, le=100)
+    """Maximum unfinished items re-injected into the compaction output.
+    Default is 20."""
 
     target_churn_enabled: bool = Field(default=False)
     """When true, inject a reminder when the agent repeatedly modifies the same

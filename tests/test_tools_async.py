@@ -318,14 +318,28 @@ class TestPython:
     async def test_file_not_found_treated_as_code(self, mock_session: MagicMock) -> None:
         """A .py path that does not exist should be treated as inline code."""
         tool = Python(session=mock_session)
-        # "nonexistent.py" doesn't exist, so it's treated as inline code (a syntax error)
+        # "nonexistent.py" doesn't exist, so it's treated as inline code.
+        # It compiles fine (attribute access ``nonexistent.py``) and then
+        # fails at runtime with NameError.
         params = PyParams(code="nonexistent.py", timeout=10)
         result = await tool(params)
-        # It will fail as Python code since "nonexistent.py" is not valid Python
         assert isinstance(result, ToolError)
         output_str = str(result.output)
         # Should reference structured output block
         assert "task_id:" in output_str
+
+    async def test_broken_inline_code_fails_fast_syntax_check(
+        self, mock_session: MagicMock
+    ) -> None:
+        """Genuinely broken inline code is caught by the compile pre-check
+        before any subprocess spawn, so the response has no task_id."""
+        tool = Python(session=mock_session)
+        params = PyParams(code="def broken(:", timeout=10)
+        result = await tool(params)
+        assert isinstance(result, ToolError)
+        assert result.brief == "Syntax error"
+        assert "Syntax error detected before execution" in str(result.message)
+        assert "task_id:" not in str(result.output)
 
     # Interactive mode tests ------------------------------------------------
 

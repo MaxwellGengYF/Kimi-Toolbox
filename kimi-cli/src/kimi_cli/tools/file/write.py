@@ -292,11 +292,40 @@ class WriteFile(CallableTool2[Params]):
             # Write content to file
             if params.mode == "append" and file_existed:
                 await p.append_text(params.content, encoding="utf-8", errors="strict")
+                expected_size = len(old_text.encode("utf-8")) + len(
+                    params.content.encode("utf-8")
+                )
             else:
                 await p.write_text(new_text, encoding="utf-8", errors="strict")
+                expected_size = len(new_text.encode("utf-8"))
+
+            # Post-write size verification
+            try:
+                actual_size = (await p.stat()).st_size
+            except Exception as e:
+                logger.warning(
+                    "WriteFile verification failed: {path}: {error}", path=params.path, error=e
+                )
+                return ToolError(
+                    message=(
+                        f"{'[out of work-dir] ' if _outside else ''}Write verification failed "
+                        f"for {display_p}: {e}."
+                    ),
+                    brief="Verification failed",
+                )
+            if actual_size != expected_size:
+                return ToolError(
+                    message=(
+                        f"{'[out of work-dir] ' if _outside else ''}Write verification failed "
+                        "(size mismatch): "
+                        f"expected {expected_size} bytes, got {actual_size} bytes. "
+                        f"Path: {display_path}"
+                    ),
+                    brief="Verification failed",
+                )
 
             # Compute file size in-memory
-            file_size = len(new_text.encode("utf-8"))
+            file_size = expected_size
             action_desc = "overwritten" if params.mode == "overwrite" else "appended to"
 
             if fmt_error:
@@ -322,7 +351,8 @@ class WriteFile(CallableTool2[Params]):
 
             message_parts = [
                 f"{'[out of work-dir] ' if _outside else ''}File successfully {action_desc}. "
-                f"Current size: {file_size} bytes. Path: {display_path}"
+                f"Current size: {file_size} bytes. Path: {display_path}",
+                " Verified: size matches.",
             ]
             if _repair_diff:
                 message_parts.append(" JSON was auto-repaired.")

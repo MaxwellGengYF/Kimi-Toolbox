@@ -650,8 +650,11 @@ class TestPwshToolValidationFlow:
         ):
             pwsh_tool = Powershell(session=mock_session)
 
+        # Use a config-forbidden-but-not-hardline command: `rm -rf /` itself is
+        # now intercepted earlier by the hardline floor (brief "Blocked
+        # (hardline)"), so this test keeps exercising the config path.
         with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
-            result = await pwsh_tool(PowershellParams(cmd="rm -rf /"))
+            result = await pwsh_tool(PowershellParams(cmd="rm -rf /tmp/build"))
             mock_pt.assert_not_called()
 
         assert isinstance(result, ToolError)

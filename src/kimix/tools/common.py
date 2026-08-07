@@ -496,6 +496,8 @@ def _build_session_output_block(
     wait_matched: bool | None = None,
     elapsed_seconds: float | None = None,
     exit_code: int | None = None,
+    exit_code_meaning: str | None = None,
+    failure_hint: str | None = None,
     output_path: str | None = None,
     output_truncated: bool = False,
     original_path: str | None = None,
@@ -503,12 +505,15 @@ def _build_session_output_block(
     """Build a YAML-like metadata block for interactive/background sessions.
 
     The block is appended to tool output so callers get structured metadata
-    (task_id, status, elapsed_seconds, etc.) alongside the raw process output.
+    (task_id, status, elapsed_seconds, exit-code meaning, failure hint, etc.)
+    alongside the raw process output.
     """
     lines = [
         f"task_id: {task_id}",
         f"status: {status}",
         f"exit_code: {exit_code if exit_code is not None else 'null'}",
+        f"exit_code_meaning: {exit_code_meaning if exit_code_meaning else 'null'}",
+        f"failure_hint: {failure_hint if failure_hint else 'null'}",
         "output: |",
     ]
     if output:
@@ -1166,6 +1171,8 @@ class ProcessTask:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         append_newline: bool = False,
+        scrub_env: bool = False,
+        redact: bool = False,
     ) -> None:
         import shutil
         # On Windows, subprocess.Popen with shell=False does not resolve .cmd/.bat
@@ -1178,6 +1185,8 @@ class ProcessTask:
         self.args = args or []
         self.cwd = cwd
         self.env = env
+        self.scrub_env = scrub_env
+        self.redact = redact
         self._append_newline = append_newline
         self._stop_event = threading.Event()
         self._process_ref: asyncio.subprocess.Process | None = None
@@ -1194,11 +1203,29 @@ class ProcessTask:
         """
         process = None
         output_buffer = io.StringIO()
+        # Lazy imports: kimix.tools.security is a light module, but importing it
+        # here (rather than at module top) keeps kimix.tools.common importable
+        # even when only the process machinery is needed.  The cap is read from
+        # the background.utils module namespace at call time so tests can patch
+        # ``BACKGROUND_MAX_OUTPUT_CHARS``.
+        from kimix.tools.background.utils import bounded_append, bounded_put
+        import kimix.tools.background.utils as _bg_utils
+        from kimix.tools.security import redact_sensitive_output, scrub_child_env
+
+        def _write_output(text: str) -> None:
+            nonlocal output_buffer
+            bounded_append(output_buffer, text, _bg_utils.BACKGROUND_MAX_OUTPUT_CHARS)
+
         try:
             if self._stop_event.is_set():
                 return False, None
-            # Start the process
+            # Start the process.  The child inherits the parent environment;
+            # when scrubbing is enabled, credential-looking variables are
+            # removed from the base copy FIRST so that a caller-provided
+            # ``self.env`` override can still restore a specific variable.
             process_env = os.environ.copy()
+            if self.scrub_env:
+                process_env = scrub_child_env(process_env)
             if self.env:
                 process_env.update(self.env)
             # On Windows, put the child in its own process group and create it
@@ -1247,14 +1274,18 @@ class ProcessTask:
                             text = decoder.decode(data)
                             if text:
                                 text = filter_output(text)
-                                q.put_nowait(text)
-                                output_buffer.write(text)
+                                if self.redact:
+                                    text = redact_sensitive_output(text)
+                                bounded_put(q, text)
+                                _write_output(text)
                         else:
                             text = decoder.decode(b'', final=True)
                             if text:
                                 text = filter_output(text)
-                                q.put_nowait(text)
-                                output_buffer.write(text)
+                                if self.redact:
+                                    text = redact_sensitive_output(text)
+                                bounded_put(q, text)
+                                _write_output(text)
                             break
                 except (IOError, OSError, ValueError):
                     pass
@@ -1262,8 +1293,10 @@ class ProcessTask:
                     text = decoder.decode(b'', final=True)
                     if text:
                         text = filter_output(text)
-                        q.put_nowait(text)
-                        output_buffer.write(text)
+                        if self.redact:
+                            text = redact_sensitive_output(text)
+                        bounded_put(q, text)
+                        _write_output(text)
 
             async def read_stderr() -> None:
                 if process.stderr is None:
@@ -1278,16 +1311,20 @@ class ProcessTask:
                             text = decoder.decode(data)
                             if text:
                                 text = filter_output(text)
+                                if self.redact:
+                                    text = redact_sensitive_output(text)
                                 msg = "[stderr] " + text
-                                q.put_nowait(msg)
-                                output_buffer.write(msg)
+                                bounded_put(q, msg)
+                                _write_output(msg)
                         else:
                             text = decoder.decode(b'', final=True)
                             if text:
                                 text = filter_output(text)
+                                if self.redact:
+                                    text = redact_sensitive_output(text)
                                 msg = "[stderr] " + text
-                                q.put_nowait(msg)
-                                output_buffer.write(msg)
+                                bounded_put(q, msg)
+                                _write_output(msg)
                             break
                 except (IOError, OSError, ValueError):
                     pass
@@ -1295,9 +1332,11 @@ class ProcessTask:
                     text = decoder.decode(b'', final=True)
                     if text:
                         text = filter_output(text)
+                        if self.redact:
+                            text = redact_sensitive_output(text)
                         msg = "[stderr] " + text
-                        q.put_nowait(msg)
-                        output_buffer.write(msg)
+                        bounded_put(q, msg)
+                        _write_output(msg)
 
             async def write_stdin() -> None:
                 try:
@@ -1363,8 +1402,10 @@ class ProcessTask:
                 if remaining_stdout:
                     text = remaining_stdout.decode('utf-8', errors='replace')
                     text = filter_output(text)
-                    q.put_nowait(text)
-                    output_buffer.write(text)
+                    if self.redact:
+                        text = redact_sensitive_output(text)
+                    bounded_put(q, text)
+                    _write_output(text)
             except (IOError, OSError, ValueError):
                 pass
             if process.stderr is not None:
@@ -1373,9 +1414,11 @@ class ProcessTask:
                     if remaining_stderr:
                         text = remaining_stderr.decode('utf-8', errors='replace')
                         text = filter_output(text)
+                        if self.redact:
+                            text = redact_sensitive_output(text)
                         msg = "[stderr] " + text
-                        q.put_nowait(msg)
-                        output_buffer.write(msg)
+                        bounded_put(q, msg)
+                        _write_output(msg)
                 except (IOError, OSError, ValueError):
                     pass
             # Report completion status

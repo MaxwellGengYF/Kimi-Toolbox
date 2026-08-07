@@ -49,3 +49,32 @@ def test_build_block_original_path_null_when_none() -> None:
         output="hello",
     )
     assert "original_path: null" in block
+
+
+# ---------------------------------------------------------------------------
+# _build_session_output_block with exit_code_meaning / failure_hint (WP3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_block_emits_exit_code_meaning_and_failure_hint() -> None:
+    block = _build_session_output_block(
+        task_id="test_task",
+        status="completed",
+        output="hello",
+        exit_code=1,
+        exit_code_meaning="No matches found (not an error)",
+        failure_hint="The command was not found.",
+    )
+    assert "exit_code: 1" in block
+    assert "exit_code_meaning: No matches found (not an error)" in block
+    assert "failure_hint: The command was not found." in block
+
+
+def test_build_block_null_meaning_and_hint_when_unset() -> None:
+    block = _build_session_output_block(
+        task_id="test_task",
+        status="completed",
+        output="hello",
+    )
+    assert "exit_code_meaning: null" in block
+    assert "failure_hint: null" in block

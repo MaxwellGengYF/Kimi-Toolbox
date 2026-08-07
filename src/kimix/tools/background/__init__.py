@@ -2,6 +2,7 @@
 import sys
 import asyncio
 
+import regex as re
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
@@ -48,6 +49,13 @@ class TaskOutputParams(BaseModel):
     output_path: str | None = Field(
         default=None,
         description="Output file path."
+    )
+    wait_for_pattern: str | None = Field(
+        default=None,
+        description=(
+            "Optional regex pattern. When action='get' and this is set, block "
+            "until the pattern appears in the task output or 'timeout' expires."
+        ),
     )
     kill: bool = Field(
         default=False,
@@ -200,17 +208,39 @@ class TaskOutput(CallableTool2):
             )
 
         timeout = params.timeout
-        if params.wait:
-            inactivity_timeout = min(900, timeout)
-            completed, _elapsed, _inactivity_timed_out = await stream.wait_with_inactivity_timeout(
-                timeout, inactivity_timeout
-            )
-            task_alive = not completed
+        wait_matched: bool | None = None
+        if params.wait_for_pattern is not None:
+            try:
+                pattern = re.compile(params.wait_for_pattern)
+            except re.error as exc:
+                return ToolError(
+                    message=f"Invalid wait_for_pattern: {exc}",
+                    output="",
+                    brief="Invalid pattern",
+                )
+            if params.wait:
+                inactivity_timeout = min(900, timeout)
+                output, wait_matched, _elapsed = await stream.wait_for_output(
+                    timeout=timeout,
+                    pattern=pattern,
+                    inactivity_timeout=inactivity_timeout,
+                )
+                task_alive = await stream.thread_is_alive()
+            else:
+                output = await stream.pop_output()
+                task_alive = await stream.thread_is_alive()
         else:
-            task_alive = await stream.thread_is_alive()
+            if params.wait:
+                inactivity_timeout = min(900, timeout)
+                completed, _elapsed, _inactivity_timed_out = await stream.wait_with_inactivity_timeout(
+                    timeout, inactivity_timeout
+                )
+                task_alive = not completed
+            else:
+                task_alive = await stream.thread_is_alive()
 
-        # Use pop_output to ensure each call returns only new data
-        output = await stream.pop_output()
+            # Use pop_output to ensure each call returns only new data
+            output = await stream.pop_output()
         if not task_alive:
             remove_task_id(self._session, params.task_id.strip())
             if not await stream.success():
@@ -238,6 +268,8 @@ class TaskOutput(CallableTool2):
         kind = params.task_id.split("_")[0] if params.task_id else "task"
         status = "running" if task_alive else "completed"
         output_text = output if output else "(no output)"
+        if wait_matched is not None:
+            output_text += f"\nwait_matched: {str(wait_matched).lower()}"
         if not task_alive:
             elapsed = stream.process_elapsed
             if elapsed is not None:

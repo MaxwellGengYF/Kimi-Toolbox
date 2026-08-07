@@ -321,6 +321,126 @@ async def test_grep_multiline_mode(grep_tool: Grep):
         assert "multiline" in result.output
 
 
+async def test_grep_auto_multiline_real_newline(grep_tool: Grep):
+    """A pattern with a REAL newline matches across lines without multiline=True."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        test_file = Path(temp_dir) / "multi.py"
+        test_file.write_text(
+            "def foo():\n    return 1\n\ndef bar():\n    return 2\n",
+            newline="\n",
+        )
+
+        # No multiline=True: auto-detection must enable multiline mode.
+        result = await grep_tool(
+            Params(
+                pattern="def foo\\(\\):\n    return 1",
+                path=temp_dir,
+                output_mode="content",
+            )
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        assert "def foo():" in result.output
+        assert "return 1" in result.output
+
+
+async def test_grep_auto_multiline_escape(grep_tool: Grep):
+    """A regex `\n` escape matches across lines without multiline=True."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        test_file = Path(temp_dir) / "multi.py"
+        test_file.write_text(
+            "def foo():\n    return 1\n\ndef bar():\n    return 2\n",
+            newline="\n",
+        )
+
+        # No multiline=True: the `\n` escape must auto-enable multiline mode.
+        result = await grep_tool(
+            Params(
+                pattern=r"def foo\(\):\n    return 1",
+                path=temp_dir,
+                output_mode="content",
+            )
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        assert "def foo():" in result.output
+        assert "return 1" in result.output
+
+
+async def test_grep_literal_backslash_n_stays_line_oriented(grep_tool: Grep):
+    """A literal backslash-n (even backslashes) does NOT auto-enable multiline."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Real line boundary between alpha and beta: literal `\n` must NOT
+        # match across it (pattern stays line-oriented).
+        (Path(temp_dir) / "real_newline.txt").write_text("alpha\nbeta\n", newline="\n")
+        # Same-line literal backslash-n: literal search still works.
+        (Path(temp_dir) / "literal.txt").write_text("x alpha\\nbeta y\n", newline="\n")
+
+        result = await grep_tool(
+            Params(pattern=r"alpha\\nbeta", path=temp_dir, output_mode="content")
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        # Only the same-line literal backslash-n matches; no cross-line match.
+        assert "literal.txt" in result.output
+        assert "real_newline.txt" not in result.output
+
+
+def test_pattern_has_regex_newline():
+    """Unit tests for the auto-multiline pattern detection helper."""
+    from kimi_cli.tools.file.grep_local import _pattern_has_regex_newline
+
+    # Real newline decoded into the pattern.
+    assert _pattern_has_regex_newline("a\nb") is True
+    # Regex `\n` escape (single backslash).
+    assert _pattern_has_regex_newline(r"a\nb") is True
+    # Literal backslash-n (even number of backslashes) → not a newline escape.
+    assert _pattern_has_regex_newline(r"a\\nb") is False
+    # No newline at all.
+    assert _pattern_has_regex_newline("abc") is False
+
+
+def test_multiline_pattern_crlf_normalization():
+    """Multi-line patterns are rewritten to match CRLF files too.
+
+    ripgrep multiline mode matches raw bytes, so on CRLF files (the Windows
+    default) a pattern written with ``\n`` would silently find nothing.
+    ``_multiline_pattern`` rewrites newline constructs to ``\r?\n``.
+    """
+    from kimi_cli.tools.file.grep_local import _multiline_pattern
+
+    # Real newline → optional carriage return.
+    assert _multiline_pattern("a\nb") == r"a\r?\nb"
+    # Explicit CRLF in the pattern normalizes to the same form.
+    assert _multiline_pattern("a\r\nb") == r"a\r?\nb"
+    # Regex `\n` escape → optional carriage return.
+    assert _multiline_pattern(r"a\nb") == r"a\r?\nb"
+    # Literal backslash-n (even backslashes) stays untouched.
+    assert _multiline_pattern(r"a\\nb") == r"a\\nb"
+    # No newline at all → unchanged.
+    assert _multiline_pattern("abc") == "abc"
+
+
+async def test_grep_auto_multiline_crlf_file(grep_tool: Grep):
+    """A \n pattern matches across lines in a CRLF file (Windows default)."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        test_file = Path(temp_dir) / "crlf.py"
+        # Default text-mode write on Windows produces CRLF; force it explicitly.
+        test_file.write_bytes(b"def foo():\r\n    return 1\r\n\r\ndef bar():\r\n    return 2\r\n")
+
+        result = await grep_tool(
+            Params(
+                pattern="def foo\\(\\):\n    return 1",
+                path=temp_dir,
+                output_mode="content",
+            )
+        )
+        assert not result.is_error
+        assert isinstance(result.output, str)
+        assert "def foo():" in result.output
+        assert "return 1" in result.output
+
+
 async def test_grep_no_matches(grep_tool: Grep):
     """Test when no matches are found."""
     with tempfile.TemporaryDirectory() as temp_dir:

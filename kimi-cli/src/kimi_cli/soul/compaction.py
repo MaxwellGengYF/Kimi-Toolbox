@@ -12,6 +12,7 @@ from kosong.tooling.empty import EmptyToolset
 
 import kimi_cli.prompts as prompts
 from kimi_cli.llm import LLM
+from kimi_cli.session_state import TodoItemState, format_todo_injection
 from kimi_cli.soul.llm_request_recorder import LLMRequestRecorder
 from kimi_cli.soul.message import system
 from kimi_cli.utils.logging import logger
@@ -58,6 +59,9 @@ class CompactionOptions:
 
     avoid_cascade: bool = False
     mode: CompactMode = CompactMode.BALANCED
+    todos_max_items: int | None = None
+    """Maximum unfinished todos re-injected into the compaction output.
+    ``None`` uses :func:`format_todo_injection`'s default (20)."""
 
 
 class CompactionResult(NamedTuple):
@@ -257,6 +261,7 @@ class SimpleCompaction:
         custom_instruction: str = "",
         options: CompactionOptions | None = None,
         recorder: LLMRequestRecorder | None = None,
+        todos_loader: Callable[[], Sequence[TodoItemState]] | None = None,
     ) -> CompactionResult:
         options = options if options is not None else CompactionOptions()
         prepare_result = self.prepare(
@@ -307,6 +312,19 @@ class SimpleCompaction:
 
         # drop thinking parts if any
         content.extend(part for part in compacted_msg.content if not isinstance(part, ThinkPart))
+
+        # Hermes-style re-injection: deterministically append the active
+        # (unfinished) todo list so the plan survives context compression.
+        # Failure-isolated — a broken loader must never break compaction.
+        if todos_loader is not None:
+            try:
+                injection = format_todo_injection(
+                    todos_loader(), max_items=options.todos_max_items or 20
+                )
+            except Exception:
+                injection = None
+            if injection:
+                content.append(TextPart(text="\n\n" + injection))
         compacted_messages: list[Message] = [Message(role="user", content=content)]
         compacted_messages.extend(to_preserve)
         return CompactionResult(messages=compacted_messages, usage=result.usage)

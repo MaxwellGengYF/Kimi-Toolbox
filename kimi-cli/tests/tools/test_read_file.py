@@ -121,6 +121,58 @@ async def test_read_nonexistent_file(read_file_tool: ReadFile, temp_work_dir: Ka
     assert result.brief == "File not found"
 
 
+async def test_read_nonexistent_file_with_suggestion(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    """A missing file with a similarly-named sibling suggests it."""
+    await (temp_work_dir / "config.yaml").write_text("key: value\n")
+
+    missing = temp_work_dir / "config.yml"
+    result = await read_file_tool(Params(path=str(missing)))
+
+    assert result.is_error
+    assert "does not exist" in result.message
+    assert "Did you mean" in result.message
+    assert "config.yaml" in result.message
+    assert result.brief == "File not found"
+
+
+async def test_read_nonexistent_unrelated_files_not_suggested(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    """Unrelated sibling files are NOT suggested (scoring cutoff is honored).
+
+    Regression: rapidfuzz ``process.extract`` with a Python callable scorer
+    rescales 0..100 scores to 100.0, defeating the cutoff and suggesting
+    every sibling. The scorer must rank manually so only genuinely similar
+    names (score >= _SIMILARITY_CUTOFF) appear.
+    """
+    for name in ("config.yaml", "long.txt", "nb.ipynb", "code.py", "stale.txt"):
+        await (temp_work_dir / name).write_text("x\n")
+
+    missing = temp_work_dir / "zzz_none.txt"
+    result = await read_file_tool(Params(path=str(missing)))
+
+    assert result.is_error
+    assert "does not exist" in result.message
+    # No sibling scores >= cutoff for `zzz_none.txt`.
+    assert "Did you mean" not in result.message
+    assert "config.yaml" not in result.message
+    assert "nb.ipynb" not in result.message
+    display_path = str(missing).replace("\\", "/")
+    assert result.message == f"`{display_path}` does not exist."
+
+
+async def test_read_nonexistent_file_suggestion_never_raises(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    """The suggestion scan is guarded: unrelated errors still yield the plain message."""
+    # Read a nonexistent path whose parent cannot be listed (a file as parent).
+    file_parent = temp_work_dir / "parent.txt"
+    await file_parent.write_text("x")
+    weird = temp_work_dir / "parent.txt" / "child.txt"
+
+    result = await read_file_tool(Params(path=str(weird)))
+
+    assert result.is_error
+    assert result.brief == "File not found"
+    assert "does not exist" in result.message
+
+
 async def test_read_directory_instead_of_file(read_file_tool: ReadFile, temp_work_dir: KaosPath):
     """Test attempting to read a directory."""
     result = await read_file_tool(Params(path=str(temp_work_dir)))
@@ -786,7 +838,11 @@ class TestReadFileCharSlicing:
         await f.write_text("0123456789\n")
         result = await read_file_tool(Params(path=str(f), char_offset=7, max_char=12))
         assert not result.is_error
-        assert result.output == "01234"
+        # char_offset = start position; max_char = MAX chars to RETURN.
+        # Offset 7 lands past the line-number prefix ("     1\t"), so the
+        # remaining 11 chars of the line are returned (12 max_char is a cap).
+        assert result.output == "0123456789\n"
+        assert len(result.output) <= 12
 
     async def test_char_offset_beyond_output(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         f = temp_work_dir / "a.txt"
@@ -857,7 +913,38 @@ class TestReadFileCharSlicing:
         await f.write_text("你好世界\n")
         result = await read_file_tool(Params(path=str(f), char_offset=7, max_char=9))
         assert not result.is_error
-        assert result.output == "你好"
+        # max_char caps the RETURNED length (not the end index): offset 7 is
+        # past the line-number prefix, so the whole 5-char line is returned.
+        assert result.output == "你好世界\n"
+        assert len(result.output) <= 9
+
+    async def test_char_offset_pagination_pages(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """Page 1 / page 2 via char_offset: disjoint windows, each <= max_char."""
+        f = temp_work_dir / "long.txt"
+        content = "\n".join(f"line {i:04d} content here" for i in range(1, 101)) + "\n"
+        await f.write_text(content)
+
+        page1 = await read_file_tool(Params(path=str(f), char_offset=0, max_char=100))
+        page2 = await read_file_tool(Params(path=str(f), char_offset=100, max_char=100))
+        full = await read_file_tool(Params(path=str(f), char_offset=0, max_char=200000))
+
+        assert not page1.is_error and not page2.is_error and not full.is_error
+        assert len(page1.output) <= 100
+        assert len(page2.output) <= 100
+        # Disjoint windows of the same rendered output.
+        assert page1.output == full.output[0:100]
+        assert page2.output == full.output[100:200]
+        assert page1.output != page2.output
+
+    async def test_char_offset_zero_unchanged(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """char_offset=0 behaves exactly like no char slicing."""
+        f = temp_work_dir / "a.txt"
+        await f.write_text("0123456789\n")
+        r0 = await read_file_tool(Params(path=str(f), char_offset=0))
+        r1 = await read_file_tool(Params(path=str(f)))
+        assert not r0.is_error and not r1.is_error
+        assert r0.output == r1.output
+        assert r0.output == "     1\t0123456789\n"
 
 
 # ── Multi-file read tests ────────────────────────────────────────────────────
@@ -1005,18 +1092,64 @@ async def test_read_multiple_files_scalar_options(
     assert "     2\tb2" not in b_section
 
 
+async def test_read_multiple_files_per_file_list_options(
+    read_file_tool: ReadFile, temp_work_dir: KaosPath
+):
+    """List-valued n_lines applies per file: [1, 2] → 1 line for a, 2 for b."""
+    a = temp_work_dir / "a.txt"
+    b = temp_work_dir / "b.txt"
+    await a.write_text("a1\na2\na3")
+    await b.write_text("b1\nb2\nb3")
+
+    result = await read_file_tool(Params(path=[str(a), str(b)], n_lines=[1, 2]))
+    assert not result.is_error
+    display_b = str(b).replace("\\", "/")
+    a_section = result.output.split(f"======== {display_b} ========")[0]
+    b_section = result.output.split(f"======== {display_b} ========")[1]
+    assert "     1\ta1" in a_section
+    assert "     2\ta2" not in a_section
+    assert "     1\tb1" in b_section
+    assert "     2\tb2" in b_section
+    assert "     3\tb3" not in b_section
+
+
+async def test_read_multiple_files_per_file_list_char_offset(
+    read_file_tool: ReadFile, temp_work_dir: KaosPath
+):
+    """List-valued char_offset applies per file; scalars still broadcast."""
+    a = temp_work_dir / "a.txt"
+    b = temp_work_dir / "b.txt"
+    await a.write_text("0123456789\n")
+    await b.write_text("0123456789\n")
+
+    result = await read_file_tool(Params(path=[str(a), str(b)], char_offset=[0, 7]))
+    assert not result.is_error
+    display_b = str(b).replace("\\", "/")
+    a_section = result.output.split(f"======== {display_b} ========")[0]
+    b_section = result.output.split(f"======== {display_b} ========")[1]
+    # a: offset 0 → full rendered line with prefix.
+    assert "     1\t0123456789\n" in a_section
+    # b: offset 7 → past the prefix, remaining "0123456789\n".
+    assert "0123456789\n" in b_section
+    assert "\t" not in b_section[:5]
+
+
 async def test_read_multiple_files_mismatched_option_length(
     read_file_tool: ReadFile, temp_work_dir: KaosPath
 ):
-    """List-valued options are no longer accepted; only scalar values."""
+    """List-valued options must match the number of file paths."""
     a = temp_work_dir / "a.txt"
     b = temp_work_dir / "b.txt"
     await a.write_text("a")
     await b.write_text("b")
 
-    # n_lines no longer accepts lists; should raise validation error
+    # 2 paths but a 1-element list → validation error.
     with pytest.raises((ValueError, Exception)):
         Params(path=[str(a), str(b)], n_lines=[1])
+
+    # A list longer than the path list is also rejected.
+    with pytest.raises((ValueError, Exception)):
+        Params(path=[str(a)], n_lines=[1, 2])
 
 
 async def test_read_multiple_files_alias_paths(
@@ -1198,13 +1331,57 @@ class TestReadFileGlob:
         # Only one file matched, so single-file output format is used.
         assert result.message.endswith(" Path: included.md")
 
-    async def test_read_glob_rejects_leading_double_star(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
-        """`**/*.md` is rejected as unsafe."""
-        result = await read_file_tool(Params(path="**/*.md", glob=True))
+    async def test_read_glob_rejects_unsafe_double_star(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """Bare `**` is rejected as an unsafe all-wildcard recursive pattern."""
+        result = await read_file_tool(Params(path="**", glob=True))
 
         assert result.is_error
-        assert "starts with `**`" in result.message
+        assert "unsafe" in result.message.lower()
         assert result.brief == "Unsafe glob pattern"
+
+    async def test_read_glob_rejects_double_star_all(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """`**/*` is rejected as an unsafe all-wildcard recursive pattern."""
+        result = await read_file_tool(Params(path="**/*", glob=True))
+
+        assert result.is_error
+        assert "unsafe" in result.message.lower()
+        assert result.brief == "Unsafe glob pattern"
+
+    async def test_read_glob_recursive_src_double_star(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """`src/**/*.ts` reads files recursively (aligned with Glob)."""
+        src = temp_work_dir / "src"
+        await src.mkdir()
+        nested = src / "nested"
+        await nested.mkdir()
+        await (src / "a.ts").write_text("alpha")
+        await (nested / "b.ts").write_text("beta")
+        await (src / "c.txt").write_text("not-ts")
+
+        result = await read_file_tool(Params(path="src/**/*.ts", glob=True))
+
+        assert not result.is_error
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert "not-ts" not in result.output
+        assert len(self._file_headers(result.output)) == 2
+
+    async def test_read_glob_recursive_root_double_star(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
+        """`**/*.ts` from the work-dir root reads files recursively."""
+        src = temp_work_dir / "src"
+        await src.mkdir()
+        nested = src / "nested"
+        await nested.mkdir()
+        await (temp_work_dir / "top.ts").write_text("top")
+        await (src / "a.ts").write_text("alpha")
+        await (nested / "b.ts").write_text("beta")
+
+        result = await read_file_tool(Params(path="**/*.ts", glob=True))
+
+        assert not result.is_error
+        assert "top" in result.output
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert len(self._file_headers(result.output)) == 3
 
     async def test_read_glob_respects_max_files(self, read_file_tool: ReadFile, temp_work_dir: KaosPath):
         """Create MAX_FILES + 1 matching files and verify the call is rejected."""

@@ -43,6 +43,16 @@ from kimix.tools.file.bash.bash_fix import (
     # forbidden source commands.
     fix_bash_command,
 )
+from kimix.tools.file.bash.output_enhance import (
+    annotate_failure,
+    interpret_exit_code,
+    redact_sensitive_output,
+)
+from kimix.tools.file.bash.safety import (
+    check_hardline_blocked,
+    foreground_background_guidance,
+    validate_workdir,
+)
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_PARSE = _native_get_module("parse")
@@ -838,6 +848,11 @@ class BashParams(BaseModel):
         description="Deduplicate repeated output lines from known commands (git, npm, etc.). "
                     "Set to False to see raw, unfiltered output.",
     )
+    cwd: str | None = Field(
+        default=None,
+        alias="workdir",  # LLM can use "workdir" instead of "cwd"
+        description="Working directory for the command (absolute or relative path).",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -869,6 +884,7 @@ class Bash(CallableTool2[BashParams]):
     description: str = (
         "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
         "Accepts `cmd` or `command` parameter. "
+        "`cwd`/`workdir` sets the working directory for this command. "
         "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
         "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
         "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
@@ -906,6 +922,38 @@ class Bash(CallableTool2[BashParams]):
                 seen.add(normalized)
                 self._forbidden_keywords.append(normalized)
 
+        # Config gates for the hardline safety floor and secret redaction
+        # (both default on; explicitly set False to disable).
+        shell_cfg = self._session.custom_config.get("config_json", {}).get("shell", {})
+        if isinstance(shell_cfg, dict):
+            self._hardline_enabled = shell_cfg.get("hardline", True)
+            self._redact_secrets = shell_cfg.get("redact_secrets", True)
+        else:
+            self._hardline_enabled = True
+            self._redact_secrets = True
+
+    def _hardline_blocked(self, command: str) -> ToolError | None:
+        r"""Return a ToolError when *command* hits the unconditional hardline floor.
+
+        Applies deobfuscation variants (quotes/backslash-escapes/case tricks)
+        before matching, so ``r\m -rf /``, ``rm "" -rf /`` and ``Rm -Rf /``
+        are all blocked.  Skipped entirely when the ``shell.hardline`` config
+        gate is explicitly ``False``.
+        """
+        if not self._hardline_enabled or not command:
+            return None
+        blocked, desc = check_hardline_blocked(command)
+        if not blocked:
+            return None
+        return ToolError(
+            output="",
+            message=(
+                f"Blocked (hardline): {desc}. This command cannot be executed "
+                "via the agent."
+            ),
+            brief="Blocked (hardline)",
+        )
+
     async def __call__(self, params: BashParams) -> ToolReturnValue:
         """Execute the bash command via the system bash executable.
 
@@ -915,6 +963,15 @@ class Bash(CallableTool2[BashParams]):
         Returns:
             ToolOk on success, ToolError on failure or timeout.
         """
+        # Hardline safety floor: never spawn a process for destructive commands.
+        blocked = self._hardline_blocked(params.cmd)
+        if blocked is not None:
+            return blocked
+
+        workdir_err = validate_workdir(params.cwd)
+        if workdir_err is not None:
+            return ToolError(message=workdir_err, brief="Invalid workdir")
+
         forbidden = self._forbidden_error(params.cmd)
         if forbidden is not None:
             return forbidden
@@ -964,13 +1021,16 @@ class Bash(CallableTool2[BashParams]):
                 )
                 if forbidden is not None:
                     return forbidden
+                blocked = self._hardline_blocked(startup_cmd)
+                if blocked is not None:
+                    return blocked
                 encoded = _encode_startup_script(
                     _with_msystem_neutralized(startup_cmd, self._bash)
                 )
                 bash_args = ["-c", encoded + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
-            process_task = ProcessTask(self._bash, bash_args, None, _bash_subprocess_env(), append_newline=True)
+            process_task = ProcessTask(self._bash, bash_args, params.cwd, _bash_subprocess_env(), append_newline=True)
             task_id = await process_task.start(self._session, "bash")
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -1011,7 +1071,10 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
+        blocked = self._hardline_blocked(rtk_cmd)
+        if blocked is not None:
+            return blocked
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], params.cwd, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         wait_matched: bool | None = None
@@ -1052,9 +1115,13 @@ class Bash(CallableTool2[BashParams]):
         if await process_task.thread_is_alive():
             output = await process_task.stream.pop_output() if process_task.stream else ""
             output = await _maybe_export_output_async(output)
+            guidance = foreground_background_guidance(params.cmd)
+            message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`"
+            if guidance:
+                message += f" {guidance}"
             return ToolError(
                 output=output,
-                                    message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                message=message,
                 brief="Timeout",
             )
 
@@ -1066,6 +1133,11 @@ class Bash(CallableTool2[BashParams]):
         success = await stream.success() if stream else False
         real_exit_code = stream.exit_code if stream else None
 
+        # Exit-code semantics + failure hints run on the raw output (the
+        # redacted text is what gets displayed/exported below).
+        meaning = interpret_exit_code(params.cmd, real_exit_code)
+        hint = annotate_failure(output, params.cmd, real_exit_code)
+
         # Unify success/error path: always pass the real exit code.
         processed, output_path, output_truncated, original_path = await self._process_output(
             params, output, rtk_rewritten=rtk_rewritten
@@ -1075,6 +1147,8 @@ class Bash(CallableTool2[BashParams]):
             status="completed",
             output=processed,
             exit_code=real_exit_code,
+            exit_code_meaning=meaning,
+            failure_hint=hint,
             wait_matched=wait_matched,
             elapsed_seconds=elapsed_seconds,
             output_path=output_path,
@@ -1082,7 +1156,7 @@ class Bash(CallableTool2[BashParams]):
             original_path=original_path,
         )
         if not success:
-            msg = "failed"
+            msg = "failed" + (f" Hint: {hint}" if hint else "")
             return ToolError(output=block, message=msg, brief="Command execution failed")
 
         msg = "[rtk] success" if rtk_rewritten else "success"
@@ -1183,7 +1257,10 @@ class Bash(CallableTool2[BashParams]):
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
             return forbidden
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
+        blocked = self._hardline_blocked(rtk_cmd)
+        if blocked is not None:
+            return blocked
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], params.cwd, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         return ToolOk(
@@ -1272,6 +1349,10 @@ class Bash(CallableTool2[BashParams]):
         self, params: BashParams, output: str, rtk_rewritten: bool = False
     ) -> tuple[str, str | None, bool, str | None]:
         """Summarize/export long output. Returns (display_output, path, truncated, original_path)."""
+        # Secret redaction runs first (config-gated) so the dedup/export/
+        # summarize pipeline never sees credentials.
+        if self._redact_secrets and output:
+            output = redact_sensitive_output(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
@@ -1300,6 +1381,8 @@ class Bash(CallableTool2[BashParams]):
         message: str,
         brief: str,
         rtk_rewritten: bool = False,
+        exit_code_meaning: str | None = None,
+        failure_hint: str | None = None,
     ) -> ToolReturnValue:
         """Build a ToolOk response with a structured output block."""
         processed, output_path, output_truncated, original_path = await self._process_output(
@@ -1311,11 +1394,15 @@ class Bash(CallableTool2[BashParams]):
             real_exit_code = stream.exit_code if stream else None
             if real_exit_code is None and stream is not None:
                 real_exit_code = 0 if await stream.success() else None
+        if exit_code_meaning is None and real_exit_code is not None:
+            exit_code_meaning = interpret_exit_code(params.cmd, real_exit_code)
         block = _build_session_output_block(
             task_id=task_id,
             status=status,
             output=processed,
             exit_code=real_exit_code,
+            exit_code_meaning=exit_code_meaning,
+            failure_hint=failure_hint,
             wait_matched=wait_matched,
             elapsed_seconds=elapsed_seconds,
             output_path=output_path,

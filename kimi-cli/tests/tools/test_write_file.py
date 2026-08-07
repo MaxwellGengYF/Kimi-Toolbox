@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,8 @@ from kaos.path import KaosPath
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval, ApprovalResult
+from kimi_cli.tools.file.read import Params as ReadParams
+from kimi_cli.tools.file.read import ReadFile
 from kimi_cli.tools.file.write import Params, WriteFile
 from tests.conftest import tool_call_context
 
@@ -345,6 +348,105 @@ async def test_write_new_file_not_in_dict_succeeds(
     assert not result.is_error
     assert "successfully overwritten" in result.message
     assert await file_path.read_text() == "new content"
+
+
+# --- FileMTime external-modification integration tests ---
+
+
+def _bump_mtime(path: KaosPath, delta: float = 2.0) -> None:
+    """Deterministically move *path*'s mtime forward by *delta* seconds."""
+    st = os.stat(str(path))
+    os.utime(str(path), (st.st_atime, st.st_mtime + delta))
+
+
+async def test_write_blocked_after_external_modification(
+    read_file_tool: ReadFile,
+    write_file_tool: WriteFile,
+    temp_work_dir: KaosPath,
+):
+    """Read via ReadFile, external modification, then WriteFile is blocked."""
+    file_path = temp_work_dir / "ext_mod.txt"
+    await file_path.write_text("original content")
+
+    # Read it — records the read baseline via clean_file
+    result = await read_file_tool(ReadParams(path=str(file_path)))
+    assert not result.is_error
+
+    # External modification bumps the mtime past the read baseline
+    _bump_mtime(file_path)
+
+    result = await write_file_tool(Params(path=str(file_path), content="clobbered"))
+    assert result.is_error
+    assert "File modified" in result.message
+    assert "read file first" in result.message
+
+
+async def test_write_after_write_without_read_blocked(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath
+):
+    """Two consecutive writes with no read in between: the second is blocked."""
+    file_path = temp_work_dir / "double_write.txt"
+
+    result1 = await write_file_tool(Params(path=str(file_path), content="first"))
+    assert not result1.is_error
+
+    result2 = await write_file_tool(Params(path=str(file_path), content="second"))
+    assert result2.is_error
+    assert "File modified" in result2.message
+    assert "read file first" in result2.message
+
+
+async def test_write_succeeds_after_read(
+    read_file_tool: ReadFile,
+    write_file_tool: WriteFile,
+    temp_work_dir: KaosPath,
+):
+    """Reading a file via ReadFile legitimizes a subsequent WriteFile."""
+    file_path = temp_work_dir / "read_then_write.txt"
+    await file_path.write_text("original content")
+
+    result = await read_file_tool(ReadParams(path=str(file_path)))
+    assert not result.is_error
+
+    result = await write_file_tool(Params(path=str(file_path), content="new content"))
+    assert not result.is_error
+    assert "successfully overwritten" in result.message
+    assert await file_path.read_text() == "new content"
+
+
+# --- Post-write size verification tests ---
+
+
+async def test_write_message_includes_verification(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath
+):
+    """Success message notes that post-write size verification passed."""
+    file_path = temp_work_dir / "verified.txt"
+    result = await write_file_tool(Params(path=str(file_path), content="hello world"))
+    assert not result.is_error
+    assert "Verified: size matches." in result.message
+
+
+async def test_write_verification_size_mismatch(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath
+):
+    """A post-write stat size mismatch reports a verification error."""
+    file_path = temp_work_dir / "mismatch.txt"
+
+    class FakeStat:
+        st_mode = 0o100644  # regular-file mode so is_dir()/exists() keep working
+        st_size = 999999  # wrong size on purpose
+
+    async def fake_stat(self, follow_symlinks: bool = True) -> FakeStat:
+        return FakeStat()
+
+    # The real write happens; only the post-write stat reports a wrong size.
+    with patch("kaos.path.KaosPath.stat", fake_stat):
+        result = await write_file_tool(Params(path=str(file_path), content="hello"))
+
+    assert result.is_error
+    assert "verification failed" in result.message.lower()
+    assert "Verification failed" in result.brief
 
 
 # ============================================================================

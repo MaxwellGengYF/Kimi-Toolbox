@@ -4354,3 +4354,220 @@ class TestMSystemNeutralizationRealBash:
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout == ""
+
+
+# ============================================================================
+# Shell enhancement wiring: hardline floor, cwd/workdir, hints, redaction,
+# background guidance (WP1-WP5)
+# ============================================================================
+
+class TestShellSafetyWiring:
+    @pytest.fixture
+    def bash_instance(self, mock_session: MagicMock) -> Bash:
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            return Bash(session=mock_session)
+
+    @staticmethod
+    def _completed_process_task() -> MagicMock:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-enhance-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value="mock output")
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        process_task.stream.process_elapsed = None
+        return process_task
+
+    # -- hardline floor ----------------------------------------------------
+
+    async def test_hardline_block_returns_error_before_process_task(
+        self, bash_instance: Bash
+    ) -> None:
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd="rm -rf /"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (hardline)"
+        assert "hardline" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_hardline_block_obfuscated_spelling(
+        self, bash_instance: Bash
+    ) -> None:
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd=r"r\m -rf /"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (hardline)"
+        mock_pt.assert_not_called()
+
+    async def test_hardline_skipped_when_config_disabled(
+        self, mock_session: MagicMock
+    ) -> None:
+        mock_session.custom_config.get.return_value = {"shell": {"hardline": False}}
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+        process_task = self._completed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ) as mock_pt:
+            result = await bash(BashParams(cmd="rm -rf /"))
+        assert isinstance(result, ToolOk)
+        mock_pt.assert_called_once()
+
+    # -- cwd / workdir -----------------------------------------------------
+
+    async def test_cwd_and_workdir_alias_accepted(self) -> None:
+        params = BashParams(cmd="pwd", cwd="/tmp/work")
+        assert params.cwd == "/tmp/work"
+        params2 = BashParams(cmd="pwd", workdir=r"C:\work")
+        assert params2.cwd == r"C:\work"
+
+    async def test_dangerous_cwd_returns_error_without_spawning(
+        self, bash_instance: Bash
+    ) -> None:
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd="pwd", cwd="a;b"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Invalid workdir"
+        assert "Invalid workdir" in result.message
+        mock_pt.assert_not_called()
+
+    async def test_process_task_receives_cwd(self, bash_instance: Bash) -> None:
+        process_task = self._completed_process_task()
+        with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
+            "kimix.utils.windows_env.refresh_env_from_registry"
+        ), patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask",
+            return_value=process_task,
+        ) as mock_pt:
+            result = await bash_instance(BashParams(cmd="echo hi", cwd=r"C:\work"))
+        assert isinstance(result, ToolOk)
+        assert mock_pt.call_args.args[2] == r"C:\work"
+
+    # -- exit-code meaning / failure hints ---------------------------------
+
+    async def test_completed_failure_block_has_meaning_and_hint(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        process_task.stream.pop_output = AsyncMock(
+            return_value="bash: no_such_cmd_xyz: command not found"
+        )
+        process_task.stream.success = AsyncMock(return_value=False)
+        process_task.stream.exit_code = 127
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="no_such_cmd_xyz"))
+        assert isinstance(result, ToolError)
+        assert "exit_code_meaning:" in result.output
+        assert "failure_hint:" in result.output
+        assert "command was not found" in result.output.lower()
+        assert "Hint:" in result.message
+
+    async def test_completed_success_block_has_null_meaning_and_hint(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="echo hi"))
+        assert isinstance(result, ToolOk)
+        assert "exit_code_meaning: null" in result.output
+        assert "failure_hint: null" in result.output
+
+    # -- timeout branch guidance -------------------------------------------
+
+    async def test_timeout_branch_includes_guidance_for_server_command(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        process_task.thread_is_alive = AsyncMock(return_value=True)
+        process_task.stream.pop_output = AsyncMock(return_value="")
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="npm run dev", timeout=1))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Timeout"
+        assert "Running in background" in result.message
+        assert "Long-running process detected" in result.message
+
+    async def test_timeout_branch_plain_command_no_guidance(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        process_task.thread_is_alive = AsyncMock(return_value=True)
+        process_task.stream.pop_output = AsyncMock(return_value="")
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="sleep 5", timeout=1))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Timeout"
+        assert "Long-running process detected" not in result.message
+
+    # -- secret redaction (config-gated) ------------------------------------
+
+    async def test_redaction_applied_in_process_output(
+        self, mock_session: MagicMock
+    ) -> None:
+        mock_session.custom_config.get.return_value = {"shell": {"redact_secrets": True}}
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+        process_task = self._completed_process_task()
+        process_task.stream.pop_output = AsyncMock(
+            return_value="token=ghp_1234567890123456789012"
+        )
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash(BashParams(cmd="echo token"))
+        assert isinstance(result, ToolOk)
+        assert "ghp_" not in result.output
+        assert "[REDACTED]" in result.output
+
+    async def test_redaction_disabled_by_config(self, mock_session: MagicMock) -> None:
+        mock_session.custom_config.get.return_value = {"shell": {"redact_secrets": False}}
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+        process_task = self._completed_process_task()
+        process_task.stream.pop_output = AsyncMock(
+            return_value="token=ghp_1234567890123456789012"
+        )
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash(BashParams(cmd="echo token"))
+        assert isinstance(result, ToolOk)
+        assert "ghp_1234567890123456789012" in result.output

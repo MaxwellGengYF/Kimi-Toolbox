@@ -1,7 +1,7 @@
 """Tests for Defects 3.1-3.4: TaskOutput improvements."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from kimix.tools.background import TaskOutput, TaskOutputParams
 
@@ -56,3 +56,55 @@ class TestTaskOutputDelCleanup:
             obj.__del__()  # Should return without accessing session
         finally:
             sys.is_finalizing = orig
+
+
+# ── Defect: TaskOutput wait_for_pattern (WP5) ─────────────────────────────
+
+
+class TestTaskOutputWaitForPattern:
+    @staticmethod
+    def _stream(matched: bool) -> MagicMock:
+        stream = MagicMock()
+        stream.wait_for_output = AsyncMock(return_value=("output text", matched, 0.1))
+        stream.thread_is_alive = AsyncMock(return_value=True)
+        stream.success = AsyncMock(return_value=True)
+        stream.process_elapsed = None
+        return stream
+
+    def _register(self, mock_session: MagicMock, stream: MagicMock) -> None:
+        from kimix.tools.background.utils import TaskData
+
+        data = TaskData()
+        data.tasks = {"bash_1": stream}
+        mock_session.custom_data["background_task_data"] = data
+
+    async def test_wait_for_pattern_matched_true(self, mock_session: MagicMock) -> None:
+        to = TaskOutput(session=mock_session)
+        stream = self._stream(matched=True)
+        self._register(mock_session, stream)
+
+        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="ready"))
+
+        assert not result.is_error
+        assert "output text" in result.output
+        assert "wait_matched: true" in result.output
+        stream.wait_for_output.assert_awaited_once()
+
+    async def test_wait_for_pattern_matched_false(self, mock_session: MagicMock) -> None:
+        to = TaskOutput(session=mock_session)
+        stream = self._stream(matched=False)
+        self._register(mock_session, stream)
+
+        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="never"))
+
+        assert not result.is_error
+        assert "wait_matched: false" in result.output
+
+    async def test_invalid_regex_returns_tool_error(self, mock_session: MagicMock) -> None:
+        to = TaskOutput(session=mock_session)
+        self._register(mock_session, self._stream(matched=True))
+
+        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="["))
+
+        assert result.is_error
+        assert "Invalid wait_for_pattern" in result.message

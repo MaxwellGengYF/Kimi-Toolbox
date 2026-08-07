@@ -1,6 +1,7 @@
 """Tests for the Python tool interpreter resolution, env building and hints."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -8,14 +9,26 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from kimi_agent_sdk import ToolError, ToolOk
 from kimix.tools.py import Params as PythonParams
 from kimix.tools.py import Python
+
+
+def _long_output() -> str:
+    """~176 KB of distinct lines that survive the dedup/micro-compress pipeline
+    (random-ish per-line md5 suffix defeats near-duplicate folding)."""
+    return "\n".join(
+        f"line_{i:05d}_{hashlib.md5(f'rand-{i}-seed'.encode()).hexdigest()}"
+        for i in range(4000)
+    )
 
 
 @pytest.fixture
 def tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Python:
     session = MagicMock()
     session.custom_data = {}
+    # Deterministic config: empty config_json so `python.*` gates read defaults.
+    session.custom_config = {"config_json": {}}
     session.dir = tmp_path / ".kimi" / "sessions" / "test"
     session.dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.delenv("KIMIX_PYTHON_EXECUTABLE", raising=False)
@@ -189,3 +202,330 @@ async def test_failed_run_includes_hint(tool: Python) -> None:
     message = str(result.message)
     assert "-m pip install definitely_missing_pkg_xyz" in message
     assert "interpreter:" in message
+
+
+# ---------------------------------------------------------------------------
+# WP2: cwd / workdir param + workdir validation (no spawn on invalid cwd)
+# ---------------------------------------------------------------------------
+class TestCwdParam:
+    def test_cwd_param_accepted(self) -> None:
+        p = PythonParams(code="print(1)", cwd=r"C:\work")
+        assert p.cwd == r"C:\work"
+
+    def test_workdir_alias_accepted(self) -> None:
+        p = PythonParams(code="print(1)", workdir="/tmp/work")
+        assert p.cwd == "/tmp/work"
+
+    def test_cwd_defaults_none(self) -> None:
+        assert PythonParams(code="print(1)").cwd is None
+
+    def test_invalid_cwd_rejected_by_params_validation(self) -> None:
+        # The cwd field itself is free-form; hardline validation happens in __call__.
+        p = PythonParams(code="print(1)", cwd="bad$path")
+        assert p.cwd == "bad$path"
+
+    @pytest.mark.asyncio
+    async def test_invalid_cwd_returns_tool_error_without_spawn(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cwd containing a shell metacharacter is rejected before any spawn."""
+        constructed: list[tuple] = []
+
+        def boom(*args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+            raise AssertionError("ProcessTask must not be constructed for invalid cwd")
+
+        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
+        result = await tool(PythonParams(code="print('x')", cwd="bad$path"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Invalid workdir"
+        assert "$" in result.message
+        assert constructed == []
+
+
+# ---------------------------------------------------------------------------
+# WP2: ProcessTask wiring — cwd / scrub_env / redact kwargs
+# ---------------------------------------------------------------------------
+def _fake_process_task(monkeypatch: pytest.MonkeyPatch, output: str = "fake output"):
+    """Patch ``kimix.tools.py.ProcessTask`` with a fake that records ctor kwargs
+    and behaves like a successfully completed process."""
+    import unittest.mock as um
+
+    inst = um.AsyncMock()
+    inst.start.return_value = "fake-task-id"
+    inst.thread_is_alive.return_value = False
+    inst.wait_with_monitor = um.AsyncMock()
+    inst.stream = um.AsyncMock()
+    inst.stream.pop_output.return_value = output
+    inst.stream.success.return_value = True
+    inst.stream.exit_code = 0
+    mock_cls = um.Mock(return_value=inst)
+    monkeypatch.setattr("kimix.tools.py.ProcessTask", mock_cls)
+    return mock_cls
+
+
+class TestProcessTaskWiring:
+    @pytest.mark.asyncio
+    async def test_cwd_forwarded_to_process_task(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cls = _fake_process_task(monkeypatch)
+        result = await tool(PythonParams(code="print('x')", cwd="/some/dir"))
+        assert isinstance(result, ToolOk)
+        mock_cls.assert_called_once()
+        kwargs = mock_cls.call_args.kwargs
+        assert kwargs["cwd"] == "/some/dir"
+
+    @pytest.mark.asyncio
+    async def test_defaults_forward_scrub_env_and_redact(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cls = _fake_process_task(monkeypatch)
+        await tool(PythonParams(code="print('x')"))
+        kwargs = mock_cls.call_args.kwargs
+        assert kwargs["scrub_env"] is True
+        assert kwargs["redact"] is True
+
+    @pytest.mark.asyncio
+    async def test_config_disables_scrub_and_redact(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tool._session.custom_config = {
+            "config_json": {"python": {"scrub_env": False, "redact_secrets": False}}
+        }
+        mock_cls = _fake_process_task(monkeypatch)
+        await tool(PythonParams(code="print('x')"))
+        kwargs = mock_cls.call_args.kwargs
+        assert kwargs["scrub_env"] is False
+        assert kwargs["redact"] is False
+
+    @pytest.mark.asyncio
+    async def test_env_passthrough_disables_scrub_only(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tool._session.custom_config = {
+            "config_json": {"python": {"env_passthrough": True}}
+        }
+        mock_cls = _fake_process_task(monkeypatch)
+        await tool(PythonParams(code="print('x')"))
+        kwargs = mock_cls.call_args.kwargs
+        assert kwargs["scrub_env"] is False
+        assert kwargs["redact"] is True
+
+    @pytest.mark.asyncio
+    async def test_undict_config_json_falls_back_to_defaults(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tool._session.custom_config = {"config_json": "not-a-dict"}
+        mock_cls = _fake_process_task(monkeypatch)
+        await tool(PythonParams(code="print('x')"))
+        kwargs = mock_cls.call_args.kwargs
+        assert kwargs["scrub_env"] is True
+        assert kwargs["redact"] is True
+
+
+# ---------------------------------------------------------------------------
+# WP2: fail-fast syntax pre-check (no subprocess spawn on broken source)
+# ---------------------------------------------------------------------------
+class TestSyntaxPrecheck:
+    @pytest.mark.asyncio
+    async def test_broken_inline_code_fails_without_spawn(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        constructed: list[tuple] = []
+
+        def boom(*args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+            raise AssertionError("ProcessTask must not be constructed for broken syntax")
+
+        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
+        result = await tool(PythonParams(code="def broken(:"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Syntax error"
+        assert "Syntax error detected before execution" in result.message
+        assert result.output == ""
+        assert constructed == []
+
+    @pytest.mark.asyncio
+    async def test_null_bytes_fail_without_spawn(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        constructed: list[tuple] = []
+
+        def boom(*args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+            raise AssertionError("ProcessTask must not be constructed")
+
+        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
+        # A real NUL byte in the source is rejected by compile() (ValueError).
+        result = await tool(PythonParams(code="print('a\x00')"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Syntax error"
+        assert constructed == []
+
+    @pytest.mark.asyncio
+    async def test_broken_file_mode_fails_without_spawn(
+        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        py_file = tmp_path / "broken.py"
+        py_file.write_text("def broken(:", encoding="utf-8")
+        constructed: list[tuple] = []
+
+        def boom(*args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+            raise AssertionError("ProcessTask must not be constructed")
+
+        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
+        result = await tool(PythonParams(code=str(py_file)))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Syntax error"
+        assert constructed == []
+
+    @pytest.mark.asyncio
+    async def test_valid_code_unaffected(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cls = _fake_process_task(monkeypatch, output="hello_ok")
+        result = await tool(PythonParams(code="print('hello_ok')"))
+        assert isinstance(result, ToolOk)
+        assert "hello_ok" in str(result.output)
+        mock_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_syntax_false_skips_precheck(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tool._session.custom_config = {
+            "config_json": {"python": {"check_syntax": False}}
+        }
+        mock_cls = _fake_process_task(monkeypatch)
+        result = await tool(PythonParams(code="def broken(:"))
+        # Pre-check skipped: ProcessTask is constructed (the fake "runs" it
+        # successfully instead of the subprocess failing at runtime).
+        assert isinstance(result, ToolOk)
+        mock_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_interactive_with_broken_code_fails_without_spawn(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        constructed: list[tuple] = []
+
+        def boom(*args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+            raise AssertionError("ProcessTask must not be constructed")
+
+        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
+        result = await tool(PythonParams(code="def broken(:", mode="interactive"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Syntax error"
+        assert constructed == []
+
+    @pytest.mark.asyncio
+    async def test_pure_repl_no_initial_code_not_checked(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cls = _fake_process_task(monkeypatch)
+        result = await tool(PythonParams(code="", mode="interactive"))
+        # Pure REPL: no source to compile, ProcessTask is constructed.
+        assert isinstance(result, ToolOk)
+        assert "Interactive Python started" in result.message
+        mock_cls.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# WP2: config gate `python.summarize_long_output` (default True)
+# ---------------------------------------------------------------------------
+class TestSummarizeGate:
+    @pytest.mark.asyncio
+    async def test_summarize_disabled_skips_summarizer(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple] = []
+
+        async def fake_summarize(session, context: str, output: str) -> str:
+            calls.append((session, context, output))
+            return "SUMMARY"
+
+        monkeypatch.setattr("kimix.tools.py._summarize_long_output_async", fake_summarize)
+        tool._session.custom_config = {
+            "config_json": {"python": {"summarize_long_output": False}}
+        }
+        # ~176 KB of distinct lines: above the 64 KB summarization threshold and
+        # not compressible by the dedup/micro-compress pipeline.
+        long_output = _long_output()
+        assert len(long_output) > 65536
+        _fake_process_task(monkeypatch, output=long_output)
+        result = await tool(PythonParams(code="print('x')"))
+        assert isinstance(result, ToolOk)
+        assert calls == []
+        assert "output_truncated:" in str(result.output)
+
+    @pytest.mark.asyncio
+    async def test_summarize_enabled_by_default_calls_summarizer(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple] = []
+
+        async def fake_summarize(session, context: str, output: str) -> str:
+            calls.append((session, context, output))
+            return "SUMMARY"
+
+        monkeypatch.setattr("kimix.tools.py._summarize_long_output_async", fake_summarize)
+        long_output = _long_output()
+        _fake_process_task(monkeypatch, output=long_output)
+        result = await tool(PythonParams(code="print('x')"))
+        assert isinstance(result, ToolOk)
+        assert len(calls) == 1
+        assert calls[0][1] == "print('x')"
+
+
+class TestEnvScrubbing:
+    """Env scrubbing must survive the full pipeline (regression for the
+    full-snapshot merge bug: _build_env returned a complete os.environ copy
+    which re-introduced every scrubbed variable after ProcessTask's base scrub)."""
+
+    def test_build_env_scrub_drops_secret_keeps_safe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        share = tmp_path / "share"
+        (share / "bin").mkdir(parents=True)
+        monkeypatch.setattr("kimix.tools.py.get_share_dir", lambda: share)
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA1234567890ABCD")
+        monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t")
+        monkeypatch.setenv("SAFE_HOME", "/home/u")
+        env = Python._build_env(sys.executable, scrub_env=True)
+        assert env is not None
+        assert "AWS_ACCESS_KEY_ID" not in env
+        assert "VERIFY_SCRUB_TOKEN" not in env
+        assert env["SAFE_HOME"] == "/home/u"
+        assert "PATH" in env
+        assert env["PATH"].split(os.pathsep)[0] == str(share / "bin")
+
+    def test_build_env_no_scrub_keeps_secrets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        share = tmp_path / "share"
+        (share / "bin").mkdir(parents=True)
+        monkeypatch.setattr("kimix.tools.py.get_share_dir", lambda: share)
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t")
+        env = Python._build_env(sys.executable, scrub_env=False)
+        assert env is not None
+        assert env.get("VERIFY_SCRUB_TOKEN") == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_scrub_end_to_end_child_does_not_see_secret(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t-value")
+        result = await tool(
+            PythonParams(
+                code="import os; print(os.environ.get('VERIFY_SCRUB_TOKEN', '<scrubbed>'))",
+                timeout=30,
+            )
+        )
+        assert not isinstance(result, ToolError)
+        assert "<scrubbed>" in str(result.output), f"secret leaked: {result.output!r}"
+        assert "s3cr3t-value" not in str(result.output)

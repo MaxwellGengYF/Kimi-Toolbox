@@ -1715,8 +1715,17 @@ class KimiSoul:
                 self._context.history,
                 self._runtime.llm,
                 custom_instruction=custom_instruction,
-                options=CompactionOptions(avoid_cascade=avoid_cascade, mode=mode),
+                options=CompactionOptions(
+                    avoid_cascade=avoid_cascade,
+                    mode=mode,
+                    todos_max_items=self._loop_control.todo_compact_injection_max_items,
+                ),
                 recorder=self._llm_request_recorder,
+                todos_loader=(
+                    self._load_todo_states_for_reminder
+                    if self._loop_control.todo_compact_injection_enabled
+                    else None
+                ),
             )
 
         start_time = time.monotonic()

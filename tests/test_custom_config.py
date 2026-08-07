@@ -291,7 +291,10 @@ class TestRunForbiddenCommands:
         params = RunParams(command="rm -rf /")
         result = await run_tool(params)
         assert isinstance(result, ToolError)
-        assert result.brief == "Forbidden command"
+        # The unconditional hardline floor now intercepts `rm -rf /` before
+        # the config keyword check, so the brief changed from "Forbidden
+        # command" to "Blocked (hardline)" — both block the same command.
+        assert result.brief == "Blocked (hardline)"
 
     async def test_allowed_command(self, run_tool: Run, mock_process_task: MagicMock) -> None:
         params = RunParams(command="git status")

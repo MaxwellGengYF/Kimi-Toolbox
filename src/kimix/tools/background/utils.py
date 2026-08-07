@@ -17,6 +17,53 @@ from kimi_cli.session import Session
 # patchable in tests.
 DEFAULT_INACTIVITY_TIMEOUT = 120.0
 
+# Maximum characters retained in an output buffer before it is rewritten to
+# head 40% + tail 60% with a marker line (see ``bounded_append``).  Read at
+# call time so it stays patchable in tests.
+BACKGROUND_MAX_OUTPUT_CHARS = 200_000
+
+# Maximum queued output chunks before the oldest chunk is dropped (see
+# ``bounded_put``).  Read at call time so it stays patchable in tests.
+MAX_QUEUE_CHUNKS = 10_000
+
+
+def bounded_append(buf: io.StringIO, text: str, cap: int) -> bool:
+    """Write *text* to *buf*, bounding the retained output to *cap* chars.
+
+    When the buffer size exceeds *cap* after the write, it is rewritten to the
+    first 40% of *cap* plus the last 60% of *cap*, joined by a marker line
+    ``[... (output truncated, keeping first N and last M chars)]``, and
+    ``True`` is returned.  ``False`` is returned when no truncation happened.
+    """
+    buf.write(text)
+    if buf.tell() <= cap:
+        return False
+    full = buf.getvalue()
+    head_len = int(cap * 0.4)
+    tail_len = cap - head_len
+    head = full[:head_len]
+    tail = full[-tail_len:] if tail_len else ""
+    marker = f"\n[... (output truncated, keeping first {head_len} and last {tail_len} chars)]\n"
+    buf.seek(0)
+    buf.truncate(0)
+    buf.write(head + marker + tail)
+    return True
+
+
+def bounded_put(q: queue.Queue[str], text: str, max_chunks: int = MAX_QUEUE_CHUNKS) -> None:
+    """Put *text* on the queue, dropping the oldest chunk when it is full.
+
+    Keeps the queue size at most *max_chunks* so a long-running producer
+    cannot grow the queue without bound.  The most recent output is always
+    retained; only the oldest chunks are discarded.
+    """
+    while q.qsize() >= max_chunks:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            break
+    q.put_nowait(text)
+
 
 class TaskData:
     def __init__(self) -> None:
@@ -54,6 +101,7 @@ class BackgroundStream:
         self._success = False
         self._exit_code: int | None = None
         self._output = io.StringIO()
+        self._output_truncated = False
         self._last_output_time = time.monotonic()
         self._completed_event = threading.Event()
         self._process_elapsed: float | None = None
@@ -65,6 +113,11 @@ class BackgroundStream:
     def exit_code(self) -> int | None:
         """The exit code of the subprocess, or None if not yet completed."""
         return self._exit_code
+
+    @property
+    def output_truncated(self) -> bool:
+        """True when the retained output buffer has been truncated (head+tail)."""
+        return self._output_truncated
 
     @property
     def process_elapsed(self) -> float | None:
@@ -137,10 +190,12 @@ class BackgroundStream:
         new_data = False
         while True:
             try:
-                self._output.write(self._queue.get_nowait())
-                new_data = True
+                chunk = self._queue.get_nowait()
             except queue.Empty:
                 break
+            if bounded_append(self._output, chunk, BACKGROUND_MAX_OUTPUT_CHARS):
+                self._output_truncated = True
+            new_data = True
         if new_data:
             with self._lock:
                 self._last_output_time = time.monotonic()

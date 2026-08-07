@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,95 @@ class TodoItemState(BaseModel):
     status: TodoStatus
     notes: str | None = None
     code: str | None = None
+
+
+# ── Compression re-injection (Hermes parity) ────────────────────────────────
+# The active (unfinished) todo list is deterministically appended to the
+# context-compaction output under this stable header so the plan survives
+# summarization. The header wording is part of the contract — keep it
+# byte-identical to Hermes's `TODO_INJECTION_HEADER`.
+TODO_INJECTION_HEADER = (
+    "[Your active task list was preserved across context compression]"
+)
+
+# Hermes markers are `[x]`/`[>]`/`[ ]`/`[~]`; Kimi only has the two
+# non-done statuses below (`done` items are deliberately excluded).
+TODO_INJECTION_MARKERS: dict[TodoStatus, str] = {
+    "pending": "[ ]",
+    "in_progress": "[>]",
+}
+
+TODO_INJECTION_TRUNCATION_MARKER = "… [truncated]"
+
+
+# A plain (non-`None`) title is required for an item to be injected.
+def format_todo_injection(
+    todos: Sequence[TodoItemState],
+    *,
+    max_items: int = 20,
+    max_chars: int = 4096,
+    per_title_chars: int = 200,
+) -> str | None:
+    """Render the active (unfinished) todo list for compaction re-injection.
+
+    Hermes-style parity: only ``pending``/``in_progress`` items are included
+    (``done`` items are excluded so the model does not re-do finished work)
+    and the result is appended to the compaction output under
+    :data:`TODO_INJECTION_HEADER`.
+
+    Pure function: no I/O, and it must never raise on malformed input
+    (defensive ``getattr`` on ``status``/``title``; malformed items are
+    skipped).
+
+    Args:
+        todos: The todo items to render.
+        max_items: Maximum number of lines to emit; excess items are replaced
+            by a single overflow line.
+        max_chars: Hard cap on the total output length; lines are dropped
+            from the tail (never a partial line) and the truncation marker
+            is appended.
+        per_title_chars: Per-title truncation length.
+
+    Returns:
+        The formatted injection text, or ``None`` when there is nothing to
+        inject (empty input or no unfinished items).
+    """
+    if not todos:
+        return None
+    lines: list[str] = []
+    for item in todos:
+        status = getattr(item, "status", None)
+        title = getattr(item, "title", None)
+        if status not in TODO_INJECTION_MARKERS or not title:
+            continue  # defensive: skip malformed items, never raise
+        if len(title) > per_title_chars:
+            title = title[:per_title_chars] + TODO_INJECTION_TRUNCATION_MARKER
+        lines.append(f"- {TODO_INJECTION_MARKERS[status]} {title} ({status})")
+    if not lines:
+        return None
+    if len(lines) > max_items:
+        overflow = len(lines) - max_items
+        lines = lines[:max_items]
+        lines.append(f"- … and {overflow} more (call TodoList to read all)")
+
+    text = TODO_INJECTION_HEADER + "\n" + "\n".join(lines)
+    if len(text) > max_chars:
+        kept: list[str] = []
+        for line in lines:
+            candidate = TODO_INJECTION_HEADER + "\n" + "\n".join([*kept, line])
+            if len(candidate) + len("\n" + TODO_INJECTION_TRUNCATION_MARKER) > max_chars:
+                break
+            kept.append(line)
+        if not kept:
+            return None  # the header alone does not fit — nothing to inject
+        text = (
+            TODO_INJECTION_HEADER
+            + "\n"
+            + "\n".join(kept)
+            + "\n"
+            + TODO_INJECTION_TRUNCATION_MARKER
+        )
+    return text
 
 
 class SessionState(BaseModel):

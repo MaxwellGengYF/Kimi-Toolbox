@@ -386,3 +386,131 @@ async def test_run_process_bg_decoder_flush_on_stop() -> None:
     # The buffered byte must have been flushed (as replacement char) rather
     # than silently discarded.
     assert "\ufffd" in output
+
+
+# ---------------------------------------------------------------------------
+# scrub_env / redact (WP1 security) + bounded output (WP4)
+# ---------------------------------------------------------------------------
+
+def _drain(q: queue.Queue[str]) -> str:
+    output = ""
+    while True:
+        try:
+            output += q.get_nowait()
+        except queue.Empty:
+            break
+    return output
+
+
+_ENV_PROBE = (
+    "import os\n"
+    "if os.environ.get('AWS_ACCESS_KEY_ID'):\n"
+    "    print('SECRET_VISIBLE')\n"
+    "else:\n"
+    "    print('SECRET_SCRUBBED')\n"
+)
+
+
+async def test_scrub_env_applied_before_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With scrub_env=True the child must NOT see the parent's AWS key."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA_LEAK_ME")
+    task = ProcessTask(sys.executable, ["-c", _ENV_PROBE], scrub_env=True)
+    q: queue.Queue[str] = queue.Queue()
+    result = await task._run_process_bg(q)
+    assert result[0] is True
+    output = _drain(q)
+    assert "SECRET_SCRUBBED" in output
+    assert "SECRET_VISIBLE" not in output
+
+
+async def test_no_scrub_leaks_parent_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without scrubbing (default) the child inherits the full parent env."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA_LEAK_ME")
+    task = ProcessTask(sys.executable, ["-c", _ENV_PROBE], scrub_env=False)
+    q: queue.Queue[str] = queue.Queue()
+    result = await task._run_process_bg(q)
+    assert result[0] is True
+    output = _drain(q)
+    assert "SECRET_VISIBLE" in output
+
+
+async def test_scrub_env_merge_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scrubbing happens on the base env; an explicit env override restores a
+    variable even when its name matches a secret substring."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA_LEAK_ME")
+    task = ProcessTask(
+        sys.executable,
+        ["-c", "import os; print(os.environ.get('AWS_ACCESS_KEY_ID', '<missing>'))"],
+        scrub_env=True,
+        env={"AWS_ACCESS_KEY_ID": "OVERRIDE_VALUE"},
+    )
+    q: queue.Queue[str] = queue.Queue()
+    result = await task._run_process_bg(q)
+    assert result[0] is True
+    output = _drain(q)
+    assert "OVERRIDE_VALUE" in output
+    assert "AKIA_LEAK_ME" not in output
+
+
+_JWT = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+)
+
+
+async def test_redact_masks_jwt_at_capture(mock_session: MagicMock) -> None:
+    """redact=True masks a printed JWT before it reaches the stream buffer."""
+    task = ProcessTask(
+        sys.executable, ["-c", f"print('{_JWT}')"], redact=True
+    )
+    await task.start(mock_session, kind="run")
+    await task.wait(timeout=5)
+    output = await task.stream.pop_output()
+    assert "[REDACTED]" in output
+    assert "eyJ" not in output
+
+
+async def test_redact_false_leaves_raw(mock_session: MagicMock) -> None:
+    """redact=False keeps the captured output untouched."""
+    task = ProcessTask(
+        sys.executable, ["-c", f"print('{_JWT}')"], redact=False
+    )
+    await task.start(mock_session, kind="run")
+    await task.wait(timeout=5)
+    output = await task.stream.pop_output()
+    assert _JWT in output
+
+
+async def test_output_buffer_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long stream is truncated to head+tail in the internal output buffer;
+    _find_error_line_index still locates an error line in the retained tail."""
+    monkeypatch.setattr(
+        "kimix.tools.background.utils.BACKGROUND_MAX_OUTPUT_CHARS", 5000
+    )
+    code = (
+        "for i in range(2000):\n"
+        "    print('filler', i)\n"
+        "import sys\n"
+        "print('ERROR: boom')\n"
+        "sys.exit(3)\n"
+    )
+    task = ProcessTask(sys.executable, ["-c", code])
+    q: queue.Queue[str] = queue.Queue()
+    result = await task._run_process_bg(q)
+    assert result[0] is False
+    assert result[1] == 3
+    messages = _drain(q)
+    assert "Process exited with code 3" in messages
+    assert "error at line" in messages
+    line_num = int(messages.split("error at line ")[1].rstrip("]"))
+    # The bounded buffer keeps only head (2000 chars) + tail (3000 chars) of a
+    # ~2000-line stream, so the error line's position must be far below the
+    # absolute line count (~2002) — proving the buffer was truncated.
+    assert 0 < line_num < 1000

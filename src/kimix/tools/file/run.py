@@ -1,6 +1,7 @@
 """run tool for executing a process from a path."""
 import anyio
 import asyncio
+import os
 from pathlib import Path
 from typing import Literal
 import regex as re
@@ -23,6 +24,16 @@ from kimix.tools.common import (
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
+)
+from kimix.tools.file.bash.output_enhance import (
+    annotate_failure,
+    interpret_exit_code,
+    redact_sensitive_output,
+)
+from kimix.tools.file.bash.safety import (
+    check_hardline_blocked,
+    foreground_background_guidance,
+    validate_workdir,
 )
 from kimi_cli.tools.display import ShellDisplayBlock
 from kimi_cli.share import get_share_dir
@@ -171,21 +182,6 @@ class RunParams(BaseModel):
 
 
 class Run(CallableTool2[RunParams]):
-    @model_validator(mode="after")
-    def _validate_cmd(self) -> "RunParams":
-        if self.mode == "execute" and not self.command:
-            raise ValueError("command cannot be empty unless mode='send'")
-        if self.mode == "send":
-            if not self.command:
-                raise ValueError("command cannot be empty when mode='send'")
-            if not self.task_id:
-                raise ValueError("mode='send' requires task_id to identify the target session")
-        if self.task_id is not None and self.mode != "send":
-            raise ValueError("task_id requires mode='send'")
-        return self
-
-
-class Run(CallableTool2[RunParams]):
     name: str = "Run"
     description: str = (
         "Run an executable or bash command. "
@@ -197,7 +193,6 @@ class Run(CallableTool2[RunParams]):
     params: type[RunParams] = RunParams
 
     def __init__(self, session: Session):
-        import os
         super().__init__()
         if USE_SYSTEM_SHELL:
             if sys.platform == "win32" and USE_SYSTEM_PWSH_ON_WINDOWS:
@@ -222,8 +217,47 @@ class Run(CallableTool2[RunParams]):
                 seen.add(normalized)
                 self._forbidden_keywords.append(normalized)
 
+        # Config gates for the hardline safety floor and secret redaction
+        # (both default on; explicitly set False to disable).
+        shell_cfg = self._session.custom_config.get("config_json", {}).get("shell", {})
+        if isinstance(shell_cfg, dict):
+            self._hardline_enabled = shell_cfg.get("hardline", True)
+            self._redact_secrets = shell_cfg.get("redact_secrets", True)
+        else:
+            self._hardline_enabled = True
+            self._redact_secrets = True
+
+    def _hardline_blocked(self, command: str) -> ToolError | None:
+        r"""Return a ToolError when *command* hits the unconditional hardline floor.
+
+        Applies deobfuscation variants (quotes/backslash-escapes/case tricks)
+        before matching, so ``r\m -rf /``, ``rm "" -rf /`` and ``Rm -Rf /``
+        are all blocked.  Skipped entirely when the ``shell.hardline`` config
+        gate is explicitly ``False``.
+        """
+        if not self._hardline_enabled or not command:
+            return None
+        blocked, desc = check_hardline_blocked(command)
+        if not blocked:
+            return None
+        return ToolError(
+            output="",
+            message=(
+                f"Blocked (hardline): {desc}. This command cannot be executed "
+                "via the agent."
+            ),
+            brief="Blocked (hardline)",
+        )
+
     async def __call__(self, params: RunParams) -> ToolReturnValue:
-        import os
+        # Hardline safety floor: never spawn a process for destructive commands.
+        blocked = self._hardline_blocked(params.command)
+        if blocked is not None:
+            return blocked
+
+        workdir_err = validate_workdir(params.cwd)
+        if workdir_err is not None:
+            return ToolError(message=workdir_err, brief="Invalid workdir")
 
         # Mode-based dispatch
         if params.mode == "send":
@@ -310,7 +344,6 @@ class Run(CallableTool2[RunParams]):
 
             # Check if executable is a valid process (in PATH or existing file),
             # then fall back to bash built-in commands.
-            import shutil
             # Refresh PATH/PATHEXT from registry so that tools installed
             # since the last command (e.g. via WinGet) are discoverable.
             if sys.platform == "win32":
@@ -439,9 +472,13 @@ class Run(CallableTool2[RunParams]):
                 if await task.thread_is_alive():
                     output = await task.stream.pop_output() if task.stream else ""
                     output = await _maybe_export_output_async(output)
+                    guidance = foreground_background_guidance(params.command)
+                    message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`"
+                    if guidance:
+                        message += f" {guidance}"
                     return ToolError(
                         output=output,
-                        message=f"Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                        message=message,
                         brief="Timeout",
                     )
                 # Clean up foreground task registration
@@ -450,6 +487,11 @@ class Run(CallableTool2[RunParams]):
 
                 # Get output
                 output = await task.stream.pop_output() if task.stream else ""
+
+                # Secret redaction runs first (config-gated) so the dedup/
+                # export/summarize pipeline never sees credentials.
+                if self._redact_secrets and output:
+                    output = redact_sensitive_output(output)
 
                 # Apply token filter pipeline (dedup, truncate)
                 output, original_path = await _token_filter_output(
@@ -478,6 +520,9 @@ class Run(CallableTool2[RunParams]):
 
                 # Check success
                 success = await task.stream.success() if task.stream else False
+                real_exit_code = task.stream.exit_code if task.stream else None
+                meaning = interpret_exit_code(params.command, real_exit_code)
+                hint = annotate_failure(output, params.command, real_exit_code)
 
                 if not success:
                     if output and not params.output_path:
@@ -495,7 +540,9 @@ class Run(CallableTool2[RunParams]):
                         task_id=task_id,
                         status="completed",
                         output=output,
-                        exit_code=None,
+                        exit_code=real_exit_code,
+                        exit_code_meaning=meaning,
+                        failure_hint=hint,
                         wait_matched=wait_matched,
                         elapsed_seconds=elapsed_seconds,
                         output_path=output_path,
@@ -504,6 +551,8 @@ class Run(CallableTool2[RunParams]):
                     )
                     elapsed = task.stream.process_elapsed if task.stream else None
                     msg = "[rtk] failed" if rtk_rewritten else "failed"
+                    if hint:
+                        msg += f" Hint: {hint}"
                     return ToolError(
                         output=block,
                         message=msg,
@@ -517,7 +566,9 @@ class Run(CallableTool2[RunParams]):
                     task_id=task_id,
                     status="completed",
                     output=output,
-                    exit_code=0,
+                    exit_code=real_exit_code,
+                    exit_code_meaning=meaning,
+                    failure_hint=hint,
                     wait_matched=wait_matched,
                     elapsed_seconds=elapsed_seconds,
                     output_path=output_path,
@@ -563,6 +614,7 @@ class Run(CallableTool2[RunParams]):
                 deduplicate_output=params.deduplicate_output,
                 max_lines=params.max_lines,
                 wait_for_pattern=params.wait_for_pattern,
+                cwd=params.cwd,
                 interactive=False,
             )
             return await pwsh.__call__(ps_params)
@@ -582,6 +634,7 @@ class Run(CallableTool2[RunParams]):
                 deduplicate_output=params.deduplicate_output,
                 max_lines=params.max_lines,
                 wait_for_pattern=params.wait_for_pattern,
+                cwd=params.cwd,
                 interactive=False,
             )
             return await bash.__call__(bash_params)
@@ -655,6 +708,10 @@ class Run(CallableTool2[RunParams]):
         self, params: RunParams, output: str, rtk_rewritten: bool = False
     ) -> tuple[str, str | None, bool, str | None]:
         """Summarize/export long output. Returns (display_output, path, truncated, original_path)."""
+        # Secret redaction runs first (config-gated) so the dedup/export/
+        # summarize pipeline never sees credentials.
+        if self._redact_secrets and output:
+            output = redact_sensitive_output(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
@@ -685,16 +742,28 @@ class Run(CallableTool2[RunParams]):
         message: str,
         brief: str,
         rtk_rewritten: bool = False,
+        exit_code_meaning: str | None = None,
+        failure_hint: str | None = None,
     ) -> ToolReturnValue:
         """Build a ToolOk response with a structured output block."""
         processed, output_path, output_truncated, original_path = await self._process_output(
             params, output, rtk_rewritten=rtk_rewritten
         )
+        if status != "completed":
+            real_exit_code = None
+        else:
+            real_exit_code = stream.exit_code if stream else None
+            if real_exit_code is None and stream is not None:
+                real_exit_code = 0 if await stream.success() else None
+        if exit_code_meaning is None and real_exit_code is not None:
+            exit_code_meaning = interpret_exit_code(params.command, real_exit_code)
         block = _build_session_output_block(
             task_id=task_id,
             status=status,
             output=processed,
-            exit_code=None if status != "completed" else (0 if await stream.success() else None),
+            exit_code=real_exit_code,
+            exit_code_meaning=exit_code_meaning,
+            failure_hint=failure_hint,
             wait_matched=wait_matched,
             elapsed_seconds=elapsed_seconds,
             output_path=output_path,
