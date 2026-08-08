@@ -33,7 +33,7 @@ class TestInjection:
         assert len(injections) == 1
         assert injections[0].type == "context_meter"
         assert "Context is volatile" in injections[0].content
-        assert "Memory" in injections[0].content
+        assert "Retrieve" in injections[0].content
 
     async def test_subagent_skipped(self) -> None:
         provider = ContextMeterProvider()

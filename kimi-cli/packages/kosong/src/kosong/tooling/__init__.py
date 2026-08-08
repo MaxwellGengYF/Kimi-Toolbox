@@ -818,42 +818,6 @@ VALUE_ALIASES_TASK_ACTION: dict[str, str] = {
     "end": "kill",
 }
 
-# --- Memory action (Literal["write", "append", "read", "list", "search"]) ---
-# source: kimi_cli/tools/memory/__init__.py:237
-VALUE_ALIASES_MEMORY_ACTION: dict[str, str] = {
-    "write": "write",
-    "set": "write",
-    "put": "write",
-    "create": "write",
-    "save": "write",
-    "store": "write",
-    # append synonyms
-    "append": "append",
-    "add": "append",
-    "push": "append",
-    "patch": "append",
-    "extend": "append",
-    # read synonyms
-    "read": "read",
-    "get": "read",
-    "fetch": "read",
-    "retrieve": "read",
-    "load": "read",
-    "view": "read",
-    # list synonyms
-    "list": "list",
-    "ls": "list",
-    "all": "list",
-    "topics": "list",
-    "keys": "list",
-    # search synonyms
-    "search": "search",
-    "query": "search",
-    "find": "search",
-    "lookup": "search",
-    "filter": "search",
-}
-
 # --- HTTP method (Literal["GET", "POST"]) ---
 # source: kimi_cli/tools/web/fetch.py:23
 VALUE_ALIASES_HTTP_METHOD: dict[str, str] = {
@@ -1018,7 +982,6 @@ _COMMON_VALUE_ALIASES: dict[str, str] = {
     **VALUE_ALIASES_MATCH_MODE,
     **VALUE_ALIASES_MEDIA_KIND,
     **VALUE_ALIASES_MEDIA_TYPE,
-    **VALUE_ALIASES_MEMORY_ACTION,
     **VALUE_ALIASES_OVERWRITE_MODE,
     **VALUE_ALIASES_PRUNE_MODE,
     **VALUE_ALIASES_RUN_MODE,
@@ -1682,7 +1645,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "LookupWeb": "SearchWeb",
     "FindOnline": "SearchWeb",
     # ── Context management hallucinations ──
-    # ContextUsage, Compact, ContextPrune, Memory are canonical
+    # ContextUsage, Compact, ContextPrune, Retrieve are canonical
     "PruneContext": "ContextPrune",
     "CompactContext": "Compact",
     "Summarize": "Compact",
@@ -1690,10 +1653,10 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "ContextSummary": "Compact",
     "ContextTrim": "ContextPrune",
     "TrimContext": "ContextPrune",
-    "Recall": "Memory",
-    "RetrieveContext": "Memory",
-    "SearchHistory": "Memory",
-    "HistorySearch": "Memory",
+    "Recall": "Retrieve",
+    "RetrieveContext": "Retrieve",
+    "SearchHistory": "Retrieve",
+    "HistorySearch": "Retrieve",
     "GetContext": "ContextUsage",
     "ContextInfo": "ContextUsage",
     # ── Agent/Subagent hallucinations ──

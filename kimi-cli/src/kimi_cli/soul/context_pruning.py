@@ -607,7 +607,7 @@ def _apply_tier_c(
     when an *annotated* stage actually fired (Stages 4/6/7/8 — markers such as
     ``[prefix: …]``, ``[N banner lines dropped]``, ``[×k near-dup …]``);
     lossless-only changes (Stages 1-3/5) are applied silently.  The original
-    text is archived on the record so ``Memory``/``HistoryIndex`` retrieval
+    text is archived on the record so ``Retrieve``/``HistoryIndex`` retrieval
     stays lossless.
 
     Returns ``(work_history, records, freed_tokens, changed_indices, next_ref)``.
@@ -1089,7 +1089,7 @@ class ContextPruner:
                 stub_text = (
                     f"<system>[context-elided: {kind} — content elided. "
                     f"~{savings} tokens freed. "
-                    f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
+                    f"Retrieve full content with Retrieve id={ref}]</system>"
                 )
 
                 elided_records.append(

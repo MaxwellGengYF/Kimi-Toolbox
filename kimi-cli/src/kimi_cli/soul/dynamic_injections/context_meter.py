@@ -2,12 +2,12 @@
 
 Research shows agents manage memory better when context pressure is
 *observable*: a cheap status line lets the model pick a good moment to
-checkpoint, flush durable memory, or start a fresh session — instead of the
+checkpoint, recall history, or start a fresh session — instead of the
 harness compacting at a bad time.
 
-This provider injects a reminder to persist important facts with the ``Memory``
-tool when usage has materially changed. It deliberately stays quiet in the
-high-usage region, which is owned by :class:`CompactReminderProvider`
+This provider injects a reminder to use the ``Retrieve`` tool when usage
+has materially changed. It deliberately stays quiet in the high-usage
+region, which is owned by :class:`CompactReminderProvider`
 (actionable advice), so the two never double-inject.
 """
 
@@ -27,7 +27,7 @@ _CONTEXT_METER_TYPE = "context_meter"
 
 
 class ContextMeterProvider(DynamicInjectionProvider):
-    """Injects a reminder to use the ``Memory`` tool when context usage materially changes."""
+    """Injects a reminder to use the ``Retrieve`` tool when context usage materially changes."""
 
     def __init__(
         self,
@@ -118,13 +118,11 @@ class ContextMeterProvider(DynamicInjectionProvider):
         self._last_injected_usage = usage
 
         content = (
-            "Context is volatile — persist important facts with the `Memory` tool; "
-            "they survive compaction. When unsure about history or memory, "
-            "recall past decisions, file paths, or errors with the "
-            "`Memory` tool (action='retrieve'). "
-            "There is no need to call the `Memory` tool frequently — this reminder "
-            "only fires when context usage materially changes, so write or retrieve "
-            "only when there is something genuinely important."
+            "Context is volatile — when unsure about history, recall past decisions, "
+            "file paths, or errors with the `Retrieve` tool. "
+            "There is no need to call it frequently — this reminder only fires when "
+            "context usage materially changes, so retrieve only when there is "
+            "something genuinely important."
         )
         return [DynamicInjection(type=_CONTEXT_METER_TYPE, content=content)]
 

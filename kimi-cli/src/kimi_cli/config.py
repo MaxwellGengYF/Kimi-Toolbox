@@ -242,24 +242,16 @@ Default is 3."""
     Default is 'self_eval'."""
 
     context_meter_enabled: bool = Field(default=True)
-    """When true, inject a reminder to persist important facts with the `Memory`
+    """When true, inject a reminder to recall past history with the `Retrieve`
     tool when usage materially changes, so the agent can self-regulate
-    (checkpoint, flush memory) before the harness compacts. Default is true."""
+    (recall past decisions, paths, or errors) before the harness compacts.
+    Default is true."""
     context_meter_min_delta: float = Field(default=0.15, ge=0.0, le=0.5)
     """Minimum usage-ratio change since the last context-meter injection
     required to inject again. Default is 0.15 (15%)."""
     context_meter_cooldown_steps: int = Field(default=30, ge=0)
     """Minimum number of steps between context-meter injections.
     Default is 30."""
-
-    pre_compact_flush_enabled: bool = Field(default=True)
-    """When true, flush important agent state (unfinished todos, notes) to the
-    durable session memory directory before any compaction fires, so details
-    destroyed by summarization are recoverable from disk. Default is true."""
-    memory_restore_enabled: bool = Field(default=True)
-    """When true, append a memory-pointer message after compaction that
-    re-surfaces the durable memory directory (and the latest pre-compaction
-    flush excerpt) at the end of the rebuilt context. Default is true."""
 
     auto_retrieve_history: bool = Field(default=True)
     """When true, automatically search archived conversation history before each

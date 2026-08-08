@@ -35,7 +35,7 @@ _DEFAULT_TOOL_NAMES = (
     "WriteFile", "WritePlan", "ReadFile", "ReadPlan", "EditFile", "EditPlan",
     "Python", "Agent", "AgentList", "AgentClose", "Run", "Powershell",
     "Bash", "Grep", "Glob", "FetchURL", "TodoList", "TaskOutput",
-    "Compact", "ContextUsage", "Memory",
+    "Compact", "ContextUsage", "Retrieve",
 )
 
 

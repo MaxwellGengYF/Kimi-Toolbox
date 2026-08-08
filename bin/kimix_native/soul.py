@@ -688,7 +688,7 @@ def _compat_prune_history(messages: list[dict], policy: dict) -> dict:
         stub_text = (
             f"<system>[context-elided: {kind} — content elided. "
             f"~{savings} tokens freed. "
-            f"Retrieve full content with Memory action='retrieve' id={ref}]</system>"
+            f"Retrieve full content with Retrieve id={ref}]</system>"
         )
         elided.append({
             "index": i,

@@ -66,7 +66,7 @@ async def test_injected_once_above_min_usage() -> None:
     result = await provider.get_injections([], _mock_soul(usage=0.30, step_no=1))
     assert len(result) == 1
     assert result[0].type == _CONTEXT_METER_TYPE
-    assert "Memory" in result[0].content
+    assert "Retrieve" in result[0].content
 
 
 async def test_silent_below_min_usage_on_first_call() -> None:

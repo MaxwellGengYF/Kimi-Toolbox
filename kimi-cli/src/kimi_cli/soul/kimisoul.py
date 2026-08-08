@@ -332,15 +332,14 @@ class KimiSoul:
 
         # Register context-management tools if the toolset supports it
         if isinstance(agent.toolset, KimiToolset):
-            # Attach the history index to the Memory tool so its 'retrieve'
-            # action can search past conversation turns (previously a separate
-            # retrieval tool).
-            from kimi_cli.tools.memory import Memory
-            memory_tool = agent.toolset.find("Memory")
-            if not isinstance(memory_tool, Memory):
-                memory_tool = Memory(self._runtime)
-                agent.toolset.add(memory_tool)
-            memory_tool.attach_history_index(self._history_index)
+            # Attach the history index to the Retrieve tool so it can search
+            # past conversation turns.
+            from kimi_cli.tools.memory import Retrieve
+            retrieve_tool = agent.toolset.find("Retrieve")
+            if not isinstance(retrieve_tool, Retrieve):
+                retrieve_tool = Retrieve()
+                agent.toolset.add(retrieve_tool)
+            retrieve_tool.attach_history_index(self._history_index)
             agent.toolset.add(ContextPrune(self))
 
         self._checkpoint_with_user_message = False
@@ -1770,30 +1769,7 @@ class KimiSoul:
             ),
         )
 
-        # --- Pre-compaction flush: persist important state to disk so details
-        # destroyed by summarization stay recoverable ("disk is source of truth").
-        # Failure-isolated: a flush error must never block compaction.
-        if self._loop_control.pre_compact_flush_enabled:
-            try:
-                from kimi_cli.tools.memory import flush_pre_compact_state
-
-                unfinished = [
-                    (t.status, t.title)
-                    for t in self._load_todo_states_for_reminder()
-                    if t.status != "done"
-                ]
-                flush_path = flush_pre_compact_state(
-                    self._runtime.session.dir,
-                    trigger_reason=trigger_reason,
-                    context_tokens=before_tokens,
-                    max_context_tokens=self.status.max_context_tokens,
-                    unfinished_todos=unfinished,
-                )
-                if flush_path is not None:
-                    logger.info("Pre-compaction state flushed to: {path}", path=flush_path)
-            except Exception:
-                logger.warning("Pre-compaction memory flush failed", exc_info=True)
-
+        # (Pre-compaction durable-state flush removed: Retrieve is history-only.)
         wire_send(CompactionBegin())
         try:
             compaction_result = await _compact_with_retry()
@@ -1861,20 +1837,7 @@ class KimiSoul:
                 )
                 await self._context.append_message(active_task_message)
 
-        # --- Post-compaction memory restore: re-surface the durable memory
-        # directory at the end of the rebuilt context, where attention is
-        # strongest. Failure-isolated like the flush above.
-        if self._loop_control.memory_restore_enabled:
-            try:
-                from kimi_cli.tools.memory import build_memory_restore_text
-
-                restore_text = build_memory_restore_text(self._runtime.session.dir)
-                if restore_text is not None:
-                    await self._context.append_message(
-                        Message(role="user", content=[system(restore_text)])
-                    )
-            except Exception:
-                logger.warning("Post-compaction memory restore failed", exc_info=True)
+        # (Post-compaction state-restore message removed: Retrieve is history-only.)
 
         # Recompute the token estimate from the rebuilt context so it reflects
         # the checkpoint marker, preserved messages, compaction summary, and any

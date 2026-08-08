@@ -28,7 +28,7 @@ def test_load_default_agent_spec():
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Memory', "kimi_cli.tools.file:ReadFile",
+            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
@@ -66,7 +66,7 @@ def test_load_default_agent_spec():
     )
     assert subagent_specs["coder"].model == snapshot(None)
     assert subagent_specs["coder"].allowed_tools == snapshot(
-        ['kimi_cli.tools.memory:Memory', "kimi_cli.tools.file:ReadFile",
+        ['kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
@@ -87,7 +87,7 @@ def test_load_default_agent_spec():
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Memory', "kimi_cli.tools.file:ReadFile",
+            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
@@ -160,7 +160,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Memory', "kimi_cli.tools.file:ReadFile",
+            "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
@@ -249,7 +249,7 @@ agent:
             [
                 "kimi_cli.tools.agent:Agent",
                 "kimi_cli.tools.ask_user:AskUserQuestion",
-                "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Memory', "kimi_cli.tools.file:ReadFile",
+                "kimi_cli.tools.todo:TodoList", 'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
                 "kimi_cli.tools.file:ReadMediaFile",
                 "kimi_cli.tools.file:Glob",
                 "kimi_cli.tools.file:Grep",

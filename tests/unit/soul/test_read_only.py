@@ -5,17 +5,14 @@ Covers:
 - KimiToolset blocking blocked tools when read_only=True
 - KimiToolset allowing unblocked tools when read_only=True
 - TodoList stripping code fields when read_only=True
-- Memory blocking write/append actions when read_only=True
 """
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.toolset import _READ_ONLY_BLOCKED_TOOLS, KimiToolset
-from kimi_cli.tools.memory import Memory
 from kimi_cli.tools.todo import Params as TodoListParams
 from kimi_cli.tools.todo import Todo, TodoList
 from kimi_cli.wire.types import ToolCall, ToolResult
@@ -270,79 +267,3 @@ class TestTodoListReadOnly:
         # Should succeed without warning
         assert not result.is_error
         assert "<system-warning>" not in result.output
-
-
-# =========================================================================
-# Phase 6.4 — Memory action blocking in read_only mode
-# =========================================================================
-
-
-class TestMemoryReadOnly:
-    """Verify Memory write/append are allowed in read_only mode.
-
-    The read-only guard lives in :data:`_READ_ONLY_BLOCKED_TOOLS` at the
-    toolset level; the Memory tool itself does not block writes.
-    """
-
-    @pytest.fixture
-    def session_dir(self, tmp_path: Path) -> Path:
-        return tmp_path / "session"
-
-    @pytest.fixture
-    def runtime(self, session_dir: Path) -> MagicMock:
-        r = MagicMock()
-        r.session.dir = session_dir
-        return r
-
-    @pytest.fixture
-    def tool(self, runtime: MagicMock, session_dir: Path) -> Memory:
-        t = Memory(runtime=runtime)  # type: ignore[arg-type]
-        return t
-
-    @pytest.mark.parametrize("action", ["write", "append"])
-    async def test_write_append_allowed_when_read_only(
-        self, tool: Memory, runtime: MagicMock, action: str,
-    ) -> None:
-        """Write/append actions still work when read_only=True (not a blocked tool)."""
-        runtime.read_only = True
-        from kimi_cli.tools.memory import Params as MemoryParams
-
-        result = await tool(MemoryParams(
-            action=action,  # type: ignore[arg-type]
-            topic="test",
-            content="some content",
-        ))
-        assert not (isinstance(result, ToolError) and "forbidden in read-only mode" in result.message)
-
-    @pytest.mark.parametrize("action", ["read", "list", "search"])
-    async def test_read_list_search_allowed_when_read_only(
-        self, tool: Memory, runtime: MagicMock, action: str,
-    ) -> None:
-        """Read/list/search actions still work when read_only=True."""
-        runtime.read_only = True
-        from kimi_cli.tools.memory import Params as MemoryParams
-
-        kwargs = {"action": action}  # type: ignore[arg-type]
-        if action == "search":
-            kwargs["query"] = "test"
-
-        result = await tool(MemoryParams(**kwargs))
-
-        # Should NOT be a blocked error (may be a different error like
-        # "no memory topics", but not the read-only forbidden error)
-        assert not (isinstance(result, ToolError) and "forbidden in read-only mode" in result.message)
-
-    async def test_read_only_false_allows_write(
-        self, tool: Memory, runtime: MagicMock,
-    ) -> None:
-        """Write action works normally when read_only=False."""
-        runtime.read_only = False
-        from kimi_cli.tools.memory import Params as MemoryParams
-
-        result = await tool(MemoryParams(
-            action="write",
-            topic="test",
-            content="some content",
-        ))
-        # Should NOT be a forbidden error
-        assert not (isinstance(result, ToolError) and "forbidden in read-only mode" in result.message)
