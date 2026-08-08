@@ -1,7 +1,8 @@
 """sync_native — copy the kimix-base native runtime into this project's bin/.
 
-Stages the compiled extension (``runtime_py.pyd``) and any runtime DLL
-dependencies in the same directory into ``<work-dir>\\bin`` so the native
+Stages the compiled extension (``runtime_py.pyd`` on Windows / ``runtime_py.so``
+on Linux & macOS) and any runtime DLL dependencies in the same directory
+into ``<work-dir>\\bin`` so the native
 acceleration path is importable from the
 running project without any absolute cross-repo path baked in. The
 pure-Python ``kimix_native`` shim package lives in ``bin\\kimix_native`` and is
@@ -50,13 +51,24 @@ def _kimix_base_bin() -> str:
     """kimix-base bin dir (parent of the per-mode build dirs)."""
     return os.path.join(_kimix_base(), "bin")
 
-_NATIVE_FILES = ("runtime_py.pyd",)
+def _native_files() -> tuple[str, ...]:
+    """Compiled-extension file name(s) shipped by kimix-base for this platform.
+
+    Mirrors kimix-base publish.py: Windows ships the CPython extension under
+    its native ``.pyd`` name; Linux/macOS must use the ``.so`` suffix (CPython
+    on those platforms only imports ``*.so`` modules).
+    """
+    if sys.platform == "win32":
+        return ("runtime_py.pyd",)
+    return ("runtime_py.so",)
+
+
 _MODES = ("release", "debug", "releasedbg")
 
 
 def _valid_build(bin_dir: str) -> bool:
     """A build dir is valid when the native artifact exists."""
-    return all(os.path.isfile(os.path.join(bin_dir, f)) for f in _NATIVE_FILES)
+    return all(os.path.isfile(os.path.join(bin_dir, f)) for f in _native_files())
 
 
 def _source_dirs(mode: str) -> list[str]:
@@ -72,7 +84,7 @@ def _source_dirs(mode: str) -> list[str]:
         ]
         if not cands:
             return []
-        cands.sort(key=lambda d: os.path.getmtime(os.path.join(d, "runtime_py.pyd")))
+        cands.sort(key=lambda d: os.path.getmtime(os.path.join(d, _native_files()[0])))
         return [cands[-1]]
     if mode == "release":
         # release first, then debug, then releasedbg (fallback order).
@@ -97,7 +109,7 @@ def sync(mode: str = "release", dest: str | None = None) -> int:
     if not sources:
         raise FileNotFoundError(
             f"no valid native build found under {_kimix_base_bin()!r} "
-            f"(need runtime_py.pyd; mode={mode!r})"
+            f"(need {' or '.join(_native_files())}; mode={mode!r})"
         )
     src = sources[0]
     os.makedirs(dest, exist_ok=True)
@@ -106,7 +118,7 @@ def sync(mode: str = "release", dest: str | None = None) -> int:
     copied = []
     # Native artifacts + any runtime DLL deps in the same dir.
     for name in sorted(os.listdir(src)):
-        if name in _NATIVE_FILES:
+        if name in _native_files():
             shutil.copy2(os.path.join(src, name), os.path.join(dest, name))
             copied.append(name)
             total += os.path.getsize(os.path.join(src, name))

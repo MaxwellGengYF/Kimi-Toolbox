@@ -3,8 +3,9 @@
 The performance-critical pure-Python code in this project can be accelerated
 by the native C++ runtime compiled in the
 [kimix-base](https://github.com/…) repo (a sibling of this checkout by
-default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd`,
-pybind11 extension with submodules `text` / `index` / `search` / `parse` /
+default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd` on Windows /
+`runtime_py.so` on Linux & macOS — the platform-dependent suffix of the same
+pybind11 extension, with submodules `text` / `index` / `search` / `parse` /
 `soul` / `tools` / `stream` / `codec` / `json` / `concurrency` / `diff` /
 `glob` / `image` / `todo` / `workspace`).
 
@@ -35,8 +36,9 @@ bit-identical outputs.
    python tools\sync_native.py --mode auto  # newest valid build
    ```
 
-   `sync_native.py` copies `runtime_py.pyd` (plus any runtime DLL deps) into
-   `<repo>\bin\` — the default native path. The
+   `sync_native.py` copies the platform's compiled extension —
+   `runtime_py.pyd` on Windows, `runtime_py.so` on Linux & macOS — (plus any
+   runtime DLL deps) into `<repo>\bin\` — the default native path. The
    `kimix_native` shim package is tracked by git (not ignored), so it is never
    synced. Idempotent; run it before every test/bench run.
 
@@ -95,8 +97,8 @@ new hoisted call-site pattern ≈ 0.15 µs (~2×).
 
 | env | behavior |
 |---|---|
-| `KIMIX_NATIVE=0` | pure Python everywhere (never imports the .pyd) |
-| `KIMIX_NATIVE=1` | **require** native; `ImportError` if the .pyd is missing |
+| `KIMIX_NATIVE=0` | pure Python everywhere (never imports the native extension) |
+| `KIMIX_NATIVE=1` | **require** native; `ImportError` if the extension (`.pyd`/`.so`) is missing |
 | `KIMIX_NATIVE=auto` (default) | native when importable, Python fallback otherwise |
 | `KIMIX_NATIVE_<KERNEL>=0` | disable one kernel (TEXT / INDEX / SEARCH / PARSE / SOUL / TOOLS / STREAM / CODEC / JSON / CONCURRENCY / DIFF / GLOB / IMAGE / TODO / WORKSPACE) |
 | `KIMIX_BASE=<dir>` | kimix-base repo root for the dev-only fallback & `sync_native.py` (default: the `kimix-base` sibling of this checkout) |
@@ -179,12 +181,13 @@ because the native contracts do not match the app's data model bit-for-bit:
 
 ## Compatibility caveats
 
-- **DLL shipping**: any runtime DLL dependencies must sit next to
-  `runtime_py.pyd`. `tools\sync_native.py` copies the `.pyd` plus any sibling
+- **Binary shipping**: any runtime DLL dependencies must sit next to the
+  compiled extension (`runtime_py.pyd` on Windows / `runtime_py.so` on
+  Linux & macOS). `tools\sync_native.py` copies the extension plus any sibling
   `.dll` files, so the staged copy is consistent by construction.
-  `KIMIX_NATIVE=1` + missing `.pyd` → `ImportError` (documented contract);
+  `KIMIX_NATIVE=1` + missing extension → `ImportError` (documented contract);
   `auto` → silent Python fallback.
-- **Python/arch mismatch** (e.g. 3.13 pyd on 3.14): `ImportError` → fallback.
+- **Python/arch mismatch** (e.g. 3.13 extension on 3.14): `ImportError` → fallback.
 - **Hash determinism**: native hash kernels use a fixed XXH3-64 seed (not
   `PYTHONHASHSEED`). `SimHash`/`MinHash` are not wired (see above) — no
   output change in this repo.

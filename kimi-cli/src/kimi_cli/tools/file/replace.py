@@ -316,12 +316,6 @@ class EditFile(CallableTool2[Params]):
                 brief="Empty file path",
             )
 
-        if not self._session.file_mtime.mark_dirty(params.path):
-            return ToolError(
-                message=f"File modified, read file first. Path: {display_path}",
-                brief="File modified",
-            )
-
         try:
             p = kaos_path_from_tool_input(params.path, self._work_dir)
             logical_path = p

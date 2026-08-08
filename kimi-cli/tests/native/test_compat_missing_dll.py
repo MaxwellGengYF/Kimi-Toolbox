@@ -13,6 +13,10 @@ import pytest
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _BIN = os.path.join(_REPO, "bin")
 
+# The staged artifact name is platform-dependent (runtime_py.pyd on Windows /
+# runtime_py.so on Linux & macOS).
+_NATIVE_FILE = "runtime_py.pyd" if sys.platform == "win32" else "runtime_py.so"
+
 
 def _run_with_native_disabled(code: str) -> subprocess.CompletedProcess[str]:
     """Run *code* in a fresh interpreter with the native runtime disabled."""
@@ -69,7 +73,7 @@ def test_consumers_work_after_restore():
 
     import kimi_cli.native_loader as knl
 
-    if os.path.isfile(os.path.join(_BIN, "runtime_py.pyd")):
+    if os.path.isfile(os.path.join(_BIN, _NATIVE_FILE)):
         # Reload the loader module so it re-resolves the staged binaries.
         import kimix.native_loader as xn
 

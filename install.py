@@ -319,16 +319,31 @@ def _install_rtk() -> tuple[bool, bool]:
 # kimix_base native runtime (download + unpack into bin/)
 # ---------------------------------------------------------------------------
 
-# Release metadata for the kimix_base native runtime (runtime_py.pyd).
+# Release metadata for the kimix_base native runtime (runtime_py.pyd on
+# Windows / runtime_py.so on Linux & macOS).
 # The release asset naming rule is:
 #   kimix_base-<platform>-<arch>-<version>.zip
 # e.g. kimix_base-windows-x64-0.1.0.zip under
 # https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/...
-KIMIX_BASE_VERSION = "0.4.0"
+KIMIX_BASE_VERSION = "0.5.0"
 KIMIX_BASE_RELEASE_URL = (
     "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release"
 )
-KIMIX_BASE_NATIVE_FILES = ("runtime_py.pyd",)
+
+
+def _native_files() -> tuple[str, ...]:
+    """Compiled-extension file name(s) shipped by kimix_base for this platform.
+
+    Mirrors kimix-base publish.py: Windows ships the CPython extension under
+    its native ``.pyd`` name; Linux/macOS must use the ``.so`` suffix (CPython
+    on those platforms only imports ``*.so`` modules).
+    """
+    if sys.platform == "win32":
+        return ("runtime_py.pyd",)
+    return ("runtime_py.so",)
+
+
+KIMIX_BASE_NATIVE_FILES = _native_files()
 
 
 def _kimix_native_version_path() -> Path:
@@ -461,20 +476,22 @@ def _unlink_with_retry(path: Path, attempts: int = 5, delay: float = 1.0) -> Non
 def _stage_native_files(src_dir: Path, dest_dir: Path) -> list[str]:
     """Copy the native artifacts found under *src_dir* into *dest_dir*.
 
-    The release archive may place ``runtime_py.pyd`` at the archive root or
-    inside a sub-directory, so the directory holding ``runtime_py.pyd`` is
-    located by walking *src_dir*. ``runtime_py.pyd`` and any sibling ``*.dll``
-    runtime dependencies are then copied into *dest_dir* (the same layout
-    contract as tools/sync_native.py: ``runtime_py.pyd`` at the root of
-    ``bin/``). Returns the list of copied file names.
+    The release archive may place the compiled extension (``runtime_py.pyd``
+    on Windows / ``runtime_py.so`` on Linux & macOS) at the archive root or
+    inside a sub-directory, so the directory holding it is located by walking
+    *src_dir*. The extension and any sibling ``*.dll`` runtime dependencies are
+    then copied into *dest_dir* (the same layout contract as
+    tools/sync_native.py: the extension at the root of ``bin/``). Returns the
+    list of copied file names.
     """
+    native_files = KIMIX_BASE_NATIVE_FILES
     pyd_dirs = sorted(
-        d for d in src_dir.rglob("*") if d.is_dir() and (d / "runtime_py.pyd").is_file()
+        d for d in src_dir.rglob("*") if d.is_dir() and (d / native_files[0]).is_file()
     )
     source = pyd_dirs[0] if pyd_dirs else src_dir
-    if not (source / "runtime_py.pyd").is_file():
+    if not (source / native_files[0]).is_file():
         raise RuntimeError(
-            f"archive does not contain runtime_py.pyd (checked {source})"
+            f"archive does not contain {' or '.join(native_files)} (checked {source})"
         )
     dest_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -503,9 +520,10 @@ def _stage_native_files(src_dir: Path, dest_dir: Path) -> list[str]:
 def _verify_native_binaries(bin_dir: Path) -> tuple[bool, str]:
     """Verify the staged native runtime in *bin_dir*.
 
-    Checks that ``runtime_py.pyd`` exists and that the ``kimix_native`` shim
-    can import the compiled extension. ``KIMIX_NATIVE=1`` is forced so a
-    broken/mismatched pyd is an error instead of a silent pure-Python fallback.
+    Checks that the compiled extension (``runtime_py.pyd`` on Windows /
+    ``runtime_py.so`` on Linux & macOS) exists and that the ``kimix_native``
+    shim can import it. ``KIMIX_NATIVE=1`` is forced so a broken/mismatched
+    extension is an error instead of a silent pure-Python fallback.
     Returns ``(ok, version_or_error)``.
     """
     for name in KIMIX_BASE_NATIVE_FILES:
@@ -544,8 +562,9 @@ def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> b
     ``kimix_base-<platform>-<arch>-<version>.zip`` (e.g.
     ``kimix_base-windows-x64-0.1.0.zip``). The ``.zip`` is downloaded to a
     temporary location, extracted, staged into *bin_dir* (default
-    ``<repo>\bin`` — the same layout as ``runtime_py.pyd``), verified by
-    importing the extension, and the downloaded archive is deleted on success.
+    ``<repo>\bin`` — the same layout as the compiled extension
+    ``runtime_py.pyd`` / ``runtime_py.so``), verified by importing the
+    extension, and the downloaded archive is deleted on success.
 
     When the staged runtime already loads and its version matches
     ``KIMIX_BASE_VERSION`` the download is skipped; a version mismatch prompts
@@ -572,8 +591,8 @@ def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> b
             return False
 
     if not _ask_yes_no(
-        "kimix_base native runtime (runtime_py.pyd) was not found/verified. "
-        "Download and install it?"
+        f"kimix_base native runtime ({' or '.join(_native_files())}) was not "
+        "found/verified. Download and install it?"
     ):
         print("⏭️  Skipping kimix_base native runtime installation.")
         return False

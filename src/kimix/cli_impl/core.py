@@ -27,8 +27,9 @@ exec_ctx: dict[str, Any] = {}
 def _check_native() -> None:
     """Detect the optional native acceleration path and log its status.
 
-    The native library (``runtime_py.pyd`` wrapped by the ``kimix_native``
-    shim) is an OPTIONAL acceleration. When it loads, an info
+    The native library (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
+    Linux & macOS, wrapped by the ``kimix_native`` shim) is an OPTIONAL
+    acceleration. When it loads, an info
     log confirms it is enabled; when the binary is missing or the library is
     invalid, ``kimix.native_loader`` falls back to pure Python and a concise
     warning is logged through ``kimix.ui.printing`` so the fallback does not

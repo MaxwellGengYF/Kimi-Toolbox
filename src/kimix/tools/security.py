@@ -17,6 +17,14 @@ module is cheap to import even from the light ``kimix.tools`` namespace.
 
 import regex as re
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 __all__ = [
     "redact_sensitive_output",
     "scrub_child_env",
@@ -51,6 +59,10 @@ def scrub_child_env(env: dict[str, str]) -> dict[str, str]:
     stay in the base), scrubbing must run on the base copy *before* any
     caller-provided overrides are merged in.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and all(
+        name.isascii() for name in env
+    ):
+        return _NATIVE_TOOLS.scrub_child_env(env)
     if not env:
         return {}
     scrubbed: dict[str, str] = {}
@@ -114,6 +126,8 @@ def redact_sensitive_output(output: str) -> str:
     """
     if not output:
         return output
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and output.isascii():
+        return _NATIVE_TOOLS.redact_sensitive_output(output)
     output = _URL_USERINFO_RE.sub(_mask_userinfo, output)
     output = _JWT_RE.sub(_REDACTED, output)
     output = _PEM_RE.sub(_REDACTED, output)

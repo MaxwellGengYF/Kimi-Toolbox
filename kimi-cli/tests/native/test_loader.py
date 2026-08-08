@@ -19,6 +19,10 @@ _REPO_ROOT = os.path.dirname(
 )
 _WORKDIR_BIN = os.path.join(_REPO_ROOT, "bin")
 
+# The staged artifact name is platform-dependent (runtime_py.pyd on Windows /
+# runtime_py.so on Linux & macOS).
+_NATIVE_FILE = "runtime_py.pyd" if sys.platform == "win32" else "runtime_py.so"
+
 
 def test_dev_fallback_defaults_to_sibling_kimix_base(monkeypatch):
     """Without $KIMIX_BASE the dev-only fallback is the sibling kimix-base repo
@@ -163,7 +167,9 @@ def test_env_matrix_subprocess(env):
         env=env_full,
         timeout=120,
     )
-    staged = os.path.isfile(os.path.join(os.environ.get("KIMIX_NATIVE_PATH", _WORKDIR_BIN), "runtime_py.pyd"))
+    staged = os.path.isfile(
+        os.path.join(os.environ.get("KIMIX_NATIVE_PATH", _WORKDIR_BIN), _NATIVE_FILE)
+    )
     mode = env["KIMIX_NATIVE"]
     if mode == "0":
         assert proc.returncode == 0

@@ -7,7 +7,14 @@ import time
 import queue
 from typing import Any, Awaitable, Callable, cast
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.session import Session
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
 
 
 # Seconds of output inactivity that triggers an early return from a blocking
@@ -35,6 +42,20 @@ def bounded_append(buf: io.StringIO, text: str, cap: int) -> bool:
     ``[... (output truncated, keeping first N and last M chars)]``, and
     ``True`` is returned.  ``False`` is returned when no truncation happened.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None:
+        # tell-guard: the native contract is (content, text, cap) ->
+        # (new_content, truncated); only cross the boundary when a truncation
+        # is actually needed (bit-identical to the Python body below).
+        if buf.tell() + len(text) > cap:
+            content, truncated = _NATIVE_TOOLS.bounded_append(
+                buf.getvalue(), text, cap
+            )
+            buf.seek(0)
+            buf.truncate(0)
+            buf.write(content)
+            return truncated
+        buf.write(text)
+        return False
     buf.write(text)
     if buf.tell() <= cap:
         return False

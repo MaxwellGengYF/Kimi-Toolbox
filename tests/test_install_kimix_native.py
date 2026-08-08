@@ -10,6 +10,7 @@ success contract.
 from __future__ import annotations
 
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -20,10 +21,26 @@ import install as install_mod
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_BIN = REPO_ROOT / "bin"
 
+# The staged artifact name is platform-dependent (runtime_py.pyd on Windows /
+# runtime_py.so on Linux & macOS) — mirrors install_mod._native_files().
+_NATIVE_FILE = "runtime_py.pyd" if sys.platform == "win32" else "runtime_py.so"
+
 
 # ---------------------------------------------------------------------------
 # naming rule / URL / platform detection
 # ---------------------------------------------------------------------------
+
+
+def test_native_files_is_platform_aware(monkeypatch):
+    """The staged artifact name follows the platform (mirrors kimix-base
+    publish.py): .pyd on Windows, .so on Linux & macOS."""
+    monkeypatch.setattr(install_mod.sys, "platform", "win32")
+    assert install_mod._native_files() == ("runtime_py.pyd",)
+    assert install_mod.KIMIX_BASE_NATIVE_FILES == ("runtime_py.pyd",)
+    monkeypatch.setattr(install_mod.sys, "platform", "linux")
+    assert install_mod._native_files() == ("runtime_py.so",)
+    monkeypatch.setattr(install_mod.sys, "platform", "darwin")
+    assert install_mod._native_files() == ("runtime_py.so",)
 
 
 def test_archive_name_rule():
@@ -98,13 +115,13 @@ def test_download_file_file_uri(tmp_path):
 
 
 def _make_release_archive(dest: Path) -> Path:
-    """Build a kimix_base-style zip archive with runtime_py.pyd."""
+    """Build a kimix_base-style zip archive with the platform's extension."""
     archive = dest / f"kimix_base-windows-x64-{install_mod.KIMIX_BASE_VERSION}.zip"
     payload = dest / "payload"
     payload.mkdir(parents=True, exist_ok=True)
-    (payload / "runtime_py.pyd").write_bytes(b"# fake runtime_py extension\n")
+    (payload / _NATIVE_FILE).write_bytes(b"# fake runtime_py extension\n")
     with zipfile.ZipFile(archive, "w") as zf:
-        zf.write(payload / "runtime_py.pyd", arcname="runtime_py.pyd")
+        zf.write(payload / _NATIVE_FILE, arcname=_NATIVE_FILE)
     return archive
 
 
@@ -117,7 +134,7 @@ def test_extract_zip_extracts_members(tmp_path):
     archive = _make_release_archive(tmp_path)
     out = tmp_path / "out"
     install_mod._extract_zip(archive, out)
-    assert (out / "runtime_py.pyd").read_bytes() == b"# fake runtime_py extension\n"
+    assert (out / _NATIVE_FILE).read_bytes() == b"# fake runtime_py extension\n"
 
 
 def test_extract_zip_rejects_bad_archive(tmp_path):
@@ -136,12 +153,12 @@ def test_extract_zip_rejects_bad_archive(tmp_path):
 def test_stage_native_files_copies_artifacts_and_deps(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
-    (src / "runtime_py.pyd").write_bytes(b"pyd")
+    (src / _NATIVE_FILE).write_bytes(b"pyd")
     (src / "vcruntime140.dll").write_bytes(b"dep")
     (src / "notes.txt").write_bytes(b"skip")
     dest = tmp_path / "dest"
     copied = install_mod._stage_native_files(src, dest)
-    assert sorted(copied) == ["runtime_py.pyd", "vcruntime140.dll"]
+    assert sorted(copied) == sorted([_NATIVE_FILE, "vcruntime140.dll"])
     assert sorted(p.name for p in dest.iterdir()) == sorted(copied)
     assert not (dest / "notes.txt").exists()
 
@@ -149,17 +166,17 @@ def test_stage_native_files_copies_artifacts_and_deps(tmp_path):
 def test_stage_native_files_finds_nested_pyd_dir(tmp_path):
     src = tmp_path / "src" / "release"
     src.mkdir(parents=True)
-    (src / "runtime_py.pyd").write_bytes(b"pyd")
+    (src / _NATIVE_FILE).write_bytes(b"pyd")
     dest = tmp_path / "dest"
     copied = install_mod._stage_native_files(tmp_path / "src", dest)
-    assert sorted(copied) == ["runtime_py.pyd"]
-    assert (dest / "runtime_py.pyd").read_bytes() == b"pyd"
+    assert sorted(copied) == [_NATIVE_FILE]
+    assert (dest / _NATIVE_FILE).read_bytes() == b"pyd"
 
 
 def test_stage_native_files_missing_artifacts_raises(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
-    (src / "other.dll").write_bytes(b"dll")  # runtime_py.pyd missing
+    (src / "other.dll").write_bytes(b"dll")  # native extension missing
     with pytest.raises(RuntimeError, match="does not contain"):
         install_mod._stage_native_files(src, tmp_path / "dest")
 
@@ -167,14 +184,14 @@ def test_stage_native_files_missing_artifacts_raises(tmp_path):
 def test_stage_native_files_locked_file_reports(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
-    (src / "runtime_py.pyd").write_bytes(b"pyd")
+    (src / _NATIVE_FILE).write_bytes(b"pyd")
     dest = tmp_path / "dest"
     dest.mkdir()
-    (dest / "runtime_py.pyd").write_bytes(b"old")
+    (dest / _NATIVE_FILE).write_bytes(b"old")
     real_copy2 = shutil.copy2
 
     def locked_copy2(src_file, dst_file, **kwargs):
-        if Path(dst_file).name == "runtime_py.pyd":
+        if Path(dst_file).name == _NATIVE_FILE:
             raise PermissionError(32, "in use")
         return real_copy2(src_file, dst_file, **kwargs)
 
@@ -212,7 +229,7 @@ def test_verify_native_binaries_rejects_broken_pyd(tmp_path):
         "def version():\n"
         "    return 'broken'\n"
     )
-    (tmp_path / "runtime_py.pyd").write_bytes(b"this is not a real extension")
+    (tmp_path / _NATIVE_FILE).write_bytes(b"this is not a real extension")
     ok, msg = install_mod._verify_native_binaries(tmp_path)
     assert ok is False
     assert msg  # a diagnostic is returned
@@ -220,7 +237,7 @@ def test_verify_native_binaries_rejects_broken_pyd(tmp_path):
 
 def test_verify_native_binaries_repo_bin(tmp_path):
     """The real repo bin/ (staged runtime) must verify when present."""
-    if not (REPO_BIN / "runtime_py.pyd").is_file():
+    if not (REPO_BIN / _NATIVE_FILE).is_file():
         pytest.skip("native runtime not staged in repo bin/")
     ok, version = install_mod._verify_native_binaries(REPO_BIN)
     assert ok is True
@@ -258,7 +275,7 @@ def test_install_kimix_native_success_deletes_archive(tmp_path, monkeypatch):
     )
     ok = install_mod._install_kimix_native(bin_dir=stage_bin, force=True)
     assert ok is True
-    assert (stage_bin / "runtime_py.pyd").is_file()
+    assert (stage_bin / _NATIVE_FILE).is_file()
     # The downloaded archive must be deleted on success.
     assert not (download_dir / archive.name).exists()
 

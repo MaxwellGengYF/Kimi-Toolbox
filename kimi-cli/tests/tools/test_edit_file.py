@@ -580,30 +580,36 @@ async def test_edit_outside_work_dir_directory_has_warning(
         assert "[out of work-dir]" in result.message
 
 
-# --- mark_dirty tests ---
+# --- mark_dirty / external modification tests ---
 
 
-async def test_edit_after_file_changed_returns_error(
+async def test_edit_after_external_modification_succeeds(
     edit_file_tool: EditFile, temp_work_dir: KaosPath, session
 ):
-    """Editing a file whose mtime matches the recorded mtime returns error."""
+    """Editing a file modified externally since the last read succeeds.
+
+    The FileMTime guard was removed: EditFile no longer refuses to edit a
+    file whose mtime changed externally. The edit applies to the current
+    on-disk content.
+    """
     file_path = temp_work_dir / "changed.txt"
     await file_path.write_text("original content")
 
-    # Pre-populate the tracker so mark_dirty finds an equal timestamp
-    # and returns False.
+    # Simulate an external modification: pre-populate a stale read baseline
+    # so the recorded read time is older than the file's current mtime.
     from kimi_cli.utils.path import kaos_path_from_user_input
     key = str(kaos_path_from_user_input(str(file_path)).canonical())
     st = await file_path.stat()
-    session.file_mtime._times[key] = st.st_mtime
+    session.file_mtime._read_times[key] = st.st_mtime - 10
+    assert session.file_mtime._read_times[key] < (await file_path.stat()).st_mtime
 
     result = await edit_file_tool(
         Params(path=str(file_path), edit=Edit(old="original", new="modified"))
     )
 
-    assert result.is_error
-    assert "File modified" in result.message
-    assert "read file first" in result.message
+    assert not result.is_error
+    assert "successfully edited" in result.message
+    assert await file_path.read_text() == "modified content"
 
 
 async def test_edit_new_file_not_in_dict_succeeds(

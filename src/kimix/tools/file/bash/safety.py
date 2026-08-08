@@ -12,6 +12,14 @@ backslash escapes, case) are used to obfuscate them.
 
 import regex as re
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 __all__ = [
     "check_hardline_blocked",
     "command_detection_variants",
@@ -186,6 +194,8 @@ def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
     Returns ``(True, "<human description>")`` when any variant matches, else
     ``(False, None)``.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and command.isascii():
+        return _NATIVE_TOOLS.check_hardline_blocked(command)
     for variant in command_detection_variants(command):
         blocked, desc = detect_hardline_command(variant)
         if blocked:
@@ -234,6 +244,8 @@ def foreground_background_guidance(command: str) -> str | None:
     """
     if not command or not command.strip():
         return None
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and command.isascii():
+        return _NATIVE_TOOLS.foreground_background_guidance(command)
     stripped = _strip_quoted(command)
     text = " ".join(stripped.split())
     if any(re.search(pattern, text) for pattern in _LONG_RUNNING_PATTERNS):

@@ -92,6 +92,8 @@ def _pattern_has_regex_newline(pattern: str) -> bool:
     ``n``).  Even backslashes, e.g. ``\\n``, mean a literal backslash+n
     search and should stay line-oriented.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and pattern.isascii():
+        return _NATIVE_TOOLS.pattern_has_regex_newline(pattern)
     return "\n" in pattern or bool(_REGEX_NEWLINE_ESCAPE_RE.search(pattern))
 
 
@@ -104,6 +106,8 @@ def _multiline_pattern(pattern: str) -> str:
     return) makes the same pattern match both LF and CRLF files.  Only
     called when multiline mode is active.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and pattern.isascii():
+        return _NATIVE_TOOLS.multiline_pattern(pattern)
     if "\n" not in pattern and not _REGEX_NEWLINE_ESCAPE_RE.search(pattern):
         return pattern
     # Normalize explicit CRLF in the pattern, then rewrite real newlines and

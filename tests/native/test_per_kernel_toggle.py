@@ -12,6 +12,10 @@ import pytest
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# The staged artifact name is platform-dependent (runtime_py.pyd on Windows /
+# runtime_py.so on Linux & macOS).
+_NATIVE_FILE = "runtime_py.pyd" if sys.platform == "win32" else "runtime_py.so"
+
 ALL_KERNELS = [
     "TEXT",
     "INDEX",
@@ -49,7 +53,7 @@ def _run(env_extra: dict[str, str]) -> dict[str, bool]:
 
 @pytest.mark.parametrize("kernel", ALL_KERNELS)
 def test_kernel_toggle_flips_only_one(kernel):
-    if not os.path.isfile(os.path.join(_REPO, "bin", "runtime_py.pyd")):
+    if not os.path.isfile(os.path.join(_REPO, "bin", _NATIVE_FILE)):
         pytest.skip("native runtime not staged")
     baseline = _run({"KIMIX_NATIVE": "auto"})
     if not all(baseline.values()):

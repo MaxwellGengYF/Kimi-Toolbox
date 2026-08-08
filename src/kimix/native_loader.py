@@ -1,7 +1,9 @@
 """kimix.native_loader — resolve and load the ``kimix_native`` shim.
 
-The native acceleration path (``runtime_py.pyd`` compiled in the kimix-base
-repo, plus the pure-Python ``kimix_native`` shim that wraps it) is OPTIONAL. This module locates the shim using an ordered list of
+The native acceleration path (``runtime_py.pyd`` on Windows / ``runtime_py.so``
+on Linux & macOS, compiled in the kimix-base repo, plus the pure-Python
+``kimix_native`` shim that wraps it) is OPTIONAL. This module locates the shim
+using an ordered list of
 search paths, inserts the first usable directory on ``sys.path`` and imports
 it once (cached). When the binaries are missing the loader degrades to the
 pure-Python fallback — no import-time side effects, never raises (except for
@@ -12,7 +14,8 @@ Search order (first usable directory wins):
 1. ``KIMIX_NATIVE_PATH`` env var — explicit override; when set, only that
    directory is tried.
 2. **default**: ``<repo root>\\bin`` — the current project work-dir where
-   ``tools\\sync_native.py`` stages ``runtime_py.pyd`` (the ``kimix_native``
+   ``tools\\sync_native.py`` stages the compiled extension (``runtime_py.pyd``
+   on Windows / ``runtime_py.so`` on Linux & macOS; the ``kimix_native``
    shim package is tracked by git and always present there).
    "Repo root" is the parent of
    ``src/kimix`` (falling back to ``os.getcwd()`` when the repo layout is not
@@ -152,8 +155,9 @@ def _try_import(require: bool) -> bool:
         if require:
             raise
         return False
-    # The shim may have imported fine while the .pyd failed (auto fallback):
-    # native is usable only when the shim's own import succeeded.
+    # The shim may have imported fine while the compiled extension failed
+    # (auto fallback): native is usable only when the shim's own import
+    # succeeded.
     return getattr(_shim, "_native", None) is not None
 
 

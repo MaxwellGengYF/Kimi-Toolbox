@@ -20,6 +20,8 @@ sys.path.insert(0, _TOOLS_DIR)
 
 import sync_native  # noqa: E402
 
+_NATIVE_FILE = "runtime_py.pyd" if sys.platform == "win32" else "runtime_py.so"
+
 
 def test_kimix_base_defaults_to_sibling(monkeypatch):
     """Without $KIMIX_BASE the source repo is the sibling kimix-base."""
@@ -30,6 +32,17 @@ def test_kimix_base_defaults_to_sibling(monkeypatch):
     assert sync_native._kimix_base_bin() == os.path.join(
         os.path.dirname(_REPO_ROOT), "kimix-base", "bin"
     )
+
+
+def test_native_files_is_platform_aware(monkeypatch):
+    """The staged artifact name follows the platform (mirrors kimix-base
+    publish.py): .pyd on Windows, .so on Linux & macOS."""
+    monkeypatch.setattr(sync_native.sys, "platform", "win32")
+    assert sync_native._native_files() == ("runtime_py.pyd",)
+    monkeypatch.setattr(sync_native.sys, "platform", "linux")
+    assert sync_native._native_files() == ("runtime_py.so",)
+    monkeypatch.setattr(sync_native.sys, "platform", "darwin")
+    assert sync_native._native_files() == ("runtime_py.so",)
 
 
 def test_kimix_base_env_override(monkeypatch):
@@ -45,7 +58,7 @@ def test_source_dirs_uses_override(tmp_path, monkeypatch):
     fake = tmp_path / "kimix-base"
     release = fake / "bin" / "release"
     release.mkdir(parents=True)
-    (release / "runtime_py.pyd").write_bytes(b"x")
+    (release / _NATIVE_FILE).write_bytes(b"x")
     monkeypatch.setenv("KIMIX_BASE", str(fake))
     dirs = sync_native._source_dirs("release")
     assert dirs == [str(release)]

@@ -18,6 +18,14 @@ Provides:
 
 import regex as re
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 __all__ = [
     "annotate_failure",
     "interpret_exit_code",
@@ -50,6 +58,8 @@ def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
     """
     if exit_code is None or exit_code == 0:
         return None
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and command.isascii():
+        return _NATIVE_TOOLS.interpret_exit_code(command, exit_code)
     name = _base_command_name(command).lower()
     code = exit_code
 
@@ -84,6 +94,8 @@ def annotate_failure(output: str, command: str, exit_code: int | None) -> str | 
     """
     if not output:
         return None
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and output.isascii():
+        return _NATIVE_TOOLS.annotate_failure(output, command, exit_code)
     sample = output[:4000]
     lowered = sample.lower()
 

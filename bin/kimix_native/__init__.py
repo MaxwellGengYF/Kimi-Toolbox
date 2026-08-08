@@ -1,13 +1,14 @@
 """kimix_native — Python shim for the compiled ``runtime_py`` extension module.
 
-The compiled extension (``runtime_py.pyd``) is lazily imported as ``_native``.
+The compiled extension (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
+Linux & macOS) is lazily imported as ``_native``.
 The module-level environment toggle ``KIMIX_NATIVE`` (default ``auto``)
 controls whether the native extension is used at all:
 
 * ``KIMIX_NATIVE=0`` — never import the compiled module (pure-Python
   fallback; the framework's ``_compat`` implementations are used).
 * ``KIMIX_NATIVE=1`` — require the compiled module (raise ImportError if the
-  .pyd is unavailable).
+  extension (``.pyd``/``.so``) is unavailable).
 * ``KIMIX_NATIVE=auto`` (default) — use the compiled module when it is
   importable, fall back to pure Python otherwise.
 

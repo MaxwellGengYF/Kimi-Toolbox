@@ -1,7 +1,8 @@
 """Tests for the native-acceleration detection in ``kimix.cli_impl.core``.
 
 ``core._check_native`` logs the status of the optional native library
-(``runtime_py.pyd`` wrapped by the ``kimix_native`` shim):
+(``runtime_py.pyd`` on Windows / ``runtime_py.so`` on Linux & macOS, wrapped
+by the ``kimix_native`` shim):
 a concise info log when it loads, a concise warning when the binary is missing
 or the library is invalid, and nothing when the user explicitly opted out with
 ``KIMIX_NATIVE=0``.
