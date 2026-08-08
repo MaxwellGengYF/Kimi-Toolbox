@@ -1,4 +1,9 @@
-"""Tests for document extraction in ReadFile (.ipynb / .docx / .xlsx)."""
+"""Tests for document extraction in ReadFile (.ipynb/.docx/.xlsx/.xlsm/.xls/.pptx/.pdf).
+
+Fixtures are built with the same third-party parsers that read_extract uses
+(python-docx, openpyxl, python-pptx, xlwt, PyMuPDF) so the tests exercise the
+real file formats end to end.
+"""
 
 from __future__ import annotations
 
@@ -18,10 +23,42 @@ from kimi_cli.tools.file.read_extract import (
     is_extractable_document,
 )
 
-_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-_NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-_NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+NB_JSON = {
+    "nbformat": 4,
+    "nbformat_minor": 5,
+    "metadata": {},
+    "cells": [
+        {
+            "id": "cell-1",
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["# Title\n", "Some *text*."],
+        },
+        {"id": "cell-2", "cell_type": "code", "metadata": {}, "source": "print('hello')"},
+        {"id": "cell-3", "cell_type": "raw", "metadata": {}, "source": "raw content"},
+    ],
+}
+
+# v3 notebooks use `worksheets` + code cells with an `input` field; nbformat
+# upgrades them to v4 internally.
+NB_JSON_V3 = {
+    "nbformat": 3,
+    "nbformat_minor": 0,
+    "metadata": {},
+    "worksheets": [
+        {
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "input": ["x = 1"],
+                    "outputs": [],
+                },
+            ],
+        }
+    ],
+}
 
 
 def _write_zip(path: KaosPath, files: dict[str, str | bytes]) -> None:
@@ -37,81 +74,107 @@ def _write_bytes(path: KaosPath, data: bytes) -> None:
     Path(str(path)).write_bytes(data)
 
 
-NB_JSON = {
-    "cells": [
-        {"cell_type": "markdown", "source": ["# Title\n", "Some *text*."]},
-        {"cell_type": "code", "source": "print('hello')"},
-        {"cell_type": "raw", "source": "raw content"},
-    ]
-}
-
-DOCX_MINIMAL: dict[str, str] = {
-    "word/document.xml": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<w:document xmlns:w="{_NS_W}">'
-        "<w:body>"
-        "<w:p><w:r><w:t>Hello</w:t><w:tab/><w:t>World</w:t><w:br/></w:r></w:p>"
-        "<w:p><w:r><w:t>Second para</w:t></w:r></w:p>"
-        "</w:body>"
-        "</w:document>"
-    )
-}
-
-XLSX_MINIMAL: dict[str, str] = {
-    "xl/workbook.xml": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<workbook xmlns="{_NS_S}" xmlns:r="{_NS_REL}">'
-        "<sheets>"
-        '<sheet name="Data" sheetId="1" r:id="rId1"/>'
-        '<sheet name="HiddenSheet" sheetId="2" state="hidden" r:id="rId2"/>'
-        "</sheets>"
-        "</workbook>"
-    ),
-    "xl/_rels/workbook.xml.rels": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<Relationships xmlns="{_NS_PKG_REL}">'
-        '<Relationship Id="rId1" '
-        f'Type="{_NS_REL}/worksheet" Target="worksheets/sheet1.xml"/>'
-        '<Relationship Id="rId2" '
-        f'Type="{_NS_REL}/worksheet" Target="worksheets/sheet2.xml"/>'
-        "</Relationships>"
-    ),
-    "xl/worksheets/sheet1.xml": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<worksheet xmlns="{_NS_S}">'
-        "<sheetData>"
-        '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row>'
-        '<row r="2"><c r="A2" t="s"><v>1</v></c></row>'
-        "</sheetData>"
-        "</worksheet>"
-    ),
-    "xl/worksheets/sheet2.xml": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<worksheet xmlns="{_NS_S}">'
-        "<sheetData></sheetData>"
-        "</worksheet>"
-    ),
-    "xl/sharedStrings.xml": (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<sst xmlns="{_NS_S}">'
-        "<si><t>Name</t></si>"
-        "<si><t>Alice</t></si>"
-        "</sst>"
-    ),
-}
+# ── fixture builders (same libs as the extractor) ─────────────────────────────
 
 
-# ── module-level extraction helpers ─────────────────────────────────────────
+def _build_docx(path: KaosPath, *, with_table: bool = False) -> None:
+    from docx import Document
+
+    document = Document()
+    paragraph = document.add_paragraph()
+    paragraph.add_run("Hello\tWorld")
+    document.add_paragraph("Second para")
+    if with_table:
+        table = document.add_table(rows=1, cols=2)
+        table.rows[0].cells[0].text = "H1"
+        table.rows[0].cells[1].text = "H2"
+    document.save(str(path))
+
+
+def _build_xlsx(path: KaosPath, *, hidden: bool = False) -> None:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Name", 42])
+    sheet.append(["Alice"])
+    if hidden:
+        hidden_sheet = workbook.create_sheet("HiddenSheet")
+        hidden_sheet.sheet_state = "hidden"
+        hidden_sheet.append(["secret"])
+    workbook.save(str(path))
+
+
+def _build_pptx(path: KaosPath) -> None:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    blank = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank)
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+    box.text = "Title line"
+    bullet = box.text_frame.add_paragraph()
+    bullet.text = "Bullet line"
+
+    slide2 = prs.slides.add_slide(blank)
+    graphic = slide2.shapes.add_table(1, 2, Inches(1), Inches(1), Inches(4), Inches(1))
+    graphic.table.cell(0, 0).text = "A"
+    graphic.table.cell(0, 1).text = "B"
+    prs.save(str(path))
+
+
+def _build_xls(path: KaosPath) -> None:
+    import xlwt
+
+    book = xlwt.Workbook()
+    sheet = book.add_sheet("Old")
+    sheet.write(0, 0, "Name")
+    sheet.write(0, 1, 42)
+    sheet.write(1, 0, "Bob")
+    book.save(str(path))
+
+
+def _build_pdf(path: KaosPath, pages: int = 2) -> None:
+    import pymupdf
+
+    doc = pymupdf.open()
+    for index in range(pages):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"PDF text page {index + 1}")
+    doc.save(str(path))
+    doc.close()
+
+
+# ── extension routing ─────────────────────────────────────────────────────────
 
 
 def test_is_extractable_document():
-    assert set(EXTRACTABLE_EXTENSIONS) == {".ipynb", ".docx", ".xlsx"}
+    assert set(EXTRACTABLE_EXTENSIONS) == {
+        ".ipynb",
+        ".docx",
+        ".xlsx",
+        ".xlsm",
+        ".xls",
+        ".pptx",
+        ".pdf",
+    }
     assert is_extractable_document("notes.ipynb")
     assert is_extractable_document("doc.DOCX")
     assert is_extractable_document("a/b/c.xlsx")
+    assert is_extractable_document("macro.xlsm")
+    assert is_extractable_document("legacy.xls")
+    assert is_extractable_document("deck.PPTX")
+    assert is_extractable_document("paper.pdf")
     assert not is_extractable_document("notes.txt")
     assert not is_extractable_document("noext")
     assert not is_extractable_document("archive.zip")
+    assert not is_extractable_document("old.doc")
+    assert not is_extractable_document("old.ppt")
+
+
+# ── .ipynb ────────────────────────────────────────────────────────────────────
 
 
 def test_extract_notebook_markdown_and_code_cells(temp_work_dir: KaosPath):
@@ -132,54 +195,141 @@ def test_extract_notebook_markdown_and_code_cells(temp_work_dir: KaosPath):
     )
 
 
-def test_extract_notebook_legacy_worksheets(temp_work_dir: KaosPath):
-    """Legacy `worksheets`-based notebooks are supported."""
+def test_extract_notebook_legacy_v3_worksheets(temp_work_dir: KaosPath):
+    """Legacy v3 notebooks (worksheets + code `input` cells) are upgraded."""
     nb = temp_work_dir / "legacy.ipynb"
-    _write_bytes(
-        nb,
-        orjson.dumps(
-            {
-                "worksheets": [
-                    {"cells": [{"cell_type": "code", "source": "x = 1"}]},
-                ]
-            }
-        ),
-    )
+    _write_bytes(nb, orjson.dumps(NB_JSON_V3))
     text = extract_document_text(str(nb))
     assert text == "# ── Code cell 1 ──\nx = 1\n"
 
 
 def test_extract_notebook_no_cells_raises(temp_work_dir: KaosPath):
     nb = temp_work_dir / "empty.ipynb"
-    _write_bytes(nb, orjson.dumps({"cells": []}))
-    with pytest.raises(ExtractionError):
+    _write_bytes(
+        nb, orjson.dumps({"nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": []})
+    )
+    with pytest.raises(ExtractionError, match="no cells"):
         extract_document_text(str(nb))
+
+
+def test_extract_notebook_bad_json_raises(temp_work_dir: KaosPath):
+    nb = temp_work_dir / "broken.ipynb"
+    _write_bytes(nb, b"{this is not json")
+    with pytest.raises(ExtractionError, match="Not a valid notebook"):
+        extract_document_text(str(nb))
+
+
+# ── .docx ─────────────────────────────────────────────────────────────────────
 
 
 def test_extract_docx_paragraphs_tabs_breaks(temp_work_dir: KaosPath):
     docx = temp_work_dir / "doc.docx"
-    _write_zip(docx, DOCX_MINIMAL)
+    _build_docx(docx)
 
     text = extract_document_text(str(docx))
     assert text == "Hello\tWorld\n\nSecond para\n"
 
 
-def test_extract_xlsx_sheets_and_shared_strings(temp_work_dir: KaosPath):
-    xlsx = temp_work_dir / "book.xlsx"
-    _write_zip(xlsx, XLSX_MINIMAL)
+def test_extract_docx_table(temp_work_dir: KaosPath):
+    docx = temp_work_dir / "table.docx"
+    _build_docx(docx, with_table=True)
 
-    text = extract_document_text(str(xlsx))
-    assert text == "# ── Sheet: Data ──\nName\t42\nAlice\n"
+    text = extract_document_text(str(docx))
+    assert text == "Hello\tWorld\n\nSecond para\n\nH1\tH2\n"
 
 
 def test_extract_bad_docx_raises(temp_work_dir: KaosPath):
     bad = temp_work_dir / "bad.docx"
     _write_bytes(bad, b"this is not a zip file at all")
-    with pytest.raises(ExtractionError):
+    with pytest.raises(ExtractionError, match="Not a valid DOCX"):
         extract_document_text(str(bad))
 
 
-# ── tool-level tests ────────────────────────────────────────────────────────
+# ── .xlsx / .xlsm ─────────────────────────────────────────────────────────────
+
+
+def test_extract_xlsx_sheets_and_values(temp_work_dir: KaosPath):
+    xlsx = temp_work_dir / "book.xlsx"
+    _build_xlsx(xlsx, hidden=True)
+
+    text = extract_document_text(str(xlsx))
+    assert text == "# ── Sheet: Data ──\nName\t42\nAlice\n"
+
+
+def test_extract_xlsm_same_as_xlsx(temp_work_dir: KaosPath):
+    xlsm = temp_work_dir / "book.xlsm"
+    _build_xlsx(xlsm)
+
+    text = extract_document_text(str(xlsm))
+    assert text == "# ── Sheet: Data ──\nName\t42\nAlice\n"
+
+
+def test_extract_xlsx_empty_sheet_shows_placeholder(temp_work_dir: KaosPath):
+    from openpyxl import Workbook
+
+    xlsx = temp_work_dir / "empty.xlsx"
+    workbook = Workbook()
+    workbook.save(str(xlsx))
+
+    text = extract_document_text(str(xlsx))
+    assert text == "# ── Sheet: Sheet ──\n(empty)\n"
+
+
+def test_extract_bad_xlsx_raises(temp_work_dir: KaosPath):
+    bad = temp_work_dir / "bad.xlsx"
+    _write_bytes(bad, b"this is not a zip file at all")
+    with pytest.raises(ExtractionError, match="Not a valid XLSX"):
+        extract_document_text(str(bad))
+
+
+# ── .xls ──────────────────────────────────────────────────────────────────────
+
+
+def test_extract_xls_legacy_sheets(temp_work_dir: KaosPath):
+    xls = temp_work_dir / "legacy.xls"
+    _build_xls(xls)
+
+    text = extract_document_text(str(xls))
+    assert text == "# ── Sheet: Old ──\nName\t42\nBob\n"
+
+
+# ── .pptx ─────────────────────────────────────────────────────────────────────
+
+
+def test_extract_pptx_slides_text_and_table(temp_work_dir: KaosPath):
+    pptx = temp_work_dir / "deck.pptx"
+    _build_pptx(pptx)
+
+    text = extract_document_text(str(pptx))
+    assert text == ("# ── Slide 1 ──\nTitle line\nBullet line\n\n# ── Slide 2 ──\nA\tB\n")
+
+
+def test_extract_bad_pptx_raises(temp_work_dir: KaosPath):
+    bad = temp_work_dir / "bad.pptx"
+    _write_bytes(bad, b"this is not a zip file at all")
+    with pytest.raises(ExtractionError, match="Not a valid PPTX"):
+        extract_document_text(str(bad))
+
+
+# ── .pdf ──────────────────────────────────────────────────────────────────────
+
+
+def test_extract_pdf_pages(temp_work_dir: KaosPath):
+    pdf = temp_work_dir / "paper.pdf"
+    _build_pdf(pdf, pages=2)
+
+    text = extract_document_text(str(pdf))
+    assert text == ("# ── Page 1 ──\nPDF text page 1\n\n# ── Page 2 ──\nPDF text page 2\n")
+
+
+def test_extract_bad_pdf_raises(temp_work_dir: KaosPath):
+    bad = temp_work_dir / "bad.pdf"
+    _write_bytes(bad, b"this is not a pdf at all")
+    with pytest.raises(ExtractionError, match="Not a valid PDF"):
+        extract_document_text(str(bad))
+
+
+# ── tool-level tests ──────────────────────────────────────────────────────────
 
 
 async def test_read_ipynb_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -201,7 +351,7 @@ async def test_read_ipynb_via_tool(read_file_tool: ReadFile, temp_work_dir: Kaos
 
 async def test_read_docx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
     docx = temp_work_dir / "doc.docx"
-    _write_zip(docx, DOCX_MINIMAL)
+    _build_docx(docx)
     display_path = str(docx).replace("\\", "/")
 
     result = await read_file_tool(Params(path=str(docx)))
@@ -216,7 +366,7 @@ async def test_read_docx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosP
 
 async def test_read_xlsx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
     xlsx = temp_work_dir / "book.xlsx"
-    _write_zip(xlsx, XLSX_MINIMAL)
+    _build_xlsx(xlsx, hidden=True)
     display_path = str(xlsx).replace("\\", "/")
 
     result = await read_file_tool(Params(path=str(xlsx)))
@@ -226,7 +376,31 @@ async def test_read_xlsx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosP
     assert "Alice" in result.output
     # Hidden sheet is skipped.
     assert "HiddenSheet" not in result.output
+    assert "secret" not in result.output
     assert result.message.endswith(f" Path: {display_path} (extracted from .xlsx document)")
+
+
+async def test_read_pptx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    pptx = temp_work_dir / "deck.pptx"
+    _build_pptx(pptx)
+
+    result = await read_file_tool(Params(path=str(pptx)))
+    assert not result.is_error
+    assert "# ── Slide 1 ──" in result.output
+    assert "Title line" in result.output
+    assert "A\tB" in result.output
+    assert result.message.endswith("(extracted from .pptx document)")
+
+
+async def test_read_pdf_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    pdf = temp_work_dir / "paper.pdf"
+    _build_pdf(pdf, pages=1)
+
+    result = await read_file_tool(Params(path=str(pdf)))
+    assert not result.is_error
+    assert "# ── Page 1 ──" in result.output
+    assert "PDF text page 1" in result.output
+    assert result.message.endswith("(extracted from .pdf document)")
 
 
 async def test_read_malformed_docx_bad_zip(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -239,14 +413,15 @@ async def test_read_malformed_docx_bad_zip(read_file_tool: ReadFile, temp_work_d
     assert result.brief == "Document extraction failed"
 
 
-async def test_read_docx_missing_document_xml(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+async def test_read_docx_bad_package_zip(read_file_tool: ReadFile, temp_work_dir: KaosPath):
+    """A zip that is not a valid DOCX package fails cleanly."""
     docx = temp_work_dir / "nodoc.docx"
     _write_zip(docx, {"word/styles.xml": "<styles/>"})
 
     result = await read_file_tool(Params(path=str(docx)))
     assert result.is_error
     assert "could not be extracted" in result.message
-    assert "word/document.xml" in result.message
+    assert "Not a valid DOCX" in result.message
     assert result.brief == "Document extraction failed"
 
 
@@ -265,7 +440,7 @@ async def test_read_extract_size_guard(
 ):
     """Documents over MAX_EXTRACT_BYTES are refused without extraction."""
     docx = temp_work_dir / "big.docx"
-    _write_zip(docx, DOCX_MINIMAL)
+    _build_docx(docx)
     monkeypatch.setattr(read_module, "MAX_EXTRACT_BYTES", 4)
 
     result = await read_file_tool(Params(path=str(docx)))
