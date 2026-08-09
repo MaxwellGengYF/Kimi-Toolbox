@@ -32,6 +32,18 @@ from kimix.tools.common import (
     _token_filter_output,
     ProcessTask,
 )
+from kimix.tools.prompt_common import (
+    accepts_alias_text,
+    cwd_field,
+    deduplicate_output_field,
+    max_lines_field,
+    mode_field,
+    normalize_mode_validator,
+    shell_cmd_required_validator,
+    task_id_field,
+    timeout_field,
+    wait_for_pattern_field,
+)
 from kimix.tools.file.bash.output_enhance import (
     annotate_failure,
     interpret_exit_code,
@@ -199,74 +211,27 @@ class PowershellParams(BaseModel):
     cmd: str = Field(
         default="",
         alias="command",  # LLM can use "command" instead of "cmd"
-        description="PowerShell command or input text for an existing session. Accepts `cmd` or `command`."
+        description="PowerShell command or input text for an existing session. " + accepts_alias_text("cmd", "command", word=False)
     )
-    mode: Literal["execute", "send", "interactive"] = Field(
-        default="execute",
-        description=(
-            "'execute' (alias: 'run'): Run the PowerShell command. "
-            "'send' (alias: 'background'): Execute the command in background, return task_id immediately. "
-            "'interactive': Start a persistent PowerShell REPL, return task_id for further input."
-        ),
+    mode: Literal["execute", "send", "interactive"] = mode_field(
+        execute_desc="Run the PowerShell command.",
+        send_desc="Execute the command in background, return task_id immediately.",
+        interactive_desc="Start a persistent PowerShell REPL, return task_id for further input.",
     )
-    timeout: int = Field(
-        default=30,
-        ge=1,
-        le=900,
-        description="Timeout in seconds (1-900)."
-    )
-    task_id: str | None = Field(
-        default=None,
-        description=(
-            "Existing session/task ID to continue. When provided, 'cmd' is sent to the "
-            "process stdin instead of being executed."
-        ),
-    )
-    wait_for_pattern: str | None = Field(
-        default=None,
-        description=(
-            "Optional regex pattern. After starting or sending input, the tool blocks up "
-            "to 'timeout' seconds until the pattern appears in output."
-        ),
-    )
-    max_lines: int | None = Field(
-        default=None,
-        ge=3,
-        description="Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
-    )
-    deduplicate_output: bool = Field(
-        default=True,
-        alias="token_kill",  # backward compat
-        description="Deduplicate repeated output lines from known commands (git, npm, etc.). "
-                    "Set to False to see raw, unfiltered output.",
-    )
-    cwd: str | None = Field(
-        default=None,
-        alias="workdir",  # LLM can use "workdir" instead of "cwd"
-        description="Working directory for the command (absolute or relative path).",
-    )
+    timeout: int = timeout_field()
+    task_id: str | None = task_id_field("cmd")
+    wait_for_pattern: str | None = wait_for_pattern_field()
+    max_lines: int | None = max_lines_field()
+    deduplicate_output: bool = deduplicate_output_field()
+    cwd: str | None = cwd_field("command")
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_mode(cls, data: dict) -> dict:
         """Convert deprecated boolean flags and mode aliases to canonical names."""
-        if isinstance(data, dict):
-            if data.get('interactive', False):
-                data['mode'] = 'interactive'
-            if 'mode' in data:
-                if data['mode'] == 'run':
-                    data['mode'] = 'execute'
-                elif data['mode'] == 'background':
-                    data['mode'] = 'send'
-        return data
+        return normalize_mode_validator(data)
 
-    @model_validator(mode="after")
-    def _validate_cmd(self) -> "PowershellParams":
-        if self.mode == "execute" and not self.cmd and self.task_id is None:
-            raise ValueError("cmd cannot be empty when mode='execute' and no task_id")
-        if self.task_id is not None and not self.cmd:
-            raise ValueError("cmd cannot be empty when continuing a session via task_id")
-        return self
+    _validate_cmd = shell_cmd_required_validator("cmd")
 
 class Powershell(CallableTool2[PowershellParams]):
 
@@ -277,13 +242,7 @@ class Powershell(CallableTool2[PowershellParams]):
     def __init__(self, session: Session):
         desc = load_desc(Path(__file__).parent / "pwsh_tool.md")
         super().__init__(description=desc)
-        self.description += (
-            " Accepts `cmd` or `command` parameter. "
-            "`cwd`/`workdir` sets the working directory for this command. "
-            "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
-            "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
-            + _interactive_scope_text(is_shell=True)
-        )
+        self.description += " " + _interactive_scope_text(is_shell=True)
         self._session = session
         if not _bash_tool._should_enable_powershell():
             raise SkipThisTool()

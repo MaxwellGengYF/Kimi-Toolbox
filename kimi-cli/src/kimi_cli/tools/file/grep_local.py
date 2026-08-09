@@ -720,9 +720,7 @@ class Grep(CallableTool2[Params]):
     name: str = "Grep"
     description: str = (
         "Search files using ripgrep. "
-        "Multiline patterns match across line boundaries. "
-        "Example: pattern='def foo\\(.*?\\):' with multiline=True matches function signatures "
-        "spanning multiple lines."
+        "Multiline patterns match across line boundaries."
     )
     params: type[Params] = Params
     field_aliases = {

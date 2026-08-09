@@ -37,10 +37,9 @@ class Retrieve(CallableTool2[Params]):
     name: str = "Retrieve"
     description: str = (
         "Retrieve past conversation history, including compacted/archived turns. "
-        "The context window is volatile; this tool recalls earlier messages that "
-        "may have been pruned or compacted. Use `query` to search (natural language, "
-        "relevance-ranked with a recency boost) or `id` to fetch a specific turn "
-        "(e.g. a `prune_<n>` reference left by context pruning)."
+        "Use `query` to search (natural language, relevance-ranked with a recency "
+        "boost) or `id` to fetch a specific turn (e.g. a `prune_<n>` reference "
+        "left by context pruning)."
     )
     params: type[Params] = Params
 

@@ -14,6 +14,7 @@ from kosong.tooling import (
     ToolError,
     ToolOk,
     ToolReturnValue,
+    alias_note,
 )
 from pydantic import BaseModel, Field, model_validator
 from rapidfuzz import fuzz
@@ -66,11 +67,11 @@ class Params(BaseModel):
     path: str | list[str] = Field(
         alias="file_path",  # common LLM variant
         description=(
-            "File path, or a list of file paths. Accepts `path` or `file_path`. "
+            "File path, or a list of file paths. " + alias_note("path", "file_path", word=False) + " "
             "When `glob=True`, the final path component may contain wildcards "
             "(`*`, `?`, `[...]`); recursive patterns like `src/**/*.ts` are "
             "supported, only unsafe all-wildcard patterns (e.g. `**`, `**/*`) "
-            "are rejected. Absolute for files outside working directory."
+            "are rejected."
         ),
     )
     line_offset: int | list[int] = Field(

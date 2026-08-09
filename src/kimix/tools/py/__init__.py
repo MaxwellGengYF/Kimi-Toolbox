@@ -17,6 +17,17 @@ from kimix.tools.common import (
     _token_filter_output,
     ProcessTask,
 )
+from kimix.tools.prompt_common import (
+    accepts_alias_text,
+    cwd_field,
+    deduplicate_output_field,
+    max_lines_field,
+    mode_field,
+    normalize_mode_validator,
+    task_id_field,
+    timeout_field,
+    wait_for_pattern_field,
+)
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from kimi_cli.session import Session
@@ -33,7 +44,7 @@ class Params(BaseModel):
         default="",
         validation_alias=AliasChoices("code", "source_code", "file"),
         description=(
-            "Inline Python code to execute. Accepts `code` or `file`. "
+            "Inline Python code to execute. " + accepts_alias_text("code", "file", word=False) + " "
             "When the value ends with '.py' and the file exists, "
             "it is treated as a file path."
         ),
@@ -42,65 +53,23 @@ class Params(BaseModel):
         default=None,
         description="Output file path."
     )
-    timeout: int = Field(
-        default=30,
-        ge=1,
-        le=900,
-        description="Timeout in seconds (1-900)."
+    timeout: int = timeout_field()
+    mode: Literal["execute", "send", "interactive"] = mode_field(
+        execute_desc="Run code and wait for completion (default).",
+        send_desc="Execute code in background, return immediately with task_id.",
+        interactive_desc="Start a persistent Python REPL, return task_id for further input.",
     )
-    mode: Literal["execute", "send", "interactive"] = Field(
-        default="execute",
-        description=(
-            "'execute' (alias: 'run'): Run code and wait for completion (default). "
-            "'send' (alias: 'background'): Execute code in background, return immediately with task_id. "
-            "'interactive': Start a persistent Python REPL, return task_id for further input."
-        ),
-    )
-    task_id: str | None = Field(
-        default=None,
-        description=(
-            "Existing session/task ID to continue. When provided, 'code' is sent to "
-            "the process stdin instead of being executed as a new script."
-        ),
-    )
-    wait_for_pattern: str | None = Field(
-        default=None,
-        description=(
-            "Optional regex pattern. After starting or sending input, the tool blocks up "
-            "to 'timeout' seconds until the pattern appears in output."
-        ),
-    )
-    max_lines: int | None = Field(
-        default=None,
-        ge=3,
-        description="Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
-    )
-    deduplicate_output: bool = Field(
-        default=True,
-        alias="token_kill",  # backward compat with shell tools
-        description="Deduplicate repeated output lines from known commands (pytest, ruff, etc.). "
-                    "Accepts `deduplicate_output` or `token_kill`. "
-                    "Set to False to see raw, unfiltered output.",
-    )
-    cwd: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("cwd", "workdir"),
-        description="Working directory for the script (absolute or relative path).",
-    )
+    task_id: str | None = task_id_field("code", tail="being executed as a new script.")
+    wait_for_pattern: str | None = wait_for_pattern_field()
+    max_lines: int | None = max_lines_field()
+    deduplicate_output: bool = deduplicate_output_field(accepts_alias=True)
+    cwd: str | None = cwd_field("script", via_alias=False)
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_mode(cls, data: dict) -> dict:
         """Convert deprecated boolean flags and mode aliases to canonical names."""
-        if isinstance(data, dict):
-            if data.get('interactive', False):
-                data['mode'] = 'interactive'
-            if 'mode' in data:
-                if data['mode'] == 'run':
-                    data['mode'] = 'execute'
-                elif data['mode'] == 'background':
-                    data['mode'] = 'send'
-        return data
+        return normalize_mode_validator(data)
 
     @model_validator(mode="after")
     def _validate_source(self) -> "Params":
@@ -116,26 +85,11 @@ class Python(CallableTool2[Params]):
     description: str = (
         "Execute Python code or run a .py file directly. "
         "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
-        "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
-        "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
-        "Set `deduplicate_output=False` (or `token_kill=False`) to disable deduplication of repeated "
-        "output lines from known commands (pytest, ruff, mypy, pip, etc.). "
-        "When invoking known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, etc.) via subprocess, "
-        "you can use the \"rtk\" executable to reduce token usage: rtk is a valid binary available on "
-        "PATH with the usage pattern `rtk <process> <arguments...>`. For example: "
-        "subprocess.run([\"rtk\", \"pytest\", \"-v\"]) or subprocess.run(\"rtk pip list\", shell=True). "
-        "rtk automatically deduplicates and truncates the output of the wrapped command. "
         "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
         "the backend interpreter). To install packages for scripts run by this tool, use "
         "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
         "'uv pip install <pkg>' in the project directory — not bare 'pip install'. "
-        "Set `cwd` (or `workdir`) to run the script in a specific working directory. "
-        "By default the child environment is scrubbed of secret-looking variables "
-        "(AWS_*, *KEY*, *TOKEN*, *SECRET*, *PASSWORD*, ...) and captured output is "
-        "redacted for secrets — set `python.env_passthrough=true` (or "
-        "`python.scrub_env=false`) to disable env scrubbing and "
-        "`python.redact_secrets=false` to disable output redaction in config_json."
-        " "
+        "By default the child env is scrubbed of secret-looking vars. "
         + _interactive_scope_text(is_shell=False)
     )
     params: type[Params] = Params

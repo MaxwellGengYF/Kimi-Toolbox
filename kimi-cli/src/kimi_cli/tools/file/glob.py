@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import override
 
 from kaos.path import KaosPath
-from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
+from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue, alias_note
 from pydantic import BaseModel, Field
 
 from kimi_cli.native_loader import (
@@ -393,7 +393,7 @@ class Params(BaseModel):
     directory: str | None = Field(
         alias="path",  # common LLM variant
         description="Absolute search path. Defaults to working directory. "
-        "Accepts `directory` or `path`.",
+        + alias_note("directory", "path", word=False),
         default=None,
     )
     include_dirs: bool = Field(

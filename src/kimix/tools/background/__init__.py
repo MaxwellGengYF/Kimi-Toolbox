@@ -10,6 +10,7 @@ from kimi_cli.session import Session
 
 from .utils import generate_task_id, remove_task_id, add_task, get_all_tasks, BackgroundStream, discard_all_tasks
 from kimix.tools.common import _maybe_export_output_async, _export_to_temp_file_async
+from kimix.tools.prompt_common import accepts_alias_text, wait_for_pattern_field
 from kimi_cli.tools.display import BackgroundTaskDisplayBlock
 
 
@@ -34,7 +35,7 @@ class TaskOutputParams(BaseModel):
         alias="block",  # backward compat
         description=(
             "When True (default), wait for the task to finish (up to `timeout` seconds) "
-            "and return accumulated output. Accepts `wait` or `block`. "
+            "and return accumulated output. " + accepts_alias_text("wait", "block", word=False) + " "
             "When False, return immediately with whatever output is available so far."
         ),
     )
@@ -50,13 +51,7 @@ class TaskOutputParams(BaseModel):
         default=None,
         description="Output file path."
     )
-    wait_for_pattern: str | None = Field(
-        default=None,
-        description=(
-            "Optional regex pattern. When action='get' and this is set, block "
-            "until the pattern appears in the task output or 'timeout' expires."
-        ),
-    )
+    wait_for_pattern: str | None = wait_for_pattern_field()
     kill: bool = Field(
         default=False,
         description="[Deprecated] Use action='kill' instead.",

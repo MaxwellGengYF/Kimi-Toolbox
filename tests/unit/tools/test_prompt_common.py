@@ -1,0 +1,282 @@
+"""Tests for the shared tool-prompt helpers (plan.md Part 1).
+
+Layer-1 invariant: the four shell/python tools compose their ``description``
+and ``Params`` field descriptions from ``kimix.tools.prompt_common`` and the
+composed wire text stayed byte-identical to the pre-refactor text through
+Layer 2(a).  Layer 2(b) then hoisted the *generic* conventions (head+tail
+fold, output dedup, ``rtk``, parameter aliases, ``wait_for_pattern``,
+``timeout`` ranges) into the "# Tool Conventions" block of
+``kimi-cli/src/kimi_cli/agents/default/system.md`` and deleted those
+fragments from the four tools, leaving only tool-specific sentences.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+from pydantic import ValidationError
+
+from kimix.tools.prompt_common import (
+    accepts_alias_text,
+    normalize_mode_validator,
+)
+
+
+class _FakeSession:
+    """Minimal stand-in for kimi_cli.session.Session used by tool __init__s."""
+
+    def __init__(self) -> None:
+        self.custom_data: dict[str, Any] = {}
+        self.custom_config = mock.MagicMock()
+        self.custom_config.get.side_effect = lambda key, default=None: (
+            {} if key == "config_json" else default
+        )
+
+
+def _build_tools() -> dict[str, Any]:
+    """Instantiate the four tools exactly as serialized on Windows.
+
+    ``sys.platform`` is forced to ``"win32"`` so the Windows-specific
+    sentences are always appended, keeping the snapshots deterministic on
+    every platform.
+    """
+    from kimix.tools.file.bash import bash_tool as bt
+    from kimix.tools.file.bash import pwsh_tool as pt
+    from kimix.tools.file.bash.bash_tool import Bash
+    from kimix.tools.file.bash.pwsh_tool import Powershell
+    from kimix.tools.file import run as rt
+    from kimix.tools.file.run import Run
+    from kimix.tools.py import Python
+
+    session = _FakeSession()
+    tools: dict[str, Any] = {}
+    with mock.patch.object(bt.sys, "platform", "win32"), mock.patch.object(
+        bt, "_should_enable_bash", return_value=True
+    ), mock.patch.object(bt, "find_bash", return_value=r"C:\Git\bin\bash.exe"):
+        tools["Bash"] = Bash(session)
+    with mock.patch.object(pt.sys, "platform", "win32"), mock.patch.object(
+        pt._bash_tool, "_should_enable_powershell", return_value=True
+    ), mock.patch.object(pt, "find_pwsh", return_value=r"C:\pwsh\pwsh.exe"), mock.patch.object(
+        pt, "load_desc", return_value="<PWSH_MD>"
+    ):
+        tools["Powershell"] = Powershell(session)
+    tools["Python"] = Python(session)
+    with mock.patch.object(rt, "USE_SYSTEM_SHELL", True), mock.patch.object(
+        rt, "USE_SYSTEM_PWSH_ON_WINDOWS", False
+    ), mock.patch.object(rt, "find_bash", return_value=None):
+        tools["Run"] = Run(session)
+    return tools
+
+
+# ── shared fragment text ──────────────────────────────────────────────────
+
+def test_shared_fragments_identical() -> None:
+    """Shared param descriptions must be the same object text in all four tools."""
+    from kimix.tools.file.bash.bash_tool import BashParams
+    from kimix.tools.file.bash.pwsh_tool import PowershellParams
+    from kimix.tools.file.run import RunParams
+    from kimix.tools.py import Params as PyParams
+
+    def desc(model: type, field: str) -> str:
+        return model.model_fields[field].description  # type: ignore[attr-defined]
+
+    # timeout / wait_for_pattern / max_lines are byte-identical in all four.
+    for field in ("timeout", "wait_for_pattern", "max_lines"):
+        values = {
+            name: desc(model, field)
+            for name, model in (
+                ("Bash", BashParams),
+                ("Powershell", PowershellParams),
+                ("Python", PyParams),
+                ("Run", RunParams),
+            )
+        }
+        assert len(set(values.values())) == 1, f"{field} descs diverged: {values}"
+
+    # task_id: Bash == Powershell (payload 'cmd'); Python uses 'code' + tail.
+    assert desc(BashParams, "task_id") == desc(PowershellParams, "task_id")
+    assert "'cmd' is sent" in desc(BashParams, "task_id")
+    assert "'code' is sent" in desc(PyParams, "task_id")
+    assert "executed as a new script" in desc(PyParams, "task_id")
+    assert "'command' is sent" in desc(RunParams, "task_id")
+
+    # deduplicate_output: Bash == Powershell == Run; Python adds the alias note.
+    assert desc(BashParams, "deduplicate_output") == desc(RunParams, "deduplicate_output")
+    assert desc(PowershellParams, "deduplicate_output") == desc(RunParams, "deduplicate_output")
+    assert "Accepts `deduplicate_output` or `token_kill`." in desc(PyParams, "deduplicate_output")
+
+    # cwd: Bash/Powershell property named "workdir", Python "cwd".
+    assert desc(BashParams, "cwd") == desc(PowershellParams, "cwd")
+    assert "the command" in desc(BashParams, "cwd")
+    assert "the script" in desc(PyParams, "cwd")
+    assert "workdir" in BashParams.model_json_schema()["properties"]
+    assert "cwd" in PyParams.model_json_schema()["properties"]
+
+    # mode: execute/send/interactive aliases documented for the shell tools.
+    for model in (BashParams, PowershellParams, PyParams):
+        assert "(alias: 'run')" in desc(model, "mode")
+        assert "(alias: 'background')" in desc(model, "mode")
+    assert "(alias: 'run')" not in desc(RunParams, "mode")
+
+
+def test_accepts_alias_text() -> None:
+    assert accepts_alias_text("cmd", "command") == "Accepts `cmd` or `command` parameter."
+    assert accepts_alias_text("command", "cmd") == "Accepts `command` or `cmd` parameter."
+    assert accepts_alias_text("code", "code_file") == "Accepts `code` or `code_file` parameter."
+    # field-level prose omits the " parameter" suffix
+    assert accepts_alias_text("cmd", "command", word=False) == "Accepts `cmd` or `command`."
+    with pytest.raises(ValueError):
+        accepts_alias_text("only-one")
+
+
+def test_normalize_mode_validator() -> None:
+    assert normalize_mode_validator({"interactive": True}) == {"interactive": True, "mode": "interactive"}
+    assert normalize_mode_validator({"mode": "run"}) == {"mode": "execute"}
+    assert normalize_mode_validator({"mode": "background"}) == {"mode": "send"}
+    assert normalize_mode_validator({"mode": "execute"}) == {"mode": "execute"}
+    # non-dict input passes through untouched
+    assert normalize_mode_validator("junk") == "junk"  # type: ignore[arg-type]
+
+
+# ── Layer-2(b) description snapshots ──────────────────────────────────────
+
+def test_descriptions_unchanged() -> None:
+    """The four composed descriptions must match the expected snapshots.
+
+    Snapshot reflects the post-Layer-2(b) wire text: the generic conventions
+    (fold, dedup, ``rtk``, ``cwd``/``workdir`` aliases) were deleted from the
+    descriptions — they now live once in the system.md conventions block —
+    and only tool-specific sentences remain.
+    """
+    tools = _build_tools()
+
+    assert tools["Bash"].description == (
+        "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
+        "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
+        "Start a persistent session with interactive=True, then reuse the same tool with "
+        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
+        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. "
+        "Send 'exit' to close the session. "
+        "On Windows, unquoted backslash paths are auto-converted to forward slashes "
+        "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
+    )
+
+    assert tools["Powershell"].description == (
+        "<PWSH_MD> "
+        "Start a persistent session with interactive=True, then reuse the same tool with "
+        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
+        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. "
+        "Send 'exit' to close the session. "
+        "Windows paths must use backslashes (`\\`) instead of forward slashes (`/`)."
+    )
+
+    assert tools["Python"].description == (
+        "Execute Python code or run a .py file directly. "
+        "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
+        "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
+        "the backend interpreter). To install packages for scripts run by this tool, use "
+        "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
+        "'uv pip install <pkg>' in the project directory — not bare 'pip install'. "
+        "By default the child env is scrubbed of secret-looking vars. "
+        "Start a background session with run_in_background=True, then reuse the same tool with "
+        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
+        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks."
+    )
+
+    assert tools["Run"].description == (
+        "Run an executable or bash command. "
+        "Start a background session with run_in_background=True, then reuse the same tool with "
+        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
+        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks."
+    )
+
+
+def test_generic_conventions_removed_from_tool_text() -> None:
+    """Layer 2(b): generic conventions no longer repeat inside each tool."""
+    tools = _build_tools()
+    for tool in tools.values():
+        desc = tool.description
+        assert "head+tail fold" not in desc
+        assert "token_kill" not in desc
+        assert "`rtk`" not in desc and "rtk " not in desc
+        assert "`cwd`/`workdir` sets" not in desc
+        assert "Accepts `cmd` or `command` parameter" not in desc
+        assert "Accepts `command` or `cmd` parameter" not in desc
+        # per-tool param schemas keep only the minimal, tool-specific text
+        schema = tool.params.model_json_schema()
+        assert schema["properties"]["timeout"]["description"] == "Timeout in seconds."
+        assert schema["properties"]["max_lines"]["description"] == "Max lines to return. None = unlimited."
+        assert schema["properties"]["wait_for_pattern"]["description"] == "Pattern to wait for in the tool output."
+
+
+def test_conventions_block_in_system_prompt() -> None:
+    """The generic conventions live once in the default system prompt."""
+    system_md = (
+        Path(__file__).resolve().parents[3]
+        / "kimi-cli" / "src" / "kimi_cli" / "agents" / "default" / "system.md"
+    )
+    text = system_md.read_text(encoding="utf-8")
+    assert "# Tool Conventions" in text
+    for fragment in (
+        "head+tail fold",
+        "deduplicate_output=False",
+        "`rtk <process> <arguments...>`",
+        "Parameter aliases",
+        "`wait_for_pattern`",
+        "`timeout`",
+        "Working directory",
+    ):
+        assert fragment in text, f"conventions block missing: {fragment}"
+
+
+# ── shared validators ─────────────────────────────────────────────────────
+
+def test_validators_shared() -> None:
+    """``_normalize_mode`` behaves identically across the three Params models."""
+    from kimix.tools.file.bash.bash_tool import BashParams
+    from kimix.tools.file.bash.pwsh_tool import PowershellParams
+    from kimix.tools.py import Params as PyParams
+
+    models = (BashParams, PowershellParams, PyParams)
+    for model in models:
+        payload = {"cmd": "x"} if model is not PyParams else {"code": "x"}
+        assert model.model_validate({**payload, "interactive": True}).mode == "interactive"
+        assert model.model_validate({**payload, "mode": "run"}).mode == "execute"
+        assert model.model_validate({**payload, "mode": "background"}).mode == "send"
+        assert model.model_validate({**payload, "mode": "execute"}).mode == "execute"
+
+
+def test_shell_cmd_required_validator_shared() -> None:
+    """Bash/Powershell share the input-required after-validator semantics."""
+    from kimix.tools.file.bash.bash_tool import BashParams
+    from kimix.tools.file.bash.pwsh_tool import PowershellParams
+
+    for model in (BashParams, PowershellParams):
+        with pytest.raises(ValidationError, match="cmd cannot be empty when mode='execute'"):
+            model.model_validate({"mode": "execute"})
+        with pytest.raises(ValidationError, match="cmd cannot be empty when continuing"):
+            model.model_validate({"mode": "send", "task_id": "abc"})
+        ok = model.model_validate({"mode": "send", "task_id": "abc", "cmd": "echo hi"})
+        assert ok.task_id == "abc"
+        assert ok.mode == "send"
+
+
+def test_python_params_still_validate_source() -> None:
+    """Python keeps its own (looser) input rules; sanity-check unchanged."""
+    from kimix.tools.py import Params as PyParams
+
+    with pytest.raises(ValidationError, match="code"):
+        PyParams.model_validate({})
+    # interactive without code is allowed for Python
+    ok = PyParams.model_validate({"mode": "interactive"})
+    assert ok.mode == "interactive"
+    with pytest.raises(ValidationError, match="code cannot be empty when continuing"):
+        PyParams.model_validate({"mode": "send", "task_id": "abc"})
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))

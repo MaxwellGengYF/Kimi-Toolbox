@@ -9,6 +9,3 @@ Start a subagent for focused tasks. Create new or resume by `agent_id`.
 - Subagent results are private—summarize for user if needed.
 
 **Explore Agent** — Preferred for codebase research (read-only). Use when you need >3 searches, module understanding, or concurrent investigations. Specify thoroughness: "quick" (find file), "medium" (understand module), "thorough" (architecture analysis).
-
-**When Not To Use**
-Reading known paths, small file searches, tasks completable in 1-2 tool calls.

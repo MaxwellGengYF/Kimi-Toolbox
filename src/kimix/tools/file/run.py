@@ -35,6 +35,14 @@ from kimix.tools.file.bash.safety import (
     foreground_background_guidance,
     validate_workdir,
 )
+from kimix.tools.prompt_common import (
+    deduplicate_output_field,
+    max_lines_field,
+    mode_field,
+    task_id_field,
+    timeout_field,
+    wait_for_pattern_field,
+)
 from kimi_cli.tools.display import ShellDisplayBlock
 from kimi_cli.share import get_share_dir
 import functools
@@ -97,12 +105,10 @@ class RunParams(BaseModel):
             "Accepts `command` or `cmd` parameter."
         )
     )
-    mode: Literal["execute", "send"] = Field(
-        default="execute",
-        description=(
-            "'execute': Run `command` as a direct process (default). "
-            "'send': Send `command` as stdin text to an existing session identified by `task_id`."
-        ),
+    mode: Literal["execute", "send"] = mode_field(
+        aliases=False,
+        execute_desc="Run `command` as a direct process (default).",
+        send_desc="Send `command` as stdin text to an existing session identified by `task_id`.",
     )
     shell: bool = Field(
         default=False,
@@ -112,12 +118,7 @@ class RunParams(BaseModel):
             "When False (default), execute `command` as a direct process without shell interpretation."
         ),
     )
-    timeout: int = Field(
-        default=30,
-        ge=1,
-        le=900,
-        description="Timeout in seconds (1-900)."
-    )
+    timeout: int = timeout_field()
     output_path: str | None = Field(
         default=None,
         description="Output file path."
@@ -134,31 +135,10 @@ class RunParams(BaseModel):
         default=False,
         description="Run the process in the background and return immediately."
     )
-    task_id: str | None = Field(
-        default=None,
-        description=(
-            "Existing session/task ID to continue. When provided, 'command' is sent to the "
-            "process stdin instead of being executed."
-        ),
-    )
-    wait_for_pattern: str | None = Field(
-        default=None,
-        description=(
-            "Optional regex pattern. After starting or sending input, the tool blocks up "
-            "to 'timeout' seconds until the pattern appears in output."
-        ),
-    )
-    max_lines: int | None = Field(
-        default=None,
-        ge=3,
-        description="Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
-    )
-    deduplicate_output: bool = Field(
-        default=True,
-        alias="token_kill",  # backward compat
-        description="Deduplicate repeated output lines from known commands (git, npm, etc.). "
-                    "Set to False to see raw, unfiltered output.",
-    )
+    task_id: str | None = task_id_field("command")
+    wait_for_pattern: str | None = wait_for_pattern_field()
+    max_lines: int | None = max_lines_field()
+    deduplicate_output: bool = deduplicate_output_field()
 
     @model_validator(mode="after")
     def _infer_mode(self) -> "RunParams":
@@ -185,9 +165,6 @@ class Run(CallableTool2[RunParams]):
     name: str = "Run"
     description: str = (
         "Run an executable or bash command. "
-        "Accepts `command` or `cmd` parameter. "
-        "Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, "
-        "with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. "
         + _interactive_scope_text(is_shell=False)
     )
     params: type[RunParams] = RunParams

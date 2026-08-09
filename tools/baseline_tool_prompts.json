@@ -1,0 +1,432 @@
+{
+ "Bash": {
+  "description": "Execute a bash command. Supports Unix-style / POSIX bash syntax. Accepts `cmd` or `command` parameter. `cwd`/`workdir` sets the working directory for this command. Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. Start a persistent session with interactive=True, then reuse the same tool with task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. Send 'exit' to close the session. On Windows, unquoted backslash paths are auto-converted to forward slashes (`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved.",
+  "schema": {
+   "description": "Parameters for the Bash tool — execute a bash command.",
+   "properties": {
+    "command": {
+     "default": "",
+     "description": "Bash command or input text for an existing session. Accepts `cmd` or `command`.",
+     "title": "Command",
+     "type": "string"
+    },
+    "mode": {
+     "default": "execute",
+     "description": "'execute' (alias: 'run'): Run `cmd` as a shell command. 'send' (alias: 'background'): Execute `cmd` in background, return task_id immediately. 'interactive': Start a persistent Bash REPL, return task_id for further input.",
+     "enum": [
+      "execute",
+      "send",
+      "interactive"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Timeout in seconds (1-900).",
+     "maximum": 900,
+     "minimum": 1,
+     "title": "Timeout",
+     "type": "integer"
+    },
+    "task_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Existing session/task ID to continue. When provided, 'cmd' is sent to the process stdin instead of being executed.",
+     "title": "Task Id"
+    },
+    "wait_for_pattern": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional regex pattern. After starting or sending input, the tool blocks up to 'timeout' seconds until the pattern appears in output.",
+     "title": "Wait For Pattern"
+    },
+    "max_lines": {
+     "anyOf": [
+      {
+       "minimum": 3,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
+     "title": "Max Lines"
+    },
+    "token_kill": {
+     "default": true,
+     "description": "Deduplicate repeated output lines from known commands (git, npm, etc.). Set to False to see raw, unfiltered output.",
+     "title": "Token Kill",
+     "type": "boolean"
+    },
+    "workdir": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Working directory for the command (absolute or relative path).",
+     "title": "Workdir"
+    }
+   },
+   "title": "BashParams",
+   "type": "object"
+  }
+ },
+ "Powershell": {
+  "description": "<PWSH_MD> Accepts `cmd` or `command` parameter. `cwd`/`workdir` sets the working directory for this command. Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. Start a persistent session with interactive=True, then reuse the same tool with task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. Send 'exit' to close the session. Windows paths must use backslashes (`\\`) instead of forward slashes (`/`).",
+  "schema": {
+   "description": "Parameters for the Powershell tool — execute a PowerShell command.",
+   "properties": {
+    "command": {
+     "default": "",
+     "description": "PowerShell command or input text for an existing session. Accepts `cmd` or `command`.",
+     "title": "Command",
+     "type": "string"
+    },
+    "mode": {
+     "default": "execute",
+     "description": "'execute' (alias: 'run'): Run the PowerShell command. 'send' (alias: 'background'): Execute the command in background, return task_id immediately. 'interactive': Start a persistent PowerShell REPL, return task_id for further input.",
+     "enum": [
+      "execute",
+      "send",
+      "interactive"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Timeout in seconds (1-900).",
+     "maximum": 900,
+     "minimum": 1,
+     "title": "Timeout",
+     "type": "integer"
+    },
+    "task_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Existing session/task ID to continue. When provided, 'cmd' is sent to the process stdin instead of being executed.",
+     "title": "Task Id"
+    },
+    "wait_for_pattern": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional regex pattern. After starting or sending input, the tool blocks up to 'timeout' seconds until the pattern appears in output.",
+     "title": "Wait For Pattern"
+    },
+    "max_lines": {
+     "anyOf": [
+      {
+       "minimum": 3,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
+     "title": "Max Lines"
+    },
+    "token_kill": {
+     "default": true,
+     "description": "Deduplicate repeated output lines from known commands (git, npm, etc.). Set to False to see raw, unfiltered output.",
+     "title": "Token Kill",
+     "type": "boolean"
+    },
+    "workdir": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Working directory for the command (absolute or relative path).",
+     "title": "Workdir"
+    }
+   },
+   "title": "PowershellParams",
+   "type": "object"
+  }
+ },
+ "Python": {
+  "description": "Execute Python code or run a .py file directly. Use `code` for inline Python code or a path to an existing .py file (auto-detected). Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. Set `deduplicate_output=False` (or `token_kill=False`) to disable deduplication of repeated output lines from known commands (pytest, ruff, mypy, pip, etc.). When invoking known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, etc.) via subprocess, you can use the \"rtk\" executable to reduce token usage: rtk is a valid binary available on PATH with the usage pattern `rtk <process> <arguments...>`. For example: subprocess.run([\"rtk\", \"pytest\", \"-v\"]) or subprocess.run(\"rtk pip list\", shell=True). rtk automatically deduplicates and truncates the output of the wrapped command. Scripts run with a resolved interpreter (a project .venv is used when found, otherwise the backend interpreter). To install packages for scripts run by this tool, use '<python> -m pip install <pkg>' with the interpreter reported in error messages, or 'uv pip install <pkg>' in the project directory — not bare 'pip install'. Set `cwd` (or `workdir`) to run the script in a specific working directory. By default the child environment is scrubbed of secret-looking variables (AWS_*, *KEY*, *TOKEN*, *SECRET*, *PASSWORD*, ...) and captured output is redacted for secrets — set `python.env_passthrough=true` (or `python.scrub_env=false`) to disable env scrubbing and `python.redact_secrets=false` to disable output redaction in config_json. Start a background session with run_in_background=True, then reuse the same tool with task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks.",
+  "schema": {
+   "properties": {
+    "code": {
+     "default": "",
+     "description": "Inline Python code to execute. Accepts `code` or `file`. When the value ends with '.py' and the file exists, it is treated as a file path.",
+     "title": "Code",
+     "type": "string"
+    },
+    "output_path": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Output file path.",
+     "title": "Output Path"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Timeout in seconds (1-900).",
+     "maximum": 900,
+     "minimum": 1,
+     "title": "Timeout",
+     "type": "integer"
+    },
+    "mode": {
+     "default": "execute",
+     "description": "'execute' (alias: 'run'): Run code and wait for completion (default). 'send' (alias: 'background'): Execute code in background, return immediately with task_id. 'interactive': Start a persistent Python REPL, return task_id for further input.",
+     "enum": [
+      "execute",
+      "send",
+      "interactive"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "task_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Existing session/task ID to continue. When provided, 'code' is sent to the process stdin instead of being executed as a new script.",
+     "title": "Task Id"
+    },
+    "wait_for_pattern": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional regex pattern. After starting or sending input, the tool blocks up to 'timeout' seconds until the pattern appears in output.",
+     "title": "Wait For Pattern"
+    },
+    "max_lines": {
+     "anyOf": [
+      {
+       "minimum": 3,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
+     "title": "Max Lines"
+    },
+    "token_kill": {
+     "default": true,
+     "description": "Deduplicate repeated output lines from known commands (pytest, ruff, etc.). Accepts `deduplicate_output` or `token_kill`. Set to False to see raw, unfiltered output.",
+     "title": "Token Kill",
+     "type": "boolean"
+    },
+    "cwd": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Working directory for the script (absolute or relative path).",
+     "title": "Cwd"
+    }
+   },
+   "title": "Params",
+   "type": "object"
+  }
+ },
+ "Run": {
+  "description": "Run an executable or bash command. Accepts `command` or `cmd` parameter. Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. Start a background session with run_in_background=True, then reuse the same tool with task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks.",
+  "schema": {
+   "properties": {
+    "cmd": {
+     "default": "",
+     "description": "Executable command line. Only real executables / processes are accepted — No shell syntax (pipes, redirects, &&, ||, variables, etc.). Example: `python -c \"print(1)\"` or `git status`. Accepts `command` or `cmd` parameter.",
+     "title": "Cmd",
+     "type": "string"
+    },
+    "mode": {
+     "default": "execute",
+     "description": "'execute': Run `command` as a direct process (default). 'send': Send `command` as stdin text to an existing session identified by `task_id`.",
+     "enum": [
+      "execute",
+      "send"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "shell": {
+     "default": false,
+     "description": "When True, execute `command` through the system shell (bash on Linux/macOS, powershell on Windows). Supports pipes, redirects, variables, etc. When False (default), execute `command` as a direct process without shell interpretation.",
+     "title": "Shell",
+     "type": "boolean"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Timeout in seconds (1-900).",
+     "maximum": 900,
+     "minimum": 1,
+     "title": "Timeout",
+     "type": "integer"
+    },
+    "output_path": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Output file path.",
+     "title": "Output Path"
+    },
+    "cwd": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Working directory.",
+     "title": "Cwd"
+    },
+    "env": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Environment variables to set for the subprocess.",
+     "title": "Env"
+    },
+    "run_in_background": {
+     "default": false,
+     "description": "Run the process in the background and return immediately.",
+     "title": "Run In Background",
+     "type": "boolean"
+    },
+    "task_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Existing session/task ID to continue. When provided, 'command' is sent to the process stdin instead of being executed.",
+     "title": "Task Id"
+    },
+    "wait_for_pattern": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional regex pattern. After starting or sending input, the tool blocks up to 'timeout' seconds until the pattern appears in output.",
+     "title": "Wait For Pattern"
+    },
+    "max_lines": {
+     "anyOf": [
+      {
+       "minimum": 3,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Max lines to return via head+tail fold. <N> head lines + <N> tail lines kept; middle collapsed. None = unlimited.",
+     "title": "Max Lines"
+    },
+    "token_kill": {
+     "default": true,
+     "description": "Deduplicate repeated output lines from known commands (git, npm, etc.). Set to False to see raw, unfiltered output.",
+     "title": "Token Kill",
+     "type": "boolean"
+    }
+   },
+   "title": "RunParams",
+   "type": "object"
+  }
+ }
+}

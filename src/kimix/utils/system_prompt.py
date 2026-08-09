@@ -12,7 +12,7 @@ from kimi_cli.utils.tokens import count_tokens
 
 # Concise system prompt to reduce LLM overthinking and hallucination
 _SYSTEM_PROMP = (
-    '{AGENT_ROLE}:\n{NUMBERED}\n{AGENTS_MD}{SKILLS}'
+    '{TOOL_CONVENTIONS}{AGENT_ROLE}:\n{NUMBERED}\n{AGENTS_MD}{SKILLS}'
 )
 
 
@@ -66,34 +66,47 @@ def get_system_prompt(
 
     def system_prompt_func(runtime: Runtime, is_compacting: bool = False, compact_export_path: str | None = None) -> str:
         args = runtime.builtin_args
+        tool_conventions = ''
         items: list[str] = []
         agent_md_doc = ''
         skill_doc = ''
         use_agent_md = False
         use_skills = False
         items.append('Call tools in parallel.')
-        items.append(f'OS: {args.KIMI_OS}')
+        items.append(f'OS: {args.KIMI_OS} WORK DIR: {args.KIMI_WORK_DIR}')
         if args.KIMI_OS == 'Windows':
-            items.append(r'Windows paths use backslashes (`\`). Always use `\` instead of `/` for file paths.')
+            items.append(r'Windows paths use backslashes (`\`); always `\` instead of `/` for file paths.')
         def worker_logic(role: str, is_sub_agent: bool = False):
+            nonlocal tool_conventions
+            tool_conventions = '''
+# Tool Conventions
+Applies to every tool that exposes the corresponding parameters:
+- **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker. `max_lines=None` for unlimited.
+- **Output dedup**: Repeated lines from known commands are deduplicated by default; set `deduplicate_output=False` (or `token_kill=False`) for raw output.
+- **`rtk`**: Invoke known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, ...) via `rtk <process> <arguments...>` to save tokens — it deduplicates and truncates the wrapped command's output.
+- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `cwd`/`workdir`, `code`/`code_file`); common misspellings are repaired automatically.
+- **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
+- **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
+- **Working directory**: `cwd`/`workdir` sets the working directory for the command or script; files outside it require absolute paths.
+'''.strip() + '\n'
             nonlocal role_doc, use_agent_md, use_skills
             use_agent_md = True
             use_skills = True
             role_doc = f'You are a {role}'
             items.append('DO NOT use your own knowledge. Read the provided references, skills, and files first, then judge and act strictly from the evidence you read.')
             items.append('Persist: finish all requirements, keep trying until done.')
-            items.append('One action per turn: each response = exactly one tool call, edit, or verification.')
+            items.append('One action per turn: exactly one tool call, edit, or verification.')
             shell_tool = _shell_tool_name()
             items.append(f'For long commands, use `Python` instead of `{shell_tool}`.')
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
-            items.append('After completing an independent task, reach milestone, or finishing one part of the schedule, call `Compact` before the next step.')
-            items.append('Multi-step: use `TodoList`. Finish all before ending. For any todo involving code changes, attach verification `code` — prefer the project\'s own tests in `!shell` form (e.g. `!pytest ...`); if none exist, write a minimal reproduction script. Never declare completion from reading code alone: all verification must actually run and pass before the todo is marked `done`.')
+            items.append('After each independent task, milestone, or schedule part, call `Compact` before the next step.')
+            items.append('Multi-step: use `TodoList`. Finish all before ending. For any todo involving code changes, attach verification `code` — the project\'s own tests in `!shell` form (e.g. `!pytest ...`), or a minimal reproduction script. Never declare completion from reading code alone: all verification must actually run and pass before the todo is `done`.')
             if not is_sub_agent:
                 if yolo:
-                    items.append('Yolo: no asking. accept all. When choices or options appear, independently pick the best one and continue; do not ask the user which to choose.')
+                    items.append('Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.')
 
-                items.append("Use `Retrieve` whenever not sure about past conversation history.")
+                items.append("Use `Retrieve` whenever unsure about past conversation history.")
             else:
                 items.append('Sub-Agent: only report results. If any option, output the question and stop.')
         if extra_system_prompt and extra_system_prompt.role_callback:
@@ -168,6 +181,7 @@ def get_system_prompt(
         if count_tokens(agent_md_doc) >= max_system_prompt_tokens:
             agent_md_doc = 'read AGENTS.md before work\n'
         prompt = _SYSTEM_PROMP.format(
+            TOOL_CONVENTIONS=tool_conventions,
             AGENT_ROLE=role_doc.strip(),
             NUMBERED=numbered_block,
             AGENTS_MD=agent_md_doc,

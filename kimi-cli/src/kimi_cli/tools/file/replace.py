@@ -6,7 +6,7 @@ from typing import Any, Literal, override
 
 import json_repair
 from kaos.path import KaosPath
-from kosong.tooling import CallableTool2, ToolError, ToolReturnValue
+from kosong.tooling import CallableTool2, ToolError, ToolReturnValue, alias_note
 from pydantic import BaseModel, Field, field_validator
 from rapidfuzz import fuzz, process
 
@@ -41,11 +41,11 @@ class Edit(BaseModel):
 
     old: str = Field(
         alias="old_string",  # common LLM variant
-        description="String to replace. Accepts `old` or `old_string`.",
+        description="String to replace. " + alias_note("old", "old_string", word=False),
     )
     new: str = Field(
         alias="new_string",  # common LLM variant
-        description="Replacement string. Accepts `new` or `new_string`.",
+        description="Replacement string. " + alias_note("new", "new_string", word=False),
     )
     replace_all: bool = Field(
         default=False,
@@ -69,12 +69,12 @@ class Params(BaseModel):
 
     path: str = Field(
         alias="file_path",  # common LLM variant
-        description="File path. Absolute path required outside working directory. "
-        "Accepts `path` or `file_path`.",
+        description="File path. "
+        + alias_note("path", "file_path", word=False),
     )
     edit: Edit | list[Edit] = Field(
         alias="edits",  # common LLM variant (plural)
-        description="One or more edits to apply, in order. Accepts `edit` or `edits`.",
+        description="One or more edits to apply, in order. " + alias_note("edit", "edits", word=False),
     )
 
     @field_validator("edit", mode="before")

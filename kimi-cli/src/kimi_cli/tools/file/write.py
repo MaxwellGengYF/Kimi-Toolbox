@@ -3,7 +3,7 @@ from typing import Literal, override
 
 import json_repair
 from kaos.path import KaosPath
-from kosong.tooling import CallableTool2, DisplayBlock, ToolError, ToolReturnValue
+from kosong.tooling import CallableTool2, DisplayBlock, ToolError, ToolReturnValue, alias_note
 from pydantic import BaseModel, Field, field_validator
 
 from kimi_cli import logger
@@ -63,12 +63,12 @@ class Params(BaseModel):
 
     path: str = Field(
         alias="file_path",  # common LLM variant
-        description="File path. Absolute paths required outside the working directory. "
-        "Accepts `path` or `file_path`.",
+        description="File path. "
+        + alias_note("path", "file_path", word=False),
     )
     content: str = Field(
         alias="text",  # common LLM variant
-        description="Content to write. Accepts `content` or `text`.",
+        description="Content to write. " + alias_note("content", "text", word=False),
     )
     mode: Literal["overwrite", "append"] = Field(
         description="Write mode: overwrite or append.",

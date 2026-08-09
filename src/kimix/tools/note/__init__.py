@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.utils import truncate_line
 from rapidfuzz import fuzz, process
+from kimix.tools.prompt_common import accepts_alias_text
 
 MAX_LINES = 1000
 MAX_LINE_LENGTH = 2000
@@ -31,7 +32,7 @@ class WritePlanParams(BaseModel):
 
     content: str = Field(
         alias="text",  # common LLM variant (mirrors WriteFile)
-        description="Content to write. Accepts `content` or `text`.",
+        description="Content to write. " + accepts_alias_text("content", "text", word=False),
     )
     mode: Literal["overwrite", "append"] = Field(
         description="Write mode: overwrite or append.",
@@ -289,11 +290,11 @@ class Edit(BaseModel):
 
     old: str = Field(
         alias="old_string",  # common LLM variant (mirrors EditFile)
-        description="String to replace. Accepts `old` or `old_string`.",
+        description="String to replace. " + accepts_alias_text("old", "old_string", word=False),
     )
     new: str = Field(
         alias="new_string",  # common LLM variant (mirrors EditFile)
-        description="Replacement string. Accepts `new` or `new_string`.",
+        description="Replacement string. " + accepts_alias_text("new", "new_string", word=False),
     )
     replace_all: bool = Field(description="Replace all occurrences.", default=False)
 
@@ -303,7 +304,7 @@ class EditPlanParams(BaseModel):
 
     edit: Edit | list[Edit] = Field(
         alias="edits",  # common LLM variant (plural, mirrors EditFile)
-        description="One or more edits. Accepts `edit` or `edits`.",
+        description="One or more edits. " + accepts_alias_text("edit", "edits", word=False),
     )
 
 

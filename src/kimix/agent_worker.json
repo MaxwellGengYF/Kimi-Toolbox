@@ -6,6 +6,7 @@
       "kimix.tools.file.bash:Powershell",
       "kimix.tools.file.run:Run",
       "kimix.tools.py:Python",
+      "kimix.tools.py.check:PySyntaxCheck",
       "kimix.tools.background:TaskOutput",
       "kimi_cli.tools.todo:TodoList",
       "kimi_cli.tools.memory:Retrieve",

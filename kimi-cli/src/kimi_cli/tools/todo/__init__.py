@@ -13,7 +13,7 @@ from typing import Any, Literal, cast, override
 
 import orjson
 import rapidfuzz
-from kosong.tooling import CallableTool2, ToolReturnValue
+from kosong.tooling import CallableTool2, ToolReturnValue, alias_note
 from pydantic import (
     AliasChoices, BaseModel, ConfigDict, Field,
     ValidationError, field_validator, model_validator,
@@ -105,7 +105,7 @@ def _code_field_description(kind: Literal["bash", "powershell"]) -> str:
         "Todos involving code changes should attach verification code. "
         "Omit if this todo has no executable code. "
         "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
-        "Accepts `code` or `code_file`."
+        + alias_note("code", "code_file", word=False)
     )
 
 
@@ -174,23 +174,12 @@ def _patch_code_description(
             _patch_code_description(value, kind)
 
 
-# Class-level description: neutral (mentions both shells) because the enabled
-# dialect is only detectable at runtime.  ``TodoList.__init__`` replaces it
-# with the dialect-specific ``_tool_description`` for the instance, and
-# ``TodoListParams.model_json_schema`` patches the ``code`` field description.
-_TODO_LIST_DESCRIPTION_NEUTRAL = (
-    "Track progress with a todo list.\n"
-    "Call with no arguments to read the current list. "
-    "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
-    "mode='overwrite' replaces the list only when every existing todo is done; "
-    "use mode='force_overwrite' to intentionally discard unfinished items.\n"
-    "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
-    "Each todo may include a `code` field with inline Python, a `.py` file path, "
-    "a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
-    "Todos involving code changes should attach verification `code`.\n"
-    "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
-    "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors."
-)
+# Class-level ``description`` is a placeholder only: the enabled shell
+# dialect is only detectable at runtime, so ``TodoList.__init__`` always
+# overrides it with the dialect-specific ``_tool_description`` for the
+# instance, and ``TodoListParams.model_json_schema`` patches the ``code``
+# field description.  (There is intentionally no neutral description text
+# here — it would never be serialized, see plan.md §2.2.)
 
 
 def _truncate_prompt(text: str, max_len: int = 200) -> str:
@@ -282,7 +271,7 @@ class Todo(BaseModel):
             "Todos involving code changes should attach verification code. "
             "Omit if this todo has no executable code. "
             "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
-            "Accepts `code` or `code_file`."
+            + alias_note("code", "code_file", word=False)
         ),
     )
 
@@ -331,7 +320,7 @@ class Params(BaseModel):
         default=None,
         alias="items",  # common LLM variant
         description="Updated list, a single Todo item, or omit to return current list unchanged. "
-        "Accepts `todos` or `items`.",
+        + alias_note("todos", "items", word=False),
     )
     mode: Literal["overwrite", "append", "force_overwrite"] = Field(
         default="append",
@@ -464,7 +453,7 @@ class TodoListParams(Params):
 
 class TodoList(CallableTool2[Params]):
     name: str = "TodoList"
-    description: str = _TODO_LIST_DESCRIPTION_NEUTRAL
+    description: str = ""  # always replaced in __init__ (see note above)
     params: type[Params] = TodoListParams
 
     def __init__(self, runtime: Runtime) -> None:

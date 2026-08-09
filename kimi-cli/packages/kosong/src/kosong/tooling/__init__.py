@@ -1014,6 +1014,27 @@ for _bad_key, _good_key in _COMMON_FIELD_ALIASES.items():
     _REVERSE_ALIASES.setdefault(_good_key, []).append(_bad_key)
 
 
+def alias_note(*names: str, word: bool = True) -> str:
+    """Return the \"Accepts `a` or `b`\" prose for a parameter with aliases.
+
+    ``names`` are the accepted spellings in canonical-first order, e.g.
+    ``alias_note("cmd", "command")``.  With three or more names the last two
+    are joined with \"or\" (e.g. ``code | source_code | file``).  ``word=True``
+    appends \" parameter\" (used in tool descriptions); field-level param
+    descriptions historically omit it (``word=False``).  This is the single
+    implementation shared by every tool description (see
+    ``kimix.tools.prompt_common.accepts_alias_text``, which delegates here).
+    """
+    if len(names) == 2:
+        suffix = " parameter." if word else "."
+        return f"Accepts `{names[0]}` or `{names[1]}`{suffix}"
+    if len(names) > 2:
+        head = ", ".join(f"`{n}`" for n in names[:-1])
+        suffix = " parameter." if word else "."
+        return f"Accepts {head} or `{names[-1]}`{suffix}"
+    raise ValueError("alias_note requires at least two names")
+
+
 def _get_base_model_type(annotation: Any) -> type[BaseModel] | None:
     """Extract a BaseModel subclass from a type annotation, unwrapping generics."""
     origin = typing.get_origin(annotation)

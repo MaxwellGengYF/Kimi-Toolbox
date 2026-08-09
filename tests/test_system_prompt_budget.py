@@ -96,12 +96,17 @@ class TestSystemPromptBudget:
         prompt_func = get_system_prompt(
             work_dir=tmp_path,
             agent_role=SystemPromptType.Worker,
-            max_system_prompt_tokens=500,
+            # The base Worker prompt includes the "# Tool Conventions" block
+            # (≈150 tokens) plus the numbered behavior items, so the budget
+            # must exceed that baseline for the AGENTS.md-drop guard to be the
+            # thing that trips. The huge AGENTS.md below (≈2000 tokens) is
+            # still far over this budget and must be dropped.
+            max_system_prompt_tokens=1_000,
         )
         runtime = _make_runtime(tmp_path)
         prompt = prompt_func(runtime, is_compacting=True)
         from kimi_cli.utils.tokens import count_tokens
-        assert count_tokens(prompt) <= 500
+        assert count_tokens(prompt) <= 1_000
         # AGENTS.md should be dropped to the short form
         assert "read AGENTS.md before work" in prompt
 

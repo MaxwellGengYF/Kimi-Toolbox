@@ -636,7 +636,7 @@ def generate_hash_aware_diff(
 
 
 class HashReadParams(BaseModel):
-    path: str = Field(description="File path. Absolute for files outside working directory.")
+    path: str = Field(description="File path.")
     offset: int = Field(default=0, description="0-based line offset.")
     limit: int = Field(default=2000, description="Max lines to read.")
     max_char: int = Field(
@@ -830,7 +830,7 @@ class HashRead(CallableTool2[HashReadParams]):
 
 
 class HashEditParams(BaseModel):
-    path: str = Field(description="File path. Absolute for files outside working directory.")
+    path: str = Field(description="File path.")
     edits: list[HashlineEdit] = Field(description="Edits to apply.")
 
 class HashEdit(CallableTool2[HashEditParams]):

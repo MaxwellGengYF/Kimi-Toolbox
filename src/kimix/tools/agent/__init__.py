@@ -11,6 +11,7 @@ from typing import Any, Literal
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
 from kimi_cli.session import Session
+from kimix.tools.prompt_common import accepts_alias_text
 from kimix.ui.printing import MessageType
 from kimix.utils import close_session_async, _create_session_async
 from kimix.utils.system_prompt import SystemPromptType
@@ -40,13 +41,15 @@ class SubAgentParams(BaseModel):
 
     prompt: str = Field(
         alias="task",  # common LLM variant
-        description="Task instructions for the sub-agent. Accepts `prompt` or `task`.",
+        description="Task instructions for the sub-agent. " + accepts_alias_text("prompt", "task", word=False),
     )
     session_id: str | None = Field(
         default=None,
         alias="session",  # common LLM variant
-        description="Optional session ID to resume an existing sub-agent session. "
-        "Accepts `session_id` or `session`.",
+        description=(
+            "Optional session ID to resume an existing sub-agent session. "
+            + accepts_alias_text("session_id", "session", word=False)
+        ),
     )
     close_session: bool = Field(
         default=True,
@@ -587,7 +590,7 @@ class AgentCloseParams(BaseModel):
 
     session_id: str = Field(
         alias="session",  # common LLM variant
-        description="Subagent session ID to close. Accepts `session_id` or `session`.",
+        description="Subagent session ID to close. " + accepts_alias_text("session_id", "session", word=False),
     )
 
 
