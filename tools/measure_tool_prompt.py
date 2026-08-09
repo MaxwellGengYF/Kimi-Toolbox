@@ -6,12 +6,20 @@ Serializes the four shell/python tools the way the chat provider does
 char counts.  When ``.baseline_tools.json`` exists (captured before the
 refactor), also prints the delta.
 
+``--full`` measures the whole builtin tool list: the four kimix shell/python
+tools plus the kimi-cli description ``.md`` files (with their known template
+vars substituted by their default lengths).  The full-list baseline is saved
+to ``tools/baseline_tool_prompts_full.json`` on first run and compared on
+later runs.
+
 Usage:
     uv run python tools/measure_tool_prompt.py
+    uv run python tools/measure_tool_prompt.py --full
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -22,6 +30,31 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 BASELINE = ROOT / "tools" / "baseline_tool_prompts.json"
+FULL_BASELINE = ROOT / "tools" / "baseline_tool_prompts_full.json"
+
+# ── --full: kimi-cli description .md files + default template substitutions ─
+# The ${...} vars are substituted with the same default values the owning
+# tools pass to ``load_desc`` (read.py: MAX_LINE_LENGTH=4000, MAX_LINES=5000,
+# MAX_BYTES=102400, MAX_FILES=32; glob.py: WINDOWS_PATH_HINT; read_media.py:
+# MAX_MEDIA_MEGABYTES=100).
+_WINDOWS_PATH_HINT = (
+    "Windows: `directory` accepts native (`C:\\Users\\foo`) and POSIX-style "
+    "(`/c/Users/foo`) paths. Results use backslashes — convert to forward "
+    "slashes for shell commands."
+)
+
+FULL_DESC_FILES: list[tuple[str, Path, dict[str, str]]] = [
+    ("agent/description.md", ROOT / "kimi-cli/src/kimi_cli/tools/agent/description.md", {}),
+    ("ask_user/description.md", ROOT / "kimi-cli/src/kimi_cli/tools/ask_user/description.md", {}),
+    ("file/glob.md", ROOT / "kimi-cli/src/kimi_cli/tools/file/glob.md", {"WINDOWS_PATH_HINT": _WINDOWS_PATH_HINT}),
+    ("file/read.md", ROOT / "kimi-cli/src/kimi_cli/tools/file/read.md",
+     {"MAX_LINE_LENGTH": "4000", "MAX_LINES": "5000", "MAX_BYTES": "102400", "MAX_FILES": "32"}),
+    ("file/read_media.md", ROOT / "kimi-cli/src/kimi_cli/tools/file/read_media.md",
+     {"MAX_MEDIA_MEGABYTES": "100"}),
+    ("file/write.md", ROOT / "kimi-cli/src/kimi_cli/tools/file/write.md", {}),
+    ("web/fetch.md", ROOT / "kimi-cli/src/kimi_cli/tools/web/fetch.md", {}),
+    ("web/search.md", ROOT / "kimi-cli/src/kimi_cli/tools/web/search.md", {}),
+]
 
 
 class _FakeSession:
@@ -78,16 +111,78 @@ def serialize(tools: dict[str, object]) -> dict[str, dict[str, str]]:
     return out
 
 
-def main() -> int:
-    tools = _build_tools()
-    serialized = serialize(tools)
+def render_md(path: Path, subs: dict[str, str]) -> str:
+    """Render a description .md with the given ``${VAR}`` substitutions."""
+    text = path.read_text(encoding="utf-8")
+    for key, value in subs.items():
+        text = text.replace("${" + key + "}", value)
+    return text
+
+
+def full_sources() -> dict[str, dict[str, str]]:
+    """The whole builtin tool list: 4 kimix tools + kimi-cli description .md."""
+    sources = serialize(_build_tools())
+    for label, path, subs in FULL_DESC_FILES:
+        sources[label] = {"description": render_md(path, subs), "schema": ""}
+    return sources
+
+
+def _print_table(sources: dict[str, dict[str, str]]) -> int:
     total = 0
-    print(f"{'tool':<12}{'desc':>8}{'schema':>8}{'total':>8}")
-    for name, item in sorted(serialized.items()):
+    print(f"{'source':<28}{'desc':>8}{'schema':>8}{'total':>8}")
+    for name, item in sorted(sources.items()):
         n = len(item["description"]) + len(item["schema"])
         total += n
-        print(f"{name:<12}{len(item['description']):>8}{len(item['schema']):>8}{n:>8}")
-    print(f"{'TOTAL':<12}{'':>8}{'':>8}{total:>8}")
+        print(f"{name:<28}{len(item['description']):>8}{len(item['schema']):>8}{n:>8}")
+    print(f"{'TOTAL':<28}{'':>8}{'':>8}{total:>8}")
+    return total
+
+
+def full_main() -> int:
+    """--full: measure the whole builtin tool list and track its baseline."""
+    sources = full_sources()
+    total = _print_table(sources)
+
+    if not FULL_BASELINE.exists():
+        # First run: capture the baseline (description + schema, like the
+        # default 4-tool baseline).
+        FULL_BASELINE.write_text(
+            json.dumps(sources, sort_keys=True, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"\nfull-list baseline saved to: {FULL_BASELINE}")
+        print(f"full-list total: {total} chars")
+    else:
+        old = json.loads(FULL_BASELINE.read_text(encoding="utf-8"))
+        old_total = sum(
+            len(v["description"]) + len(v.get("schema", "")) for v in old.values()
+        )
+        delta = total - old_total
+        print(f"\nfull-list baseline total: {old_total}")
+        print(f"delta (negative = saved):   {delta}")
+        if delta < 0:
+            print(f"approx tokens saved @4 ch/token: {-delta // 4}")
+        else:
+            print(f"approx tokens added @4 ch/token: {delta // 4}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Measure the wire-visible tool-prompt budget (plan.md §5)."
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="measure the whole builtin tool list (4 kimix tools + kimi-cli .md descriptions)",
+    )
+    args = parser.parse_args()
+    if args.full:
+        return full_main()
+
+    tools = _build_tools()
+    serialized = serialize(tools)
+    _print_table(serialized)
 
     if BASELINE.exists():
         old = json.loads(BASELINE.read_text(encoding="utf-8"))
@@ -95,6 +190,7 @@ def main() -> int:
             len(v["description"]) + len(json.dumps(v["schema"], sort_keys=True, ensure_ascii=False))
             for v in old.values()
         )
+        total = sum(len(v["description"]) + len(v["schema"]) for v in serialized.values())
         delta = total - old_total
         print(f"\npre-refactor baseline total: {old_total}")
         print(f"delta (negative = saved):   {delta}")

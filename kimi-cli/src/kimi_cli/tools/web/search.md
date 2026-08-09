@@ -1,1 +1,1 @@
-Search the web for current information: news, docs, release notes, blogs, papers, and more.
+Search the web for current information: news, docs, release notes, blogs, papers, and more. Use `FetchURL` to read a specific URL found here.

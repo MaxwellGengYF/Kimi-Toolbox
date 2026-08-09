@@ -63,6 +63,26 @@ def check_file(py_file: Path) -> tuple[Path, int, str, str]:
     return py_file, result.returncode, result.stdout, result.stderr
 
 
+PROMPT_QUALITY_SCRIPT = PROJECT_ROOT / "tools" / "check_prompt_quality.py"
+
+
+def run_prompt_quality_check() -> tuple[int, str]:
+    """Run the prompt-quality lint (plan.md Part 4 §4.3 P4) as a subprocess.
+
+    Returns (returncode, report); a non-zero returncode means the tool
+    descriptions violate one of the Q1–Q5 rules.
+    """
+    cmd = [sys.executable, str(PROMPT_QUALITY_SCRIPT)]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+    )
+    report = (result.stdout or "") + (result.stderr or "")
+    return result.returncode, report
+
+
 def main() -> int:
     print("Collecting Python files ...")
     py_files = collect_python_files(PROJECT_ROOT)
@@ -127,6 +147,22 @@ def main() -> int:
                 lines.append(stderr)
         lines.append("")
 
+    # Prompt-quality lint (plan.md Part 4 §4.3, P4): run after the syntax
+    # loop as a subprocess and append its report; fail the build when the
+    # tool descriptions violate any Q1-Q5 rule.
+    prompt_quality_rc, prompt_quality_report = run_prompt_quality_check()
+    prompt_quality_failed = prompt_quality_rc != 0
+    lines.append("=" * 70)
+    lines.append(
+        "Prompt Quality Check: " + ("FAILED" if prompt_quality_failed else "OK")
+    )
+    lines.append("=" * 70)
+    if prompt_quality_report.strip():
+        lines.append(prompt_quality_report.strip())
+    else:
+        lines.append("(no output)")
+    lines.append("")
+
     lines.append("=" * 70)
     lines.append("Done")
     lines.append("=" * 70)
@@ -137,7 +173,7 @@ def main() -> int:
     print(report)
     print(f"\nReport saved to: {RESULT_FILE}")
 
-    return 1 if errors else 0
+    return 1 if (errors or prompt_quality_failed) else 0
 
 
 if __name__ == "__main__":
