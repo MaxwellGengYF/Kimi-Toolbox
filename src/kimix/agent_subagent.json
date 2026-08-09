@@ -18,7 +18,7 @@
       "kimi_cli.tools.file:Grep",
       "kimix.tools.web.fetch_url:FetchURL",
       "kimi_cli.tools.web:SearchWeb",
-      "kimix.tools.agent:AskParent",
+      "kimix.tools.agent:AskAgent",
       "kimix.tools.context:ContextUsage",
       "kimix.tools.context:Compact"
     ]

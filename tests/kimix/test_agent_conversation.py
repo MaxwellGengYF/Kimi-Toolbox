@@ -1,31 +1,35 @@
 """Tests for the conversational Agent system."""
 
-import asyncio
 import time
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from kimix.base import MessageType
-from kimix.tools.agent.store import (
-    AgentSessionEntry,
-    AgentSessionStore,
-    ConversationTurn,
-)
 from kimix.tools.agent import (
     Agent,
     AgentClose,
     AgentCloseParams,
     AgentList,
     AgentListParams,
-    AskParent,
-    AskParentParams,
+    AskAgent,
+    AskAgentParams,
     SubAgentParams,
     _AgentConversationCollector,
+    _drain_pending_messages,
+    _format_pending_messages,
+    _get_agent_session,
     _get_store,
+    _pending_message_count,
+    _queue_pending_message,
+    _register_agent_session,
     _register_entry,
+    _unregister_agent_session,
     _unregister_entry,
+)
+from kimix.tools.agent.store import (
+    AgentSessionEntry,
+    AgentSessionStore,
 )
 
 
@@ -442,25 +446,394 @@ async def test_agent_close_not_found(mock_session: MagicMock) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Conversation protocol tests
+# AskAgent tests
 # ---------------------------------------------------------------------------
-async def test_ask_parent_tool_sets_pending_question(mock_sub_session: MagicMock) -> None:
-    entry = AgentSessionEntry(
-        session=mock_sub_session,
-        session_id="ask-id",
-        created_at=time.time(),
-        last_accessed=time.time(),
-        conversation_history=[],
-        total_turns=0,
-    )
-    _register_entry("ask-id", entry)
-    mock_sub_session.id = "ask-id"
-    ask_parent = AskParent(mock_sub_session)
-    result = await ask_parent(AskParentParams(question="What is the color?"))
+class _FakeSteer:
+    """Stand-in for ``kimi_cli.soul.steer.Steer`` recording pushed content."""
+
+    def __init__(self, delivered: bool = True) -> None:
+        self.delivered = delivered
+        self.pushed: list[str] = []
+
+    async def push(self, content: str) -> bool:
+        self.pushed.append(content)
+        return self.delivered
+
+
+def _fake_sdk_session(session_id: str) -> MagicMock:
+    """A stand-in SDK session exposing ``_cli.soul`` + ``_cli.session.id``."""
+    sdk = MagicMock()
+    cli = MagicMock()
+    cli_session = MagicMock()
+    cli_session.id = session_id
+    cli.session = cli_session
+    cli.soul = MagicMock()
+    sdk._cli = cli
+    return sdk
+
+
+async def test_ask_agent_sub_agent_messages_parent(mock_sub_session: MagicMock) -> None:
+    mock_sub_session.id = "sub-123"
+    mock_sub_session.custom_config = {
+        "is_sub_agent": True,
+        "parent_session_id": "parent-1",
+    }
+    parent_sdk = _fake_sdk_session("parent-1")
+    _register_agent_session("parent-1", parent_sdk)
+    try:
+        fake = _FakeSteer(delivered=True)
+        with patch("kimi_cli.soul.steer.Steer.from_session", return_value=fake) as mock_from:
+            ask_agent = AskAgent(mock_sub_session)
+            result = await ask_agent(AskAgentParams(question="What is the color?"))
+        assert not result.is_error
+        assert "parent-1" in result.output
+        assert fake.pushed == ["Message from agent 'sub-123':\nWhat is the color?"]
+        mock_from.assert_called_once_with(parent_sdk)
+    finally:
+        _unregister_agent_session("parent-1")
+
+
+async def test_ask_agent_sub_agent_ignores_id(mock_sub_session: MagicMock) -> None:
+    """The ``id`` param is ignored for sub-agents: they always message the parent."""
+    mock_sub_session.id = "sub-123"
+    mock_sub_session.custom_config = {
+        "is_sub_agent": True,
+        "parent_session_id": "parent-1",
+    }
+    parent_sdk = _fake_sdk_session("parent-1")
+    _register_agent_session("parent-1", parent_sdk)
+    try:
+        fake = _FakeSteer(delivered=True)
+        with patch("kimi_cli.soul.steer.Steer.from_session", return_value=fake):
+            ask_agent = AskAgent(mock_sub_session)
+            result = await ask_agent(
+                AskAgentParams(question="ignored id", id="some-other-agent")
+            )
+        assert not result.is_error
+        assert fake.pushed == ["Message from agent 'sub-123':\nignored id"]
+    finally:
+        _unregister_agent_session("parent-1")
+
+
+async def test_ask_agent_sub_agent_without_parent_id_errors(
+    mock_sub_session: MagicMock,
+) -> None:
+    mock_sub_session.id = "sub-123"
+    mock_sub_session.custom_config = {"is_sub_agent": True}
+    ask_agent = AskAgent(mock_sub_session)
+    result = await ask_agent(AskAgentParams(question="hi"))
+    assert result.is_error
+    assert "parent_session_id" in result.message
+
+
+async def test_ask_agent_sub_agent_parent_not_registered_queues(
+    mock_sub_session: MagicMock,
+) -> None:
+    """A message to an unregistered (closed) parent is queued, not an error."""
+    mock_sub_session.id = "sub-123"
+    mock_sub_session.custom_config = {
+        "is_sub_agent": True,
+        "parent_session_id": "missing-parent",
+    }
+    ask_agent = AskAgent(mock_sub_session)
+    result = await ask_agent(AskAgentParams(question="hi"))
     assert not result.is_error
-    assert entry.pending_question == "What is the color?"
-    assert entry.state == "awaiting_response"
-    _unregister_entry("ask-id")
+    assert "queued" in result.output
+    assert "missing-parent" in result.output
+    assert _pending_message_count("missing-parent") == 1
+    assert _drain_pending_messages("missing-parent") == [
+        "Message from agent 'sub-123':\nhi"
+    ]
+
+
+async def test_ask_agent_main_agent_targets_by_id(mock_session: MagicMock) -> None:
+    mock_session.custom_config = {}
+    mock_session.id = "main-1"
+    target_sdk = _fake_sdk_session("target-1")
+    _register_agent_session("target-1", target_sdk)
+    try:
+        fake = _FakeSteer(delivered=True)
+        with patch("kimi_cli.soul.steer.Steer.from_session", return_value=fake):
+            ask_agent = AskAgent(mock_session)
+            result = await ask_agent(AskAgentParams(question="status?", id="target-1"))
+        assert not result.is_error
+        assert fake.pushed == ["Message from agent 'main-1':\nstatus?"]
+    finally:
+        _unregister_agent_session("target-1")
+
+
+async def test_ask_agent_main_agent_defaults_to_recent_active(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    mock_session.custom_config = {}
+    store = _get_store(mock_session)
+    old_sdk = _fake_sdk_session("old-1")
+    recent_sdk = _fake_sdk_session("recent-1")
+    store.put(
+        AgentSessionEntry(
+            session=old_sdk,
+            session_id="old-1",
+            created_at=time.time(),
+            last_accessed=time.time() - 100,
+            conversation_history=[],
+            total_turns=1,
+        )
+    )
+    store.put(
+        AgentSessionEntry(
+            session=recent_sdk,
+            session_id="recent-1",
+            created_at=time.time(),
+            last_accessed=time.time(),
+            conversation_history=[],
+            total_turns=1,
+        )
+    )
+    fake = _FakeSteer(delivered=True)
+    with patch("kimi_cli.soul.steer.Steer.from_session", return_value=fake) as mock_from:
+        ask_agent = AskAgent(mock_session)
+        result = await ask_agent(AskAgentParams(question="anyone there?"))
+    assert not result.is_error
+    assert "recent-1" in result.output
+    mock_from.assert_called_once_with(recent_sdk)
+
+
+async def test_ask_agent_main_agent_closed_session_queues(
+    mock_session: MagicMock,
+) -> None:
+    """A message to a closed/unregistered session is queued, not an error."""
+    mock_session.custom_config = {}
+    mock_session.id = "main-1"
+    ask_agent = AskAgent(mock_session)
+    result = await ask_agent(AskAgentParams(question="ping?", id="ghost"))
+    assert not result.is_error
+    assert "queued" in result.output
+    assert "ghost" in result.output
+    assert _pending_message_count("ghost") == 1
+    assert _drain_pending_messages("ghost") == ["Message from agent 'main-1':\nping?"]
+
+
+async def test_ask_agent_main_agent_no_active_sub_agents_errors(
+    mock_session: MagicMock,
+) -> None:
+    mock_session.custom_config = {}
+    ask_agent = AskAgent(mock_session)
+    result = await ask_agent(AskAgentParams(question="hi"))
+    assert result.is_error
+    assert "no active sub-agents" in result.message
+
+
+async def test_ask_agent_rejects_self_message(mock_session: MagicMock) -> None:
+    mock_session.custom_config = {}
+    mock_session.id = "self-1"
+    target_sdk = _fake_sdk_session("self-1")
+    _register_agent_session("self-1", target_sdk)
+    try:
+        ask_agent = AskAgent(mock_session)
+        result = await ask_agent(AskAgentParams(question="hi", id="self-1"))
+        assert result.is_error
+        assert "yourself" in result.message
+    finally:
+        _unregister_agent_session("self-1")
+
+
+async def test_ask_agent_queues_when_target_idle(mock_session: MagicMock) -> None:
+    mock_session.custom_config = {}
+    mock_session.id = "main-1"
+    target_sdk = _fake_sdk_session("target-1")
+    _register_agent_session("target-1", target_sdk)
+    try:
+        fake = _FakeSteer(delivered=False)
+        with patch("kimi_cli.soul.steer.Steer.from_session", return_value=fake):
+            ask_agent = AskAgent(mock_session)
+            result = await ask_agent(AskAgentParams(question="hi", id="target-1"))
+        assert not result.is_error
+        assert "queued" in result.output
+        # The message is persisted (not just left in the steer queue, which
+        # would be discarded as stale at the next turn init).
+        assert _pending_message_count("target-1") == 1
+        assert _drain_pending_messages("target-1") == [
+            "Message from agent 'main-1':\nhi"
+        ]
+    finally:
+        _unregister_agent_session("target-1")
+        _drain_pending_messages("target-1")
+
+
+async def test_ask_agent_target_not_steerable_queues(mock_session: MagicMock) -> None:
+    """A target without a steerable session is queued, not an error."""
+    mock_session.custom_config = {}
+    mock_session.id = "main-1"
+    target_sdk = _fake_sdk_session("target-1")
+    _register_agent_session("target-1", target_sdk)
+    try:
+        with patch("kimi_cli.soul.steer.Steer.from_session", return_value=None):
+            ask_agent = AskAgent(mock_session)
+            result = await ask_agent(AskAgentParams(question="hi", id="target-1"))
+        assert not result.is_error
+        assert "queued" in result.output
+        assert _pending_message_count("target-1") == 1
+        assert _drain_pending_messages("target-1") == [
+            "Message from agent 'main-1':\nhi"
+        ]
+    finally:
+        _unregister_agent_session("target-1")
+        _drain_pending_messages("target-1")
+
+
+def test_ask_agent_tool_name_is_pascal_case() -> None:
+    """The tool registers under the canonical ``AskAgent`` name."""
+    assert AskAgent.name == "AskAgent"
+
+
+async def test_format_pending_messages() -> None:
+    assert _format_pending_messages([]) == ""
+    block = _format_pending_messages(["msg one", "msg two"])
+    assert "<pending-messages>" in block
+    assert "</pending-messages>" in block
+    assert "1. msg one" in block
+    assert "2. msg two" in block
+    assert block.index("1. msg one") < block.index("2. msg two")
+
+
+async def test_pending_message_queue_roundtrip() -> None:
+    _queue_pending_message("s1", "first")
+    _queue_pending_message("s1", "second")
+    try:
+        assert _pending_message_count("s1") == 2
+        assert _drain_pending_messages("s1") == ["first", "second"]
+        assert _pending_message_count("s1") == 0
+        # Draining a session with no queued messages yields [].
+        assert _drain_pending_messages("never-queued") == []
+    finally:
+        _drain_pending_messages("s1")
+
+
+async def test_agent_resume_lists_pending_messages(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """Resuming an idle sub-agent lists messages queued by ``AskAgent`` at the
+    top of its next prompt."""
+    mock_session.custom_config = {"chat_provider": None}
+    store = _get_store(mock_session)
+    store.put(
+        AgentSessionEntry(
+            session=mock_sub_session,
+            session_id="idle-1",
+            created_at=time.time(),
+            last_accessed=time.time(),
+            conversation_history=[],
+            total_turns=1,
+        )
+    )
+    _queue_pending_message("idle-1", "Message from agent 'main-1':\nstatus?")
+    captured_prompt = None
+
+    async def _mock_prompt_async(*, prompt_str, session, output_function, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = prompt_str
+        if output_function:
+            output_function("done", MessageType.Text)
+
+    try:
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ) as mock_prompt:
+            mock_prompt.side_effect = _mock_prompt_async
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                result = await agent(
+                    SubAgentParams(
+                        prompt="resume", session_id="idle-1", close_session=False
+                    )
+                )
+
+        assert not result.is_error
+        assert result.extras["session_id"] == "idle-1"
+        assert captured_prompt is not None
+        assert "<pending-messages>" in captured_prompt
+        assert "status?" in captured_prompt
+        assert "resume" in captured_prompt
+        # The queued message was consumed (listed once, not repeatedly).
+        assert _pending_message_count("idle-1") == 0
+    finally:
+        _unregister_agent_session("idle-1")
+        _drain_pending_messages("idle-1")
+
+
+async def test_agent_new_session_lists_pending_messages_for_closed_id(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """Re-creating a closed session under the same id lists queued messages at
+    the next prompt."""
+    mock_session.custom_config = {"chat_provider": None}
+    _queue_pending_message("closed-1", "Message from agent 'main-1':\ncome back")
+    captured_prompt = None
+
+    async def _mock_prompt_async(*, prompt_str, session, output_function, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = prompt_str
+        if output_function:
+            output_function("ok", MessageType.Text)
+
+    try:
+        with patch(
+            "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_sub_session
+            with patch(
+                "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+            ) as mock_prompt:
+                mock_prompt.side_effect = _mock_prompt_async
+                with patch(
+                    "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+                ):
+                    agent = Agent(mock_session)
+                    result = await agent(
+                        SubAgentParams(prompt="do X", session_id="closed-1")
+                    )
+
+        assert not result.is_error
+        assert result.extras["session_id"] == "closed-1"
+        assert captured_prompt is not None
+        assert "<pending-messages>" in captured_prompt
+        assert "come back" in captured_prompt
+        assert _pending_message_count("closed-1") == 0
+    finally:
+        _unregister_agent_session("closed-1")
+        _drain_pending_messages("closed-1")
+
+
+async def test_agent_resolve_session_registers_parent_and_child(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    mock_session.custom_config = {"chat_provider": None}
+    mock_session.id = "parent-1"
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ):
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                result = await agent(SubAgentParams(prompt="do X", close_session=False))
+
+    assert not result.is_error
+    child_id = result.extras["session_id"]
+    sub_config = mock_sub_session.get_custom_config()
+    assert sub_config["is_sub_agent"] is True
+    assert sub_config["parent_session_id"] == "parent-1"
+    assert _get_agent_session(child_id) is mock_sub_session
+    # Close-path cleanup removes the registration.
+    _unregister_agent_session(child_id)
+    assert _get_agent_session(child_id) is None
 
 
 async def test_agent_awaiting_response_status(

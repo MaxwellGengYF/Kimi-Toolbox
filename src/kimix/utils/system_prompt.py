@@ -130,7 +130,7 @@ Applies to every tool that exposes the corresponding parameters:
                 items.append('Self-verify: catch errors and bad assumptions.')
             case SystemPromptType.TrivialSubAgent:
                 worker_logic('persistent autonomous sub-agent', True)
-                items.append('If you need clarification from the parent agent, call the `ask_parent` tool with your question, then stop.')
+                items.append('If you need clarification from the parent agent, call the `AskAgent` tool with your question, then stop.')
             case SystemPromptType.Reader:
                 role_doc = 'You are a reader'
                 items.append('Read the given content and report a concise summary: key results, errors, warnings, and next steps.')

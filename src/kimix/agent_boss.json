@@ -12,6 +12,7 @@
       "kimix.tools.note:ReadPlan",
       "kimix.tools.note:EditPlan",
       "kimix.tools.agent:Agent",
+      "kimix.tools.agent:AskAgent",
       "kimix.tools.agent:AgentList",
       "kimix.tools.agent:AgentClose",
       "kimix.tools.swarm:AgentSwarm",

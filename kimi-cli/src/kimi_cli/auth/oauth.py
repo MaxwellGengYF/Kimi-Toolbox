@@ -769,9 +769,29 @@ class OAuthManager:
         self._config = config
         # Cache access tokens only; refresh tokens are always read from persisted storage.
         self._access_tokens: dict[str, str] = {}
-        self._refresh_lock = asyncio.Lock()
+        # ``asyncio.Lock`` binds to the running event loop on first acquire and
+        # the manager outlives a single prompt (each prompt may run in a fresh
+        # ``asyncio.run`` loop), so the lock is created lazily per loop in
+        # ``_get_refresh_lock`` instead of here.
+        self._refresh_lock: asyncio.Lock | None = None
+        self._refresh_lock_loop: asyncio.AbstractEventLoop | None = None
         self._migrate_oauth_storage()
         self._load_initial_tokens()
+
+    def _get_refresh_lock(self) -> asyncio.Lock:
+        """Return an ``asyncio.Lock`` bound to the *current* event loop.
+
+        The ``OAuthManager`` persists across prompts, and each prompt may run in
+        a fresh event loop (e.g. ``kimix.utils.prompt.prompt`` wraps every
+        prompt in its own ``asyncio.run``). An ``asyncio.Lock`` created for a
+        previous prompt would raise ``RuntimeError: ... is bound to a different
+        event loop`` on the next one, so cache a lock per loop.
+        """
+        loop = asyncio.get_running_loop()
+        if self._refresh_lock is None or self._refresh_lock_loop is not loop:
+            self._refresh_lock = asyncio.Lock()
+            self._refresh_lock_loop = loop
+        return self._refresh_lock
 
     def _iter_oauth_refs(self) -> list[OAuthRef]:
         refs: list[OAuthRef] = []
@@ -980,7 +1000,7 @@ class OAuthManager:
         current_token = persisted or token
         if not current_token.refresh_token:
             return
-        async with self._refresh_lock:
+        async with self._get_refresh_lock():
             # Re-check persisted token inside the in-process lock.
             persisted = load_tokens(ref)
             if persisted and not self._should_suppress_persisted_token(ref, persisted):

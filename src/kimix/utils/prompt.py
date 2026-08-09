@@ -12,6 +12,7 @@ import orjson
 import kimix.base as base
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
+from kosong.message import ContentPart
 from kimix.ui.printing import Color, MessageType, Style
 from kimix.ui.stream import print_agent_json, print_agent_json_flush_text
 from kimix.tools.common import _export_to_temp_file
@@ -38,6 +39,40 @@ def _read_subagent_state(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+async def steer_session(session: Session, content: str | list[ContentPart]) -> bool:
+    """Push a follow-up message into a running agent session.
+
+    Resolves the session's ``KimiSoul`` (via ``session._cli.soul``) and injects
+    *content* as a user message, interrupting the currently streaming step when
+    the session is mid-turn (including while reasoning/text parts are still
+    printing). The injection happens at the message/context layer, above the
+    providers, so it works with every backend provider.
+
+    Returns ``True`` when the content was delivered to a running soul; ``False``
+    when no soul can be resolved from the session or the soul is idle.
+    """
+    from kimi_cli.soul.steer import Steer
+
+    steer = Steer.from_session(session)
+    if steer is None:
+        return False
+    return await steer.push(content)
+
+
+def steer_session_sync(session: Session, content: str | list[ContentPart]) -> bool:
+    """Synchronous wrapper around :func:`steer_session` for non-async callers.
+
+    Only call this from a thread other than the one running the session's event
+    loop — blocking the loop's own thread would deadlock.
+    """
+    from kimi_cli.soul.steer import Steer
+
+    steer = Steer.from_session(session)
+    if steer is None:
+        return False
+    return steer.push_sync(content)
 
 
 async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) -> str | None:

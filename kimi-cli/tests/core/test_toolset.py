@@ -346,6 +346,59 @@ async def test_snake_case_non_tool_returns_not_found():
     assert isinstance(result.return_value, KosongToolNotFoundError)
 
 
+# --- AskAgent name-variant auto-correction (fuzzy matching) ---
+
+
+class DummyAskAgent(CallableTool2[DummyParams]):
+    name: str = "AskAgent"
+    description: str = "Send a message to another agent."
+    params: type[DummyParams] = DummyParams
+
+    async def __call__(self, params: DummyParams) -> ToolReturnValue:
+        return ToolOk(output="asked")
+
+
+def _make_ask_agent_toolset() -> KimiToolset:
+    ts = KimiToolset()
+    ts.add(DummyAskAgent())
+    return ts
+
+
+async def _assert_ask_agent_variant_autocorrects(sent: str) -> None:
+    """A slightly-wrong spelling of ``AskAgent`` auto-corrects and runs it."""
+    ts = _make_ask_agent_toolset()
+    tool_call = ToolCall(
+        id=f"tc-ask-{sent}",
+        function=ToolCall.FunctionBody(
+            name=sent,
+            arguments="{}",
+        ),
+    )
+    result = ts.handle(tool_call)
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    output = tr.return_value.output
+    assert isinstance(output, str)
+    assert output.startswith("asked")
+    assert "<system-warning>" in output
+    assert "AskAgent" in output
+
+
+async def test_ask_agent_kebab_case_autocorrects():
+    """``ask-agent`` auto-corrects to ``AskAgent``."""
+    await _assert_ask_agent_variant_autocorrects("ask-agent")
+
+
+async def test_ask_agent_snake_case_autocorrects():
+    """``ask_agent`` auto-corrects to ``AskAgent``."""
+    await _assert_ask_agent_variant_autocorrects("ask_agent")
+
+
+async def test_ask_agent_space_separated_autocorrects():
+    """``ask agent`` (space-separated) auto-corrects to ``AskAgent``."""
+    await _assert_ask_agent_variant_autocorrects("ask agent")
+
+
 # --- hide/unhide cycle ---
 
 

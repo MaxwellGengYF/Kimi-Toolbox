@@ -347,6 +347,14 @@ class KimiSoul:
         self._llm_request_recorder = LLMRequestRecorder()
         self._recorder_restored = False
         self._steer_queue: asyncio.Queue[str | list[ContentPart]] = asyncio.Queue()
+        # Wake event set by ``request_steer`` so a steer can interrupt the
+        # currently streaming step (see ``_agent_loop`` step race).
+        self._steer_wake_event = asyncio.Event()
+        self._current_step_task: asyncio.Task[Any] | None = None
+        self._run_active = False
+        # The event loop the soul runs on (set by ``run``). Used by ``Steer``
+        # to marshal thread-safe enqueues from other loops/threads.
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._last_tool_calls: list[tuple[str, str]] = []
         self._current_turn_id: str = ""
         self._current_step_no: int = 0
@@ -835,8 +843,24 @@ class KimiSoul:
         await self._context.checkpoint(self._checkpoint_with_user_message)
 
     def steer(self, content: str | list[ContentPart]) -> None:
-        """Queue a steer message for injection into the current turn."""
+        """Queue a steer message for injection into the current turn.
+
+        Step-boundary steering only: the message is consumed between steps (or
+        before turn end), never mid-stream. Use :meth:`request_steer` for a
+        mid-stream interrupt.
+        """
         self._steer_queue.put_nowait(content)
+
+    async def request_steer(self, content: str | list[ContentPart]) -> None:
+        """Enqueue a steer and wake the agent loop so the currently streaming
+        step is interrupted and the steer injected as a follow-up user
+        message."""
+        self._steer_queue.put_nowait(content)
+        self._steer_wake_event.set()
+
+    def is_running(self) -> bool:
+        """Whether the soul is currently running a turn."""
+        return self._run_active
 
     async def _consume_pending_steers(self) -> bool:
         """Drain the steer queue and inject as follow-up user messages.
@@ -885,6 +909,16 @@ class KimiSoul:
             created_approval_source = ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
             approval_source_token = set_current_approval_source(created_approval_source)
         try:
+            self._loop = asyncio.get_running_loop()
+            # The soul persists across prompts, and each prompt may run in a
+            # fresh event loop (e.g. ``kimix.utils.prompt.prompt`` wraps every
+            # prompt in its own ``asyncio.run``). ``asyncio.Event``/``Queue``
+            # bind to the loop on first use, so recreate them here — otherwise
+            # the second prompt raises ``RuntimeError: <asyncio.locks.Event
+            # ...> is bound to a different event loop`` on its first step.
+            self._steer_wake_event = asyncio.Event()
+            self._steer_queue = asyncio.Queue()
+            self._run_active = True
             # Refresh OAuth tokens on each turn to avoid idle-time expirations.
             await self._runtime.oauth.ensure_fresh(self._runtime)
 
@@ -993,6 +1027,7 @@ class KimiSoul:
                             save_session_state(fresh, session.dir)
                         session.state.custom_title = fresh.custom_title
         finally:
+            self._run_active = False
             if turn_started and not turn_finished:
                 wire_send(TurnEnd())
 
@@ -1125,6 +1160,9 @@ class KimiSoul:
         # Discard any stale steers from a previous turn.
         while not self._steer_queue.empty():
             self._steer_queue.get_nowait()
+        # Reset the wake event so a steer arriving later in this turn can
+        # interrupt a streaming step.
+        self._steer_wake_event.clear()
 
         # ── 1a. MCP deferred loading ──────────────────────────────────────────
         if isinstance(self._agent.toolset, KimiToolset):
@@ -1213,7 +1251,41 @@ class KimiSoul:
                 self._denwa_renji.set_n_checkpoints(self._context.n_checkpoints)
 
                 # ── 2e. Step Execution ──────────────────────────────────────────
-                step_outcome = await self._step()
+                # Race the step against the steer wake event so a steer can
+                # interrupt the step mid-stream (while reasoning/text parts are
+                # still printing). The interrupted step's partial output is not
+                # grown into the context; the steer is injected as a follow-up
+                # user message and a fresh step starts with it in context.
+                self._steer_wake_event.clear()
+                step_task = asyncio.create_task(self._step())
+                self._current_step_task = step_task
+                steer_waiter = asyncio.create_task(self._steer_wake_event.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {step_task, steer_waiter},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    steer_waiter.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await steer_waiter
+                    if not step_task.done():
+                        step_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await step_task
+                    self._current_step_task = None
+                if step_task in done:
+                    # Normal completion (or the step finished exactly as the
+                    # steer arrived) — exceptions re-raise into the existing
+                    # except clauses below.
+                    step_outcome = step_task.result()
+                else:
+                    # Steer-interrupt path: the wake event fired first and the
+                    # step was cancelled above. Inject the steers as user
+                    # messages and end the interrupted step on the wire.
+                    await self._consume_pending_steers()
+                    wire_send(StepInterrupted())
+                    continue
 
             except SessionRestartRequired:
                 # ── 2f-i. Session restart signal ─────────────────────────────

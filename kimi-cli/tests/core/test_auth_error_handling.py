@@ -29,7 +29,8 @@ from kosong.tooling.simple import SimpleToolset
 from pydantic import SecretStr
 
 from kimi_cli.acp.session import ACPSession
-from kimi_cli.config import LLMProvider, OAuthRef
+from kimi_cli.auth.oauth import OAuthManager
+from kimi_cli.config import Config, LLMProvider, OAuthRef
 from kimi_cli.llm import LLM
 from kimi_cli.soul import SessionRestartRequired, run_soul
 from kimi_cli.soul.agent import Agent, Runtime
@@ -560,3 +561,29 @@ async def test_wire_server_catches_connection_error(runtime: Runtime, tmp_path: 
     assert isinstance(response, JSONRPCErrorResponse)
     assert response.error.code == ErrorCodes.INTERNAL_ERROR
     assert "ConnectionError" in response.error.message
+
+
+# ---------------------------------------------------------------------------
+# Event-loop reuse across prompts
+# ---------------------------------------------------------------------------
+
+
+def test_oauth_refresh_lock_reusable_across_event_loops(config: Config) -> None:
+    """The OAuthManager's refresh lock survives fresh event loops.
+
+    Regression test: the ``OAuthManager`` persists across prompts and each
+    prompt may run in its own event loop (``kimix.utils.prompt.prompt`` wraps
+    every prompt in a fresh ``asyncio.run``). ``asyncio.Lock`` binds to the
+    loop on first acquire, so the lock must be recreated per loop instead of
+    being bound to the first prompt's loop.
+    """
+    manager = OAuthManager(config)
+
+    async def _acquire() -> bool:
+        async with manager._get_refresh_lock():
+            return True
+
+    assert asyncio.run(_acquire()) is True
+    # Second acquire in a brand-new event loop must not raise the
+    # "is bound to a different event loop" RuntimeError.
+    assert asyncio.run(_acquire()) is True

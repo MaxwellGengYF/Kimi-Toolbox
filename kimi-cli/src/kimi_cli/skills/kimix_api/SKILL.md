@@ -975,10 +975,10 @@ for c in result.comments:
 
 ## `kimix.tools` — Built-in Agent Tools
 
-All tools are `CallableTool2` subclasses. They are organized in subpackages under `kimix.tools` (the package `__init__.py` does not re-export them); import from the relevant submodule, e.g. `from kimix.tools.agent import Agent, AgentList, AgentClose, AskParent`. Key ones:
+All tools are `CallableTool2` subclasses. They are organized in subpackages under `kimix.tools` (the package `__init__.py` does not re-export them); import from the relevant submodule, e.g. `from kimix.tools.agent import Agent, AgentList, AgentClose, AskAgent`. Key ones:
 
 - `Agent` — launch sub-agent; params: `prompt`, `session_id`, `close_session=True`, `return_history=False`, `response` (from `kimix.tools.agent`)
-- `AskParent` — ask parent clarifying question; params: `question`, `context` (from `kimix.tools.agent`)
+- `AskAgent` — send a message to another agent via the steer mechanism; params: `question`, `id` (optional for the main agent, ignored for sub-agents which always message their parent) (from `kimix.tools.agent`)
 - `AgentList` — list active sub-agent sessions (from `kimix.tools.agent`)
 - `AgentClose` — close sub-agent session; params: `session_id` (from `kimix.tools.agent`)
 - `TaskOutput` — get background task output; params: `task_id`, `block=True`, `timeout=60`, `output_path`, `kill=False`
