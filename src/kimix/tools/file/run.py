@@ -7,13 +7,13 @@ from typing import Literal
 import regex as re
 import shlex
 import sys
-import tempfile
 from kimi_cli.tools import SkipThisTool
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field, model_validator
 from kimi_cli.session import Session
 from kimix.tools.common import (
     _build_session_output_block,
+    _create_script_file,
     _env_with_rg_bin_path,
     _extract_export_path,
     _interactive_scope_text,
@@ -369,14 +369,14 @@ class Run(CallableTool2[RunParams]):
             display_cmd = display_executable if len(
                 cmd_str) > _HUGE_CMD_THRESHOLD else cmd_str
 
-            # Handle extremely long python -c scripts via temp file (Windows CreateProcessW ~32767 limit)
+            # Handle extremely long python -c scripts via a script file in the
+            # shared temp folder (Windows CreateProcessW ~32767 limit).
             if is_py:
                 c_idx = next((i for i, a in enumerate(
                     args_list) if a == '-c'), None)
                 if c_idx is not None and c_idx + 1 < len(args_list) and len(args_list[c_idx + 1]) > 30000:
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                        f.write(args_list[c_idx + 1])
-                        script_path = f.name
+                    script_path = _create_script_file(
+                        args_list[c_idx + 1], ext='.py')
                     # Replace -c <code> with <script_path>, preserving leading options and trailing args
                     args_list = args_list[:c_idx] + \
                         [script_path] + args_list[c_idx + 2:]

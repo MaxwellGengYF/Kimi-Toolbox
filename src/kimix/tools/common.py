@@ -339,6 +339,46 @@ async def _export_to_temp_file_async(key: Path | None, content: str, ext: str = 
     return str(name), new_id
 
 
+def _create_script_file(content: str, ext: str = '.py') -> str:
+    """Write *content* to a new code/script file inside the shared temp folder.
+
+    Tools (e.g. the Python tool's inline code, the Run tool's long
+    ``python -c`` payloads) save generated script files to ``_temp_folder``
+    (``.kimix_cache/tmp_<pid>``) instead of the session folder, so they don't
+    accumulate in session state and are removed at process exit.
+
+    Returns the *absolute* path (resolved against the current process cwd) so
+    callers can pass it straight to a subprocess that may run with a different
+    cwd.  Use :func:`_display_temp_path` for the short relative form shown in
+    return messages.
+    """
+    global _temp_idx
+    _temp_folder.mkdir(parents=True, exist_ok=True)
+    id = _temp_idx
+    _temp_idx += 1
+    name = _temp_folder / (str(id) + ext)
+    name.write_text(content, encoding='utf-8')
+    return str(name.resolve())
+
+
+def _display_temp_path(path: str | Path) -> str:
+    """Return a short, forward-slashed display form of *path*.
+
+    Paths inside the shared temp folder are shown relative to the process cwd
+    (``.kimix_cache/tmp_<pid>/0.py``) instead of the long absolute path, so
+    tool return messages stay short.  Paths elsewhere are returned unchanged
+    except for forward-slash normalization.
+    """
+    p = Path(path)
+    try:
+        rel = p.resolve().relative_to(_temp_folder.resolve())
+    except (OSError, ValueError):
+        rel = None
+    if rel is not None:
+        return str(_temp_folder / rel).replace("\\", "/")
+    return str(p).replace("\\", "/")
+
+
 def _maybe_export_output(output: str, key: Path | None = None) -> str:
     """Check if output is too large and export to temp file if needed.
 

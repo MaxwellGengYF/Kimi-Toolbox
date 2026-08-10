@@ -10,6 +10,8 @@ import anyio
 import regex as re
 from kimix.tools.common import (
     _build_session_output_block,
+    _create_script_file,
+    _display_temp_path,
     _extract_export_path,
     _interactive_scope_text,
     _maybe_export_output_async,
@@ -99,7 +101,6 @@ class Python(CallableTool2[Params]):
         super().__init__()
         self._session = session
         self._semaphore = asyncio.Semaphore(8)
-        self._script_counter = 0
         self._resolved_python: str | None = None
 
     def _resolve_python(self, params: Params) -> str:
@@ -299,14 +300,11 @@ class Python(CallableTool2[Params]):
         if params.code.endswith('.py') and code_path.is_file():
             return params.code, True
 
-        # Priority 2: inline code — write to a temp file
-        session_dir = Path(self._session.dir)
-        script_name = f"{self._script_counter}.py"
-        script_path = str(session_dir / script_name)
-        self._script_counter += 1
-        # Write is done synchronously because we need the path before async ops
-        session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / script_name).write_text(params.code, encoding='utf-8')
+        # Priority 2: inline code — write to the shared temp folder (not the
+        # session folder) so generated scripts don't accumulate in session
+        # state.  The returned path is absolute (subprocess-ready); display it
+        # via ``_display_temp_path`` so messages show the short relative form.
+        script_path = _create_script_file(params.code, ext='.py')
         return script_path, False
 
     async def __call__(self, params: Params) -> ToolReturnValue:
@@ -405,7 +403,7 @@ class Python(CallableTool2[Params]):
         """
         # Resolve script source: `file` param takes priority
         script_path, is_file_mode = self._resolve_script_source(params)
-        display_script_path = script_path.replace("\\", "/") if script_path else ""
+        display_script_path = _display_temp_path(script_path) if script_path else ""
 
         # Fail-fast syntax pre-check before any subprocess spawn (config-gated).
         syntax_error = self._syntax_check_error(params, script_path, is_file_mode)

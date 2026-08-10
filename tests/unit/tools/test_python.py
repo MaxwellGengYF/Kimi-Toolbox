@@ -529,3 +529,47 @@ class TestEnvScrubbing:
         assert not isinstance(result, ToolError)
         assert "<scrubbed>" in str(result.output), f"secret leaked: {result.output!r}"
         assert "s3cr3t-value" not in str(result.output)
+
+
+# ---------------------------------------------------------------------------
+# Scripts are saved to the shared temp folder (not the session folder) and
+# return messages show the short relative path.
+# ---------------------------------------------------------------------------
+class TestScriptTempFolder:
+    def test_inline_code_written_to_temp_folder_not_session_dir(
+        self, tool: Python
+    ) -> None:
+        from kimix.tools import common as common_mod
+
+        script_path, is_file_mode = tool._resolve_script_source(
+            PythonParams(code="x = 42")
+        )
+        p = Path(script_path)
+        assert is_file_mode is False
+        assert p.is_absolute()
+        assert p.is_file()
+        assert p.read_text(encoding="utf-8") == "x = 42"
+        # Inside the shared temp folder, not the session dir.
+        temp_root = common_mod._temp_folder.resolve()
+        assert temp_root in p.resolve().parents
+        assert not list(Path(tool._session.dir).glob("*.py"))
+
+    def test_display_path_is_short_relative(self, tool: Python) -> None:
+        from kimix.tools import common as common_mod
+
+        script_path, _ = tool._resolve_script_source(PythonParams(code="x = 42"))
+        display = common_mod._display_temp_path(script_path)
+        temp_prefix = str(common_mod._temp_folder).replace("\\", "/")
+        assert display.startswith(temp_prefix + "/")
+        assert "sessions" not in display
+
+    @pytest.mark.asyncio
+    async def test_execute_message_uses_relative_temp_path(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_process_task(monkeypatch, output="ok")
+        result = await tool(PythonParams(code="print('ok')"))
+        assert isinstance(result, ToolOk)
+        assert ".kimix_cache/tmp_" in str(result.message)
+        assert "sessions" not in str(result.message)
+        assert not list(Path(tool._session.dir).glob("*.py"))

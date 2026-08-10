@@ -262,3 +262,81 @@ class TestRunSafetyWiring:
 
         assert isinstance(result, ToolError)
         assert "exit_code: 42" in result.output
+
+
+# ============================================================================
+# Long `python -c` payloads are saved to the shared temp folder
+# (not the OS temp dir / session folder), via common._create_script_file.
+# ============================================================================
+
+class TestRunLongPythonCScript:
+    async def test_long_python_c_script_saved_to_temp_folder(
+        self, mock_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys as _sys
+
+        run = _run_instance(mock_session)
+        long_code = "print(" + "1" * 40000 + ")"
+        assert len(long_code) > 30000
+        command = f"python -c {long_code}"
+
+        calls: list[tuple[str, str]] = []
+        script_path = r"C:\fake\.kimix_cache\tmp_9\42.py"
+
+        def fake_create(content: str, ext: str = ".py") -> str:
+            calls.append((content, ext))
+            return script_path
+
+        monkeypatch.setattr("kimix.tools.file.run._create_script_file", fake_create)
+
+        instance = MagicMock()
+        instance.start = AsyncMock(return_value="run_long")
+        instance.wait = AsyncMock(return_value=None)
+        instance.thread_is_alive = AsyncMock(return_value=False)
+        instance.stream = AsyncMock()
+        instance.stream.pop_output = AsyncMock(return_value="ok")
+        instance.stream.success = AsyncMock(return_value=True)
+        instance.stream.exit_code = 0
+        instance.stream.process_elapsed = None
+        pt = MagicMock(return_value=instance)
+        monkeypatch.setattr("kimix.tools.file.run.ProcessTask", pt)
+        monkeypatch.setattr("kimix.tools.file.run.shutil.which", lambda name: None)
+
+        result = await run(RunParams(command=command))
+
+        assert isinstance(result, ToolOk)
+        # The long -c payload went through the temp-folder writer, not
+        # tempfile.NamedTemporaryFile, and replaced the -c <code> args.
+        assert calls == [(long_code, ".py")]
+        pt.assert_called_once()
+        ctor_args = pt.call_args[0]
+        assert ctor_args[0] == _sys.executable
+        assert ctor_args[1] == [script_path]
+
+    async def test_short_python_c_script_not_exported(self, mock_session: MagicMock) -> None:
+        run = _run_instance(mock_session)
+        command = "python -c print(1)"
+        calls: list[tuple[str, str]] = []
+
+        def fake_create(content: str, ext: str = ".py") -> str:
+            calls.append((content, ext))
+            return r"C:\fake\script.py"
+
+        instance = MagicMock()
+        instance.start = AsyncMock(return_value="run_short")
+        instance.wait = AsyncMock(return_value=None)
+        instance.thread_is_alive = AsyncMock(return_value=False)
+        instance.stream = AsyncMock()
+        instance.stream.pop_output = AsyncMock(return_value="ok")
+        instance.stream.success = AsyncMock(return_value=True)
+        instance.stream.exit_code = 0
+        instance.stream.process_elapsed = None
+        with (
+            patch("kimix.tools.file.run._create_script_file", side_effect=fake_create),
+            patch("kimix.tools.file.run.shutil.which", lambda name: None),
+            patch("kimix.tools.file.run.ProcessTask", return_value=instance),
+        ):
+            result = await run(RunParams(command=command))
+
+        assert isinstance(result, ToolOk)
+        assert calls == []
