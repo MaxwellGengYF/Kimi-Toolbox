@@ -1,14 +1,20 @@
 """Tests for shell-aware TodoList `code` execution (bash vs PowerShell).
 
 Covers the runtime shell-kind detection, the dialect-specific description
-builders, the params-schema patching, and the fixer-aware argv building in
-``TodoList._shell_argv`` / ``_run_code``.
+builders, the params-schema patching, the fixer-aware argv building in
+``TodoList._shell_argv`` / ``_run_code``, and the timeout process-tree kill
+in ``TodoList._run_process``.
 """
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from kimi_cli.tools.todo import (
@@ -242,3 +248,116 @@ class TestResolveCodeExecutable:
         kind, payload = TodoList._resolve_code_executable("   ")  # type: ignore[misc]
         assert kind == "python_inline"
         assert isinstance(payload, str) and payload
+
+
+class TestRunProcessTreeKill:
+    """``_run_process`` must kill the whole tree on timeout, not just the
+    direct child, so a grandchild cannot keep the verification running or
+    leak as an orphan."""
+
+    @staticmethod
+    def _pid_runs_script(pid: int, marker: str) -> bool:
+        """Return True if *pid* runs a command line containing *marker*.
+
+        Command-line matching is immune to Windows PID reuse (a busy machine
+        recycles PIDs within milliseconds of death), which makes plain
+        aliveness checks by PID unreliable.
+        """
+        if os.name == "nt":
+            out = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            ).stdout
+            return marker in out
+        proc_cmdline = Path(f"/proc/{pid}/cmdline")
+        if proc_cmdline.exists():
+            try:
+                cmd = proc_cmdline.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                return False
+            return marker in cmd
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    async def test_timeout_kills_grandchild_tree(self, tmp_path: Any) -> None:
+        interp = getattr(sys, "_base_executable", None) or sys.executable
+        pidfile = tmp_path / "todo_grandchild.pid"
+
+        grandchild_script = tmp_path / "todo_grandchild.py"
+        grandchild_script.write_text(
+            "import os, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "while True:\n"
+            "    time.sleep(1)\n",
+            encoding="utf-8",
+        )
+        parent_script = tmp_path / "todo_parent.py"
+        parent_script.write_text(
+            "import subprocess, sys\n"
+            f"gc = subprocess.Popen([{interp!r}, {str(grandchild_script)!r}])\n"
+            "try:\n"
+            "    gc.wait()\n"
+            "except Exception:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+        ok, out = await TodoList._run_process(
+            [interp, str(parent_script)],
+            timeout=1,
+            not_found_hint="n/a",
+        )
+        assert ok is False
+        assert "timed out" in out
+
+        grandchild_pid: int | None = None
+        try:
+            assert pidfile.exists(), "grandchild never started"
+            grandchild_pid = int(pidfile.read_text(encoding="utf-8").strip())
+            # The grandchild must be dead after the timeout (the whole tree
+            # was killed).  Wait briefly for taskkill/killpg to settle.
+            deadline = time.monotonic() + 10
+            while (
+                self._pid_runs_script(grandchild_pid, "todo_grandchild.py")
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.2)
+            assert not self._pid_runs_script(
+                grandchild_pid, "todo_grandchild.py"
+            ), "grandchild survived the timeout tree-kill"
+        finally:
+            if (
+                grandchild_pid is not None
+                and self._pid_runs_script(grandchild_pid, "todo_grandchild.py")
+            ):
+                from kimix.tools.common import kill_child_tree
+
+                kill_child_tree(grandchild_pid, force=True)
+
+    async def test_timeout_invokes_kill_child_tree(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The timeout branch must route through kill_child_tree (force), not
+        a direct-child-only ``proc.kill()``."""
+        with patch("kimix.tools.common.kill_child_tree") as mock_kill:
+            ok, out = await TodoList._run_process(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                timeout=1,
+                not_found_hint="n/a",
+            )
+        assert ok is False
+        assert "timed out" in out
+        mock_kill.assert_called_once()
+        args = mock_kill.call_args.args
+        assert isinstance(args[0], int) and args[0] > 0
+        assert mock_kill.call_args.kwargs.get("force") is True

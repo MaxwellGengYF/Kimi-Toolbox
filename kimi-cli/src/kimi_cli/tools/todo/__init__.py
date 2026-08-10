@@ -727,12 +727,22 @@ class TodoList(CallableTool2[Params]):
         env: dict[str, str] | None = None,
     ) -> tuple[bool, str]:
         """Run a subprocess with timeout, returning ``(success, output)``."""
+        # Start the child in its own session/process group on POSIX so a timed-
+        # out command's whole tree (grandchildren included) can be killed with
+        # ``os.killpg``; on Windows the process-tree kill goes through
+        # ``taskkill /T`` regardless.  Without this, a verification command
+        # that spawns a child (e.g. ``pytest`` launching a server) would leave
+        # an orphan running after the timeout.
+        spawn_kwargs: dict[str, Any] = {}
+        if os.name != "nt":
+            spawn_kwargs["start_new_session"] = True
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                **spawn_kwargs,
             )
         except FileNotFoundError:
             return False, not_found_hint
@@ -743,7 +753,12 @@ class TodoList(CallableTool2[Params]):
                 proc.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            # Kill the whole process tree, not just the direct child, so a
+            # grandchild holding the pipe write ends cannot keep the todo
+            # verification running (or leak an orphan) after the timeout.
+            from kimix.tools.common import kill_child_tree
+
+            kill_child_tree(proc.pid, force=True)
             await proc.wait()
             return False, f"Code execution timed out after {timeout}s."
 

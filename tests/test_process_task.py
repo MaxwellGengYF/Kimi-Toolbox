@@ -1,8 +1,12 @@
 """Comprehensive tests for ProcessTask."""
 
 import asyncio
+import os
 import queue
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -10,7 +14,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kimix.tools.background.utils import _pop_task_data
-from kimix.tools.common import ProcessTask
+from kimix.tools.common import (
+    ProcessTask,
+    _kill_registered_process_trees,
+    _process_registry,
+    _register_child_process,
+    _unregister_child_process,
+    kill_child_tree,
+)
 
 
 @pytest.fixture
@@ -514,3 +525,211 @@ async def test_output_buffer_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     # ~2000-line stream, so the error line's position must be far below the
     # absolute line count (~2002) — proving the buffer was truncated.
     assert 0 < line_num < 1000
+
+
+# ---------------------------------------------------------------------------
+# kill_child_tree / process-tree registry / orphan prevention
+# ---------------------------------------------------------------------------
+
+def _pid_runs_script(pid: int, marker: str) -> bool:
+    """Return True if process *pid* is running a command line containing
+    *marker*.
+
+    Aliveness-by-PID alone is unreliable on Windows: on a busy machine a PID
+    can be recycled within milliseconds of the process dying, so a dead PID
+    can appear "alive" again.  Matching the command line is immune to PID
+    reuse — it only reports True when the exact script is still running.
+    """
+    if os.name == "nt":
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        ).stdout
+        return marker in out
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        try:
+            cmd = proc_cmdline.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            return False
+        return marker in cmd
+    # Non-Linux POSIX (e.g. macOS): PID reuse is rare, kill(0) is reliable.
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# ── kill_child_tree unit tests ────────────────────────────────────────────
+
+def test_kill_child_tree_posix_graceful() -> None:
+    mock_os = MagicMock()
+    mock_os.name = "posix"
+    with patch("kimix.tools.common.os", mock_os):
+        kill_child_tree(1234)
+        mock_os.killpg.assert_called_once_with(1234, signal.SIGTERM)
+
+
+def test_kill_child_tree_posix_force() -> None:
+    mock_os = MagicMock()
+    mock_os.name = "posix"
+    with patch("kimix.tools.common.os", mock_os):
+        kill_child_tree(1234, force=True)
+        mock_os.killpg.assert_called_once_with(1234, getattr(signal, "SIGKILL", 9))
+
+
+def test_kill_child_tree_posix_swallows_missing_group() -> None:
+    mock_os = MagicMock()
+    mock_os.name = "posix"
+    mock_os.killpg.side_effect = ProcessLookupError
+    with patch("kimix.tools.common.os", mock_os):
+        # A group that already exited must not raise.
+        kill_child_tree(1234)
+        mock_os.killpg.assert_called_once_with(1234, signal.SIGTERM)
+
+
+def test_kill_child_tree_windows_graceful_uses_taskkill_tree() -> None:
+    with patch("kimix.tools.common.os.name", "nt"), \
+            patch("kimix.tools.common.subprocess.run") as mock_run:
+        kill_child_tree(1234)
+        mock_run.assert_called_once()
+        args = mock_run.call_args.args[0]
+        assert args == ["taskkill", "/PID", "1234", "/T"]
+
+
+def test_kill_child_tree_windows_force_appends_f() -> None:
+    with patch("kimix.tools.common.os.name", "nt"), \
+            patch("kimix.tools.common.subprocess.run") as mock_run:
+        kill_child_tree(1234, force=True)
+        args = mock_run.call_args.args[0]
+        assert args == ["taskkill", "/PID", "1234", "/T", "/F"]
+
+
+def test_kill_child_tree_windows_swallows_run_error() -> None:
+    with patch("kimix.tools.common.os.name", "nt"), \
+            patch("kimix.tools.common.subprocess.run", side_effect=OSError("no taskkill")):
+        # Missing taskkill / permission errors must not raise.
+        kill_child_tree(1234)
+
+
+def test_kill_child_tree_windows_swallows_timeout() -> None:
+    with patch("kimix.tools.common.os.name", "nt"), \
+            patch(
+                "kimix.tools.common.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("taskkill", 2.0),
+            ):
+        # A GUI child ignoring WM_CLOSE must not hang the caller forever.
+        kill_child_tree(1234)
+
+
+# ── process-tree registry ─────────────────────────────────────────────────
+
+def test_registry_register_and_unregister() -> None:
+    pid = 42_001
+    try:
+        _register_child_process(pid)
+        assert pid in _process_registry
+        _unregister_child_process(pid)
+        assert pid not in _process_registry
+    finally:
+        _unregister_child_process(pid)
+
+
+def test_kill_registered_process_trees_force_kills_all() -> None:
+    pids = (42_002, 42_003)
+    try:
+        for pid in pids:
+            _register_child_process(pid)
+        with patch("kimix.tools.common.kill_child_tree") as mock_kill:
+            _kill_registered_process_trees()
+            for pid in pids:
+                mock_kill.assert_any_call(pid, force=True)
+    finally:
+        for pid in pids:
+            _unregister_child_process(pid)
+
+
+def test_atexit_hook_registered() -> None:
+    import atexit
+
+    if not hasattr(atexit, "_ncallbacks"):
+        pytest.skip("atexit internals not available on this interpreter")
+    before = atexit._ncallbacks()
+    # unregister() removes the hook only if it is registered (silent no-op
+    # otherwise); re-register it afterwards to leave state unchanged.
+    atexit.unregister(_kill_registered_process_trees)
+    assert atexit._ncallbacks() == before - 1
+    atexit.register(_kill_registered_process_trees)
+    assert atexit._ncallbacks() == before
+
+
+# ── grandchild orphan prevention (integration) ────────────────────────────
+
+async def test_stop_kills_grandchild_process_tree(tmp_path: Path) -> None:
+    """Stopping a task must terminate the whole process tree, not just the
+    direct child.
+
+    A surviving grandchild keeps the stdout/stderr pipe write ends open, so
+    ``_run_process_bg`` would never see EOF and the task would be stuck in the
+    "running" state forever.  This test spawns a real grandchild and verifies
+    that (a) ``_run_process_bg`` returns promptly after a stop — the decisive
+    proof that the pipes closed, i.e. the whole tree died — and (b) the
+    grandchild's process is gone.
+    """
+    interp = getattr(sys, "_base_executable", None) or sys.executable
+    pidfile = tmp_path / "grandchild.pid"
+
+    grandchild_script = tmp_path / "grandchild.py"
+    grandchild_script.write_text(
+        "import os, time\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    parent_script = tmp_path / "parent.py"
+    parent_script.write_text(
+        "import subprocess, sys\n"
+        f"gc = subprocess.Popen([{interp!r}, {str(grandchild_script)!r}])\n"
+        "try:\n"
+        "    gc.wait()\n"
+        "except Exception:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    task = ProcessTask(interp, [str(parent_script)])
+    q: queue.Queue[str] = queue.Queue()
+    bg = asyncio.create_task(task._run_process_bg(q))
+    grandchild_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        assert pidfile.exists(), "grandchild never started"
+        grandchild_pid = int(pidfile.read_text(encoding="utf-8").strip())
+        # Sanity: the grandchild is really running our marker script.
+        assert _pid_runs_script(grandchild_pid, "grandchild.py")
+
+        await task._stop_function()
+        # Decisive: _run_process_bg must return promptly once the tree is
+        # killed.  It would hang until the 10s timeout if the grandchild kept
+        # the pipe write ends open.
+        result = await asyncio.wait_for(bg, timeout=10)
+        assert result[0] is False
+
+        # Secondary: the grandchild process is gone (command-line check is
+        # immune to PID reuse).
+        assert not _pid_runs_script(grandchild_pid, "grandchild.py")
+    finally:
+        # Defensive cleanup in case an assertion above failed.
+        if grandchild_pid is not None and _pid_runs_script(grandchild_pid, "grandchild.py"):
+            kill_child_tree(grandchild_pid, force=True)

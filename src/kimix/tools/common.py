@@ -6,6 +6,7 @@ import io
 import os
 import regex as re
 import shutil
+import signal
 import textwrap
 import uuid
 from enum import Enum
@@ -1233,6 +1234,106 @@ def _env_with_rg_bin_path(env: dict[str, str] | None = None) -> dict[str, str]:
     return result
 
 
+def kill_child_tree(pid: int, *, force: bool = False) -> None:
+    """Terminate *pid* and every process in its descendant tree.
+
+    Every stop/kill path in :class:`ProcessTask` routes through this helper so
+    that stopping or killing a background task never leaves orphaned
+    grandchildren behind (a long-running grandchild also keeps the stdout/stderr
+    pipe write ends open, which would otherwise pin the reader tasks and leave
+    the task stuck in the "running" state forever).
+
+    Args:
+        pid: Process id of the direct child. On POSIX the child must have been
+            spawned with ``start_new_session=True`` so that it leads its own
+            process group (pgid == pid); on Windows any child works because
+            ``taskkill /T`` walks the tree by parent pid.
+        force: When True, use SIGKILL (POSIX) or ``taskkill /F`` (Windows) so
+            that processes ignoring the graceful signal are killed outright.
+            When False, SIGTERM / ``taskkill`` without ``/F`` is used first.
+
+    Errors are swallowed on purpose: the process may already have exited
+    (``ProcessLookupError``) or the caller may lack permission; the caller is
+    expected to escalate to ``force=True`` if the tree does not die.
+    """
+    if os.name == "nt":
+        args = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            args.append("/F")
+        try:
+            subprocess.run(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                # Without /F, taskkill posts WM_CLOSE and waits for the app to
+                # close. Console children (which the tools always spawn) cannot
+                # close that way and fail immediately, but a GUI child ignoring
+                # WM_CLOSE would otherwise hang taskkill forever.  Bound the
+                # wait and let the caller escalate to ``force=True``.
+                timeout=2.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return
+    try:
+        # SIGKILL is undefined on Windows; resolve it defensively so the POSIX
+        # branch stays testable/portable (the real Windows path never reaches
+        # this code because os.name == "nt" is handled above).  ``getattr``
+        # also keeps the Windows typeshed (no ``os.killpg``) happy.
+        sig = getattr(signal, "SIGKILL", 9) if force else signal.SIGTERM
+        killpg = getattr(os, "killpg", None)
+        if killpg is not None:
+            killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+# ── Process-tree registry ──────────────────────────────────────────────────
+#
+# Every child spawned by ProcessTask is recorded here so that interpreter
+# shutdown can force-kill the whole tree.  BackgroundStream runs its worker in
+# a daemon thread; when the interpreter exits, daemon threads are abandoned
+# WITHOUT running their ``finally`` cleanup, so the only reliable place to tear
+# down still-running process trees is an atexit hook.  The registry is also
+# used to forget PIDs once their tree has been reaped, so the atexit hook only
+# ever sees live trees.
+
+_process_registry: set[int] = set()
+_process_registry_lock = threading.Lock()
+
+
+def _register_child_process(pid: int) -> None:
+    """Record *pid* so its process tree is killed at interpreter exit."""
+    with _process_registry_lock:
+        _process_registry.add(pid)
+
+
+def _unregister_child_process(pid: int) -> None:
+    """Forget *pid* once its process tree has been reaped."""
+    with _process_registry_lock:
+        _process_registry.discard(pid)
+
+
+def _kill_registered_process_trees() -> None:
+    """Force-kill every process tree that is still registered.
+
+    Registered as an atexit hook: runs on interpreter exit even when the
+    daemon worker threads are abandoned mid-run, which is exactly the case
+    where the worker's ``finally`` cleanup never executes.
+    """
+    with _process_registry_lock:
+        pids = list(_process_registry)
+    for pid in pids:
+        try:
+            kill_child_tree(pid, force=True)
+        except Exception:
+            pass
+
+
+atexit.register(_kill_registered_process_trees)
+
+
 class ProcessTask:
     """Run a subprocess in the background with stream output and input support."""
 
@@ -1320,6 +1421,11 @@ class ProcessTask:
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
                 )
             else:
+                # Start the child in its own session/process group so that
+                # ``kill_child_tree`` can signal the whole tree with
+                # ``os.killpg`` instead of only the direct child.  This is what
+                # guarantees that grandchildren (e.g. a shell's background
+                # children) die together with the direct child.
                 process = await asyncio.create_subprocess_exec(
                     self.path,
                     *self.args,
@@ -1328,8 +1434,13 @@ class ProcessTask:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
             self._process_ref = process
+            # Track the process tree so that interpreter exit (where the
+            # daemon worker thread is abandoned without running its finally
+            # cleanup) can still force-kill every descendant.
+            _register_child_process(process.pid)
             # Read stdout and stderr concurrently with stop checking
 
             if process.stdout is None:
@@ -1437,11 +1548,14 @@ class ProcessTask:
             # Wait for process completion with periodic stop checking
             while process.returncode is None:
                 if self._stop_event.is_set():
-                    process.terminate()
+                    # Kill the whole process tree (grandchildren included), not
+                    # just the direct child, so no orphan can keep the stdout/
+                    # stderr pipe write ends open and pin this task as running.
+                    kill_child_tree(process.pid)
                     try:
                         await asyncio.wait_for(process.wait(), timeout=2)
                     except asyncio.TimeoutError:
-                        process.kill()
+                        kill_child_tree(process.pid, force=True)
                         await process.wait()
                     break
                 await asyncio.sleep(0.1)
@@ -1513,21 +1627,25 @@ class ProcessTask:
             return False, None
         finally:
             self._stop_event.set()
+            if process is not None:
+                # The tree has been reaped (or was never spawned); stop
+                # tracking it so the atexit hook only sees live trees.
+                _unregister_child_process(process.pid)
             if process is not None and process.returncode is None:
                 try:
-                    process.kill()
+                    kill_child_tree(process.pid, force=True)
                     await process.wait()
                 except Exception:
                     pass
 
     async def _stop_function(self) -> None:
-        """Signal the background process to stop."""
+        """Signal the background process to stop (kills the whole process tree)."""
         self._stop_event.set()
-        # Also try to terminate the process directly if it's running
+        # Also try to terminate the whole process tree directly if it's running.
         proc = self._process_ref
         if proc is not None and proc.returncode is None:
             try:
-                proc.terminate()
+                kill_child_tree(proc.pid)
             except Exception:
                 pass
 
