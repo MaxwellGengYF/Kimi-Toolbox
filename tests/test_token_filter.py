@@ -8,6 +8,7 @@ import pytest
 from kimix.tools.common import (
     _dedup_output,
     _is_known_rtk_command,
+    _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
     _rtk_available,
     _rtk_binary_path,
@@ -576,3 +577,52 @@ def test_rewrite_pwsh_already_rewritten_untouched(rtk_available):
     )
     assert changed is False
     assert rewritten == cmd
+
+
+# ── rtk original export when rtk folded output ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_maybe_export_rtk_original_no_markers_returns_none():
+    out = "plain output\nno folds here"
+    path, truncated = await _maybe_export_rtk_original_async(out)
+    assert path is None
+    assert truncated is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_export_rtk_original_per_file_fold_exports():
+    out = (
+        "1 matches in 1 files:\n\n"
+        "src/a.py:1:match\n"
+        "  +5 more in src/b.py [see remaining: tail -n +2 /tmp/rtk.log]\n"
+    )
+    path, truncated = await _maybe_export_rtk_original_async(out)
+    assert truncated is True
+    assert path is not None
+    import anyio
+
+    async with await anyio.open_file(path, "r") as f:
+        saved = await f.read()
+    assert saved == out
+
+
+@pytest.mark.asyncio
+async def test_maybe_export_rtk_original_skipped_files_exports():
+    out = (
+        "10 matches in 15 files:\n\n"
+        "src/a.py:1:match\n"
+        "+14 more files [see remaining: tail -n +3 /tmp/rtk.log]\n"
+    )
+    path, truncated = await _maybe_export_rtk_original_async(out)
+    assert truncated is True
+    assert path is not None
+
+
+@pytest.mark.asyncio
+async def test_maybe_export_rtk_original_see_remaining_without_fold_not_exported():
+    # The marker string alone is not enough; it must match rtk's fold protocol.
+    out = "some [see remaining: tail -n +1 foo.log] text\n"
+    path, truncated = await _maybe_export_rtk_original_async(out)
+    assert path is None
+    assert truncated is False

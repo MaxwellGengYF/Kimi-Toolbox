@@ -215,6 +215,35 @@ class TestTaskOutput:
         await stream.stop()
         await stream.wait()
 
+    async def test_rtk_truncated_output_is_exported(
+        self, mock_session: MagicMock
+    ) -> None:
+        """TaskOutput exports the full stream when rtk left fold markers."""
+        tool = TaskOutput(session=mock_session)
+        stream = BackgroundStream()
+        rtk_output = (
+            "3 matches in 2 files:\n\n"
+            "src/a.py:1:match\n"
+            "  +5 more in src/b.py [see remaining: tail -n +2 /tmp/rtk.log]\n"
+        )
+
+        def worker(q: queue.Queue[str]) -> None:
+            q.put(rtk_output)
+            time.sleep(0.05)
+
+        await stream.start(worker, stop_function=lambda: None)
+        add_task(mock_session, "run_test", stream)
+
+        result = await tool(TaskOutputParams(task_id="run_test", wait=True, timeout=5))
+        await stream.wait()
+        assert "rtk output exported to:" in str(result.output)
+        # The full rtk stream should be saved in the referenced temp file.
+        import re as _re
+        m = _re.search(r"rtk output exported to: (.+?)\]", str(result.output))
+        assert m is not None
+        saved_path = m.group(1)
+        assert Path(saved_path).read_text(encoding="utf-8") == rtk_output
+
 
 # ---------------------------------------------------------------------------
 # Python tool — Params validation
@@ -497,6 +526,24 @@ class TestPython:
         output_str = str(result.output)
         assert "run_alias_test" in output_str
         assert "status: completed" in output_str
+
+    async def test_process_output_exports_rtk_original_when_truncated(
+        self, mock_session: MagicMock
+    ) -> None:
+        """If captured output contains rtk fold markers, the full stream is saved."""
+        tool = Python(session=mock_session)
+        output = (
+            "2 matches in 2 files:\n\n"
+            "src/a.py:1:match\n"
+            "  +5 more in src/b.py [see remaining: tail -n +2 /tmp/rtk.log]\n"
+        )
+        params = PyParams(code="pass", deduplicate_output=False, max_lines=None)
+        processed, output_path, output_truncated, original_path = await tool._process_output(
+            params, output
+        )
+        assert original_path is not None
+        saved = Path(original_path).read_text(encoding="utf-8")
+        assert saved == output
 
 
 class TestAsyncIntegration:

@@ -264,7 +264,7 @@ from kimi_cli.session import Session
 if TYPE_CHECKING:
     from kimix.tools.background.utils import BackgroundStream
 OUTPUT_LIMIT = 16384
-_temp_folder = Path.home() / '.kimi' / 'sessions' / uuid.uuid4().hex
+_temp_folder = Path('.kimix_cache') / f'tmp_{os.getpid()}'
 _temp_folder.mkdir(parents=True, exist_ok=True)
 _temp_idx = 0
 _temp_set: dict[Path, int] = dict()
@@ -1106,6 +1106,34 @@ async def _token_filter_output(
         output = _truncate_lines(output, max_lines)
 
     return output, original_path
+
+
+async def _maybe_export_rtk_original_async(output: str) -> tuple[str | None, bool]:
+    """Export *output* to a temp file if it contains rtk truncation markers.
+
+    rtk (the token-killing wrapper) injects protocol markers when it folds
+    long output, e.g. ``+N more in <path> [see remaining: ...]`` or
+    ``+N more files [see remaining: ...]``.  When such markers are present,
+    saving the full stream lets the model page through the unfiltered output.
+
+    Returns:
+        ``(temp_path, truncated)`` where *temp_path* is the path to the saved
+        file (``None`` if no markers were found) and *truncated* is ``True``
+        when rtk truncation markers were detected.
+    """
+    if not output or "[see remaining:" not in output:
+        return None, False
+    # Import lazily: output_utils is a kimi_cli helper and not needed unless
+    # we actually see rtk-style markers.
+    from kimi_cli.tools.file.output_utils import parse_rtk_rg_output
+
+    _, meta = parse_rtk_rg_output(output.splitlines())
+    if not (meta.get("folded_files") or meta.get("skipped_files")):
+        return None, False
+    temp_path, _ = await _export_to_temp_file_async(
+        key=None, content=output, ext=".txt"
+    )
+    return temp_path, True
 
 
 def _interactive_scope_text(*, is_shell: bool = True) -> str:

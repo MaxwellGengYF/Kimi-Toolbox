@@ -9,7 +9,7 @@ from typing import Literal
 from kimi_cli.session import Session
 
 from .utils import generate_task_id, remove_task_id, add_task, get_all_tasks, BackgroundStream, discard_all_tasks
-from kimix.tools.common import _maybe_export_output_async, _export_to_temp_file_async
+from kimix.tools.common import _maybe_export_output_async, _maybe_export_rtk_original_async
 from kimix.tools.prompt_common import accepts_alias_text, wait_for_pattern_field
 from kimi_cli.tools.display import BackgroundTaskDisplayBlock
 
@@ -249,6 +249,11 @@ class TaskOutput(CallableTool2):
                     brief=f"Task '{params.task_id}' failed"
                 )
 
+        # If rtk folded the output, preserve the full stream for later paging.
+        rtk_original_path: str | None = None
+        if output:
+            rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
+
         if params.output_path:
             from pathlib import Path
             import anyio
@@ -263,6 +268,9 @@ class TaskOutput(CallableTool2):
         kind = params.task_id.split("_")[0] if params.task_id else "task"
         status = "running" if task_alive else "completed"
         output_text = output if output else "(no output)"
+        if rtk_original_path:
+            display_rtk_path = rtk_original_path.replace("\\", "/")
+            output_text += f"\n[rtk output exported to: {display_rtk_path}]"
         if wait_matched is not None:
             output_text += f"\nwait_matched: {str(wait_matched).lower()}"
         if not task_alive:

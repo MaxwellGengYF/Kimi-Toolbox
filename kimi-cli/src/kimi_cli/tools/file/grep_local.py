@@ -440,6 +440,8 @@ def _build_rg_args(
 def _format_cmd(params: Params, *, rg_cmd: str = _RG_CMD, rtk_path: str | None = None) -> str:
     """Format the equivalent ripgrep command string for display."""
     args = _build_rg_args(rg_cmd, params, rtk_path=rtk_path)
+    if rtk_path is not None and args and args[0] == rtk_path:
+        args[0] = "rtk"
     return shlex.join(args)
 
 
@@ -558,12 +560,17 @@ def _normalize_output_lines(lines: list[str], output_mode: str) -> list[str]:
     return lines
 
 
-def _rtk_fold_note(meta: dict[str, Any]) -> str | None:
+def _rtk_fold_note(
+    meta: dict[str, Any], *, original_path: str | None = None
+) -> str | None:
     """Build a human-readable summary of rtk's fold markers.
 
     rtk folds long content-mode output and records what it hid in protocol
     lines; this turns that metadata into a message fragment the model can
     act on (e.g. ``tail -n +26 <log>`` to page through the full output).
+
+    When ``original_path`` is provided, it is surfaced as a fallback the model
+    can read to see the full, unfiltered rtk output.
 
     Returns ``None`` when no fold markers were present.
     """
@@ -588,6 +595,8 @@ def _rtk_fold_note(meta: dict[str, Any]) -> str | None:
         log = meta["skipped_log"]
     if log:
         note += f" Full log: {log}"
+    if original_path:
+        note += f" Original output: {original_path.replace(chr(92), '/')}"
     return note
 
 
@@ -938,8 +947,18 @@ class Grep(CallableTool2[Params]):
             # their metadata for the summary message. Other modes pass through
             # untouched (rtk does not emit protocol lines for them).
             rtk_meta: dict[str, Any] = {}
+            rtk_original_path: str | None = None
             if params.output_mode == "content":
                 lines, rtk_meta = parse_rtk_rg_output(lines)
+                # When rtk truly truncated output (per-file folds or skipped
+                # files), preserve the original stream so the model can page
+                # through the full results.
+                if rtk_meta.get("folded_files") or rtk_meta.get("skipped_files"):
+                    from kimix.tools.common import _export_to_temp_file_async
+
+                    rtk_original_path, _ = await _export_to_temp_file_async(
+                        key=None, content=output, ext=".txt"
+                    )
 
             # Step 1: mtime sorting (files_with_matches only, skip on timeout)
             if not timed_out and params.output_mode == "files_with_matches":
@@ -1034,7 +1053,7 @@ class Grep(CallableTool2[Params]):
                     f"{rtk_meta['total_files']} files."
                 )
                 message = f"{message} {rtk_summary}" if message else rtk_summary
-                fold_note = _rtk_fold_note(rtk_meta)
+                fold_note = _rtk_fold_note(rtk_meta, original_path=rtk_original_path)
                 if fold_note:
                     message = f"{message} {fold_note}" if message else fold_note
 

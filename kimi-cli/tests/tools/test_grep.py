@@ -21,6 +21,7 @@ from kimi_cli.tools.file.grep_local import (
     _env_with_shared_bin_path,
     _find_existing_rtk,
     _format_cmd,
+    _rtk_fold_note,
     _strip_path_prefix,
 )
 from kimi_cli.tools.utils import DEFAULT_MAX_CHARS
@@ -1833,8 +1834,41 @@ def test_build_rg_args_without_rtk_unchanged():
 
 def test_format_cmd_reflects_rtk_when_active():
     params = Params(pattern="hello")
-    assert _format_cmd(params, rtk_path="rtk").startswith("rtk rg ")
+    # Absolute rtk path is shown as just ``rtk`` for readability.
+    assert _format_cmd(params, rtk_path="/abs/bin/rtk").startswith("rtk rg ")
     assert not _format_cmd(params).startswith("rtk ")
+
+
+def test_rtk_fold_note_without_original_path():
+    meta = {
+        "total_matches": 42,
+        "total_files": 1,
+        "folded_files": [
+            {"path": "src/a.py", "count": 40, "log": "C:\\log\\tee.log", "start_line": 2}
+        ],
+        "skipped_files": None,
+        "skipped_log": None,
+    }
+    note = _rtk_fold_note(meta)
+    assert note is not None
+    assert "rtk folded output: 40 more lines in src/a.py" in note
+    assert "Original output:" not in note
+
+
+def test_rtk_fold_note_with_original_path():
+    meta = {
+        "total_matches": 42,
+        "total_files": 1,
+        "folded_files": [
+            {"path": "src/a.py", "count": 40, "log": "C:\\log\\tee.log", "start_line": 2}
+        ],
+        "skipped_files": None,
+        "skipped_log": None,
+    }
+    note = _rtk_fold_note(meta, original_path="C:\\tmp\\rtk_out.txt")
+    assert note is not None
+    assert "rtk folded output: 40 more lines in src/a.py" in note
+    assert "Original output: C:/tmp/rtk_out.txt" in note
 
 
 @pytest.mark.asyncio
@@ -1858,8 +1892,8 @@ async def test_grep_rtk_active_by_default(grep_tool: Grep, temp_test_files, capt
     assert "env" in captured_exec["kwargs"]
     path_entries = captured_exec["kwargs"]["env"]["PATH"].split(os.pathsep)
     assert path_entries[0] == share_bin
-    # Display brief reflects the real rtk-wrapped invocation.
-    assert result.brief.startswith("rtk ") or "rtk" in result.brief.split(" ")[0]
+    # Display brief shows ``rtk`` instead of the absolute share/bin path.
+    assert result.brief.startswith("rtk ")
 
 
 @pytest.mark.asyncio
@@ -1993,6 +2027,14 @@ async def test_grep_rtk_markers_stripped_and_summarized(
     assert "rtk folded output: 40 more lines in src\\a.py" in result.message
     assert "5 more files" in result.message
     assert "Full log: tail -n +2 C:\\log\\tee.log" in result.message
+    # The original rtk stream (including protocol lines) was exported.
+    assert "Original output:" in result.message
+    original_path = result.message.split("Original output: ", 1)[1].strip()
+    assert Path(original_path).is_file()
+    saved = Path(original_path).read_text(encoding="utf-8")
+    assert "42 matches in 1 files" in saved
+    assert "+40 more in" in saved
+    assert "+5 more files" in saved
 
 
 @pytest.mark.asyncio

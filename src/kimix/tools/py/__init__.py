@@ -13,6 +13,7 @@ from kimix.tools.common import (
     _extract_export_path,
     _interactive_scope_text,
     _maybe_export_output_async,
+    _maybe_export_rtk_original_async,
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
@@ -627,6 +628,13 @@ class Python(CallableTool2[Params]):
         self, params: Params, output: str, source_label: str = "Script"
     ) -> tuple[str, str | None, bool, str | None]:
         """Summarize/export long output. Returns (display_output, path, truncated, original_path)."""
+        # When rtk itself folded the output, preserve the full stream so the
+        # model can page through the unfiltered results.  This is done before
+        # the local token filter so the raw rtk stream is captured even when
+        # dedup/max_lines are disabled.
+        rtk_original_path: str | None = None
+        if output and not (params.deduplicate_output or params.max_lines is not None):
+            rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter pipeline (dedup, truncate).
         # Python tool doesn't rewrite commands with RTK binary, so rtk_rewritten=False.
         output, original_path = await _token_filter_output(
@@ -635,6 +643,8 @@ class Python(CallableTool2[Params]):
             max_lines=params.max_lines,
             rtk_rewritten=False,
         )
+        if original_path is None:
+            original_path = rtk_original_path
         output_truncated = False
         if len(output) > 65536:
             if self._python_config().get("summarize_long_output", True):
