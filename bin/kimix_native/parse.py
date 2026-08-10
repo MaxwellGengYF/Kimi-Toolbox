@@ -410,10 +410,16 @@ def fix_bash_command(cmd: str) -> BashFix:
         return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)
-    if not names_bytes and not edits:
-        return BashFix(cmd)
     names = [n.decode("utf-8", "surrogatepass") for n in names_bytes]
-    source = _apply_edits(data, _expand_bash_markers(edits)).decode("utf-8", "surrogatepass")
+    if not names and not edits:
+        source = cmd
+    else:
+        source = _apply_edits(data, _expand_bash_markers(edits)).decode("utf-8", "surrogatepass")
+    # Bash rejects a control operator on the line after a heredoc terminator;
+    # move it onto the heredoc redirection line.  The native kernel also applies
+    # this rewrite, but the shim repeats it so older kernels and the compat path
+    # behave identically.
+    source = _shell._fix_heredoc_trailing_operators(source)
     definitions = "\n".join(_shell._FALLBACKS[n] for n in dict.fromkeys(names))
     prefix = definitions + "\n" if definitions else ""
     path_changes = tuple(n.decode("utf-8", "surrogatepass") for n in notes_bytes)

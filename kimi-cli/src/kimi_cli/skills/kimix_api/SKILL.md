@@ -988,7 +988,6 @@ All tools are `CallableTool2` subclasses. They are organized in subpackages unde
 - `FindStr` — search text in files; params: `content`, `path`, `case_sensitive=False`
 - `Mkdir` / `Rm` — create/remove directories
 - `Python` — execute Python code; params: `code`, `output_path`, `timeout=10`, `run_in_background=False` (from `kimix.tools.py`)
-- `PySyntaxCheck` — check Python syntax with ruff; params: `file_path`
 - `SyntaxLint` — unified syntax lint dispatcher; params: `file_path`, `project_root=".", clangd_path="clangd", verbose=False`
 - `MypyCheck` — Python type check; params: `file_path`, `project_root=".", verbose=False`
 - `Cpplint` — C++ lint via clangd; params: `file_path`, `project_root=".", clangd_path="clangd", verbose=False`

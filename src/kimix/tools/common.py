@@ -327,6 +327,10 @@ async def _export_to_temp_file_async(key: Path | None, content: str, ext: str = 
             _temp_set[key] = id
     if new_id:
         _temp_idx += 1
+    # Keep the async path consistent with the sync variant above: the temp
+    # folder may not exist yet when the process cwd changed since import
+    # (e.g. a tool ran with a different working directory).
+    _temp_folder.mkdir(parents=True, exist_ok=True)
     name = _temp_folder / (str(id) + ext)
     # Append content if key exists, otherwise overwrite/create
     mode = 'a' if not new_id else 'w'

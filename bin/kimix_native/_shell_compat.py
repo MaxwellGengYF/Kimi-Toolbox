@@ -10,14 +10,12 @@ Reference files: bash_fix.py (the _Scanner + fallback data), bash_tool.py
 
 from __future__ import annotations
 
-
 # ======================================================================
 # bash_fix.py (kimi-agent) - Windows Git Bash compatibility scanner
 # ======================================================================
-
-
 import sys
 from dataclasses import dataclass
+from typing import Callable
 
 try:
     import regex as re
@@ -669,7 +667,7 @@ class _BashHereDoc:
 class _BashFixScanner:
     """Conservative scanner for Bash executable command positions."""
 
-    __slots__ = ("s", "n", "edits", "names", "path_notes", "nest_depth")
+    __slots__ = ("s", "n", "edits", "names", "path_notes", "heredoc_events", "nest_depth")
 
     def __init__(self, command: str) -> None:
         self.s = command
@@ -677,6 +675,7 @@ class _BashFixScanner:
         self.edits: list[tuple[int, int, str]] = []
         self.names: list[str] = []
         self.path_notes: list[str] = []
+        self.heredoc_events: list[tuple[int, int]] = []
         self.nest_depth = 0
 
     def fix(self) -> BashFix:
@@ -701,6 +700,7 @@ class _BashFixScanner:
             source = "".join(pieces)
         else:
             source = self.s
+        source = _fix_heredoc_trailing_operators(source)
         prefix = definitions + "\n" if definitions else ""
         return BashFix(prefix + source, tuple(self.names), tuple(self.path_notes))
 
@@ -1763,8 +1763,11 @@ class _BashFixScanner:
         scan_expansions: bool = True,
     ) -> int:
         s = self.s
+        redir_line_end = -1
         for document in documents:
             body_start = i
+            if redir_line_end < 0:
+                redir_line_end = body_start - 1
             logical_line = ""
             logical_start = i
             while i < end:
@@ -1792,6 +1795,8 @@ class _BashFixScanner:
             else:
                 if scan_expansions and document.expands:
                     self._scan_heredoc_expansions(body_start, end)
+        if redir_line_end >= 0:
+            self.heredoc_events.append((redir_line_end, i))
         return i
 
     @staticmethod
@@ -1979,20 +1984,156 @@ def bash_compatibility_prelude() -> str:
     return definitions + "\n" + exports
 
 
+_HEREDOC_TRAILING_OPERATORS = frozenset({"&&", "||", "|", "|&", ";", "&"})
+
+
+def _read_shell_control_operator(s: str, i: int, n: int) -> tuple[str, int]:
+    """Return the control operator at position *i* and the index after it."""
+    if i >= n:
+        return "", i
+    ch = s[i]
+    if ch == ";":
+        if s.startswith(";;&", i):
+            return ";;&", i + 3
+        if s.startswith(";;", i):
+            return ";;", i + 2
+        if s.startswith(";&", i):
+            return ";&", i + 2
+        return ";", i + 1
+    if ch == "&":
+        if s.startswith("&&", i):
+            return "&&", i + 2
+        return "&", i + 1
+    if ch == "|":
+        if s.startswith("||", i):
+            return "||", i + 2
+        if s.startswith("|&", i):
+            return "|&", i + 2
+        return "|", i + 1
+    return "", i
+
+
+def _apply_heredoc_operator_move(
+    source: str, redir_line_end: int, terminator_end: int
+) -> str:
+    """Move a control-operator line following a heredoc terminator to the redirection line.
+
+    Bash requires a control operator that continues a heredoc-delimited command
+    to appear on the same line as the ``<<`` redirection.  A common model
+    mistake is to place the operator on the line after the closing delimiter,
+    which produces ``syntax error near unexpected token `&&'``.  This helper
+    repairs that pattern while leaving the heredoc body and delimiter intact.
+    """
+    n = len(source)
+    if redir_line_end < 0 or redir_line_end >= n or source[redir_line_end] != "\n":
+        return source
+    if terminator_end < 0 or terminator_end > n:
+        return source
+
+    i = terminator_end
+    while i < n:
+        ch = source[i]
+        if ch in " \t\r":
+            i += 1
+            continue
+        if ch == "\n":
+            i += 1
+            continue
+        if ch == "#":
+            nl = source.find("\n", i, n)
+            i = n if nl < 0 else nl + 1
+            continue
+        break
+    if i >= n:
+        return source
+
+    op, op_end = _read_shell_control_operator(source, i, n)
+    if op not in _HEREDOC_TRAILING_OPERATORS:
+        return source
+    # ``&>`` / ``&>>`` are redirections, not list terminators.
+    if op == "&" and op_end < n and source[op_end] == ">":
+        return source
+
+    move_start = i
+    line_end = source.find("\n", i, n)
+    if line_end < 0:
+        line_end = n
+        move_end = n
+    else:
+        move_end = line_end + 1
+
+    rest = source[op_end:line_end].lstrip(" \t\r")
+    if not rest or rest.startswith("#"):
+        k = move_end
+        while k < n:
+            if source[k] in " \t\r":
+                k += 1
+                continue
+            if source[k] == "\n":
+                k += 1
+                continue
+            if source[k] == "#":
+                nl = source.find("\n", k, n)
+                k = n if nl < 0 else nl + 1
+                continue
+            break
+        if k >= n:
+            return source
+        next_line_end = source.find("\n", k, n)
+        if next_line_end < 0:
+            move_end = n
+        else:
+            move_end = next_line_end + 1
+
+    lines = source[move_start:move_end].splitlines()
+    parts: list[str] = []
+    if lines:
+        parts.append(lines[0][len(op):].strip())
+        parts.extend(line.strip() for line in lines[1:])
+    joined = " ".join(part for part in parts if part and not part.startswith("#"))
+    moved = f"{op} {joined}\n" if joined else f"{op}\n"
+
+    return (
+        source[:redir_line_end]
+        + " "
+        + moved
+        + source[redir_line_end + 1 : move_start]
+        + source[move_end:]
+    )
+
+
+def _fix_heredoc_trailing_operators(source: str) -> str:
+    """Repair heredoc commands whose trailing control operator is on the wrong line."""
+    try:
+        scanner = _BashFixScanner(source)
+        scanner._scan_range(0, scanner.n)
+    except RecursionError:
+        return source
+    events = scanner.heredoc_events
+    if not events:
+        return source
+    for redir_line_end, terminator_end in reversed(events):
+        source = _apply_heredoc_operator_move(source, redir_line_end, terminator_end)
+    return source
+
+
 def fix_bash_command(command: str) -> BashFix:
     """Rewrite selected native POSIX commands for Windows Git Bash.
 
-    Non-Windows input is always returned byte-for-byte unchanged.  On Windows,
-    only literal command words with verified equivalents are changed; unknown
-    or semantically ambiguous commands are left for Bash to handle normally.
+    The Windows-platform gate lives in the app layer
+    (``kimix.tools.file.bash.bash_fix.fix_bash_command``); this scanner is
+    byte-identical to the native kernel, which also does not gate on platform.
+    Empty input is returned byte-for-byte unchanged.
     """
-    if sys.platform != "win32" or not command:
+    if not command:
         return BashFix(command)
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
     # substring fast path would miss legal executable words.  The scanner is
     # linear and exits without allocating generated shell code when unchanged.
-    return _BashFixScanner(command).fix()
+    result = _BashFixScanner(command).fix()
+    fixed = _fix_heredoc_trailing_operators(result.command)
+    return BashFix(fixed, result.replacements, result.path_changes)
 
 
 # ======================================================================
@@ -2301,8 +2442,6 @@ def _process_unquoted(cmd: str) -> str:
 # pwsh_fix.py (kimi-agent) - PowerShell quoting validator/repair
 # ======================================================================
 
-
-from dataclasses import dataclass
 
 _NORMAL = "normal"
 _DQ = "double-quoted"

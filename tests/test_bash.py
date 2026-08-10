@@ -1184,6 +1184,89 @@ class TestBashFixFalsePositives:
         assert _fix_for_windows(source) == BashFix(source)
 
 
+class TestBashFixHeredocTrailingOperators:
+    """Repair a heredoc terminator followed by a control operator.
+
+    Bash requires a control operator that continues a heredoc-delimited command
+    to appear on the same line as the ``<<`` redirection.  A common model
+    mistake is to place ``&&`` (or ``||``, ``;``, ``|``...) on the line after
+    the closing delimiter, which produces ``syntax error near unexpected token
+    `&&'``.  The fixer moves the operator (and the command it chains) to the
+    redirection line, leaving the heredoc body and delimiter untouched.
+    """
+
+    @pytest.mark.parametrize(
+        ("operator", "rest", "expected"),
+        [
+            ("&&", "echo next", " && echo next"),
+            ("||", "echo fallback", " || echo fallback"),
+            (";", "echo done", " ; echo done"),
+            ("|", "tr a b", " | tr a b"),
+            ("|&", "cat", " |& cat"),
+        ],
+    )
+    def test_moves_operator_after_terminator_to_redirection_line(
+        self, operator: str, rest: str, expected: str
+    ) -> None:
+        source = f"cat <<EOF\nhello\nEOF\n{operator} {rest}"
+        result = _fix_for_windows(source)
+        assert result.command == f"cat <<EOF{expected}\nhello\nEOF\n"
+
+    def test_moves_operator_that_is_alone_on_its_line(self) -> None:
+        source = "python - <<'PY'\nprint(1)\nPY\n&&\necho next"
+        result = _fix_for_windows(source)
+        assert result.command == "python - <<'PY' && echo next\nprint(1)\nPY\n"
+
+    def test_multiple_heredocs_on_same_command_line(self) -> None:
+        source = "cat <<A <<B\na\nA\nb\nB\n&& echo next"
+        result = _fix_for_windows(source)
+        assert result.command == "cat <<A <<B && echo next\na\nA\nb\nB\n"
+
+    def test_windows_path_and_cd_flag_interaction(self) -> None:
+        source = (
+            "cd /d D:\\compute && python - <<'PY'\nprint(1)\nPY\n"
+            "&& git status --short src/ext/BTree"
+        )
+        result = _fix_for_windows(source)
+        expected = (
+            "cd  D:/compute && python - <<'PY' && git status --short src/ext/BTree\n"
+            "print(1)\nPY\n"
+        )
+        assert result.command == expected
+
+    def test_no_change_when_no_trailing_operator(self) -> None:
+        source = "cat <<EOF\nhello\nEOF\necho next"
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_no_change_when_delimiter_line_has_trailing_text(self) -> None:
+        source = "cat <<EOF\nhello\nEOF extra\n&& echo next"
+        result = _fix_for_windows(source)
+        assert result.command == source
+
+    @pytest.mark.skipif(not BASH_AVAILABLE, reason="bash not installed")
+    def test_original_command_fails_and_fixed_command_runs(self) -> None:
+        source = "python - <<'PY'\nprint('ok')\nPY\n&& echo next"
+        failed = subprocess.run(
+            ["bash", "-c", source],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert failed.returncode != 0
+        assert "syntax error" in failed.stderr
+
+        fixed = _fix_for_windows(source).command
+        passed = subprocess.run(
+            ["bash", "-c", fixed],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert passed.returncode == 0
+        assert "ok" in passed.stdout
+        assert "next" in passed.stdout
+
+
 class TestBashFixNewFallbacks:
     """Tests for Windows cmd-style and missing-POSIX fallback commands."""
 
@@ -1404,7 +1487,7 @@ class TestBashFixWindowsPaths:
         assert result.changed
         assert result.path_changes == ("cd /d", "D:\\kimi-agent\\kimi-cli")
 
-    def test_cd_D_flag_dropped(self) -> None:
+    def test_cd_upper_d_flag_dropped(self) -> None:
         result = _fix_for_windows("cd /D C:\\Users\\me")
         assert result.command == "cd  C:/Users/me"
 

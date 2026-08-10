@@ -19,6 +19,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_STREAM = _native_get_module("stream")
+
 _threads: list[threading.Thread] = []
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -169,6 +177,10 @@ _ANSI_ESCAPE = re.compile(
 def _strip_ansi(text: str) -> str:
     if "\x1b" not in text:
         return text
+    # Native acceleration: kimix_native.stream.strip_ansi uses the identical
+    # ANSI escape pattern; the pure-Python body below is unchanged.
+    if _native_use_native("STREAM") and _NATIVE_STREAM is not None:
+        return _NATIVE_STREAM.strip_ansi(text)
     return _ANSI_ESCAPE.sub("", text)
 
 

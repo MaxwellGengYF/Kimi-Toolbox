@@ -77,6 +77,15 @@ default = true
 packages = ["src/kimix", "src/kimi_agent_sdk"]
 sources = ["src"]
 
+# The pure-Python ``kimix_native`` shim (``bin/kimix_native``) is the single
+# home of the pure-Python reference implementations that src/kimix re-exports
+# (bash/pwsh scanners, comment parsers, …), so it is bundled into the wheel as
+# the top-level ``kimix_native`` package.  The compiled extension stays
+# optional (staged into ``bin/`` by install.py / tools/sync_native.py); when it
+# is absent the shim simply falls back to its pure-Python ``_compat`` code.
+[tool.hatch.build.targets.wheel.force-include]
+"bin/kimix_native" = "kimix_native"
+
 [tool.uv]
 link-mode = "symlink"
 

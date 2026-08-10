@@ -1,38 +1,32 @@
-"""Base parser class and data models for source code comment parsers."""
+"""Base parser class and data models for source code comment parsers.
+
+The canonical pure-Python reference implementations of the parser base class,
+data models, and all language parsers live in
+``bin/kimix_native/_parse_compat.py`` (the ``kimix_native`` shim); this module
+re-exports them so there is exactly one copy of the parser logic.
+"""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import ClassVar
+from kimix.native_loader import get_compat as _native_get_compat
 
+# The canonical pure-Python implementation (the historical body of this
+# module) lives in the kimix_native shim so there is exactly one copy of the
+# parser logic.
+_compat = _native_get_compat("_parse_compat")
+if _compat is None:  # pragma: no cover - shim missing (unbundled install)
+    raise ImportError(
+        "kimix_native shim unavailable: the pure-Python comment parsers live "
+        "in bin/kimix_native/_parse_compat.py and must be importable. Install "
+        "the kimix package with its bundled shim or run from the repository "
+        "checkout."
+    )
 
-@dataclass
-class Comment:
-    """Represents a single comment found in source code."""
-    content: str
-    line: int
-    column: int
-    kind: str  # "line", "block", "doc"
+Comment = _compat.Comment
+ParseResult = _compat.ParseResult
+BaseParser = _compat.BaseParser
 
-
-@dataclass
-class ParseResult:
-    """Result of parsing source code for comments."""
-    language: str
-    comments: list[Comment] = field(default_factory=list)
-    code_without_comments: str = ""
-
-    @property
-    def total_comments(self) -> int:
-        return len(self.comments)
-
-    @property
-    def comment_lines(self) -> int:
-        return sum(1 for c in self.comments for _ in c.content.splitlines() if _)
-
-    def get_comments_by_kind(self, kind: str) -> list[Comment]:
-        return [c for c in self.comments if c.kind == kind]
+__all__ = ["Comment", "ParseResult", "BaseParser", "native_parse_result"]
 
 
 def native_parse_result(
@@ -80,60 +74,3 @@ def native_parse_result(
         ],
         code_without_comments=result.code_without_comments,
     )
-
-
-class BaseParser(ABC):
-    """Abstract base class for all language parsers."""
-
-    name: ClassVar[str] = ""
-    description: ClassVar[str] = ""
-
-    @abstractmethod
-    def parse(self, source_code: str) -> ParseResult:
-        """Parse source code and extract comments.
-
-        Args:
-            source_code: The source code string to parse.
-
-        Returns:
-            ParseResult containing extracted comments and code without comments.
-        """
-        ...
-
-    def parse_file(self, file_path: str, encoding: str = "utf-8") -> ParseResult:
-        """Parse a source file and extract comments.
-
-        Args:
-            file_path: Path to the source file.
-            encoding: File encoding (default: utf-8).
-
-        Returns:
-            ParseResult containing extracted comments and code without comments.
-        """
-        with open(file_path, encoding=encoding) as f:
-            source_code = f.read()
-        return self.parse(source_code)
-
-    def _build_result(self, language: str, source_code: str, comments: list[Comment]) -> ParseResult:
-        """Build a ParseResult with code stripped of comments."""
-        lines = source_code.splitlines(keepends=True)
-        # Sort comments by line (and column) in reverse to avoid offset issues
-        sorted_comments = sorted(comments, key=lambda c: (c.line, c.column), reverse=True)
-
-        for comment in sorted_comments:
-            if 1 <= comment.line <= len(lines):
-                line = lines[comment.line - 1]
-                # Replace the comment portion with whitespace
-                col = comment.column - 1  # convert to 0-based
-                end_col = min(col + len(comment.content), len(line))
-                if col < len(line):
-                    # Preserve indentation structure by replacing with spaces
-                    replacement = " " * len(comment.content)
-                    lines[comment.line - 1] = line[:col] + replacement + line[end_col:]
-
-        code_without = "".join(lines)
-        return ParseResult(
-            language=language,
-            comments=sorted(comments, key=lambda c: (c.line, c.column)),
-            code_without_comments=code_without,
-        )

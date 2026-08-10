@@ -9,6 +9,10 @@ from kaos.path import KaosPath
 from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolReturnValue
 from pydantic import BaseModel, Field, model_validator
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.session import Session
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import ToolResultBuilder, truncate_line
@@ -29,6 +33,9 @@ NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
 MAX_LINE_LENGTH = 2000
 MAX_BYTES = 100 << 10  # 100KB
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
 
 # Precomputed lookup: hash byte → 2-char nibble string
 _NIBBLE_LOOKUP: list[str] = [NIBBLE_STR[i >> 4] + NIBBLE_STR[i & 0x0F] for i in range(256)]
@@ -71,6 +78,28 @@ def compute_line_hash(line_num: int, line: str, prev_hash: str | None) -> str:
     data = "".join(chars).encode("utf-8")
     hash_val = xxhash.xxh32(data, seed).intdigest() & 0xFF
     return _NIBBLE_LOOKUP[hash_val]
+
+
+def _cumulative_hashes(file_lines: list[str]) -> list[str]:
+    """Compute cumulative (chained) hashes for every line in *file_lines*.
+
+    Bulk native fast path: ``kimix_native.tools.compute_line_hashes`` hashes
+    the whole file in a single call (GIL released). The kernel splits on
+    ``\n`` and treats a trailing ``\n`` as the end marker (dropping the
+    trailing empty element), so it is used only when the line list has no
+    trailing empty line — earlier hashes never depend on later lines and the
+    pure-Python loop below is bit-identical otherwise.
+    """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None:
+        if not file_lines or file_lines[-1] != "":
+            return _NATIVE_TOOLS.compute_line_hashes("\n".join(file_lines))
+    hashes: list[str] = []
+    prev_hash: str | None = None
+    for i, line in enumerate(file_lines, 1):
+        h = compute_line_hash(i, line, prev_hash)
+        hashes.append(h)
+        prev_hash = h
+    return hashes
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Anchor Parsing
@@ -193,13 +222,7 @@ class HashlineMismatchError(Exception):
         display_lines = sorted(display_lines_set)
 
         # Pre-compute all cumulative hashes for the file
-        cumulative_hashes: list[str] = []
-        prev_hash: str | None = None
-        for i, line in enumerate(self.file_lines):
-            line_num = i + 1
-            hash_str = compute_line_hash(line_num, line, prev_hash)
-            cumulative_hashes.append(hash_str)
-            prev_hash = hash_str
+        cumulative_hashes = _cumulative_hashes(self.file_lines)
 
         prev_line = 0
         for line_num in display_lines:
@@ -238,15 +261,9 @@ def validate_anchor_ref(
     if cumulative_hashes is not None:
         actual_hash = cumulative_hashes[anchor.line - 1]
     else:
-        prev_hash: str | None = None
-        computed: list[str] = []
-        for i, line in enumerate(file_lines):
-            line_num = i + 1
-            hash_str = compute_line_hash(line_num, line, prev_hash)
-            computed.append(hash_str)
-            prev_hash = hash_str
-            if line_num == anchor.line:
-                break
+        # Compute all cumulative hashes; earlier hashes do not depend on
+        # later lines, so this is bit-identical to the early-stop loop.
+        computed = _cumulative_hashes(file_lines)
         actual_hash = computed[anchor.line - 1]
 
     if actual_hash != anchor.hash:
@@ -901,12 +918,6 @@ class HashEdit(CallableTool2[HashEditParams]):
             return ToolError(message=str(e), brief='Internal error.')
 
     async def _do_edit(self, params: HashEditParams) -> ToolReturnValue:
-        if not self._session.file_mtime.mark_dirty(params.path):
-            return ToolError(
-                message="File modified, read file first.",
-                brief="File modified",
-            )
-
         try:
             p = kaos_path_from_tool_input(params.path, self._work_dir)
             logical_path = p

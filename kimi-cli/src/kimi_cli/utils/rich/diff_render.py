@@ -18,8 +18,15 @@ from rich.style import Style as RichStyle
 from rich.table import Table
 from rich.text import Text
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
 from kimi_cli.tools.display import DiffDisplayBlock
 from kimi_cli.utils.rich.syntax import KimiSyntax
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_DIFF = _native_get_module("diff")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +182,11 @@ def _build_offset_map(raw: str, rendered: str, tab_size: int) -> list[int]:
     Returns a list of length ``len(raw) + 1`` where ``result[i]`` is the
     rendered offset corresponding to raw position *i*.
     """
+    # Native acceleration: kimix_native.diff.build_offset_map mirrors this
+    # body exactly (including the fallback linear-map branch); the pure-Python
+    # body below is unchanged.
+    if _native_use_native("DIFF") and _NATIVE_DIFF is not None:
+        return _NATIVE_DIFF.build_offset_map(raw, rendered, tab_size)
     if raw == rendered:
         return list(range(len(raw) + 1))
     offsets: list[int] = []

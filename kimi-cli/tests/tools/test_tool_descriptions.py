@@ -27,7 +27,7 @@ def test_glob_description(runtime):
 
     assert windows_path_hint not in glob_tool.base.description
     assert glob_tool.base.description == snapshot(
-        "Find files by glob pattern.\n"
+        "Find files by glob pattern. Use `ReadFile` to read the paths found.\n"
     )
 
 

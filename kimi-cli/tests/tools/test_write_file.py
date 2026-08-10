@@ -313,18 +313,23 @@ async def test_write_outside_relative_path_error_has_warning(
     assert "[out of work-dir]" in result.message
 
 
-# --- mark_dirty tests ---
+# --- FileMTime guard removed tests ---
 
 
-async def test_write_after_file_changed_returns_error(
+async def test_write_after_file_changed_succeeds(
     write_file_tool: WriteFile, temp_work_dir: KaosPath, session
 ):
-    """Writing to a file whose mtime matches the recorded mtime returns error."""
+    """Writing to a file whose mtime matches the recorded mtime succeeds.
+
+    The FileMTime guard was removed: WriteFile no longer refuses to write a
+    file whose mtime is recorded in the tracker. The write applies to the
+    current on-disk content.
+    """
     file_path = temp_work_dir / "changed.txt"
     await file_path.write_text("original content")
 
-    # Pre-populate the tracker with the current mtime so mark_dirty
-    # finds an equal timestamp and returns False.
+    # Pre-populate the tracker with the current mtime so the old mark_dirty
+    # guard would have found an equal timestamp and returned False.
     from kimi_cli.utils.path import kaos_path_from_user_input
     key = str(kaos_path_from_user_input(str(file_path)).canonical())
     st = await file_path.stat()
@@ -332,9 +337,9 @@ async def test_write_after_file_changed_returns_error(
 
     result = await write_file_tool(Params(path=str(file_path), content="new content"))
 
-    assert result.is_error
-    assert "File modified" in result.message
-    assert "read file first" in result.message
+    assert not result.is_error
+    assert "successfully overwritten" in result.message
+    assert await file_path.read_text() == "new content"
 
 
 async def test_write_new_file_not_in_dict_succeeds(
@@ -359,12 +364,12 @@ def _bump_mtime(path: KaosPath, delta: float = 2.0) -> None:
     os.utime(str(path), (st.st_atime, st.st_mtime + delta))
 
 
-async def test_write_blocked_after_external_modification(
+async def test_write_after_external_modification_succeeds(
     read_file_tool: ReadFile,
     write_file_tool: WriteFile,
     temp_work_dir: KaosPath,
 ):
-    """Read via ReadFile, external modification, then WriteFile is blocked."""
+    """Read via ReadFile, external modification, then WriteFile still succeeds."""
     file_path = temp_work_dir / "ext_mod.txt"
     await file_path.write_text("original content")
 
@@ -376,24 +381,24 @@ async def test_write_blocked_after_external_modification(
     _bump_mtime(file_path)
 
     result = await write_file_tool(Params(path=str(file_path), content="clobbered"))
-    assert result.is_error
-    assert "File modified" in result.message
-    assert "read file first" in result.message
+    assert not result.is_error
+    assert "successfully overwritten" in result.message
+    assert await file_path.read_text() == "clobbered"
 
 
-async def test_write_after_write_without_read_blocked(
+async def test_write_after_write_without_read_succeeds(
     write_file_tool: WriteFile, temp_work_dir: KaosPath
 ):
-    """Two consecutive writes with no read in between: the second is blocked."""
+    """Two consecutive writes with no read in between both succeed."""
     file_path = temp_work_dir / "double_write.txt"
 
     result1 = await write_file_tool(Params(path=str(file_path), content="first"))
     assert not result1.is_error
 
     result2 = await write_file_tool(Params(path=str(file_path), content="second"))
-    assert result2.is_error
-    assert "File modified" in result2.message
-    assert "read file first" in result2.message
+    assert not result2.is_error
+    assert "successfully overwritten" in result2.message
+    assert await file_path.read_text() == "second"
 
 
 async def test_write_succeeds_after_read(

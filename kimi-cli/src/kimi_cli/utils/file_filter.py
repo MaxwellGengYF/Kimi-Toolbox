@@ -5,6 +5,14 @@ import regex as re
 import subprocess
 from pathlib import Path
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_GLOB = _native_get_module("glob")
+
 _IGNORED_NAMES: frozenset[str] = frozenset(
     (
         # vcs metadata
@@ -152,6 +160,24 @@ def _parse_ls_files_output(stdout: str, *, filter_ignored: bool = True) -> list[
     ``is_ignored()`` are excluded so that tracked ``node_modules/``,
     ``vendor/``, etc. do not pollute completion candidates.
     """
+    # Native acceleration: kimix_native.glob.parse_ls_files_output mirrors this
+    # body exactly for well-formed ``git ls-files -z`` output (no empty path
+    # segments). The native kernel skips empty '/' segments, while this body
+    # treats an empty segment as an ignored name and drops the whole entry;
+    # git never emits leading/trailing slashes or '//', but when present we
+    # stay on the pure-Python path to remain bit-identical. The pure-Python
+    # body below is unchanged.
+    if _native_use_native("GLOB") and _NATIVE_GLOB is not None:
+        if (
+            not stdout.startswith("/")
+            and not stdout.endswith("/")
+            and "//" not in stdout
+            and "/\0" not in stdout
+            and "\0/" not in stdout
+        ):
+            return _NATIVE_GLOB.parse_ls_files_output(
+                stdout.encode("utf-8", "surrogatepass"), filter_ignored
+            )
     paths: list[str] = []
     seen_dirs: set[str] = set()
     ignored_prefixes: set[str] = set()

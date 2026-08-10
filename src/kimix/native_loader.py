@@ -51,6 +51,7 @@ __all__ = [
     "use_native",
     "version",
     "get_module",
+    "get_compat",
 ]
 
 _KERNELS = (
@@ -166,6 +167,18 @@ def _setup() -> tuple[bool, str | None]:
     global NATIVE_AVAILABLE, NATIVE_PATH
     mode = os.environ.get("KIMIX_NATIVE", "auto")
     if mode == "0":
+        # Pure-Python mode: never import the compiled extension, but the shim
+        # package (whose ``_compat`` modules are the canonical pure-Python
+        # reference implementations that src/kimix re-exports) must remain
+        # importable, so the candidate dirs are inserted exactly like the
+        # auto path does below.  Nothing is imported and no native module is
+        # used; the shim simply falls back to its pure-Python ``_compat``.
+        for cand in _candidate_dirs():
+            if not cand or not os.path.isdir(cand):
+                continue
+            for d in _shim_dirs_for(cand):
+                if d not in sys.path:
+                    sys.path.insert(0, d)
         NATIVE_AVAILABLE = False
         NATIVE_PATH = None
         return False, None
@@ -225,15 +238,18 @@ def _build_kernel_table() -> dict[str, bool]:
     Each known kernel is stored under its upper/lower/title spellings so
     callers never pay for a per-call ``.upper()`` on the hot path. Results
     come straight from the shim's ``use_native`` (env toggles included) and
-    never change while the process lives.
+    never change while the process lives. When native is unavailable
+    (``KIMIX_NATIVE=0`` or missing extension) every known kernel is stored
+    as ``False`` so the tables stay complete in every mode.
     """
     table: dict[str, bool] = {}
-    if NATIVE_AVAILABLE and _shim is not None:
-        for kernel in _KERNELS:
-            result = bool(_shim.use_native(kernel))
-            table[kernel] = result
-            table[kernel.lower()] = result
-            table[kernel.title()] = result
+    for kernel in _KERNELS:
+        result = (
+            bool(_shim.use_native(kernel)) if NATIVE_AVAILABLE and _shim is not None else False
+        )
+        table[kernel] = result
+        table[kernel.lower()] = result
+        table[kernel.title()] = result
     return table
 
 
@@ -243,16 +259,20 @@ def _build_module_table() -> dict[str, object]:
     All known submodules (``kimix_native.<kernel.lower()>``) are imported
     once here; each is a small shim module over the already-loaded
     ``runtime_py`` extension, so the one-time cost is negligible and the hot
-    path becomes a single dict lookup (module object or None).
+    path becomes a single dict lookup (module object or None). When native
+    is unavailable every known module is stored as ``None`` so the tables
+    stay complete in every mode.
     """
     table: dict[str, object] = {}
-    if NATIVE_AVAILABLE and _shim is not None:
-        for kernel in _KERNELS:
-            name = kernel.lower()
+    for kernel in _KERNELS:
+        name = kernel.lower()
+        mod: object = None
+        if NATIVE_AVAILABLE and _shim is not None:
             try:
-                table[name] = importlib.import_module(f"kimix_native.{name}")
+                mod = importlib.import_module(f"kimix_native.{name}")
             except ImportError:
-                table[name] = None
+                mod = None
+        table[name] = mod
     return table
 
 
@@ -272,6 +292,7 @@ def use_native(kernel: str) -> bool:
     if cached is not _MISSING:
         return cached
     if not NATIVE_AVAILABLE or _shim is None:
+        _KERNEL_TABLE[kernel] = False
         return False
     key = kernel.upper()
     cached = _kernel_cache.get(key, _MISSING)
@@ -332,6 +353,22 @@ def get_module(name: str):
         mod = None
     _MODULE_TABLE[name] = mod
     return mod
+
+
+def get_compat(name: str):
+    """Return the ``kimix_native.<name>`` pure-Python compat submodule, or None.
+
+    Unlike :func:`get_module` this works even when the compiled extension is
+    unavailable (``KIMIX_NATIVE=0`` / missing binaries): the shim's ``_compat``
+    modules are the canonical pure-Python reference implementations that
+    ``src/kimix`` re-exports, so they are imported whenever the shim package
+    itself is importable.  Returns None only when the shim cannot be imported
+    at all (e.g. an installed wheel without the bundled shim).
+    """
+    try:
+        return importlib.import_module(f"kimix_native.{name}")
+    except ImportError:
+        return None
 
 
 def kernel_module(kernel: str):

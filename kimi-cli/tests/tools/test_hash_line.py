@@ -1961,10 +1961,15 @@ async def test_read_empty_path(hash_line_tool: HashRead):
     assert "File path cannot be empty" in result.message
 
 
-async def test_edit_file_mark_dirty_blocks_second_edit(
+async def test_edit_file_second_edit_succeeds_without_read(
     hash_edit_tool: HashEdit, temp_work_dir: KaosPath, session
 ):
-    """Editing a tracked file whose mtime hasn't changed returns error."""
+    """Editing a tracked file whose mtime hasn't changed succeeds.
+
+    The FileMTime guard was removed: HashEdit no longer refuses to edit a
+    file whose mtime is recorded in the tracker. The edit applies to the
+    current on-disk content.
+    """
     file_path = temp_work_dir / "test.txt"
     content = "line 1\nline 2\nline 3\n"
     await file_path.write_text(content)
@@ -1991,7 +1996,7 @@ async def test_edit_file_mark_dirty_blocks_second_edit(
     st = await file_path.stat()
     session.file_mtime._times[key] = st.st_mtime
 
-    # Second edit without an intervening read should fail
+    # Second edit without an intervening read still succeeds
     result2 = await hash_edit_tool(
         HashEditParams(
             path=str(file_path),
@@ -2005,9 +2010,8 @@ async def test_edit_file_mark_dirty_blocks_second_edit(
             ],
         )
     )
-    assert result2.is_error
-    assert "File modified" in result2.message
-    assert "read file first" in result2.message
+    assert not result2.is_error
+    assert "ALSO_MODIFIED" in await file_path.read_text()
 
 
 async def test_edit_file_after_hashread_succeeds(
@@ -2037,7 +2041,7 @@ async def test_edit_file_after_hashread_succeeds(
     )
     assert not result1.is_error
 
-    # Manually set tracker to current mtime so a second edit would fail
+    # Manually set the tracker to the current mtime (harmless: no guard remains)
     from kimi_cli.utils.path import kaos_path_from_user_input
     key = str(kaos_path_from_user_input(str(file_path)).canonical())
     st = await file_path.stat()

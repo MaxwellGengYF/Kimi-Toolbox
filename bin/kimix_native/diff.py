@@ -111,6 +111,36 @@ def _build_offset_map(raw: str, tab_size: int) -> list[int]:
     return offsets
 
 
+def _compat_build_offset_map(raw: str, rendered: str, tab_size: int) -> list[int]:
+    """Exact mirror of diff_render.py::_build_offset_map (including the
+    fallback linear-map branch).
+
+    Returns a list of length ``len(raw) + 1`` where ``result[i]`` is the
+    rendered offset (in Python code points) corresponding to raw position *i*.
+    """
+    if raw == rendered:
+        return list(range(len(raw) + 1))
+    offsets: list[int] = []
+    col = 0
+    for ch in raw:
+        offsets.append(col)
+        if ch == "\t":
+            col += tab_size - (col % tab_size)
+        else:
+            col += 1
+    offsets.append(col)
+    if col != len(rendered):
+        # The highlighter transformed the text in a way we didn't expect.
+        # Return a bounded, monotonic best-effort map so inline stylizing
+        # can proceed without crashing or producing out-of-range offsets.
+        rendered_len = len(rendered)
+        raw_len = len(raw)
+        if raw_len == 0:
+            return [rendered_len]
+        return [(i * rendered_len) // raw_len for i in range(raw_len)] + [rendered_len]
+    return offsets
+
+
 def _compat_inline_diff_ranges(
     old_line: str,
     new_line: str,
@@ -179,3 +209,21 @@ def inline_diff_ranges(
             min_ratio,
         )
     return _compat_inline_diff_ranges(old_line, new_line, min_ratio)
+
+
+def build_offset_map(raw: str, rendered: str, tab_size: int) -> list[int]:
+    """Build a mapping from raw-string indices to rendered-string indices.
+
+    Mirrors ``kimi_cli.utils.rich.diff_render._build_offset_map`` exactly:
+    the highlighter expands tabs via ``str.expandtabs(tab_size)`` before
+    tokenising, so this replicates the same column-aware expansion. Returns a
+    list of length ``len(raw) + 1`` where ``result[i]`` is the rendered offset
+    corresponding to raw position *i* (offsets are Python code points).
+    """
+    if use_native("DIFF") and _native is not None:
+        return _native.diff.build_offset_map(
+            raw.encode("utf-8", "surrogatepass"),
+            rendered.encode("utf-8", "surrogatepass"),
+            tab_size,
+        )
+    return _compat_build_offset_map(raw, rendered, tab_size)

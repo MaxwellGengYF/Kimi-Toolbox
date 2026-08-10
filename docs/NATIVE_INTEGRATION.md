@@ -200,6 +200,37 @@ because the native contracts do not match the app's data model bit-for-bit:
   `tools\sync_native.py` after every kimix-base rebuild to refresh the
   binaries.
 
+## Windows file-lock note when re-staging `runtime_py.pyd`
+
+On Windows, `runtime_py.pyd` is locked by any running Python process that has
+already imported it. When you copy a freshly-built `.pyd` into `bin\`, a plain
+`copy`/`shutil.copy2` fails with:
+
+```text
+PermissionError: [WinError 32] The process cannot access the file because it is being used by another process.
+```
+
+The safe manual workflow (and what `tools\sync_native.py` does internally) is:
+
+1. Rename the existing `bin\runtime_py.pyd` to `bin\runtime_py.pyd.old`.
+   Windows permits renaming a mapped DLL; the old handle stays valid via the
+   renamed path.
+2. Copy the new `runtime_py.pyd` into `bin\` under the original name.
+3. New processes load the new file; already-running processes continue using
+   the `.old` copy until they exit.
+4. Delete `bin\runtime_py.pyd.old` once nothing holds it. You can find holders
+   with:
+
+   ```cmd
+   tasklist /m runtime_py.pyd
+   ```
+
+   Then either stop those processes or wait and remove the file after a shell
+   restart.
+
+This only applies to Windows. On Linux/macOS the extension is a `.so` and can
+usually be overwritten in place even while mapped, so no `.old` dance is needed.
+
 ## Adding a new kernel
 
 1. Wire the gate in the app function (pattern above).
