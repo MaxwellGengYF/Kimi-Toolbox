@@ -38,6 +38,7 @@ from kimix.tools.common import (
     _maybe_export_output_async,
     _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
+    _original_saved_message,
     _summarize_long_output_async,
     _token_filter_output,
 )
@@ -860,11 +861,16 @@ class Bash(CallableTool2[BashParams]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
+        suffix = _original_saved_message(original_path)
         if not success:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
+            if suffix:
+                msg = f"{msg} {suffix}"
             return ToolError(output=block, message=msg, brief="Command execution failed")
 
         msg = "[rtk] success" if rtk_rewritten else "success"
+        if suffix:
+            msg = f"{msg} {suffix}"
         return ToolOk(
             output=block,
             message=msg,
@@ -1068,7 +1074,7 @@ class Bash(CallableTool2[BashParams]):
             or params.max_lines is not None
         ):
             rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
-        # Run token filter pipeline (dedup, truncate)
+        # Run token filter post-process pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
             token_kill=params.deduplicate_output,
@@ -1126,4 +1132,7 @@ class Bash(CallableTool2[BashParams]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
+        suffix = _original_saved_message(original_path)
+        if suffix:
+            message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)

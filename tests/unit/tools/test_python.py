@@ -324,6 +324,37 @@ class TestProcessTaskWiring:
         assert kwargs["redact"] is True
 
 
+class TestOriginalSavedSuffix:
+    @pytest.mark.asyncio
+    async def test_message_includes_original_path_after_dedup(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repeated = "ERROR\n" * 10
+        _fake_process_task(monkeypatch, output=repeated)
+        result = await tool(PythonParams(code="print('x')", deduplicate_output=True))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    @pytest.mark.asyncio
+    async def test_message_includes_original_path_after_truncate(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        long_output = "\n".join(f"line_{i}" for i in range(500))
+        _fake_process_task(monkeypatch, output=long_output)
+        result = await tool(PythonParams(code="print('x')", max_lines=10))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    @pytest.mark.asyncio
+    async def test_message_no_suffix_when_no_filter(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_process_task(monkeypatch, output="plain output")
+        result = await tool(PythonParams(code="print('x')", deduplicate_output=False))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to" not in result.message
+
+
 # ---------------------------------------------------------------------------
 # WP2: fail-fast syntax pre-check (no subprocess spawn on broken source)
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from typing import Literal
 from kimi_cli.session import Session
 
 from .utils import generate_task_id, remove_task_id, add_task, get_all_tasks, BackgroundStream, discard_all_tasks
-from kimix.tools.common import _maybe_export_output_async, _maybe_export_rtk_original_async
+from kimix.tools.common import _maybe_export_output_async, _maybe_export_rtk_original_async, _original_saved_message
 from kimix.tools.prompt_common import accepts_alias_text, wait_for_pattern_field
 from kimi_cli.tools.display import BackgroundTaskDisplayBlock
 
@@ -278,8 +278,10 @@ class TaskOutput(CallableTool2):
             if elapsed is not None:
                 output_text += f"\n[Process completed in {elapsed:.2f}s]"
 
+        message = _original_saved_message(rtk_original_path)
         return ToolOk(
             output=output_text,
+            message=message,
             brief="Task output retrieved",
             display_block=BackgroundTaskDisplayBlock(
                 task_id=params.task_id,

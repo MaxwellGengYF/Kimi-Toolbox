@@ -19,7 +19,9 @@ from kimix.tools.common import (
     _interactive_scope_text,
     _is_known_rtk_command,
     _maybe_export_output_async,
+    _maybe_export_rtk_original_async,
     _export_to_temp_file_async,
+    _original_saved_message,
     _rtk_binary_path,
     _summarize_long_output_async,
     _token_filter_output,
@@ -530,6 +532,9 @@ class Run(CallableTool2[RunParams]):
                     msg = "[rtk] failed" if rtk_rewritten else "failed"
                     if hint:
                         msg += f" Hint: {hint}"
+                    suffix = _original_saved_message(original_path)
+                    if suffix:
+                        msg = f"{msg} {suffix}"
                     return ToolError(
                         output=block,
                         message=msg,
@@ -554,6 +559,9 @@ class Run(CallableTool2[RunParams]):
                 )
                 elapsed = task.stream.process_elapsed if task.stream else None
                 msg = "[rtk] success" if rtk_rewritten else "success"
+                suffix = _original_saved_message(original_path)
+                if suffix:
+                    msg = f"{msg} {suffix}"
                 return ToolOk(
                     output=block,
                     message=msg,
@@ -689,6 +697,16 @@ class Run(CallableTool2[RunParams]):
         # summarize pipeline never sees credentials.
         if self._redact_secrets and output:
             output = redact_sensitive_output(output)
+        # When rtk itself folded the output, preserve the full stream so the
+        # model can page through the unfiltered results.  This is done before
+        # the local token filter so the raw rtk stream is captured even when
+        # dedup/max_lines are disabled.
+        rtk_original_path: str | None = None
+        if output and not (
+            (params.deduplicate_output and not rtk_rewritten)
+            or params.max_lines is not None
+        ):
+            rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
@@ -696,6 +714,8 @@ class Run(CallableTool2[RunParams]):
             max_lines=params.max_lines,
             rtk_rewritten=rtk_rewritten,
         )
+        if original_path is None:
+            original_path = rtk_original_path
         output_truncated = False
         if len(output) > 65536:
             output = await _summarize_long_output_async(
@@ -747,4 +767,7 @@ class Run(CallableTool2[RunParams]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
+        suffix = _original_saved_message(original_path)
+        if suffix:
+            message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)

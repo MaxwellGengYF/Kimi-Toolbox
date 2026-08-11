@@ -108,3 +108,50 @@ class TestTaskOutputWaitForPattern:
 
         assert result.is_error
         assert "Invalid wait_for_pattern" in result.message
+
+
+class TestTaskOutputOriginalSavedSuffix:
+    @staticmethod
+    def _stream_with_rtk_output(output: str) -> MagicMock:
+        stream = MagicMock()
+        stream.wait_for_output = AsyncMock(return_value=(output, False, 0.1))
+        stream.wait_with_inactivity_timeout = AsyncMock(return_value=(True, 0.1, False))
+        stream.pop_output = AsyncMock(return_value=output)
+        stream.thread_is_alive = AsyncMock(return_value=False)
+        stream.success = AsyncMock(return_value=True)
+        stream.process_elapsed = None
+        return stream
+
+    def _register(self, mock_session: MagicMock, stream: MagicMock) -> None:
+        from kimix.tools.background.utils import TaskData
+
+        data = TaskData()
+        data.tasks = {"bash_1": stream}
+        mock_session.custom_data["background_task_data"] = data
+
+    async def test_message_includes_original_path_for_rtk_output(
+        self, mock_session: MagicMock
+    ) -> None:
+        to = TaskOutput(session=mock_session)
+        rtk_output = (
+            "line1\nline2\n"
+            "+5 more files [see remaining: .kimix_cache/tmp_1234/0.txt]\n"
+        )
+        self._register(mock_session, self._stream_with_rtk_output(rtk_output))
+
+        result = await to(TaskOutputParams(task_id="bash_1"))
+
+        assert not result.is_error
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    async def test_message_empty_for_plain_output(
+        self, mock_session: MagicMock
+    ) -> None:
+        to = TaskOutput(session=mock_session)
+        self._register(mock_session, self._stream_with_rtk_output("plain output"))
+
+        result = await to(TaskOutputParams(task_id="bash_1"))
+
+        assert not result.is_error
+        assert "[original saved to" not in result.message
+

@@ -264,6 +264,85 @@ class TestRunSafetyWiring:
         assert "exit_code: 42" in result.output
 
 
+class TestRunOriginalSavedSuffix:
+    async def test_success_message_includes_original_path_after_dedup(
+        self, mock_session: MagicMock
+    ) -> None:
+        run = _run_instance(mock_session)
+        with (
+            patch("kimix.tools.file.run.ProcessTask") as mock_pt,
+            patch("kimix.tools.file.run.shutil.which", return_value="/fake/python"),
+            patch("kimix.tools.file.run.Path.is_file", return_value=True),
+        ):
+            instance = MagicMock()
+            instance.start = AsyncMock(return_value="run_dedup")
+            instance.wait = AsyncMock(return_value=None)
+            instance.thread_is_alive = AsyncMock(return_value=False)
+            instance.stream = AsyncMock()
+            instance.stream.pop_output = AsyncMock(return_value="ERROR\n" * 10)
+            instance.stream.success = AsyncMock(return_value=True)
+            instance.stream.exit_code = 0
+            instance.stream.process_elapsed = None
+            mock_pt.return_value = instance
+
+            result = await run(RunParams(command="python -c print(1)", deduplicate_output=True))
+
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    async def test_success_message_includes_original_path_after_truncate(
+        self, mock_session: MagicMock
+    ) -> None:
+        run = _run_instance(mock_session)
+        with (
+            patch("kimix.tools.file.run.ProcessTask") as mock_pt,
+            patch("kimix.tools.file.run.shutil.which", return_value="/fake/python"),
+            patch("kimix.tools.file.run.Path.is_file", return_value=True),
+        ):
+            instance = MagicMock()
+            instance.start = AsyncMock(return_value="run_trunc")
+            instance.wait = AsyncMock(return_value=None)
+            instance.thread_is_alive = AsyncMock(return_value=False)
+            instance.stream = AsyncMock()
+            instance.stream.pop_output = AsyncMock(
+                return_value="\n".join(f"line_{i}" for i in range(500))
+            )
+            instance.stream.success = AsyncMock(return_value=True)
+            instance.stream.exit_code = 0
+            instance.stream.process_elapsed = None
+            mock_pt.return_value = instance
+
+            result = await run(RunParams(command="python -c print(1)", max_lines=10))
+
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    async def test_no_suffix_when_no_filter(
+        self, mock_session: MagicMock
+    ) -> None:
+        run = _run_instance(mock_session)
+        with (
+            patch("kimix.tools.file.run.ProcessTask") as mock_pt,
+            patch("kimix.tools.file.run.shutil.which", return_value="/fake/python"),
+            patch("kimix.tools.file.run.Path.is_file", return_value=True),
+        ):
+            instance = MagicMock()
+            instance.start = AsyncMock(return_value="run_plain")
+            instance.wait = AsyncMock(return_value=None)
+            instance.thread_is_alive = AsyncMock(return_value=False)
+            instance.stream = AsyncMock()
+            instance.stream.pop_output = AsyncMock(return_value="plain output")
+            instance.stream.success = AsyncMock(return_value=True)
+            instance.stream.exit_code = 0
+            instance.stream.process_elapsed = None
+            mock_pt.return_value = instance
+
+            result = await run(RunParams(command="python -c print(1)", deduplicate_output=False))
+
+        assert isinstance(result, ToolOk)
+        assert "[original saved to" not in result.message
+
+
 # ============================================================================
 # Long `python -c` payloads are saved to the shared temp folder
 # (not the OS temp dir / session folder), via common._create_script_file.

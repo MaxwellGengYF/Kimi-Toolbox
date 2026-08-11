@@ -1245,7 +1245,10 @@ class TestBashFixHeredocTrailingOperators:
 
     @pytest.mark.skipif(not BASH_AVAILABLE, reason="bash not installed")
     def test_original_command_fails_and_fixed_command_runs(self) -> None:
-        source = "python - <<'PY'\nprint('ok')\nPY\n&& echo next"
+        # ``cat`` (unlike ``python``) is guaranteed to exist in every bash
+        # environment, so this integration check does not depend on an
+        # interpreter being on PATH (many hosts only ship ``python3``).
+        source = "cat <<'EOF'\nhello\nEOF\n&& echo next"
         failed = subprocess.run(
             ["bash", "-c", source],
             capture_output=True,
@@ -1263,7 +1266,7 @@ class TestBashFixHeredocTrailingOperators:
             timeout=15,
         )
         assert passed.returncode == 0
-        assert "ok" in passed.stdout
+        assert "hello" in passed.stdout
         assert "next" in passed.stdout
 
 
@@ -4654,3 +4657,68 @@ class TestShellSafetyWiring:
             result = await bash(BashParams(cmd="echo token"))
         assert isinstance(result, ToolOk)
         assert "ghp_1234567890123456789012" in result.output
+
+
+# ============================================================================
+# Original-saved suffix on filtered output
+# ============================================================================
+
+
+class TestBashOriginalSavedSuffix:
+    @pytest.fixture
+    def bash_instance(self, mock_session: MagicMock) -> Bash:
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            return Bash(session=mock_session)
+
+    @staticmethod
+    def _completed_process_task(output: str = "fixed output") -> MagicMock:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-suffix-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value=output)
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        process_task.stream.process_elapsed = None
+        return process_task
+
+    async def test_message_includes_original_path_after_dedup(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task(output="ERROR\n" * 10)
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="echo hi", deduplicate_output=True))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    async def test_message_includes_original_path_after_truncate(
+        self, bash_instance: Bash
+    ) -> None:
+        long_output = "\n".join(f"line_{i}" for i in range(500))
+        process_task = self._completed_process_task(output=long_output)
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="echo hi", max_lines=10))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+
+    async def test_no_suffix_when_no_filter(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task(output="plain output")
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="echo hi", deduplicate_output=False))
+        assert isinstance(result, ToolOk)
+        assert "[original saved to" not in result.message

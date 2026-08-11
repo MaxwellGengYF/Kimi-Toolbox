@@ -16,6 +16,7 @@ from kimix.tools.common import (
     _interactive_scope_text,
     _maybe_export_output_async,
     _maybe_export_rtk_original_async,
+    _original_saved_message,
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
@@ -532,18 +533,24 @@ class Python(CallableTool2[Params]):
             original_path=original_path,
         )
 
+        suffix = _original_saved_message(original_path)
         if not success:
+            msg = (
+                f"{source_label}: `{display_script_path}` failed "
+                f"(interpreter: {python_exe})"
+                + self._module_not_found_hint(output, python_exe)
+            )
+            if suffix:
+                msg = f"{msg} {suffix}"
             return ToolError(
                 output=block,
-                message=(
-                    f"{source_label}: `{display_script_path}` failed "
-                    f"(interpreter: {python_exe})"
-                    + self._module_not_found_hint(output, python_exe)
-                ),
+                message=msg,
                 brief="Python execution error"
             )
 
         success_message = f"{source_label}: `{display_script_path}`"
+        if suffix:
+            success_message = f"{success_message} {suffix}"
         return ToolOk(
             output=block,
             message=success_message,
@@ -692,4 +699,7 @@ class Python(CallableTool2[Params]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
+        suffix = _original_saved_message(original_path)
+        if suffix:
+            message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)

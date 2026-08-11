@@ -1,15 +1,18 @@
 """Tests for token filter pipeline: _dedup_output, _truncate_lines, _token_filter_output."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from kimix.tools.common import (
     _dedup_output,
+    _display_temp_path,
     _is_known_rtk_command,
     _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
+    _original_saved_message,
     _rtk_available,
     _rtk_binary_path,
     _token_filter_output,
@@ -221,11 +224,13 @@ async def test_token_filter_all_stages():
 
 
 @pytest.mark.asyncio
-async def test_token_filter_saves_original_content():
-    out = "original content here\nsecond line"
+async def test_token_filter_saves_original_content_when_changed():
+    out = "ERROR\n" * 10
     result, orig_path = await _token_filter_output(
         out, token_kill=True, max_lines=None
     )
+    assert "ERROR  (10 repeats)" in result
+    assert orig_path is not None
     # Read the saved file
     import anyio
     async with await anyio.open_file(orig_path, 'r') as f:
@@ -234,13 +239,13 @@ async def test_token_filter_saves_original_content():
 
 
 @pytest.mark.asyncio
-async def test_token_filter_empty_output():
+async def test_token_filter_empty_output_no_temp_file():
     result, orig_path = await _token_filter_output(
         "", token_kill=True, max_lines=10
     )
     assert result == ""
-    # When filter is active, original is saved even for empty output
-    assert orig_path is not None
+    # Empty output is unchanged by any filter, so no temp file is created.
+    assert orig_path is None
 
 
 @pytest.mark.asyncio
@@ -273,7 +278,30 @@ async def test_token_filter_ansi_no_ansi_unchanged():
         out, token_kill=True, max_lines=None
     )
     assert result == out
-    assert orig_path is not None
+    # Output was not changed, so no temp file is created.
+    assert orig_path is None
+
+
+@pytest.mark.asyncio
+async def test_token_filter_dedup_below_threshold_no_temp_file():
+    """Dedup that does not collapse anything leaves output unchanged -> no temp file."""
+    out = "a\nb\nc"
+    result, orig_path = await _token_filter_output(
+        out, token_kill=True, max_lines=None
+    )
+    assert result == out
+    assert orig_path is None
+
+
+@pytest.mark.asyncio
+async def test_token_filter_truncate_short_no_temp_file():
+    """max_lines larger than line count leaves output unchanged -> no temp file."""
+    out = "line1\nline2\nline3"
+    result, orig_path = await _token_filter_output(
+        out, token_kill=False, max_lines=100
+    )
+    assert result == out
+    assert orig_path is None
 
 
 @pytest.mark.asyncio
@@ -286,6 +314,28 @@ async def test_token_filter_ansi_stripped_before_dedup():
     # After ANSI stripping, all 4 lines become "ERROR" -> dedup collapses to "ERROR  (4 repeats)"
     assert "ERROR  (4 repeats)" in result
     assert orig_path is not None
+
+
+# ── _original_saved_message tests ────────────────────────────────────
+
+def test_original_saved_message_empty_for_none():
+    assert _original_saved_message(None) == ""
+
+
+def test_original_saved_message_empty_for_empty_string():
+    assert _original_saved_message("") == ""
+
+
+def test_original_saved_message_formats_temp_path(tmp_path, monkeypatch):
+    from kimix.tools import common as common_mod
+    monkeypatch.chdir(tmp_path)
+    folder = Path(".kimix_cache") / "tmp_1234"
+    folder.mkdir(parents=True)
+    saved = folder / "0.txt"
+    saved.write_text("original")
+    monkeypatch.setattr(common_mod, "_temp_folder", folder)
+    suffix = _original_saved_message(str(saved.resolve()))
+    assert suffix == "[original saved to .kimix_cache/tmp_1234/0.txt]"
 
 
 # ── Param validation tests ──────────────────────────────────────────

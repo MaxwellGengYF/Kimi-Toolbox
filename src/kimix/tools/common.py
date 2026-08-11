@@ -380,6 +380,17 @@ def _display_temp_path(path: str | Path) -> str:
     return str(p).replace("\\", "/")
 
 
+def _original_saved_message(original_path: str | None) -> str:
+    """Return a short suffix noting where the original output was saved.
+
+    Returns an empty string when *original_path* is None, so callers can
+    append the result unconditionally.
+    """
+    if not original_path:
+        return ""
+    return f"[original saved to {_display_temp_path(original_path)}]"
+
+
 def _maybe_export_output(output: str, key: Path | None = None) -> str:
     """Check if output is too large and export to temp file if needed.
 
@@ -1082,13 +1093,13 @@ async def _token_filter_output(
     rtk_rewritten: bool = False,
     max_block_lines: int = 1,
 ) -> tuple[str, str | None]:
-    """Run the token filter pipeline on shell output.
+    """Run the token filter post-process pipeline on shell output.
 
     Stages run in order:
       1. Strip ANSI escape codes (via rich, merged with dedup step)
-      2. Save original to temp file (if any filter is active)
-      3. Dedup (collapse repeated lines/blocks, when token_kill=True and RTK was not used)
-      4. Truncate (head/tail fold to max_lines)
+      2. Dedup (collapse repeated lines/blocks, when token_kill=True and RTK was not used)
+      3. Truncate (head/tail fold to max_lines)
+      4. Save original to temp file only if the result differs from the input
 
     Args:
         output: Raw output string (ANSI already stripped by ProcessTask).
@@ -1104,10 +1115,18 @@ async def _token_filter_output(
 
     Returns:
         (filtered_output, original_path).
-        original_path is None if no filters were active.
+        original_path is None if no filters were active or if the filters
+        left the output unchanged.
     """
     apply_dedup = token_kill and not rtk_rewritten
     has_filter = apply_dedup or (max_lines is not None)
+
+    if not has_filter:
+        return output, None
+
+    # Keep the raw original so we can tell whether the post-process result
+    # actually differs. Only generate a temp file when it does.
+    original_output = output
 
     # Step 1: Strip ANSI escape codes (via rich, merged with dedup step)
     # When dedup is enabled, first strip any remaining ANSI codes using rich's
@@ -1115,17 +1134,6 @@ async def _token_filter_output(
     if apply_dedup and output:
         from rich.text import Text
         output = Text.from_ansi(output).plain
-
-    # Step 2: Save original before any destructive transform
-    # Even if output is empty, save the file when a filter is active.
-    original_path: str | None = None
-    if has_filter:
-        original_path, _ = await _export_to_temp_file_async(
-            key=None, content=output, ext=".txt"
-        )
-
-    if not output:
-        return output, original_path
 
     # Step 2.5: Micro-compress — lossless stages (1-3, 5) plus the annotated
     # stages (4, 6, 7, 8): timestamp/path prefix folding, banner drop,
@@ -1150,6 +1158,13 @@ async def _token_filter_output(
     if max_lines is not None:
         output = _truncate_lines(output, max_lines)
 
+    # Only save the original when the filter actually changed the output.
+    if output == original_output:
+        return output, None
+
+    original_path, _ = await _export_to_temp_file_async(
+        key=None, content=original_output, ext=".txt"
+    )
     return output, original_path
 
 

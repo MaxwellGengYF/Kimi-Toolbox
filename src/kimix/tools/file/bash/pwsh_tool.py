@@ -29,6 +29,7 @@ from kimix.tools.common import (
     _maybe_export_output_async,
     _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
+    _original_saved_message,
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
@@ -572,14 +573,21 @@ class Powershell(CallableTool2[PowershellParams]):
         )
         elapsed = stream.process_elapsed if stream else None
 
+        suffix = _original_saved_message(original_path)
         if not success:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
-            return ToolError(output=block, message=msg + transform_warning, brief="Command execution failed")
+            msg += transform_warning
+            if suffix:
+                msg = f"{msg} {suffix}"
+            return ToolError(output=block, message=msg, brief="Command execution failed")
 
         msg = "[rtk] success" if rtk_rewritten else "success"
+        msg += transform_warning
+        if suffix:
+            msg = f"{msg} {suffix}"
         return ToolOk(
             output=block,
-            message=msg + transform_warning,
+            message=msg,
             brief=f"Command executed successfully",
             display_block=ShellDisplayBlock(language="powershell"),
         )
@@ -821,4 +829,7 @@ class Powershell(CallableTool2[PowershellParams]):
             output_truncated=output_truncated,
             original_path=original_path,
         )
+        suffix = _original_saved_message(original_path)
+        if suffix:
+            message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)
