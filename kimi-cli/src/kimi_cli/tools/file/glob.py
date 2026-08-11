@@ -504,6 +504,10 @@ class Glob(CallableTool2[Params]):
             matches: list[KaosPath] = []
             truncated = False
             timed_out = False
+            # Matches suppressed by .gitignore — lets the tool explain WHY a
+            # search came back empty instead of silently reporting "no matches"
+            # when the paths exist but are hidden by an ignore rule.
+            ignored_count = 0
 
             # Handle deprecated include_ignored -> respect_gitignore inversion
             respect_gitignore = params.respect_gitignore
@@ -532,6 +536,7 @@ class Glob(CallableTool2[Params]):
                                 if _is_ignored_by_gitignore(
                                     match_resolved, gitignore_rules, resolved_dir
                                 ):
+                                    ignored_count += 1
                                     continue
                                 # resolve() dereferences junctions/symlinks
                                 # (e.g. uv's .venv pointing into a cache):
@@ -543,6 +548,7 @@ class Glob(CallableTool2[Params]):
                                 if match_resolved != match_path and _is_ignored_by_gitignore(
                                     match_path, gitignore_rules, resolved_dir
                                 ):
+                                    ignored_count += 1
                                     continue
                             except Exception:
                                 pass
@@ -616,6 +622,11 @@ class Glob(CallableTool2[Params]):
                 message = f"Found {total} matches for pattern `{pattern}`."
             else:
                 message = f"No matches found for pattern `{pattern}`."
+                if respect_gitignore and ignored_count > 0 and not timed_out:
+                    message += (
+                        f" {ignored_count} path(s) matched but were excluded by"
+                        " .gitignore — pass respect_gitignore=False to include them."
+                    )
 
             if omitted_by_fold:
                 message += (
