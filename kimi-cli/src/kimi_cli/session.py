@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import shutil
+import time
 import uuid
 
 import orjson
@@ -158,11 +159,25 @@ class Session:
         await asyncio.to_thread(shutil.rmtree, session_dir, True)
         
     def delete_sync(self) -> None:
-        """Delete the session directory."""
+        """Delete the session directory.
+
+        Best-effort: the aiosqlite worker thread (if any) is stopped first so
+        SQLite files are not locked during removal on Windows, and the removal
+        is retried briefly because the thread may still hold the file handles
+        for a moment after it has been stopped.
+        """
         session_dir = self.work_dir_meta.sessions_dir / self.id
         if not session_dir.exists():
             return
-        shutil.rmtree(session_dir, True)
+        db = self._context_db
+        if db is not None:
+            db.stop_sync()
+        deadline = time.monotonic() + 2.0
+        while True:
+            shutil.rmtree(session_dir, True)
+            if not session_dir.exists() or time.monotonic() >= deadline:
+                return
+            time.sleep(0.05)
 
     async def refresh(self) -> None:
         self.title = "Untitled"

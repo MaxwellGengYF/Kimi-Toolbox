@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import threading
 from kosong.message import Message
 
 from kimi_cli.soul.context_records import ExportedContext
@@ -125,6 +126,34 @@ class ContextDB:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+
+    def stop_sync(self) -> None:
+        """Synchronously stop the aiosqlite worker thread and close SQLite.
+
+        Used by process-exit cleanup paths (e.g. ``Session.__del__`` after a
+        ``KeyboardInterrupt``) where awaiting ``close()`` is impossible.  On
+        Windows the aiosqlite worker thread keeps ``context.db`` (and its WAL
+        files) locked until the underlying connection is closed, which makes
+        ``shutil.rmtree`` fail silently; stopping the thread releases the
+        handles so the session directory can be deleted.
+
+        The worker thread is joined with a timeout; if it is stuck inside a
+        long-running query the connection may stay locked and the caller
+        should retry the directory removal.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            conn.stop()
+        except Exception:
+            # aiosqlite.Connection.stop is best-effort (it even tolerates a
+            # missing event loop); never let cleanup raise.
+            pass
+        thread = getattr(conn, "_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._conn = None
 
     async def _ensure_open(self) -> aiosqlite.Connection:
         if self._conn is None:

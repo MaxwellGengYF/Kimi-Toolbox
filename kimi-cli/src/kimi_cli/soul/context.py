@@ -477,6 +477,10 @@ class SqliteContextStorage:
     async def close(self) -> None:
         await self._db.close()
 
+    def close_sync(self) -> None:
+        """Synchronously stop the aiosqlite worker thread (process-exit cleanup)."""
+        self._db.stop_sync()
+
     async def get_system_prompt(self) -> str | None:
         return await self._db.get_system_prompt()
 
@@ -838,6 +842,22 @@ class Context:
         """
         logger.debug("Closing context storage")
         await self._storage.close()
+
+    def close_sync(self) -> None:
+        """Synchronously stop the storage backend's worker thread.
+
+        Used by synchronous process-exit cleanup (``__del__`` after
+        ``KeyboardInterrupt``) where awaiting ``close()`` is impossible.  On
+        Windows this releases the SQLite file handles held by the aiosqlite
+        worker thread so the session directory can be deleted.
+        """
+        close_sync = getattr(self._storage, "close_sync", None)
+        if close_sync is not None:
+            try:
+                close_sync()
+            except Exception:
+                logger.debug("Failed to synchronously close context storage")
+                pass
 
     async def clear(self) -> None:
         """Clear the context history."""

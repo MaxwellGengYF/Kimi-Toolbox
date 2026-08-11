@@ -4,6 +4,7 @@ import asyncio
 import enum
 import inspect
 import logging
+import threading
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -95,6 +96,63 @@ class Session:
         self._create_kwargs: dict[str, Any] = {}
         self._tmp_data: dict[str, Any] = {}
         self._anonymous = False
+        self._shutdown_cleanup: Any = None
+
+    def _register_shutdown_cleanup(self) -> None:
+        """Register process-shutdown cleanup for an anonymous session.
+
+        When a process is killed by ``KeyboardInterrupt`` (Ctrl+C) while a
+        prompt is running, the event-loop task that owns this session is left
+        suspended, so ``Session.__del__`` may never run.  The soul's aiosqlite
+        worker thread then keeps ``context.db`` locked and — being a
+        non-daemon thread blocked on its work queue — also blocks
+        ``threading._shutdown()`` at interpreter exit, hanging the process.
+
+        ``threading._register_atexit`` callbacks are the only hooks that run
+        *before* non-daemon threads are joined, so the registered callback
+        stops the aiosqlite worker thread there (releasing the SQLite file
+        handles) and then deletes the session directory.
+        """
+        if not self._anonymous or self._shutdown_cleanup is not None:
+            return
+        register = getattr(threading, "_register_atexit", None)
+        if register is None:
+            # Very old Python without threading._register_atexit: fall back to
+            # the best-effort __del__ path only.
+            return
+        cleanup: Any = _build_shutdown_cleanup(self)
+        self._shutdown_cleanup = cleanup
+        try:
+            register(cleanup)
+        except Exception:
+            self._shutdown_cleanup = None
+
+    def _delete_sync_best_effort(self) -> None:
+        """Synchronously close the soul's storage backend and delete the session dir.
+
+        Never raises: this runs from ``__del__`` and the process-shutdown
+        callback where an exception would only be printed and ignored anyway.
+        Closing the aiosqlite worker thread synchronously is required on
+        Windows — the open ``context.db`` handle otherwise makes
+        ``shutil.rmtree`` fail silently and the anonymous session directory
+        survives a ``KeyboardInterrupt``-killed process.
+        """
+        cli = getattr(self, "_cli", None)
+        if cli is None:
+            return
+        soul = getattr(cli, "soul", None)
+        if soul is not None:
+            context = getattr(soul, "_context", None)
+            close_sync = getattr(context, "close_sync", None)
+            if close_sync is not None:
+                try:
+                    close_sync()
+                except Exception:
+                    pass
+        try:
+            cli.session.delete_sync()
+        except Exception:
+            pass
 
     async def clear(self, **custom_arguments) -> None:
         """Clear the session by removing the context file and re-creating the CLI.
@@ -225,6 +283,7 @@ class Session:
         self._cancel_event = None
         self._closed = False
         self._anonymous = new_session_id is None
+        self._register_shutdown_cleanup()
 
     async def compact(self, *, custom_instruction: str = "") -> None:
         """Compact the session context.
@@ -392,6 +451,7 @@ class Session:
         )
         session = Session(cli)
         session._anonymous = anonymous if anonymous else session_id is None
+        session._register_shutdown_cleanup()
         session_dir = cli.session.dir
         state_file = session_dir / "state.json"
         if state_file.exists():
@@ -503,6 +563,7 @@ class Session:
         )
         session = Session(cli)
         session._anonymous = anonymous if anonymous else session_id is None
+        session._register_shutdown_cleanup()
         session._create_kwargs = {
             "config": config,
             "model_name": model,
@@ -790,8 +851,13 @@ class Session:
     def __del__(self):
         if getattr(self, "_closed", False):
             return
-        if getattr(self, "_anonymous", False):
-            self._cli.session.delete_sync()
+        if not getattr(self, "_anonymous", False):
+            return
+        try:
+            self._delete_sync_best_effort()
+        except Exception:
+            # Never raise from __del__; the directory removal is best-effort.
+            pass
 
     async def __aenter__(self) -> Session:
         """Async context manager entry."""
@@ -801,3 +867,25 @@ class Session:
         """Async context manager exit."""
         await self.close()
         await self._cli.session.delete()
+
+
+def _build_shutdown_cleanup(session: Session) -> Any:
+    """Build the process-shutdown callback for an anonymous session.
+
+    The closure intentionally keeps a strong reference to the session so the
+    soul's aiosqlite storage stays alive (and can be stopped synchronously)
+    until ``threading._shutdown`` runs the callback.  The callback is a no-op
+    once the session has been renamed to a named session, and ``delete_sync``
+    tolerates a missing directory, so it is safe after a normal ``close()``.
+    """
+
+    def _cleanup() -> None:
+        try:
+            if not getattr(session, "_anonymous", False):
+                return
+            session._delete_sync_best_effort()
+        except Exception:
+            # Process-shutdown cleanup must never raise.
+            pass
+
+    return _cleanup
