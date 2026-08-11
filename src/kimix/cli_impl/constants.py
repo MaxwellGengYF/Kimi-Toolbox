@@ -42,8 +42,9 @@ Available commands:
   {colorful_text('/sessions', fg=Color.YELLOW)}       - List resumable sessions for the current working directory
   {colorful_text('/ralph:on', fg=Color.YELLOW)}       - Enable Ralph mode
   {colorful_text('/ralph:off', fg=Color.YELLOW)}      - Disable Ralph mode
-  {colorful_text('/ralph:<num>', fg=Color.YELLOW)}    - Set Ralph iterations
-  {colorful_text('/supervisor', fg=Color.YELLOW)}   - Start a supervisor session with multi-line input text
+  {colorful_text('/ralph:<num>', fg=Color.YELLOW)} - Set Ralph iterations
+  {colorful_text('/refaction', fg=Color.YELLOW)} - Reflect on current context and refactor agent source code
+  {colorful_text('/supervisor', fg=Color.YELLOW)} - Start a supervisor session with multi-line input text
   {colorful_text('/swarm', fg=Color.YELLOW)}          - Start a swarm session with multi-line input text
   {colorful_text('/plan', fg=Color.YELLOW)}           - Plan a long-term task, step-by-step, then execute
   {colorful_text('/cmd:<command>', fg=Color.YELLOW)}  - Execute system command

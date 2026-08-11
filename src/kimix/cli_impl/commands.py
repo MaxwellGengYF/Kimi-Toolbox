@@ -1,6 +1,7 @@
 import os
 import uuid
 from pathlib import Path
+from typing import Any
 import pendulum
 
 import kimix.base as base
@@ -738,6 +739,112 @@ def _cmd_code(task_split: list[str], text_arr: list[str]) -> tuple[str | None, b
     return None, False
 
 
+def _context_is_non_empty(session: Any) -> bool:
+    """Return True when the session has real conversation content."""
+    try:  # primary signal, mirrors clear/compact context checks
+        if session.status.context_usage > 1e-8:
+            return True
+    except Exception:
+        pass
+    try:  # fallback: soul context token count
+        if session._cli.soul.context.token_count > 0:
+            return True
+    except Exception:
+        pass
+    try:  # fallback: kimi_cli Session.is_empty() (wire file / context.db / context.jsonl)
+        cli_session = session._cli.session
+        is_empty = getattr(cli_session, 'is_empty', None)
+        if callable(is_empty) and not is_empty():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _refaction_context_stats(session: Any) -> str:
+    """Return a short human-readable description of the session context size."""
+    try:  # preferred: soul context history + token count
+        context = session._cli.soul.context
+        n_messages = len(context.history)
+        token_count = context.token_count
+        return f'{n_messages} messages, {token_count} tokens'
+    except Exception:
+        pass
+    try:  # fallback: status token count
+        return f'{session.status.context_tokens} tokens'
+    except Exception:
+        pass
+    return 'visible above'
+
+
+def _build_refaction_prompt(session: Any, *, report_path: Path | None = None) -> str:
+    """Build the /refaction prompt embedding source paths, AGENTS.md and rules."""
+    agent_src = Path(__file__).resolve().parent.parent          # ...\src\kimix
+    repo_root = agent_src.parent.parent                          # ...\kimi-agent
+    kimix_tools_dir = agent_src / 'tools'                        # ...\src\kimix\tools
+    kimi_cli_tools_dir = repo_root / 'kimi-cli' / 'src' / 'kimi_cli' / 'tools'
+    agents_md_path = repo_root / 'AGENTS.md'
+    try:
+        agents_md = agents_md_path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        agents_md = '(AGENTS.md not found)'
+    if report_path is None:
+        report_path = repo_root / 'docs' / f'refaction_report_{pendulum.now().format("YYYYMMDD_HHMMSS")}.md'
+    context_stats = _refaction_context_stats(session)
+    return f'''# Refaction Task
+
+Reflect on the conversation context above. Find misunderstandings caused by the
+current agent design, then change the source code to make this project better.
+
+## Context
+- Agent source code path: `{agent_src}`
+- Builtin tools dirs:
+  - `{kimix_tools_dir}`
+  - `{kimi_cli_tools_dir}`
+- Current context: {context_stats} (full conversation is visible above)
+
+## AGENTS.md
+{agents_md}
+
+## Testing rules
+- After writing any Python file, run: `uv run tools/syntax_check.py <file> [<file> ...]`
+- After writing any code, write tests to cover it.
+- Fix all errors reported by the syntax checker before proceeding.
+- Review diffs with: `uv run tools/git_diff.py <file> [<file> ...]`
+- After changing `pyproject.toml`, run: `uv sync --extra=all`
+
+## Change code rules
+- No case-by-case fixes: only generic, root-cause changes.
+- Common usage must be written into shared/generic code.
+- Be extremely careful about adding new tools: add only when very necessary.
+- Follow the AGENTS.md performance rule (orjson, msgspec, uvloop, apsw, regex,
+  rapidfuzz, xxhash, pybase64, pendulum instead of builtin counterparts).
+
+## Report
+After finishing all changes, write a report introducing the changes to:
+`{report_path}`
+Include: the misunderstanding found, what was changed, and why.
+'''
+
+
+def _cmd_refaction(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
+    """Reflect on the current context and refactor the agent source code."""
+    session = get_default_session()
+    if session is None:
+        print_error('No active session. Start a conversation first.')
+        return None, False
+    if not _context_is_non_empty(session):
+        print_error('Context is empty. /refaction requires a non-empty context.')
+        return None, False
+    prompt_str = _build_refaction_prompt(session)
+    print_info(prompt_str)
+    try:
+        prompt(prompt_str=prompt_str, session=session, format_output=True)
+    except Exception as e:
+        print_error(f'Refaction failed: {e}')
+    return None, False
+
+
 def _cmd_unknown(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
     print_warning('Unrecognized command.')
     return None, False
@@ -760,6 +867,7 @@ _command_map = {
     'load': _cmd_load,
     'sessions': _cmd_sessions,
     'ralph': _cmd_ralph,
+    'refaction': _cmd_refaction,
     'supervisor': _cmd_supervisor,
     'swarm': _cmd_swarm,
     'init': _cmd_init,

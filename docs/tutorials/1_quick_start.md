@@ -296,6 +296,7 @@ uv run kimix --clean --manually-cot
 | `/store:<id>` | 将当前会话复制为一个新的命名会话 |
 | `/load:<id>` | 将指定命名会话复制到一个新的匿名会话并切换 |
 | `/ralph:on` / `/ralph:off` / `/ralph:<num>` | 设置 Ralph 模式循环次数 |
+| `/refaction` | 反思当前对话上下文，找出由当前 Agent 设计导致的误解，并修改源代码以改进项目（需要非空上下文；完成后将变更报告写入 `docs/refaction_report_*.md`） |
 | `/supervisor` | 进入多行输入模式，以 Supervisor 角色创建会话并执行一次任务（以 `/end` 结束，`/cancel` 取消） |
 | `/plan` / `/plan:<file>` | 使用 TodoMaker Agent 生成任务计划。任务需求通过多行输入提供（以 `/end` 结束）；`<file>` 用于指定计划输出文件路径，若该文件已存在会被覆盖。生成后支持用户审阅、修改，确认后再执行，执行后会追加一次 review 提示 |
 | `/swarm` | 进入多行输入模式，创建 Swarm 会话（SwarmLeader 角色）将请求并行分发给多个同质子 Agent（以 `/end` 结束，`/cancel` 取消） |

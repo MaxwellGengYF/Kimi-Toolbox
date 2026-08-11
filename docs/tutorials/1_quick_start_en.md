@@ -158,6 +158,7 @@ uv run kimix --config=<path>
 | `/store:<id>` | Copy the current session to a new named session |
 | `/load:<id>` | Copy a named session into a new anonymous session |
 | `/ralph:on/off/<num>` | Set Ralph mode |
+| `/refaction` | Reflect on the current conversation context, find misunderstandings caused by the current agent design, and change the source code to improve the project (requires a non-empty context; writes a change report to `docs/refaction_report_*.md`) |
 | `/supervisor` | Enter multi-line input mode to create a session with the Supervisor role and execute one task (end with `/end`, cancel with `/cancel`) |
 | `/plan` / `/plan:<file>` | Use the TodoMaker Agent to generate a task plan. Task requirements are provided via multi-line input (end with `/end`); `<file>` specifies the plan output file path, and will be overwritten if it already exists. After generation, you can review and modify the plan, then confirm to execute; a review prompt is appended after execution |
 | `/cmd:<command>` | Execute system command |
