@@ -205,46 +205,23 @@ async def test_failed_run_includes_hint(tool: Python) -> None:
 
 
 # ---------------------------------------------------------------------------
-# WP2: cwd / workdir param + workdir validation (no spawn on invalid cwd)
+# WP2: cwd / workdir / deduplicate_output params removed
 # ---------------------------------------------------------------------------
-class TestCwdParam:
-    def test_cwd_param_accepted(self) -> None:
-        p = PythonParams(code="print(1)", cwd=r"C:\work")
-        assert p.cwd == r"C:\work"
+class TestNoCwdParam:
+    def test_cwd_workdir_dedup_params_removed(self) -> None:
+        props = PythonParams.model_json_schema()["properties"]
+        for gone in ("cwd", "workdir", "deduplicate_output", "token_kill"):
+            assert gone not in props, f"{gone} must be removed from Params"
 
-    def test_workdir_alias_accepted(self) -> None:
-        p = PythonParams(code="print(1)", workdir="/tmp/work")
-        assert p.cwd == "/tmp/work"
-
-    def test_cwd_defaults_none(self) -> None:
-        assert PythonParams(code="print(1)").cwd is None
-
-    def test_invalid_cwd_rejected_by_params_validation(self) -> None:
-        # The cwd field itself is free-form; hardline validation happens in __call__.
-        p = PythonParams(code="print(1)", cwd="bad$path")
-        assert p.cwd == "bad$path"
-
-    @pytest.mark.asyncio
-    async def test_invalid_cwd_returns_tool_error_without_spawn(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A cwd containing a shell metacharacter is rejected before any spawn."""
-        constructed: list[tuple] = []
-
-        def boom(*args: object, **kwargs: object) -> None:
-            constructed.append((args, kwargs))
-            raise AssertionError("ProcessTask must not be constructed for invalid cwd")
-
-        monkeypatch.setattr("kimix.tools.py.ProcessTask", boom)
-        result = await tool(PythonParams(code="print('x')", cwd="bad$path"))
-        assert isinstance(result, ToolError)
-        assert result.brief == "Invalid workdir"
-        assert "$" in result.message
-        assert constructed == []
+    def test_extra_cwd_input_ignored(self) -> None:
+        # Pydantic ignores unknown fields by default; the tool no longer
+        # reads cwd, so a stray cwd input has no effect.
+        p = PythonParams(code="print(1)", cwd=r"C:\work")  # type: ignore[call-arg]
+        assert not hasattr(p, "cwd")
 
 
 # ---------------------------------------------------------------------------
-# WP2: ProcessTask wiring — cwd / scrub_env / redact kwargs
+# WP2: ProcessTask wiring — scrub_env / redact kwargs (cwd removed)
 # ---------------------------------------------------------------------------
 def _fake_process_task(monkeypatch: pytest.MonkeyPatch, output: str = "fake output"):
     """Patch ``kimix.tools.py.ProcessTask`` with a fake that records ctor kwargs
@@ -266,15 +243,16 @@ def _fake_process_task(monkeypatch: pytest.MonkeyPatch, output: str = "fake outp
 
 class TestProcessTaskWiring:
     @pytest.mark.asyncio
-    async def test_cwd_forwarded_to_process_task(
+    async def test_process_task_runs_without_cwd(
         self, tool: Python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The Python tool no longer forwards a working directory."""
         mock_cls = _fake_process_task(monkeypatch)
-        result = await tool(PythonParams(code="print('x')", cwd="/some/dir"))
+        result = await tool(PythonParams(code="print('x')"))
         assert isinstance(result, ToolOk)
         mock_cls.assert_called_once()
         kwargs = mock_cls.call_args.kwargs
-        assert kwargs["cwd"] == "/some/dir"
+        assert kwargs["cwd"] is None
 
     @pytest.mark.asyncio
     async def test_defaults_forward_scrub_env_and_redact(
@@ -331,7 +309,7 @@ class TestOriginalSavedSuffix:
     ) -> None:
         repeated = "ERROR\n" * 10
         _fake_process_task(monkeypatch, output=repeated)
-        result = await tool(PythonParams(code="print('x')", deduplicate_output=True))
+        result = await tool(PythonParams(code="print('x')"))
         assert isinstance(result, ToolOk)
         assert "[original saved to .kimix_cache/tmp_" in result.message
 
@@ -346,13 +324,37 @@ class TestOriginalSavedSuffix:
         assert "[original saved to .kimix_cache/tmp_" in result.message
 
     @pytest.mark.asyncio
-    async def test_message_no_suffix_when_no_filter(
+    async def test_message_no_suffix_when_filter_unchanged(
         self, tool: Python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Dedup is always on, but output with no repeats is left unchanged,
+        so no original temp file is created and no suffix is appended."""
         _fake_process_task(monkeypatch, output="plain output")
-        result = await tool(PythonParams(code="print('x')", deduplicate_output=False))
+        result = await tool(PythonParams(code="print('x')"))
         assert isinstance(result, ToolOk)
         assert "[original saved to" not in result.message
+
+    @pytest.mark.asyncio
+    async def test_message_includes_original_path_after_summarize(
+        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A >64KB output that survives the (always-on) token filter unchanged
+        is still preserved before summarization replaces it with a summary."""
+        import unittest.mock as um
+
+        long_output = _long_output()
+        assert len(long_output) > 65536
+        _fake_process_task(monkeypatch, output=long_output)
+        monkeypatch.setattr(
+            "kimix.tools.py._summarize_long_output_async",
+            um.AsyncMock(return_value="[summary]"),
+        )
+        result = await tool(PythonParams(code="print('x')"))
+        assert isinstance(result, ToolOk)
+        assert "output_truncated: true" in result.output
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+        saved = result.message.split("[original saved to ", 1)[1].rstrip("]")
+        assert Path(saved).read_text(encoding="utf-8") == long_output
 
 
 # ---------------------------------------------------------------------------

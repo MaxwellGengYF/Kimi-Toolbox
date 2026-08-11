@@ -56,28 +56,33 @@ def test_apply_edit_replace_all_crlf():
 
 
 # ---------------------------------------------------------------------------
-# Default match_mode is exact
+# Default match_mode is fuzzy
 # ---------------------------------------------------------------------------
 
 
-def test_apply_edit_default_exact_no_fuzzy_fallback():
-    """Default (exact) mode must not apply fuzzy fallback — it suggests instead."""
+def test_edit_match_mode_default_is_fuzzy():
+    """Edit.match_mode defaults to fuzzy."""
+    assert Edit(old="a", new="b").match_mode == "fuzzy"
+
+
+def test_apply_edit_default_fuzzy_applies_fallback():
+    """Default (fuzzy) mode applies fuzzy fallback when exact match fails."""
     tool = object.__new__(EditFile)
     content = "helo world\nnext line"
     old = "hello world"
     new = "hi universe"
     result, count, suggestion = tool._apply_edit(content, Edit(old=old, new=new))
-    assert count == 0
-    assert result == content
-    # The closest line is reported as a suggestion, not replaced
-    assert suggestion == "helo world"
+    assert count == 1
+    assert result == "hi universe\nnext line"
 
-    # Sanity check: with fuzzy mode the same input IS replaced.
-    result_fuzzy, count_fuzzy, _ = tool._apply_edit(
-        content, Edit(old=old, new=new, match_mode="fuzzy")
+    # Sanity check: explicit exact mode is NOT replaced — it suggests instead.
+    result_exact, count_exact, suggestion_exact = tool._apply_edit(
+        content, Edit(old=old, new=new, match_mode="exact")
     )
-    assert count_fuzzy == 1
-    assert result_fuzzy == "hi universe\nnext line"
+    assert count_exact == 0
+    assert result_exact == content
+    # The closest line is reported as a suggestion, not replaced
+    assert suggestion_exact == "helo world"
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +205,84 @@ def test_apply_edit_fuzzy_multiline_close_match():
     assert suggestion is None
     assert "def qux(self):" in result
     assert "return 42" in result
+
+
+# ---------------------------------------------------------------------------
+# _apply_replace_all helper
+# ---------------------------------------------------------------------------
+
+
+def test_apply_replace_all_max_replacements():
+    """replace_all with max_replacements replaces only the first N occurrences."""
+    tool = object.__new__(EditFile)
+    result, count, suggestion = tool._apply_edit(
+        "a b a c a d a", Edit(old="a", new="X", replace_all=True, max_replacements=2)
+    )
+    assert count == 2
+    assert suggestion is None
+    assert result == "X b X c a d a"
+
+
+def test_apply_replace_all_exact_only_no_fuzzy_fallback():
+    """replace_all stays exact-only even in fuzzy mode: near-misses are suggested, not replaced."""
+    tool = object.__new__(EditFile)
+    content = "hello world\nfoo bar"
+    old = "helo wrld"  # close to "hello world" but not an exact match
+    new = "replacement"
+    result, count, suggestion = tool._apply_edit(
+        content, Edit(old=old, new=new, replace_all=True, match_mode="fuzzy")
+    )
+    assert count == 0
+    assert result == content
+    # Close enough to trigger a suggestion, but never a fuzzy replacement
+    assert suggestion == "hello world"
+
+
+# ---------------------------------------------------------------------------
+# _apply_fuzzy_fallback helper
+# ---------------------------------------------------------------------------
+
+
+def _call_fuzzy_fallback(tool: EditFile, content: str, old: str, new: str):
+    """Invoke the fuzzy-fallback helper with normalized inputs."""
+    edit = Edit(old=old, new=new)
+    return tool._apply_fuzzy_fallback(
+        content,
+        tool._normalize_line_endings(content),
+        tool._normalize_line_endings(old),
+        tool._normalize_line_endings(new),
+        edit,
+    )
+
+
+def test_apply_fuzzy_fallback_chain():
+    """_apply_fuzzy_fallback walks strip -> fuzzy match -> suggestion fallback."""
+    tool = object.__new__(EditFile)
+
+    # 1. Strip match (whitespace only): no fuzzy-matched marker, preserves spaces
+    result, count, suggestion = _call_fuzzy_fallback(
+        tool, "hello world  \nnext line", "hello world", "hi universe"
+    )
+    assert count == 1
+    assert suggestion is None
+    assert result == "hi universe  \nnext line"
+
+    # 2. Fuzzy match (wording drift): replaced and reports fuzzy-matched marker
+    result, count, suggestion = _call_fuzzy_fallback(
+        tool, "helo world\nnext line", "hello world", "hi universe"
+    )
+    assert count == 1
+    assert suggestion is not None
+    assert "fuzzy-matched" in suggestion
+    assert result == "hi universe\nnext line"
+
+    # 3. No match at all: content untouched, no suggestion below cutoff
+    result, count, suggestion = _call_fuzzy_fallback(
+        tool, "hello world\nfoo bar", "xyz123_not_close", "replacement"
+    )
+    assert count == 0
+    assert result == "hello world\nfoo bar"
+    assert suggestion is None
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +431,39 @@ async def test_replace_no_match_with_suggestion(edit_file_tool, temp_work_dir):
 
     assert result.is_error
     assert "No replacements were made" in result.message
+
+
+async def test_replace_default_fuzzy_typo(edit_file_tool, temp_work_dir):
+    """End-to-end: default (fuzzy) mode replaces a near-miss old string."""
+    file_path = temp_work_dir / "test.txt"
+    await file_path.write_text("helo world\nnext line")
+
+    result = await edit_file_tool(
+        Params(path=str(file_path), edit=Edit(old="hello world", new="hi universe"))
+    )
+
+    assert not result.is_error
+    assert "successfully edited" in result.message
+    assert await file_path.read_text() == "hi universe\nnext line"
+
+
+async def test_replace_exact_mode_typo_suggests(edit_file_tool, temp_work_dir):
+    """End-to-end: explicit exact mode with a near-miss old string errors with a suggestion."""
+    file_path = temp_work_dir / "test.txt"
+    await file_path.write_text("helo world\nnext line")
+
+    result = await edit_file_tool(
+        Params(
+            path=str(file_path),
+            edit=Edit(old="hello world", new="hi universe", match_mode="exact"),
+        )
+    )
+
+    assert result.is_error
+    assert "No replacements were made" in result.message
+    # The closest line is reported as a suggestion, not replaced
+    assert "helo world" in result.message
+    assert await file_path.read_text() == "helo world\nnext line"
 
 
 async def test_replace_fuzzy_multiline(edit_file_tool, temp_work_dir):

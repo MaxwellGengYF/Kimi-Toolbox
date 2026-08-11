@@ -39,6 +39,7 @@ from kimix.tools.common import (
     _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
     _original_saved_message,
+    _save_original_output_async,
     _summarize_long_output_async,
     _token_filter_output,
 )
@@ -58,12 +59,9 @@ from kimix.tools.file.bash.output_enhance import (
 from kimix.tools.file.bash.safety import (
     check_hardline_blocked,
     foreground_background_guidance,
-    validate_workdir,
 )
 from kimix.tools.prompt_common import (
     accepts_alias_text,
-    cwd_field,
-    deduplicate_output_field,
     max_lines_field,
     mode_field,
     normalize_mode_validator,
@@ -575,8 +573,6 @@ class BashParams(BaseModel):
     task_id: str | None = task_id_field("cmd")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
-    deduplicate_output: bool = deduplicate_output_field()
-    cwd: str | None = cwd_field("command")
 
     @model_validator(mode="before")
     @classmethod
@@ -674,10 +670,6 @@ class Bash(CallableTool2[BashParams]):
         if blocked is not None:
             return blocked
 
-        workdir_err = validate_workdir(params.cwd)
-        if workdir_err is not None:
-            return ToolError(message=workdir_err, brief="Invalid workdir")
-
         forbidden = self._forbidden_error(params.cmd)
         if forbidden is not None:
             return forbidden
@@ -714,7 +706,7 @@ class Bash(CallableTool2[BashParams]):
                 if isinstance(safe_cmd, ToolError):
                     return safe_cmd
                 rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-                    safe_cmd, params.deduplicate_output, exclude_read=True
+                    safe_cmd, True, exclude_read=True
                 )
                 startup_cmd = "\n".join(
                     part for part in (bootstrap, rtk_cmd) if part
@@ -736,7 +728,7 @@ class Bash(CallableTool2[BashParams]):
                 bash_args = ["-c", encoded + "; exec bash -i"]
             else:
                 bash_args = ["-i"]
-            process_task = ProcessTask(self._bash, bash_args, params.cwd, _bash_subprocess_env(), append_newline=True)
+            process_task = ProcessTask(self._bash, bash_args, None, _bash_subprocess_env(), append_newline=True)
             task_id = await process_task.start(self._session, "bash")
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -772,7 +764,7 @@ class Bash(CallableTool2[BashParams]):
         if isinstance(safe_cmd, ToolError):
             return safe_cmd
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            safe_cmd, params.deduplicate_output, exclude_read=True
+            safe_cmd, True, exclude_read=True
         )
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
@@ -780,7 +772,7 @@ class Bash(CallableTool2[BashParams]):
         blocked = self._hardline_blocked(rtk_cmd)
         if blocked is not None:
             return blocked
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], params.cwd, _bash_subprocess_env())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         wait_matched: bool | None = None
@@ -963,7 +955,7 @@ class Bash(CallableTool2[BashParams]):
         if isinstance(safe_cmd, ToolError):
             return safe_cmd
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            safe_cmd, params.deduplicate_output, exclude_read=True
+            safe_cmd, True, exclude_read=True
         )
         forbidden = self._forbidden_error(rtk_cmd, display_command=params.cmd)
         if forbidden is not None:
@@ -971,7 +963,7 @@ class Bash(CallableTool2[BashParams]):
         blocked = self._hardline_blocked(rtk_cmd)
         if blocked is not None:
             return blocked
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], params.cwd, _bash_subprocess_env())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
 
         return ToolOk(
@@ -1068,16 +1060,16 @@ class Bash(CallableTool2[BashParams]):
         # model can page through the unfiltered results.  This is done before
         # the local token filter so the raw rtk stream is captured even when
         # dedup/max_lines are disabled.
+        # Dedup is always enabled (the ``deduplicate_output`` param was
+        # removed), so the rtk full-stream save only applies to commands that
+        # rtk itself rewrote — local dedup is skipped for those.
         rtk_original_path: str | None = None
-        if output and not (
-            (params.deduplicate_output and not rtk_rewritten)
-            or params.max_lines is not None
-        ):
+        if output and rtk_rewritten and params.max_lines is None:
             rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter post-process pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
-            token_kill=params.deduplicate_output,
+            token_kill=True,
             max_lines=params.max_lines,
             rtk_rewritten=rtk_rewritten,
         )
@@ -1085,6 +1077,10 @@ class Bash(CallableTool2[BashParams]):
             original_path = rtk_original_path
         output_truncated = False
         if len(output) > 65536:
+            # Preserve the full stream before replacing it with a summary: the
+            # token filter may have left the output unchanged, so no original
+            # has been saved yet and the summary would otherwise destroy it.
+            original_path = await _save_original_output_async(output, original_path)
             output = await _summarize_long_output_async(self._session, params.cmd, output)
             output_truncated = True
         output = await _maybe_export_output_async(output)

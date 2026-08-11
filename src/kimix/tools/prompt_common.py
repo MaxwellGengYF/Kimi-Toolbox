@@ -22,8 +22,6 @@ __all__ = [
     "max_lines_field",
     "wait_for_pattern_field",
     "task_id_field",
-    "deduplicate_output_field",
-    "cwd_field",
     "mode_field",
     "normalize_mode_validator",
     "shell_cmd_required_validator",
@@ -74,46 +72,6 @@ def task_id_field(payload: str = "cmd", tail: str = "being executed.") -> Field:
             "Existing session/task ID to continue. When provided, "
             f"'{payload}' is sent to the process stdin instead of {tail}"
         ),
-    )
-
-
-def deduplicate_output_field(*, accepts_alias: bool = False) -> Field:
-    """``deduplicate_output`` (alias ``token_kill``): repeated-output dedup.
-
-    ``accepts_alias=True`` (Python) adds the "Accepts `deduplicate_output` or
-    `token_kill`." sentence; the dedup behavior itself is a tool convention.
-    """
-    text = "Deduplicate repeated output lines. Set to False to see raw, unfiltered output."
-    if accepts_alias:
-        text = (
-            "Deduplicate repeated output lines. "
-            "Accepts `deduplicate_output` or `token_kill`. "
-            "Set to False to see raw, unfiltered output."
-        )
-    return Field(default=True, alias="token_kill", description=text)  # backward compat
-
-
-def cwd_field(subject: str = "command", *, via_alias: bool = True) -> Field:
-    """``cwd`` (alias ``workdir``): working directory for the tool.
-
-    ``via_alias=True`` (Bash/Powershell) uses ``alias="workdir"`` so the JSON
-    schema property is named ``workdir``; ``via_alias=False`` (Python) uses
-    ``validation_alias=AliasChoices("cwd", "workdir")`` so the property stays
-    named ``cwd``.  Both spellings are accepted on input either way.
-    """
-    description = (
-        f"Working directory for the {subject} (absolute or relative path)."
-    )
-    if via_alias:
-        return Field(
-            default=None,
-            alias="workdir",  # LLM can use "workdir" instead of "cwd"
-            description=description,
-        )
-    return Field(
-        default=None,
-        validation_alias=AliasChoices("cwd", "workdir"),
-        description=description,
     )
 
 

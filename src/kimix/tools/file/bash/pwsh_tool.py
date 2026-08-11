@@ -30,14 +30,13 @@ from kimix.tools.common import (
     _maybe_export_rtk_original_async,
     _maybe_rewrite_shell_command_with_rtk,
     _original_saved_message,
+    _save_original_output_async,
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
 )
 from kimix.tools.prompt_common import (
     accepts_alias_text,
-    cwd_field,
-    deduplicate_output_field,
     max_lines_field,
     mode_field,
     normalize_mode_validator,
@@ -54,7 +53,6 @@ from kimix.tools.file.bash.output_enhance import (
 from kimix.tools.file.bash.safety import (
     check_hardline_blocked,
     foreground_background_guidance,
-    validate_workdir,
 )
 
 if TYPE_CHECKING:
@@ -224,8 +222,6 @@ class PowershellParams(BaseModel):
     task_id: str | None = task_id_field("cmd")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
-    deduplicate_output: bool = deduplicate_output_field()
-    cwd: str | None = cwd_field("command")
 
     @model_validator(mode="before")
     @classmethod
@@ -336,10 +332,6 @@ class Powershell(CallableTool2[PowershellParams]):
         if blocked is not None:
             return blocked
 
-        workdir_err = validate_workdir(params.cwd)
-        if workdir_err is not None:
-            return ToolError(message=workdir_err, brief="Invalid workdir")
-
         # Early dispatch: continue an existing session
         if params.task_id is not None:
             return await self._continue_session(params)
@@ -356,7 +348,7 @@ class Powershell(CallableTool2[PowershellParams]):
 
         # Rewrite known commands through RTK before any PS5.1 syntax transform.
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, params.deduplicate_output, pwsh=True
+            params.cmd, True, pwsh=True
         )
         self._resolve_pwsh()
         if self._pwsh_path is not None:
@@ -440,7 +432,7 @@ class Powershell(CallableTool2[PowershellParams]):
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT + cmd])
             else:
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT])
-            process_task = ProcessTask(executable, ps_args, params.cwd, _env_with_rg_bin_path(), append_newline=True)
+            process_task = ProcessTask(executable, ps_args, None, _env_with_rg_bin_path(), append_newline=True)
             task_id = await process_task.start(self._session, "pwsh")
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -487,7 +479,7 @@ class Powershell(CallableTool2[PowershellParams]):
         process_task = ProcessTask(
             executable,
             [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
-            params.cwd,
+            None,
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
@@ -683,7 +675,7 @@ class Powershell(CallableTool2[PowershellParams]):
         process_task = ProcessTask(
             executable,
             [*shell_common.PWSH_ONESHOT_FLAGS, param_name, encoded_cmd],
-            params.cwd,
+            None,
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
@@ -725,7 +717,7 @@ class Powershell(CallableTool2[PowershellParams]):
         await stream.pop_output()
 
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, params.deduplicate_output, pwsh=True
+            params.cmd, True, pwsh=True
         )
         input_text = rtk_cmd
         if not input_text.endswith("\n"):
@@ -765,16 +757,16 @@ class Powershell(CallableTool2[PowershellParams]):
         # model can page through the unfiltered results.  This is done before
         # the local token filter so the raw rtk stream is captured even when
         # dedup/max_lines are disabled.
+        # Dedup is always enabled (the ``deduplicate_output`` param was
+        # removed), so the rtk full-stream save only applies to commands that
+        # rtk itself rewrote — local dedup is skipped for those.
         rtk_original_path: str | None = None
-        if output and not (
-            (params.deduplicate_output and not rtk_rewritten)
-            or params.max_lines is not None
-        ):
+        if output and rtk_rewritten and params.max_lines is None:
             rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
-            token_kill=params.deduplicate_output,
+            token_kill=True,
             max_lines=params.max_lines,
             rtk_rewritten=rtk_rewritten,
         )
@@ -782,6 +774,10 @@ class Powershell(CallableTool2[PowershellParams]):
             original_path = rtk_original_path
         output_truncated = False
         if len(output) > 65536:
+            # Preserve the full stream before replacing it with a summary: the
+            # token filter may have left the output unchanged, so no original
+            # has been saved yet and the summary would otherwise destroy it.
+            original_path = await _save_original_output_async(output, original_path)
             output = await _summarize_long_output_async(self._session, command, output)
             output_truncated = True
         output = await _maybe_export_output_async(output)

@@ -1168,6 +1168,21 @@ async def _token_filter_output(
     return output, original_path
 
 
+async def _save_original_output_async(output: str, original_path: str | None) -> str | None:
+    """Return *original_path*, saving *output* to a temp file when not already saved.
+
+    Callers use this right before a destructive post-process step (e.g.
+    replacing a long output with a summary) so the full stream is never lost:
+    if no earlier stage (dedup / max_lines / rtk markers) already saved the
+    original, persist it here so the result can be reported via
+    ``_original_saved_message``.
+    """
+    if not output or original_path is not None:
+        return original_path
+    temp_path, _ = await _export_to_temp_file_async(key=None, content=output, ext=".txt")
+    return temp_path
+
+
 async def _maybe_export_rtk_original_async(output: str) -> tuple[str | None, bool]:
     """Export *output* to a temp file if it contains rtk truncation markers.
 

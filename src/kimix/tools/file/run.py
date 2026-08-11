@@ -9,7 +9,7 @@ import shlex
 import sys
 from kimi_cli.tools import SkipThisTool
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from kimi_cli.session import Session
 from kimix.tools.common import (
     _build_session_output_block,
@@ -22,6 +22,7 @@ from kimix.tools.common import (
     _maybe_export_rtk_original_async,
     _export_to_temp_file_async,
     _original_saved_message,
+    _save_original_output_async,
     _rtk_binary_path,
     _summarize_long_output_async,
     _token_filter_output,
@@ -38,7 +39,6 @@ from kimix.tools.file.bash.safety import (
     validate_workdir,
 )
 from kimix.tools.prompt_common import (
-    deduplicate_output_field,
     max_lines_field,
     mode_field,
     task_id_field,
@@ -52,6 +52,22 @@ import shlex
 import shutil
 _HUGE_CMD_THRESHOLD = 10000
 """Character count above which command display is culled to only the path."""
+
+
+def _cd_prefix(cwd: str | None, shell: str) -> str:
+    """Return a ``cd`` prefix that changes into *cwd* inside a shell command.
+
+    Bash/Powershell no longer accept a ``cwd``/``workdir`` parameter, so a
+    working directory is expressed with the shell's own ``cd`` builtin.  Used
+    by ``Run._run_via_shell`` to honor Run's ``cwd`` when delegating to the
+    Bash/Powershell tools.  Returns an empty string when *cwd* is falsy.
+    """
+    if not cwd:
+        return ""
+    if shell == "pwsh":
+        quoted = "'" + cwd.replace("'", "''") + "'"
+        return f"cd {quoted}; "
+    return f"cd {shlex.quote(cwd)} && "
 
 USE_SYSTEM_PWSH_ON_WINDOWS = True
 USE_SYSTEM_SHELL = True
@@ -127,6 +143,7 @@ class RunParams(BaseModel):
     )
     cwd: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("cwd", "workdir"),  # LLM can use "workdir"
         description="Working directory."
     )
     env: str | list[str] | None = Field(
@@ -140,7 +157,6 @@ class RunParams(BaseModel):
     task_id: str | None = task_id_field("command")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
-    deduplicate_output: bool = deduplicate_output_field()
 
     @model_validator(mode="after")
     def _infer_mode(self) -> "RunParams":
@@ -352,11 +368,11 @@ class Run(CallableTool2[RunParams]):
                 )
 
             # Rewrite known commands through RTK using the share-bin binary only.
+            # Dedup is always enabled (the ``deduplicate_output`` param was removed).
             rtk_rewritten = False
             rtk_path = _rtk_binary_path()
             if (
-                params.deduplicate_output
-                and rtk_path is not None
+                rtk_path is not None
                 and _is_known_rtk_command(Path(executable).stem)
                 and executable not in ("rtk", "rtk.exe")
             ):
@@ -475,7 +491,7 @@ class Run(CallableTool2[RunParams]):
                 # Apply token filter pipeline (dedup, truncate)
                 output, original_path = await _token_filter_output(
                     output,
-                    token_kill=params.deduplicate_output,
+                    token_kill=True,
                     max_lines=params.max_lines,
                     rtk_rewritten=rtk_rewritten,
                 )
@@ -483,6 +499,10 @@ class Run(CallableTool2[RunParams]):
                 # Optionally offload a very long output to a sub-agent
                 output_truncated = False
                 if len(output) > 65536 and not params.output_path:
+                    # Preserve the full stream before replacing it with a
+                    # summary: the token filter may have left it unchanged, so
+                    # no original has been saved yet.
+                    original_path = await _save_original_output_async(output, original_path)
                     output = await _summarize_long_output_async(
                         self._session, params.command, output
                     )
@@ -506,6 +526,7 @@ class Run(CallableTool2[RunParams]):
                 if not success:
                     if output and not params.output_path:
                         if len(output) > 65536:
+                            original_path = await _save_original_output_async(output, original_path)
                             output = await _summarize_long_output_async(
                                 self._session, params.command, output
                             )
@@ -582,7 +603,12 @@ class Run(CallableTool2[RunParams]):
                     pass
 
     async def _run_via_shell(self, params: RunParams) -> ToolReturnValue:
-        """Execute the command via the system shell (bash/pwsh)."""
+        """Execute the command via the system shell (bash/pwsh).
+
+        Bash/Powershell no longer accept a ``cwd`` param, so Run's ``cwd`` is
+        translated into a ``cd`` statement inside the shell command instead of
+        being passed as the subprocess working directory.
+        """
         if sys.platform == "win32":
             from kimix.tools.file.bash.pwsh_tool import Powershell, PowershellParams
             try:
@@ -594,12 +620,10 @@ class Run(CallableTool2[RunParams]):
                     brief="PowerShell unavailable",
                 )
             ps_params = PowershellParams(
-                cmd=params.command,
+                cmd=_cd_prefix(params.cwd, shell="pwsh") + params.command,
                 timeout=params.timeout,
-                deduplicate_output=params.deduplicate_output,
                 max_lines=params.max_lines,
                 wait_for_pattern=params.wait_for_pattern,
-                cwd=params.cwd,
                 interactive=False,
             )
             return await pwsh.__call__(ps_params)
@@ -614,12 +638,10 @@ class Run(CallableTool2[RunParams]):
                     brief="Bash unavailable",
                 )
             bash_params = BashParams(
-                cmd=params.command,
+                cmd=_cd_prefix(params.cwd, shell="bash") + params.command,
                 timeout=params.timeout,
-                deduplicate_output=params.deduplicate_output,
                 max_lines=params.max_lines,
                 wait_for_pattern=params.wait_for_pattern,
-                cwd=params.cwd,
                 interactive=False,
             )
             return await bash.__call__(bash_params)
@@ -697,20 +719,16 @@ class Run(CallableTool2[RunParams]):
         # summarize pipeline never sees credentials.
         if self._redact_secrets and output:
             output = redact_sensitive_output(output)
-        # When rtk itself folded the output, preserve the full stream so the
-        # model can page through the unfiltered results.  This is done before
-        # the local token filter so the raw rtk stream is captured even when
-        # dedup/max_lines are disabled.
+        # Dedup is always enabled (the ``deduplicate_output`` param was
+        # removed), so the rtk full-stream save only applies to commands that
+        # rtk itself rewrote — local dedup is skipped for those.
         rtk_original_path: str | None = None
-        if output and not (
-            (params.deduplicate_output and not rtk_rewritten)
-            or params.max_lines is not None
-        ):
+        if output and rtk_rewritten and params.max_lines is None:
             rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter pipeline (dedup, truncate)
         output, original_path = await _token_filter_output(
             output,
-            token_kill=params.deduplicate_output,
+            token_kill=True,
             max_lines=params.max_lines,
             rtk_rewritten=rtk_rewritten,
         )
@@ -718,6 +736,10 @@ class Run(CallableTool2[RunParams]):
             original_path = rtk_original_path
         output_truncated = False
         if len(output) > 65536:
+            # Preserve the full stream before replacing it with a summary: the
+            # token filter may have left the output unchanged, so no original
+            # has been saved yet and the summary would otherwise destroy it.
+            original_path = await _save_original_output_async(output, original_path)
             output = await _summarize_long_output_async(
                 self._session, params.command, output
             )

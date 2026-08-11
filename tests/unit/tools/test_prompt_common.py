@@ -104,17 +104,17 @@ def test_shared_fragments_identical() -> None:
     assert "executed as a new script" in desc(PyParams, "task_id")
     assert "'command' is sent" in desc(RunParams, "task_id")
 
-    # deduplicate_output: Bash == Powershell == Run; Python adds the alias note.
-    assert desc(BashParams, "deduplicate_output") == desc(RunParams, "deduplicate_output")
-    assert desc(PowershellParams, "deduplicate_output") == desc(RunParams, "deduplicate_output")
-    assert "Accepts `deduplicate_output` or `token_kill`." in desc(PyParams, "deduplicate_output")
+    # deduplicate_output was removed from every running tool (always-on dedup).
+    for model in (BashParams, PowershellParams, PyParams, RunParams):
+        assert "deduplicate_output" not in model.model_json_schema()["properties"]
+        assert "token_kill" not in model.model_json_schema()["properties"]
 
-    # cwd: Bash/Powershell property named "workdir", Python "cwd".
-    assert desc(BashParams, "cwd") == desc(PowershellParams, "cwd")
-    assert "the command" in desc(BashParams, "cwd")
-    assert "the script" in desc(PyParams, "cwd")
-    assert "workdir" in BashParams.model_json_schema()["properties"]
-    assert "cwd" in PyParams.model_json_schema()["properties"]
+    # cwd/workdir: only Run keeps it; Bash/Powershell/Python dropped it.
+    assert "cwd" not in BashParams.model_json_schema()["properties"]
+    assert "workdir" not in BashParams.model_json_schema()["properties"]
+    assert "cwd" not in PowershellParams.model_json_schema()["properties"]
+    assert "cwd" not in PyParams.model_json_schema()["properties"]
+    assert "cwd" in RunParams.model_json_schema()["properties"]
 
     # mode: execute/send/interactive aliases documented for the shell tools.
     for model in (BashParams, PowershellParams, PyParams):
@@ -223,14 +223,18 @@ def test_conventions_block_in_system_prompt() -> None:
     assert "# Tool Conventions" in text
     for fragment in (
         "head+tail fold",
-        "deduplicate_output=False",
+        "deduplicated automatically",
         "`rtk <process> <arguments...>`",
         "Parameter aliases",
         "`wait_for_pattern`",
         "`timeout`",
         "Working directory",
+        "Only the `Run` tool accepts `cwd`/`workdir`",
     ):
         assert fragment in text, f"conventions block missing: {fragment}"
+    # Removed params are no longer documented as opt-outs.
+    assert "deduplicate_output=False" not in text
+    assert "`cwd`/`workdir` sets" not in text
 
 
 # ── shared validators ─────────────────────────────────────────────────────

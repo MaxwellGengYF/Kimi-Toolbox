@@ -58,9 +58,9 @@ class Edit(BaseModel):
         "None means unlimited.",
     )
     match_mode: Literal["exact", "fuzzy"] = Field(
-        default="exact",
-        description="'exact' (default): Only replace literal matches of `old`. "
-        "'fuzzy': Use fuzzy matching when exact match fails (may match similar text).",
+        default="fuzzy",
+        description="'fuzzy' (default): Use fuzzy matching when exact match fails "
+        "(may match similar text). 'exact': Only replace literal matches of `old`.",
     )
 
 
@@ -145,30 +145,29 @@ class EditFile(CallableTool2[Params]):
         norm_target = self._normalize_line_endings(target)
         norm_content = self._normalize_line_endings(content)
         lines = norm_content.splitlines()
+        if not lines:
+            return None
 
-        # Try line-level matching first
-        result = process.extractOne(norm_target, lines, scorer=fuzz.ratio)
-        if result and result[1] >= cutoff:
-            return result[0]
+        def _best(candidates: list[str]) -> str | None:
+            result = process.extractOne(norm_target, candidates, scorer=fuzz.ratio)
+            if result and result[1] >= cutoff:
+                return result[0]
+            return None
 
-        # Fallback: sliding windows of similar line count for multi-line targets
+        # Line-level matching first (covers single- and multi-line targets).
+        match = _best(lines)
+        if match is not None:
+            return match
+
+        # Fallback: sliding windows of equal line count for multi-line targets.
         target_lines = norm_target.splitlines()
         target_line_count = len(target_lines)
         if target_line_count > 1 and len(lines) >= target_line_count:
-            windows = []
-            for i in range(len(lines) - target_line_count + 1):
-                window = "\n".join(lines[i : i + target_line_count])
-                windows.append(window)
-            if windows:
-                result = process.extractOne(norm_target, windows, scorer=fuzz.ratio)
-                if result and result[1] >= cutoff:
-                    return result[0]
-
-        # Fallback: single-line targets, try all lines even if length differs
-        if target_line_count == 1 and lines:
-            result = process.extractOne(norm_target, lines, scorer=fuzz.ratio)
-            if result and result[1] >= cutoff:
-                return result[0]
+            windows = [
+                "\n".join(lines[i : i + target_line_count])
+                for i in range(len(lines) - target_line_count + 1)
+            ]
+            return _best(windows)
 
         return None
 
@@ -245,49 +244,54 @@ class EditFile(CallableTool2[Params]):
 
         return None
 
-    def _apply_edit(self, content: str, edit: Edit) -> tuple[str, int, str | None]:
-        """Apply a single edit to the content.
+    def _apply_replace_all(
+        self,
+        content: str,
+        norm_content: str,
+        norm_old: str,
+        norm_new: str,
+        edit: Edit,
+    ) -> tuple[str, int, str | None]:
+        """Apply a replace-all edit using exact matching only.
 
-        Returns (new_content, replacements_made, suggestion_or_None).
+        Fuzzy fallback is intentionally NOT applied here: blindly fuzzy-matching
+        "all" occurrences is too ambiguous to be safe.
         """
-        if not edit.old or edit.old == edit.new:
-            return content, 0, None
+        if edit.max_replacements is not None:
+            # Replace only the first max_replacements occurrences
+            count = 0
+            result = norm_content
+            while count < edit.max_replacements:
+                idx = result.find(norm_old)
+                if idx == -1:
+                    break
+                result = result[:idx] + norm_new + result[idx + len(norm_old) :]
+                count += 1
+            if count == 0:
+                return content, 0, self._find_similar(edit.old, content)
+            return result, count, None
 
-        norm_content = self._normalize_line_endings(content)
-        norm_old = self._normalize_line_endings(edit.old)
-        norm_new = self._normalize_line_endings(edit.new)
-
-        if edit.replace_all:
-            if edit.max_replacements is not None:
-                # Replace only first max_replacements occurrences
-                count = 0
-                result = norm_content
-                while count < edit.max_replacements:
-                    idx = result.find(norm_old)
-                    if idx == -1:
-                        break
-                    result = result[:idx] + norm_new + result[idx + len(norm_old):]
-                    count += 1
-                if count == 0:
-                    return content, 0, self._find_similar(edit.old, content)
-                return result, count, None
-            else:
-                count = norm_content.count(norm_old)
-                if count == 0:
-                    return content, 0, self._find_similar(edit.old, content)
-                return norm_content.replace(norm_old, norm_new), count, None
-
-        # Single replacement with normalized line endings
-        idx = norm_content.find(norm_old)
-        if idx != -1:
-            return norm_content.replace(norm_old, norm_new, 1), 1, None
-
-        # Exact match failed. In exact mode (the default), no fuzzy heuristics
-        # are applied — report the closest line as a suggestion only.
-        if edit.match_mode == "exact":
+        count = norm_content.count(norm_old)
+        if count == 0:
             return content, 0, self._find_similar(edit.old, content)
+        return norm_content.replace(norm_old, norm_new), count, None
 
-        # Fuzzy mode: try strip match (ignores leading/trailing spaces)
+    def _apply_fuzzy_fallback(
+        self,
+        content: str,
+        norm_content: str,
+        norm_old: str,
+        norm_new: str,
+        edit: Edit,
+    ) -> tuple[str, int, str | None]:
+        """Fallback chain for fuzzy mode after an exact single match fails.
+
+        Tries, in order:
+          1. a strip match (ignores leading/trailing whitespace),
+          2. a best-effort fuzzy match,
+          3. a similarity suggestion for the error message.
+        """
+        # Try strip match (ignores leading/trailing spaces)
         stripped = self._try_strip_match(content, edit.old, edit.new)
         if stripped is not None:
             return stripped, 1, None
@@ -306,6 +310,38 @@ class EditFile(CallableTool2[Params]):
 
         # No match at all — return suggestion for error message
         return content, 0, self._find_similar(edit.old, content)
+
+    def _apply_edit(self, content: str, edit: Edit) -> tuple[str, int, str | None]:
+        """Apply a single edit to the content.
+
+        Returns (new_content, replacements_made, suggestion_or_None).
+        """
+        if not edit.old or edit.old == edit.new:
+            return content, 0, None
+
+        norm_content = self._normalize_line_endings(content)
+        norm_old = self._normalize_line_endings(edit.old)
+        norm_new = self._normalize_line_endings(edit.new)
+
+        if edit.replace_all:
+            return self._apply_replace_all(
+                content, norm_content, norm_old, norm_new, edit
+            )
+
+        # Single replacement with normalized line endings
+        idx = norm_content.find(norm_old)
+        if idx != -1:
+            return norm_content.replace(norm_old, norm_new, 1), 1, None
+
+        # Exact match failed. In exact mode no fuzzy heuristics are applied —
+        # report the closest line as a suggestion only.
+        if edit.match_mode == "exact":
+            return content, 0, self._find_similar(edit.old, content)
+
+        # Fuzzy mode (the default): try progressively looser fallbacks.
+        return self._apply_fuzzy_fallback(
+            content, norm_content, norm_old, norm_new, edit
+        )
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:

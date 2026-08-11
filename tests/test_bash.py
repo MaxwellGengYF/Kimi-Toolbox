@@ -4513,25 +4513,16 @@ class TestShellSafetyWiring:
         assert isinstance(result, ToolOk)
         mock_pt.assert_called_once()
 
-    # -- cwd / workdir -----------------------------------------------------
+    # -- cwd / workdir removed ---------------------------------------------
 
-    async def test_cwd_and_workdir_alias_accepted(self) -> None:
-        params = BashParams(cmd="pwd", cwd="/tmp/work")
-        assert params.cwd == "/tmp/work"
-        params2 = BashParams(cmd="pwd", workdir=r"C:\work")
-        assert params2.cwd == r"C:\work"
+    def test_cwd_and_workdir_params_removed(self) -> None:
+        """Bash no longer exposes ``cwd``/``workdir``/``deduplicate_output``."""
+        props = BashParams.model_json_schema()["properties"]
+        for gone in ("cwd", "workdir", "deduplicate_output", "token_kill"):
+            assert gone not in props, f"{gone} must be removed from BashParams"
 
-    async def test_dangerous_cwd_returns_error_without_spawning(
-        self, bash_instance: Bash
-    ) -> None:
-        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
-            result = await bash_instance(BashParams(cmd="pwd", cwd="a;b"))
-        assert isinstance(result, ToolError)
-        assert result.brief == "Invalid workdir"
-        assert "Invalid workdir" in result.message
-        mock_pt.assert_not_called()
-
-    async def test_process_task_receives_cwd(self, bash_instance: Bash) -> None:
+    async def test_process_task_runs_without_cwd(self, bash_instance: Bash) -> None:
+        """No working directory is passed to the subprocess anymore."""
         process_task = self._completed_process_task()
         with patch("kimix.tools.file.bash.bash_tool.sys.platform", "win32"), patch(
             "kimix.utils.windows_env.refresh_env_from_registry"
@@ -4539,9 +4530,9 @@ class TestShellSafetyWiring:
             "kimix.tools.file.bash.bash_tool.ProcessTask",
             return_value=process_task,
         ) as mock_pt:
-            result = await bash_instance(BashParams(cmd="echo hi", cwd=r"C:\work"))
+            result = await bash_instance(BashParams(cmd="echo hi"))
         assert isinstance(result, ToolOk)
-        assert mock_pt.call_args.args[2] == r"C:\work"
+        assert mock_pt.call_args.args[2] is None
 
     # -- exit-code meaning / failure hints ---------------------------------
 
@@ -4689,6 +4680,46 @@ class TestBashOriginalSavedSuffix:
         process_task.stream.process_elapsed = None
         return process_task
 
+    @staticmethod
+    def _random_json_lines(n: int = 2000, seed: int = 999) -> str:
+        """High-entropy JSON-ish lines that survive the token filter unchanged
+        (no repeats, no near-duplicate patterns) while staying >64KB."""
+        import random as _random
+        import string as _string
+
+        _random.seed(seed)
+
+        def rand_str(length: int) -> str:
+            return "".join(
+                _random.choice(
+                    _string.ascii_lowercase + _string.digits + " .,;:!?()[]{}-_=+"
+                )
+                for _ in range(length)
+            )
+
+        return "\n".join(
+            f'{{"id": {_random.randint(0, 10**9)}, "val": "{rand_str(20)}"}}'
+            for _ in range(n)
+        )
+
+    @staticmethod
+    def _repeated_block_output(seed: int = 123) -> str:
+        """Unique high-entropy lines plus a repeated block: the dedup stage
+        collapses the block (changing the output, so the token filter saves the
+        pre-filter original) while the unique lines keep the result >64KB."""
+        import random as _random
+        import string as _string
+
+        _random.seed(seed)
+
+        def rand_line() -> str:
+            return "".join(
+                _random.choice(_string.ascii_lowercase + _string.digits)
+                for _ in range(40)
+            )
+
+        return "\n".join([rand_line() for _ in range(2500)] + ["ERROR"] * 100)
+
     async def test_message_includes_original_path_after_dedup(
         self, bash_instance: Bash
     ) -> None:
@@ -4696,7 +4727,7 @@ class TestBashOriginalSavedSuffix:
         with patch(
             "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
         ):
-            result = await bash_instance(BashParams(cmd="echo hi", deduplicate_output=True))
+            result = await bash_instance(BashParams(cmd="echo hi"))
         assert isinstance(result, ToolOk)
         assert "[original saved to .kimix_cache/tmp_" in result.message
 
@@ -4712,13 +4743,139 @@ class TestBashOriginalSavedSuffix:
         assert isinstance(result, ToolOk)
         assert "[original saved to .kimix_cache/tmp_" in result.message
 
-    async def test_no_suffix_when_no_filter(
+    async def test_no_suffix_when_filter_unchanged(
         self, bash_instance: Bash
     ) -> None:
+        """Dedup is always on, but output with no repeats is left unchanged,
+        so no original temp file is created and no suffix is appended."""
         process_task = self._completed_process_task(output="plain output")
         with patch(
             "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
         ):
-            result = await bash_instance(BashParams(cmd="echo hi", deduplicate_output=False))
+            result = await bash_instance(BashParams(cmd="echo hi"))
         assert isinstance(result, ToolOk)
         assert "[original saved to" not in result.message
+
+    async def test_message_includes_original_path_after_summarize(
+        self, bash_instance: Bash
+    ) -> None:
+        """A >64KB output that survives the (always-on) token filter unchanged
+        is still preserved before summarization replaces it with a summary."""
+        long_output = self._random_json_lines()
+        assert len(long_output) > 65536
+        process_task = self._completed_process_task(output=long_output)
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._summarize_long_output_async",
+            new=AsyncMock(return_value="[summary]"),
+        ):
+            result = await bash_instance(BashParams(cmd="echo hi"))
+        assert isinstance(result, ToolOk)
+        assert "output_truncated: true" in result.output
+        assert "[original saved to .kimix_cache/tmp_" in result.message
+        # The saved file must contain the full pre-summary output.
+        saved = result.message.split("[original saved to ", 1)[1].rstrip("]")
+        import anyio
+        async with await anyio.open_file(saved, "r") as f:
+            assert await f.read() == long_output
+
+    async def test_summarize_saves_original_when_rtk_rewritten(
+        self, bash_instance: Bash
+    ) -> None:
+        """RTK-rewritten commands skip local dedup; a long output that is not
+        rtk-folded must still be preserved before summarization."""
+        long_output = self._random_json_lines()
+        with patch(
+            "kimix.tools.file.bash.bash_tool._summarize_long_output_async",
+            new=AsyncMock(return_value="[summary]"),
+        ):
+            display, _path, truncated, original_path = (
+                await bash_instance._process_output(
+                    BashParams(cmd="echo hi"),
+                    long_output,
+                    rtk_rewritten=True,
+                )
+            )
+        assert truncated is True
+        assert display == "[summary]"
+        assert original_path is not None
+        import anyio
+        async with await anyio.open_file(original_path, "r") as f:
+            assert await f.read() == long_output
+
+    async def test_summarize_keeps_existing_original_path(
+        self, bash_instance: Bash
+    ) -> None:
+        """When the (always-on) dedup already saved the pre-filter original,
+        summarization must reuse that path instead of writing a new file."""
+        long_output = self._repeated_block_output()
+        assert len(long_output) > 65536
+        save_calls: list[tuple[str, str | None]] = []
+
+        async def fake_save(output: str, original_path: str | None) -> str | None:
+            save_calls.append((output, original_path))
+            return original_path
+
+        with patch(
+            "kimix.tools.file.bash.bash_tool._save_original_output_async",
+            new=fake_save,
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._summarize_long_output_async",
+            new=AsyncMock(return_value="[summary]"),
+        ):
+            display, _path, truncated, original_path = (
+                await bash_instance._process_output(
+                    BashParams(cmd="echo hi"), long_output
+                )
+            )
+        assert truncated is True
+        assert display == "[summary]"
+        assert save_calls, "summarize branch must consult the original saver"
+        # The dedup stage collapsed the repeated block, so an original was
+        # already saved; the summarize branch must keep it (non-None arg).
+        assert save_calls[0][1] is not None
+        assert original_path == save_calls[0][1]
+        # The saved file is the full pre-filter original, not the summary.
+        import anyio
+        async with await anyio.open_file(original_path, "r") as f:
+            assert await f.read() == long_output
+
+
+# ============================================================================
+# Powershell parity: original saved before summarization
+# ============================================================================
+
+
+class TestPowershellOriginalSavedSuffix:
+    @pytest.fixture
+    def pwsh_instance(self, mock_session: MagicMock) -> Powershell:
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
+            return_value=True,
+        ):
+            return Powershell(session=mock_session)
+
+    async def test_process_output_saves_original_before_summarize(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        """Powershell mirrors the Bash fix: an unchanged >64KB output is saved
+        before the summarization branch replaces it with a summary."""
+        long_output = TestBashOriginalSavedSuffix._random_json_lines()
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool._summarize_long_output_async",
+            new=AsyncMock(return_value="[summary]"),
+        ):
+            display, _path, truncated, original_path = (
+                await pwsh_instance._process_output(
+                    "echo hi",
+                    PowershellParams(cmd="echo hi"),
+                    long_output,
+                )
+            )
+        assert truncated is True
+        assert display == "[summary]"
+        assert original_path is not None
+        import anyio
+        async with await anyio.open_file(original_path, "r") as f:
+            assert await f.read() == long_output

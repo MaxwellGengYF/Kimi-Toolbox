@@ -15,6 +15,7 @@ from kimix.tools.common import (
     _original_saved_message,
     _rtk_available,
     _rtk_binary_path,
+    _save_original_output_async,
     _token_filter_output,
     _truncate_lines,
 )
@@ -336,6 +337,36 @@ def test_original_saved_message_formats_temp_path(tmp_path, monkeypatch):
     monkeypatch.setattr(common_mod, "_temp_folder", folder)
     suffix = _original_saved_message(str(saved.resolve()))
     assert suffix == "[original saved to .kimix_cache/tmp_1234/0.txt]"
+
+
+# ── _save_original_output_async tests ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_save_original_output_saves_when_none_saved():
+    """With no prior original_path, the output is persisted to a temp file."""
+    out = "x" * 100
+    path = await _save_original_output_async(out, None)
+    assert path is not None
+    import anyio
+    async with await anyio.open_file(path, "r") as f:
+        assert await f.read() == out
+
+
+@pytest.mark.asyncio
+async def test_save_original_output_keeps_existing_path(tmp_path):
+    """An existing original_path wins: nothing new is written."""
+    existing = tmp_path / "already.txt"
+    existing.write_text("original")
+    out = "x" * 100
+    path = await _save_original_output_async(out, str(existing))
+    assert path == str(existing)
+    assert existing.read_text() == "original"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_save_original_output_empty_no_save():
+    """Empty output is never persisted."""
+    assert await _save_original_output_async("", None) is None
 
 
 # ── Param validation tests ──────────────────────────────────────────

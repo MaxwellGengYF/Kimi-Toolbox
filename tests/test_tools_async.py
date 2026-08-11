@@ -537,7 +537,9 @@ class TestPython:
             "src/a.py:1:match\n"
             "  +5 more in src/b.py [see remaining: tail -n +2 /tmp/rtk.log]\n"
         )
-        params = PyParams(code="pass", deduplicate_output=False, max_lines=None)
+        # Dedup is always on; the rtk full-stream save still triggers for
+        # marker-bearing output when max_lines is unset.
+        params = PyParams(code="pass", max_lines=None)
         processed, output_path, output_truncated, original_path = await tool._process_output(
             params, output
         )

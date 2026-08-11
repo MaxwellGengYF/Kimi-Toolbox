@@ -82,12 +82,12 @@ def get_system_prompt(
 # Tool Conventions
 Applies to every tool that exposes the corresponding parameters:
 - **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker. `max_lines=None` for unlimited.
-- **Output dedup**: Repeated lines from known commands are deduplicated by default; set `deduplicate_output=False` (or `token_kill=False`) for raw output.
+- **Output dedup**: Repeated lines from known commands are deduplicated automatically; output is always token-filtered (head+tail fold via `max_lines`, repeat collapsing).
 - **`rtk`**: Invoke known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, ...) via `rtk <process> <arguments...>` to save tokens — it deduplicates and truncates the wrapped command's output.
-- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `cwd`/`workdir`, `code`/`code_file`); common misspellings are repaired automatically.
+- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `code`/`code_file`); common misspellings are repaired automatically.
 - **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
 - **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
-- **Working directory**: `cwd`/`workdir` sets the working directory for the command or script; files outside it require absolute paths.
+- **Working directory**: Only the `Run` tool accepts `cwd`/`workdir` (for direct process execution). For `Bash`/`Powershell`, change directory inside the command itself: `cd <dir> && <cmd>` (bash) or `cd <dir>; <cmd>` (powershell). The `Python` tool runs in the process working directory.
 '''.strip() + '\n'
             nonlocal role_doc, use_agent_md, use_skills
             use_agent_md = True

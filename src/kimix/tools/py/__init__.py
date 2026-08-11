@@ -17,14 +17,13 @@ from kimix.tools.common import (
     _maybe_export_output_async,
     _maybe_export_rtk_original_async,
     _original_saved_message,
+    _save_original_output_async,
     _summarize_long_output_async,
     _token_filter_output,
     ProcessTask,
 )
 from kimix.tools.prompt_common import (
     accepts_alias_text,
-    cwd_field,
-    deduplicate_output_field,
     max_lines_field,
     mode_field,
     normalize_mode_validator,
@@ -66,8 +65,6 @@ class Params(BaseModel):
     task_id: str | None = task_id_field("code", tail="being executed as a new script.")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
-    deduplicate_output: bool = deduplicate_output_field(accepts_alias=True)
-    cwd: str | None = cwd_field("script", via_alias=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -313,14 +310,6 @@ class Python(CallableTool2[Params]):
         if params.task_id is not None:
             return await self._continue_session(params)
 
-        # Validate the working directory before any dispatch: a bad cwd must
-        # fail fast without spawning a subprocess.
-        if params.cwd:
-            from kimix.tools.security import validate_workdir
-            err = validate_workdir(params.cwd)
-            if err:
-                return ToolError(message=err, brief="Invalid workdir")
-
         async with self._semaphore:
             if params.mode == "interactive":
                 return await self._start_interactive(params)
@@ -357,7 +346,7 @@ class Python(CallableTool2[Params]):
         process_task = ProcessTask(
             python_exe,
             args,
-            cwd=params.cwd,
+            cwd=None,
             env=self._build_env(python_exe, scrub_env=scrub_on),
             scrub_env=scrub_on,
             redact=redact_on,
@@ -431,7 +420,7 @@ class Python(CallableTool2[Params]):
         process_task = ProcessTask(
             python_exe,
             args,
-            cwd=params.cwd,
+            cwd=None,
             env=self._build_env(python_exe, scrub_env=scrub_on),
             scrub_env=scrub_on,
             redact=redact_on,
@@ -637,14 +626,19 @@ class Python(CallableTool2[Params]):
         # model can page through the unfiltered results.  This is done before
         # the local token filter so the raw rtk stream is captured even when
         # dedup/max_lines are disabled.
+        # Dedup is always enabled (the ``deduplicate_output`` param was
+        # removed).  The rtk full-stream save applies whenever markers are
+        # present and max_lines is unset, because the Python tool never
+        # rewrites commands itself and the local filter may leave the
+        # rtk-folded stream unchanged.
         rtk_original_path: str | None = None
-        if output and not (params.deduplicate_output or params.max_lines is not None):
+        if output and params.max_lines is None:
             rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
         # Run token filter pipeline (dedup, truncate).
         # Python tool doesn't rewrite commands with RTK binary, so rtk_rewritten=False.
         output, original_path = await _token_filter_output(
             output,
-            token_kill=params.deduplicate_output,
+            token_kill=True,
             max_lines=params.max_lines,
             rtk_rewritten=False,
         )
@@ -655,6 +649,10 @@ class Python(CallableTool2[Params]):
             if self._python_config().get("summarize_long_output", True):
                 # Use the source (file path or inline code) as context for summarization
                 source_context = params.code
+                # Preserve the full stream before replacing it with a summary:
+                # the token filter may have left the output unchanged, so no
+                # original has been saved yet and the summary would destroy it.
+                original_path = await _save_original_output_async(output, original_path)
                 output = await _summarize_long_output_async(self._session, source_context, output)
                 output_truncated = True
             else:

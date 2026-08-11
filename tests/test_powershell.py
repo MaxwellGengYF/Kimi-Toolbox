@@ -507,23 +507,14 @@ class TestPowershellSafetyWiring:
         ):
             return Powershell(session=mock_session)
 
-    async def test_cwd_and_workdir_alias_accepted(self) -> None:
-        params = PowershellParams(cmd="Get-Location", cwd=r"C:\work")
-        assert params.cwd == r"C:\work"
-        params2 = PowershellParams(cmd="Get-Location", workdir="/tmp/work")
-        assert params2.cwd == "/tmp/work"
+    def test_cwd_and_workdir_params_removed(self) -> None:
+        """Powershell no longer exposes ``cwd``/``workdir``/``deduplicate_output``."""
+        props = PowershellParams.model_json_schema()["properties"]
+        for gone in ("cwd", "workdir", "deduplicate_output", "token_kill"):
+            assert gone not in props, f"{gone} must be removed from PowershellParams"
 
-    async def test_dangerous_cwd_returns_error_without_spawning(
-        self, pwsh_instance: Powershell
-    ) -> None:
-        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
-            result = await pwsh_instance(PowershellParams(cmd="Get-Location", cwd="a;b"))
-        assert isinstance(result, ToolError)
-        assert result.brief == "Invalid workdir"
-        assert "Invalid workdir" in result.message
-        mock_pt.assert_not_called()
-
-    async def test_process_task_receives_cwd(self, pwsh_instance: Powershell) -> None:
+    async def test_process_task_runs_without_cwd(self, pwsh_instance: Powershell) -> None:
+        """No working directory is passed to the subprocess anymore."""
         mock_instance = MagicMock()
         mock_instance.start = AsyncMock(return_value="pwsh-cwd-id")
         mock_instance.wait_with_monitor = AsyncMock(return_value=None)
@@ -537,11 +528,9 @@ class TestPowershellSafetyWiring:
             "kimix.tools.file.bash.pwsh_tool.ProcessTask",
             return_value=mock_instance,
         ) as mock_pt:
-            result = await pwsh_instance(
-                PowershellParams(cmd="Get-Location", cwd=r"C:\work")
-            )
+            result = await pwsh_instance(PowershellParams(cmd="Get-Location"))
         assert isinstance(result, ToolOk)
-        assert mock_pt.call_args.args[2] == r"C:\work"
+        assert mock_pt.call_args.args[2] is None
 
     async def test_hardline_blocked_before_process_task(
         self, pwsh_instance: Powershell

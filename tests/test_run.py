@@ -77,40 +77,100 @@ class TestRunRtkRewrite:
             instance.stream.process_elapsed = None
             mock_pt.return_value = instance
 
-            result = await run(RunParams(command="git status", deduplicate_output=False))
+            result = await run(RunParams(command="mycustomcmd --flag"))
 
             assert isinstance(result, ToolOk)
             args = mock_pt.call_args[0]
-            # With deduplicate_output=False, RTK is disabled and the command is passed as-is.
-            # shutil.which("git") returns "/fake/git" from the mock side_effect.
-            assert args[0] == "git"
-            assert args[1] == ["status"]
+            # Dedup is always on, but RTK only wraps *known* commands; an
+            # unknown command is passed as-is.
+            assert args[0] == "mycustomcmd"
+            assert args[1] == ["--flag"]
 
-    async def test_run_token_kill_false_does_not_prepend_rtk(self, mock_session: MagicMock) -> None:
+    def test_deduplicate_output_params_removed(self) -> None:
+        """Run no longer exposes ``deduplicate_output``/``token_kill``; cwd stays."""
+        props = RunParams.model_json_schema()["properties"]
+        assert "cwd" in props
+        for gone in ("deduplicate_output", "token_kill"):
+            assert gone not in props, f"{gone} must be removed from RunParams"
+
+    def test_cwd_accepts_workdir_alias(self) -> None:
+        """Run keeps ``cwd`` and still accepts the ``workdir`` spelling."""
+        assert RunParams(command="ls", workdir=r"C:\work").cwd == r"C:\work"
+        assert RunParams(command="ls", cwd="/tmp").cwd == "/tmp"
+
+
+class TestRunShellCwdViaCd:
+    """Run's ``cwd`` is translated into a ``cd`` statement inside the shell
+    command when delegating to Bash/Powershell (they no longer take ``cwd``)."""
+
+    def test_cd_prefix_bash(self) -> None:
+        from kimix.tools.file.run import _cd_prefix
+
+        assert _cd_prefix(None, "bash") == ""
+        assert _cd_prefix("", "bash") == ""
+        assert _cd_prefix("/tmp/work", "bash") == "cd /tmp/work && "
+        assert _cd_prefix("/tmp/a b", "bash") == "cd '/tmp/a b' && "
+
+    def test_cd_prefix_pwsh(self) -> None:
+        from kimix.tools.file.run import _cd_prefix
+
+        assert _cd_prefix(None, "pwsh") == ""
+        assert _cd_prefix(r"C:\work", "pwsh") == r"cd 'C:\work'; "
+        assert _cd_prefix(r"C:\it's", "pwsh") == r"cd 'C:\it''s'; "
+
+    async def test_shell_mode_bash_uses_cd_inside(
+        self, mock_session: MagicMock
+    ) -> None:
         run = _run_instance(mock_session)
+        captured: dict[str, object] = {}
+
+        async def fake_bash_call(self: object, params: object) -> ToolOk:
+            captured["params"] = params
+            return ToolOk(output="", message="ok", brief="ok")
+
         with (
-            patch("kimix.tools.file.run.ProcessTask") as mock_pt,
-            patch("kimix.tools.file.run._rtk_binary_path", return_value=Path("/fake/share/bin/rtk")),
-            patch("kimix.tools.file.run.shutil.which") as mock_which,
+            patch("kimix.tools.file.run.sys.platform", "darwin"),
+            patch("kimix.tools.file.bash.bash_tool.Bash.__call__", new=fake_bash_call),
+            patch("kimix.tools.file.bash.bash_tool._should_enable_bash", return_value=True),
+            patch("kimix.tools.file.bash.bash_tool.find_bash", return_value="/bin/bash"),
         ):
-            mock_which.side_effect = lambda name: f"/fake/{name}"
-            instance = MagicMock()
-            instance.start = AsyncMock(return_value="run_no_rtk")
-            instance.wait = AsyncMock(return_value=None)
-            instance.thread_is_alive = AsyncMock(return_value=False)
-            instance.stream = AsyncMock()
-            instance.stream.pop_output = AsyncMock(return_value="mock output")
-            instance.stream.success = AsyncMock(return_value=True)
-            instance.stream.exit_code = 0
-            instance.stream.process_elapsed = None
-            mock_pt.return_value = instance
+            result = await run(
+                RunParams(command="echo hi", shell=True, cwd="/tmp/work")
+            )
+        assert isinstance(result, ToolOk)
+        params = captured["params"]
+        assert params.cmd == "cd /tmp/work && echo hi"
+        # The removed params are not forwarded.
+        assert not hasattr(params, "cwd")
+        assert not hasattr(params, "deduplicate_output")
 
-            result = await run(RunParams(command="git status", token_kill=False))
+    async def test_shell_mode_pwsh_uses_cd_inside(
+        self, mock_session: MagicMock
+    ) -> None:
+        run = _run_instance(mock_session)
+        captured: dict[str, object] = {}
 
-            assert isinstance(result, ToolOk)
-            args = mock_pt.call_args[0]
-            assert args[0] == "git"
-            assert args[1] == ["status"]
+        async def fake_pwsh_call(self: object, params: object) -> ToolOk:
+            captured["params"] = params
+            return ToolOk(output="", message="ok", brief="ok")
+
+        with (
+            patch("kimix.tools.file.run.sys.platform", "win32"),
+            patch("kimix.tools.file.bash.pwsh_tool.Powershell.__call__", new=fake_pwsh_call),
+            patch(
+                "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
+                return_value=True,
+            ),
+            patch("kimix.tools.file.bash.pwsh_tool.find_pwsh", return_value=r"C:\pwsh\pwsh.exe"),
+        ):
+            result = await run(
+                RunParams(command="echo hi", shell=True, cwd=r"C:\work dir")
+            )
+        assert isinstance(result, ToolOk)
+        params = captured["params"]
+        assert params.cmd == r"cd 'C:\work dir'; echo hi"
+        assert not hasattr(params, "cwd")
+        assert not hasattr(params, "deduplicate_output")
 
 
 class TestRunContinueSession:
@@ -285,7 +345,7 @@ class TestRunOriginalSavedSuffix:
             instance.stream.process_elapsed = None
             mock_pt.return_value = instance
 
-            result = await run(RunParams(command="python -c print(1)", deduplicate_output=True))
+            result = await run(RunParams(command="python -c print(1)"))
 
         assert isinstance(result, ToolOk)
         assert "[original saved to .kimix_cache/tmp_" in result.message
@@ -337,7 +397,7 @@ class TestRunOriginalSavedSuffix:
             instance.stream.process_elapsed = None
             mock_pt.return_value = instance
 
-            result = await run(RunParams(command="python -c print(1)", deduplicate_output=False))
+            result = await run(RunParams(command="python -c print(1)"))
 
         assert isinstance(result, ToolOk)
         assert "[original saved to" not in result.message

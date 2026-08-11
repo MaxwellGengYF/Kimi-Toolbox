@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install script for the project using uv."""
 
+import argparse
 import os
 import platform
 import re
@@ -57,12 +58,20 @@ def command_exists(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+# Set to True when the script is invoked with ``-y``/``--yes``: every yes/no
+# prompt is then answered affirmatively without user input.
+_ASSUME_YES = False
+
+
 def _ask_yes_no(prompt: str, default: bool = True) -> bool:
     """Ask the user a yes/no question.
 
-    In non-interactive environments (e.g. CI pipelines) the *default*
-    value is returned immediately so the script does not hang.
+    When the script was invoked with ``-y``/``--yes`` (or in non-interactive
+    environments such as CI pipelines) the affirmative answer is returned
+    immediately so the script does not hang.
     """
+    if _ASSUME_YES:
+        return True
     if not sys.stdin.isatty():
         return default
 
@@ -643,7 +652,24 @@ def _install_kimix_native(bin_dir: Path | None = None, force: bool = False) -> b
     return True
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    global _ASSUME_YES
+
+    parser = argparse.ArgumentParser(
+        prog="install.py",
+        description="Install script for the project using uv.",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Automatically answer 'yes' to all prompts.",
+    )
+    args = parser.parse_args(argv)
+    if args.yes:
+        _ASSUME_YES = True
+        print("🟢 '-y' detected: automatically accepting all prompts.")
+
     # 1. Check if python or uv exists
     has_python = command_exists("python") or command_exists("python3")
     has_uv = command_exists("uv")
