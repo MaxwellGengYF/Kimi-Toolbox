@@ -761,7 +761,7 @@ def _context_is_non_empty(session: Any) -> bool:
     return False
 
 
-def _refaction_context_stats(session: Any) -> str:
+def _reflection_context_stats(session: Any) -> str:
     """Return a short human-readable description of the session context size."""
     try:  # preferred: soul context history + token count
         context = session._cli.soul.context
@@ -777,8 +777,8 @@ def _refaction_context_stats(session: Any) -> str:
     return 'visible above'
 
 
-def _build_refaction_prompt(session: Any, *, report_path: Path | None = None) -> str:
-    """Build the /refaction prompt embedding source paths, AGENTS.md and rules."""
+def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -> str:
+    """Build the /reflection prompt embedding source paths, AGENTS.md and rules."""
     agent_src = Path(__file__).resolve().parent.parent          # ...\src\kimix
     repo_root = agent_src.parent.parent                          # ...\kimi-agent
     kimix_tools_dir = agent_src / 'tools'                        # ...\src\kimix\tools
@@ -789,9 +789,9 @@ def _build_refaction_prompt(session: Any, *, report_path: Path | None = None) ->
     except OSError:
         agents_md = '(AGENTS.md not found)'
     if report_path is None:
-        report_path = repo_root / 'docs' / f'refaction_report_{pendulum.now().format("YYYYMMDD_HHMMSS")}.md'
-    context_stats = _refaction_context_stats(session)
-    return f'''# Refaction Task
+        report_path = repo_root / 'docs' / f'reflection_report_{pendulum.now().format("YYYYMMDD_HHMMSS")}.md'
+    context_stats = _reflection_context_stats(session)
+    return f'''# Reflection Task
 
 Reflect on the conversation context above. Find misunderstandings caused by the
 current agent design, then change the source code to make this project better.
@@ -827,21 +827,21 @@ Include: the misunderstanding found, what was changed, and why.
 '''
 
 
-def _cmd_refaction(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
+def _cmd_reflection(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
     """Reflect on the current context and refactor the agent source code."""
     session = get_default_session()
     if session is None:
         print_error('No active session. Start a conversation first.')
         return None, False
     if not _context_is_non_empty(session):
-        print_error('Context is empty. /refaction requires a non-empty context.')
+        print_error('Context is empty. /reflection requires a non-empty context.')
         return None, False
-    prompt_str = _build_refaction_prompt(session)
+    prompt_str = _build_reflection_prompt(session)
     print_info(prompt_str)
     try:
         prompt(prompt_str=prompt_str, session=session, format_output=True)
     except Exception as e:
-        print_error(f'Refaction failed: {e}')
+        print_error(f'Reflection failed: {e}')
     return None, False
 
 
@@ -867,7 +867,7 @@ _command_map = {
     'load': _cmd_load,
     'sessions': _cmd_sessions,
     'ralph': _cmd_ralph,
-    'refaction': _cmd_refaction,
+    'reflection': _cmd_reflection,
     'supervisor': _cmd_supervisor,
     'swarm': _cmd_swarm,
     'init': _cmd_init,
