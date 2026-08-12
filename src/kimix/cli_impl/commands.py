@@ -784,6 +784,11 @@ def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -
     kimix_tools_dir = agent_src / 'tools'                        # ...\src\kimix\tools
     kimi_cli_tools_dir = repo_root / 'kimi-cli' / 'src' / 'kimi_cli' / 'tools'
     agents_md_path = repo_root / 'AGENTS.md'
+    system_prompt_path = agent_src / 'utils' / 'system_prompt.py'  # ...\src\kimix\utils\system_prompt.py
+    worker_agent_json = agent_src / 'agent_worker.json'            # ...\src\kimix\agent_worker.json
+    soul_dir = repo_root / 'kimi-cli' / 'src' / 'kimi_cli' / 'soul'  # ...\kimi-cli\src\kimi_cli\soul
+    dynamic_injections_dir = soul_dir / 'dynamic_injections'        # ...\soul\dynamic_injections
+    config_path = repo_root / 'kimi-cli' / 'src' / 'kimi_cli' / 'config.py'
     try:
         agents_md = agents_md_path.read_text(encoding='utf-8', errors='replace')
     except OSError:
@@ -802,6 +807,40 @@ current agent design, then change the source code to make this project better.
   - `{kimix_tools_dir}`
   - `{kimi_cli_tools_dir}`
 - Current context: {context_stats} (full conversation is visible above)
+
+## Architecture map (source of truth)
+- System prompt: `{system_prompt_path}` — builds the per-role system prompt as
+  `{{TOOL_CONVENTIONS}}{{AGENT_ROLE}}:{{NUMBERED}}{{AGENTS_MD}}{{SKILLS}}`; roles via
+  `SystemPromptType` (Worker/TodoMaker/Thinker/TrivialSubAgent/Supervisor/Reader/SwarmLeader);
+  `get_system_prompt()` returns a per-runtime builder, picks the active shell, enforces
+  `max_system_prompt_tokens`.
+- Worker tool manifest: `{worker_agent_json}` — the exact tool list for the worker agent
+  (`agent.extend=default`): Bash, Powershell, Run, Python, TaskOutput, TodoList, Retrieve,
+  ReadFile, ReadMediaFile, EditFile, WriteFile, Agent, AskAgent, AgentList, AgentClose,
+  AgentSwarm, Glob, Grep, FetchURL, SearchWeb, ContextUsage, Compact (from `kimix.tools.*`
+  and `kimi_cli.tools.*`).
+- Soul runtime: `{soul_dir}`
+  - agent.py — Runtime + BuiltinSystemPromptArgs; loads AGENTS.md, skills, additional dirs
+  - kimisoul.py — main agent loop: step/turn lifecycle, retries, auto-compaction, injections
+  - compaction.py — context compaction (modes, adaptive preserve depth, auto-trigger)
+  - context.py / context_db.py / context_records.py — context storage (JSONL/SQLite + migration), records
+  - context_pruning.py — smart history removal (Tier A ephemeral / B elision / C micro-compress)
+  - message.py — message helpers + `<system-reminder>` tags
+  - dynamic_injection.py — DynamicInjection/Provider base + history normalization
+  - verification_gate.py — soul-layer verification nudges for todos/code edits
+  - approval.py — approval state (yolo/afk/auto-approve)
+  - btw.py / steer.py / slash.py — side questions, mid-stream steering, slash registry
+  - toolset.py / tool_taxonomy.py — tool loading & classification
+  - denwarenji.py — D-Mail; history_index.py — BM25 history index; llm_request_recorder.py — request tracing
+- Dynamic injectors (reminders): `{dynamic_injections_dir}`
+  - budget_reminder.py — budget warnings as step/wall-clock usage crosses ratios (default 0.7/0.9)
+  - compact_reminder.py — suggests `Compact` when usage exceeds threshold (default 0.70)
+  - context_meter.py — nudges `Retrieve` when context usage materially changes
+  - target_churn.py — anti-loop: repeated edits to same file / repeated identical errors
+  - todo_reminder.py — re-injects unfinished TodoList items at the context tail
+- Config: `{config_path}` — pydantic `Config` (model/provider, loop_control, background,
+  notifications, services, mcp, hooks, skills); `LoopControl` drives loop/compaction/prune/
+  reminder thresholds and toggles.
 
 ## AGENTS.md
 {agents_md}
