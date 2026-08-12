@@ -137,7 +137,12 @@ _RTK_KNOWN_COMMANDS: frozenset[str] = frozenset(
         "tree",
         "read",
         "smart",
-        "find",
+        # NOTE: `find` is intentionally NOT wrapped by rtk: rtk's find
+        # emulation is not a drop-in for the standard find(1) and refuses
+        # common predicates (`-not`, `-exec`, compound expressions) with a
+        # hard error, breaking legitimate agent usage. The faithful local
+        # dedup pipeline (_token_filter_output) still collapses repeated
+        # find output, so no token-saving benefit is lost.
         "grep",
         "rg",
         "diff",
@@ -1041,6 +1046,14 @@ def _maybe_rewrite_shell_command_with_rtk(
     command substitutions are not rewritten.  Segments already starting with
     ``rtk`` or prefixed with ``RTK_DISABLED=1`` are left untouched.
 
+    Multi-segment commands (containing top-level ``;``/``&&``/``||``) are
+    intentionally NOT rewritten: rtk cannot guarantee newline-terminated
+    output (its git-specific re-annotation, for example, strips the trailing
+    newline), so a wrapped segment followed by more output glues the next
+    command's text onto the same line (``git status --short; echo x`` renders
+    as `` M f.txtx``).  Glued structured output silently misleads the model,
+    so such commands fall back to the faithful local dedup pipeline.
+
     When ``pwsh`` is True the injected ``rtk`` prefix is prefixed with the
     PowerShell call operator ``&`` (required to invoke a command by name).
     """
@@ -1072,6 +1085,16 @@ def _maybe_rewrite_shell_command_with_rtk(
             return command, False
 
     segments = _split_shell_segments(command)
+    # Safety guard: rtk's per-segment output is not guaranteed to end with a
+    # newline (its git status re-annotation strips it), so when several
+    # commands share one output stream the next command's text gets glued
+    # onto the previous line (``rtk git status --short; echo x`` ->
+    # `` M f.txtx``).  A glued line reads as one unit and has repeatedly
+    # misled the agent into misreading structured output (e.g. a clean/dirty
+    # git status).  Multi-segment commands therefore skip rtk entirely and
+    # use the faithful local dedup pipeline (_token_filter_output).
+    if len(segments) > 1:
+        return command, False
     new_segments: list[tuple[str, str]] = []
     changed = False
     for seg, sep in segments:

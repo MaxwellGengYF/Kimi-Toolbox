@@ -408,6 +408,14 @@ def test_is_known_rtk_command_unknown():
     assert _is_known_rtk_command("echo") is False
 
 
+def test_is_known_rtk_command_find_removed():
+    # rtk's find emulation is not a drop-in for find(1): it hard-errors on
+    # standard predicates (`-not`, `-exec`, compound expressions).  Wrapping
+    # find would break legitimate agent usage, so it is deliberately absent.
+    assert _is_known_rtk_command("find") is False
+    assert _is_known_rtk_command("find.exe") is False
+
+
 @pytest.fixture
 def rtk_available(tmp_path):
     """Pretend rtk exists: fake binary in a fake share/bin, available gate on.
@@ -428,18 +436,33 @@ def rtk_available(tmp_path):
     _rtk_binary_path.cache_clear()
 
 
+def test_rewrite_find_not_wrapped(rtk_available):
+    # Standard find usage (compound predicates) must run the real find(1);
+    # rtk's find wrapper refuses `-not`/`-exec` with a hard error.
+    rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
+        "find . -name '*.cpp' -not -path './build/*'", token_kill=True
+    )
+    assert changed is False
+    assert rewritten == "find . -name '*.cpp' -not -path './build/*'"
+
+
 def test_rewrite_known_single_command(rtk_available):
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk("git status", token_kill=True)
     assert changed is True
     assert rewritten == "rtk git status"
 
 
-def test_rewrite_compound_command(rtk_available):
+def test_rewrite_compound_command_skipped_for_safety(rtk_available):
+    # Multi-segment commands (top-level `&&`) are NOT wrapped: rtk's output
+    # is not guaranteed to end with a newline, so a wrapped segment followed
+    # by more output glues lines together (e.g. `git status --short; echo x`
+    # -> ` M f.txtx`) and misleads the model.  The local dedup pipeline is
+    # faithful, so it handles these instead.
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
         "git status && cargo test", token_kill=True
     )
-    assert changed is True
-    assert rewritten == "rtk git status && rtk cargo test"
+    assert changed is False
+    assert rewritten == "git status && cargo test"
 
 
 def test_rewrite_already_prefixed(rtk_available):
@@ -580,20 +603,20 @@ async def test_token_filter_default_still_single_line():
 # ── Absolute-path rtk rewrite (no PATH reliance) ─────────────────────
 
 
-def test_rewrite_semicolon_segments_absolute(rtk_available):
+def test_rewrite_semicolon_segments_skipped_for_safety(rtk_available):
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
         "git status; cargo test", token_kill=True
     )
-    assert changed is True
-    assert rewritten == "rtk git status; rtk cargo test"
+    assert changed is False
+    assert rewritten == "git status; cargo test"
 
 
-def test_rewrite_pipe_segments_absolute(rtk_available):
+def test_rewrite_pipe_segments_skipped_for_safety(rtk_available):
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
         "git status || cargo test", token_kill=True
     )
-    assert changed is True
-    assert rewritten == "rtk git status || rtk cargo test"
+    assert changed is False
+    assert rewritten == "git status || cargo test"
 
 
 def test_rewrite_always_emits_bare_rtk(rtk_available):
@@ -643,12 +666,12 @@ def test_rewrite_pwsh_uses_call_operator(rtk_available):
     assert rewritten == "& rtk git status"
 
 
-def test_rewrite_pwsh_compound_command(rtk_available):
+def test_rewrite_pwsh_compound_command_skipped_for_safety(rtk_available):
     rewritten, changed = _maybe_rewrite_shell_command_with_rtk(
         "git status; cargo test", token_kill=True, pwsh=True
     )
-    assert changed is True
-    assert rewritten == "& rtk git status; & rtk cargo test"
+    assert changed is False
+    assert rewritten == "git status; cargo test"
 
 
 def test_rewrite_pwsh_already_rewritten_untouched(rtk_available):

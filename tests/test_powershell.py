@@ -452,9 +452,13 @@ class TestPowershellRtkRewrite:
                 assert "& rtk git status" in args[0][1][-1]
                 assert "rtk" in result.message
 
-    async def test_pwsh_compound_command_rewrites_each_segment(
+    async def test_pwsh_compound_command_skips_rtk_for_safety(
         self, mock_session: MagicMock
     ) -> None:
+        # Multi-segment commands are NOT rtk-wrapped: rtk cannot guarantee
+        # newline-terminated output, so wrapping a segment followed by more
+        # output glues lines together and misleads the model.  The command
+        # must reach pwsh unchanged.
         _rtk_binary_path.cache_clear()
         with patch("kimix.tools.common._rtk_available", return_value=True), patch(
             "kimix.tools.file.bash.pwsh_tool.find_pwsh", return_value=r"C:\pwsh\pwsh.exe"
@@ -485,8 +489,9 @@ class TestPowershellRtkRewrite:
 
                 assert isinstance(result, ToolOk)
                 args = mock_pt.call_args
-                assert "& rtk git status; & rtk cargo test" in args[0][1][-1]
-                assert "rtk" in result.message
+                # Not rewritten: the compound command reaches pwsh unchanged.
+                assert "& rtk git status; & rtk cargo test" not in args[0][1][-1]
+                assert "rtk" not in result.message
 
 
 # ============================================================================
