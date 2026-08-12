@@ -84,7 +84,7 @@ Applies to every tool that exposes the corresponding parameters:
 - **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker. `max_lines=None` for unlimited.
 - **Output dedup**: Repeated lines from known commands are deduplicated automatically; output is always token-filtered (head+tail fold via `max_lines`, repeat collapsing).
 - **`rtk`**: Invoke known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, ...) via `rtk <process> <arguments...>` to save tokens — it deduplicates and truncates the wrapped command's output.
-- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `code`/`code_file`); common misspellings are repaired automatically.
+- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `todos`/`items`); common misspellings are repaired automatically.
 - **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
 - **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
 - **Working directory**: Only the `Run` tool accepts `cwd`/`workdir` (for direct process execution). For `Bash`/`Powershell`, change directory inside the command itself: `cd <dir> && <cmd>` (bash) or `cd <dir>; <cmd>` (powershell). The `Python` tool runs in the process working directory.
@@ -101,7 +101,7 @@ Applies to every tool that exposes the corresponding parameters:
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
             items.append('After each independent task, milestone, or schedule part, call `Compact` before the next step.')
-            items.append('Multi-step: track with `TodoList`; push parent scopes with `TodoPush`, add sub-todos with `TodoSub`, close the scope with `TodoPop`. Todos involving code changes attach verification `code` — `TodoList`/`TodoSub`/`TodoPop` all run a todo\'s code when marking it `done` (failure reverts to `pending`), so verification runs on every done transition. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
+            items.append('Multi-step: track with `TodoList`; push parent scopes with `TodoPush`, add sub-todos with `TodoSub`, close the scope with `TodoPop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.')

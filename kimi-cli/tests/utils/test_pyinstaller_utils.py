@@ -74,7 +74,7 @@ def test_pyinstaller_hiddenimports():
             "kimi_cli.tools.file.replace",
             "kimi_cli.tools.file.utils",
             "kimi_cli.tools.file.write", "kimi_cli.tools.memory", "kimi_cli.tools.reason", "kimi_cli.tools.test",
-            "kimi_cli.tools.todo", "kimi_cli.tools.todo.verify", "kimi_cli.tools.utils",
+            "kimi_cli.tools.todo", "kimi_cli.tools.utils",
             "kimi_cli.tools.web",
             "kimi_cli.tools.web.fetch",
             "kimi_cli.tools.web.search",

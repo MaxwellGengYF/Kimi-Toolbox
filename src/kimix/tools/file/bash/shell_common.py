@@ -1,8 +1,7 @@
 """Shared one-shot shell-execution helpers for the Bash/Powershell tool family.
 
-The Bash tool, the Powershell tool and the TodoList verification runner all
-need to turn a raw command string into an ``(argv, env)`` pair ready for
-``asyncio.create_subprocess_exec``:
+The Bash tool and the Powershell tool both need to turn a raw command string
+into an ``(argv, env)`` pair ready for ``asyncio.create_subprocess_exec``:
 
 * bash: ``_prepare_bash_cmd`` (Windows backslash-path normalization) +
   ``fix_bash_command`` (native-command fallbacks) + ``_with_msystem_neutralized``

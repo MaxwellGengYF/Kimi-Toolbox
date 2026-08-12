@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
-import os
-import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast, override
@@ -15,10 +11,13 @@ import orjson
 import rapidfuzz
 from kosong.tooling import CallableTool2, ToolError, ToolReturnValue, alias_note
 from pydantic import (
-    AliasChoices, BaseModel, ConfigDict, Field,
-    ValidationError, field_validator, model_validator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
 )
-from pydantic.json_schema import GenerateJsonSchema
 
 from kimi_cli import logger
 from kimi_cli.session_state import TodoItemState, TodoStatus
@@ -26,158 +25,20 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
 
-
-@functools.lru_cache(maxsize=1)
-def _detect_shell_kind() -> Literal["bash", "powershell"]:
-    """Return the enabled shell dialect for TodoList verification code.
-
-    Mirrors the enablement logic of the Bash/Powershell tools: when the
-    Bash tool is enabled, ``code`` shell fragments are bash; otherwise
-    PowerShell.
-
-    The kimix import is lazy and wrapped: importing any ``kimix.*`` module
-    runs ``kimix/__init__.py`` which pulls in ``kimi_agent_sdk`` ->
-    ``kimi_cli.app`` -> ``kimi_cli.soul.kimisoul`` -> this module, so it
-    must never happen while ``kimi_cli.app`` is still initializing (that is
-    an import cycle).  When kimix is not yet importable, fall back to the
-    platform rule: bash on non-Windows, PowerShell on Windows.
-    """
-    try:
-        from kimix.tools.file.bash import bash_tool as _bash_tool
-
-        if _bash_tool._should_enable_bash():
-            return "bash"
-    except ImportError:
-        # kimix not yet importable (early boot / isolated test): platform rule.
-        return "powershell" if sys.platform == "win32" else "bash"
-    # Bash tool disabled -> the enabled shell dialect is PowerShell.
-    return "powershell"
-
-
-def _get_shell_kind() -> Literal["bash", "powershell"]:
-    """Return the enabled shell dialect, resolved lazily on first use.
-
-    Import-time resolution is impossible (importing kimix while
-    ``kimi_cli.app`` initializes would cycle), so this must only run after
-    app boot / at tool-call time.  ``_detect_shell_kind`` is lru-cached.
-    """
-    return _detect_shell_kind()
-
-
-# Labels used in the ``Todo.code`` field description / tool description for
-# the enabled shell dialect, mirroring the Bash/Powershell tool enablement.
-_SHELL_LABEL: dict[Literal["bash", "powershell"], str] = {
-    "bash": "bash",
-    "powershell": "PowerShell",
-}
-_SHELL_EXT: dict[Literal["bash", "powershell"], str] = {
-    "bash": ".sh",
-    "powershell": ".ps1",
-}
-
-
-def _code_field_description(kind: Literal["bash", "powershell"]) -> str:
-    """Return the ``Todo.code`` field description for the enabled shell dialect."""
-    label = _SHELL_LABEL[kind]
-    ext = _SHELL_EXT[kind]
-    if kind == "bash":
-        run_note = (
-            "Bash is the enabled shell tool; shell code is executed via bash "
-            "with Windows Git Bash compatibility fixes applied."
-        )
-    else:
-        run_note = (
-            "PowerShell is the enabled shell tool; shell code is executed "
-            "via PowerShell."
-        )
-    return (
-        "Verification code: inline Python, a `.py` file path, a "
-        f"{label} command prefixed with `!` (e.g. `!pytest tests/ -x -q`), "
-        f"or a `{ext}` file path. "
-        f"{run_note} "
-        "Todos involving code changes should attach verification code. "
-        "Omit if this todo has no executable code. "
-        "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
-        + alias_note("code", "code_file", word=False)
-    )
-
-
-def _tool_description(kind: Literal["bash", "powershell"]) -> str:
-    """Return the TodoList tool description for the enabled shell dialect."""
-    label = _SHELL_LABEL[kind]
-    ext = _SHELL_EXT[kind]
-    if kind == "bash":
-        code_desc = (
-            f"a `!`-prefixed bash command (e.g. `!pytest tests/ -x -q`), "
-            f"or a `.sh` file path"
-        )
-        shell_line = (
-            "The enabled shell tool is **Bash** — `code` shell commands "
-            "run via bash (`.sh`)."
-        )
-    else:
-        code_desc = (
-            f"a `!`-prefixed PowerShell command (e.g. `!pytest tests/ -x -q`), "
-            f"or a `.ps1` file path"
-        )
-        shell_line = (
-            "The enabled shell tool is **PowerShell** — `code` shell commands "
-            "run via PowerShell (`.ps1`)."
-        )
-    return (
-        "Track progress with a todo list.\n"
-        "Call with no arguments to read the current list. "
-        "mode='append' (default) merges by exact title: existing titles are updated, new titles are appended.\n"
-        "mode='overwrite' replaces the list only when every existing todo is done; "
-        "use mode='force_overwrite' to intentionally discard unfinished items.\n"
-        "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
-        "Each todo may include a `code` field with inline Python, a `.py` file path, "
-        f"{code_desc}. "
-        "Todos involving code changes should attach verification `code`; "
-        "verification runs whenever a todo is marked `done` (pending/in_progress -> done) "
-        "via `TodoList`, `TodoSub`, or `TodoPop` — and at turn end by the verification gate. "
-        "A failing verification reverts the todo to `pending` and reports the error.\n"
-        "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors.\n"
-        "When a todo stack is active (a parent was pushed), the tree is shown with a `Stack:` breadcrumb — "
-        "use TodoSub to add or edit items under the current parent and TodoPop to finish it.\n"
-        f"{shell_line}"
-    )
-
-
-def _patch_code_description(
-    schema: dict[str, Any], kind: Literal["bash", "powershell"]
-) -> None:
-    """Replace the ``Todo.code`` property description inside a JSON schema.
-
-    The ``code`` field description is baked into the ``Todo`` model class at
-    import time (where the enabled shell dialect cannot be detected), so the
-    generated params schema is patched in place with the dialect-specific
-    description whenever it is built.  Recurses into nested dicts/lists so
-    ``$defs``, ``items``, and ``anyOf`` entries are all covered.
-    """
-    new_desc = _code_field_description(kind)
-    if isinstance(schema, dict):
-        props = schema.get("properties")
-        if isinstance(props, dict):
-            code_schema = props.get("code")
-            if isinstance(code_schema, dict):
-                desc = code_schema.get("description")
-                if isinstance(desc, str) and desc.startswith("Verification code:"):
-                    code_schema["description"] = new_desc
-        for value in schema.values():
-            _patch_code_description(value, kind)
-    elif isinstance(schema, list):
-        for value in schema:
-            _patch_code_description(value, kind)
-
-
-# Class-level ``description`` is a placeholder only: the enabled shell
-# dialect is only detectable at runtime, so ``TodoList.__init__`` always
-# overrides it with the dialect-specific ``_tool_description`` for the
-# instance, and ``TodoListParams.model_json_schema`` patches the ``code``
-# field description.  (There is intentionally no neutral description text
-# here — it would never be serialized, see plan.md §2.2.)
-
+_TODOLIST_DESCRIPTION = (
+    "Track progress with a todo list.\n"
+    "Call with no arguments to read the current list. "
+    "mode='append' (default) merges by exact title at the ROOT level: root titles are updated, new titles are appended.\n"
+    "NOTE: TodoList writes only match root-level titles. Titles inside the active stack scope (children) are "
+    "NOT updated by this tool — use TodoSub to add or edit items under the current parent. "
+    "Passing todos=[] is a no-op (list unchanged); use mode='clear' to empty the list.\n"
+    "mode='overwrite' replaces the list only when every existing todo is done; "
+    "mode='force_overwrite' replaces the list unconditionally; "
+    "mode='clear' empties the list (errors unless every old todo is done).\n"
+    "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
+    "When a todo stack is active (a parent was pushed), the tree is shown with a `Stack:` breadcrumb — "
+    "use TodoSub to add or edit items under the current parent and TodoPop to finish it."
+)
 
 def _truncate_prompt(text: str, max_len: int = 200) -> str:
     """Truncate long text, keeping head and tail.
@@ -189,13 +50,11 @@ def _truncate_prompt(text: str, max_len: int = 200) -> str:
         return text[:100] + "..." + text[-100:]
     return text
 
-
 _ALL_DONE_REMINDER = (
     "All todos are done. "
     "Please review the requirements again to ensure nothing is left unfinished."
 )
 """Default reminder shown when all todos are done."""
-
 
 # Hard limits for harness safety.
 _MAX_TODOS = 4096
@@ -203,7 +62,6 @@ _MAX_TODOS = 4096
 _MAX_ARCHIVED_TODOS = 500
 # Maximum number of items printed by read mode before truncating.
 _MAX_READ_ITEMS = 100
-
 
 # ── Cross-tool reference hints (anti-hallucination core) ────────────────────
 # Compact one-line hints appended to tool output. Success outputs carry a
@@ -214,25 +72,21 @@ def _hint_next(text: str) -> str:
     """Render a one-line 'Next:' hint block appended to success output."""
     return "\nNext: " + text
 
-
 def _hint_error(text: str) -> str:
     """Render a one-line corrective hint block appended to error output."""
     return "\nHint: " + text
-
 
 _TODOLIST_SUCCESS_HINT = (
     "TodoPush to start a parent todo, or TodoList to read the tree."
 )
 
-
-
 # Mode map — only canonical values accepted
-_MODE_MAP: dict[str, Literal["overwrite", "append", "force_overwrite"]] = {
+_MODE_MAP: dict[str, Literal["overwrite", "append", "force_overwrite", "clear"]] = {
     "overwrite": "overwrite",
     "append": "append",
     "force_overwrite": "force_overwrite",
+    "clear": "clear",
 }
-
 
 # Status map — only canonical values accepted
 _STATUS_MAP: dict[str, TodoStatus] = {
@@ -240,7 +94,6 @@ _STATUS_MAP: dict[str, TodoStatus] = {
     "in_progress": "in_progress",
     "done": "done",
 }
-
 
 def _canonical_status(v: Any) -> TodoStatus:
     """Normalize a status value to its canonical form."""
@@ -256,7 +109,6 @@ def _canonical_status(v: Any) -> TodoStatus:
         )
     return canonical
 
-
 @dataclass(frozen=True)
 class _FuzzyResult:
     """Typed wrapper for rapidfuzz>=3 ``(choice, score, index)`` match tuples."""
@@ -264,7 +116,6 @@ class _FuzzyResult:
     choice: str
     score: float
     index: int
-
 
 class Todo(BaseModel):
     model_config = {"populate_by_name": True}
@@ -275,21 +126,6 @@ class Todo(BaseModel):
         default=None,
         description="Notes. MUST write, be comprehensively, detailed.",
         max_length=65536,
-    )
-    code: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("code", "code_file"),
-        # Neutral at import time: the enabled shell dialect is only detectable
-        # at runtime, so ``TodoListParams.model_json_schema`` patches this
-        # description with the dialect-specific text when the schema is built.
-        description=(
-            "Verification code: inline Python, a `.py` file path, a shell command "
-            "prefixed with `!` (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
-            "Todos involving code changes should attach verification code. "
-            "Omit if this todo has no executable code. "
-            "When updating an existing title, `None` or empty values keep the previously stored `notes`/`code`. "
-            + alias_note("code", "code_file", word=False)
-        ),
     )
     # Sub todos (children). Leave empty for a leaf. Pydantic recurses
     # automatically; all field validators apply to children too.
@@ -328,14 +164,6 @@ class Todo(BaseModel):
             raise ValueError("Title cannot be empty or contain only whitespace")
         return stripped
 
-    @field_validator("code", mode="before")
-    @classmethod
-    def _validate_code(cls, v: Any) -> str | None:
-        if v is None:
-            return None
-        return str(v)
-
-
 class Params(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -343,14 +171,16 @@ class Params(BaseModel):
         default=None,
         alias="items",  # common LLM variant
         description="Updated list, a single Todo item, or omit to return current list unchanged. "
+        "Passing an empty list [] is a no-op (use mode='clear' to empty the list). "
         + alias_note("todos", "items", word=False),
     )
-    mode: Literal["overwrite", "append", "force_overwrite"] = Field(
+    mode: Literal["overwrite", "append", "force_overwrite", "clear"] = Field(
         default="append",
         description=(
             "Write mode: 'overwrite' safely replaces the existing todo list only when all old todos are done; "
-            "'append' merges the provided todos into the existing list (existing titles are updated, new titles are appended); "
-            "'force_overwrite' replaces the existing todo list unconditionally."
+            "'append' merges the provided todos into the existing list (existing root titles are updated, new titles are appended; empty list is a no-op); "
+            "'force_overwrite' replaces the existing todo list unconditionally; "
+            "'clear' empties the list (errors unless all old todos are done)."
         ),
     )
     match_mode: Literal["exact", "fuzzy"] = Field(
@@ -372,13 +202,13 @@ class Params(BaseModel):
     def _validate_mode(cls, v: Any) -> str:
         if not isinstance(v, str):
             raise ValueError(
-                "Invalid mode. Must be 'overwrite', 'append', or 'force_overwrite'."
+                "Invalid mode. Must be 'overwrite', 'append', 'force_overwrite', or 'clear'."
             )
         normalized = v.strip().lower().replace("-", "_")
         canonical = _MODE_MAP.get(normalized)
         if canonical is None:
             raise ValueError(
-                f"Invalid mode '{v}'. Must be 'overwrite', 'append', or 'force_overwrite'."
+                f"Invalid mode '{v}'. Must be 'overwrite', 'append', 'force_overwrite', or 'clear'."
             )
         return canonical
 
@@ -421,14 +251,12 @@ class Params(BaseModel):
             return out
         raise ValueError("todos must be a list of todos, a single todo dict/object, or None")
 
-
 def _first_pydantic_message(exc: ValidationError) -> str:
     """Return the first human-readable message from a Pydantic ValidationError."""
     errors = exc.errors()
     if errors:
         return errors[0].get("msg", str(exc))
     return str(exc)
-
 
 @dataclass
 class MergeResult:
@@ -444,80 +272,19 @@ class MergeResult:
     error: ToolReturnValue | None = None
     warnings: list[str] = field(default_factory=list)
 
-
-class TodoListParams(Params):
-    """Params whose generated JSON schema carries the enabled shell dialect.
-
-    The ``Todo.code`` field description is baked into the model class at
-    import time, but the enabled shell dialect (bash vs PowerShell) is only
-    detectable at runtime (importing ``kimix`` while ``kimi_cli.app``
-    initializes would create an import cycle).  ``model_json_schema``
-    therefore patches the generated schema with the dialect-specific
-    description on every call.
-    """
-
-    @classmethod
-    def model_json_schema(
-        cls,
-        by_alias: bool = True,
-        ref_template: str = "#/$defs/{model}",
-        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
-        mode: Literal["validation", "serialization"] = "validation",
-    ) -> dict[str, Any]:
-        schema = super().model_json_schema(
-            by_alias=by_alias,
-            ref_template=ref_template,
-            schema_generator=schema_generator,
-            mode=mode,
-        )
-        _patch_code_description(schema, _get_shell_kind())
-        return schema
-
-
 class TodoList(CallableTool2[Params]):
     name: str = "TodoList"
-    description: str = ""  # always replaced in __init__ (see note above)
-    params: type[Params] = TodoListParams
+    description: str = _TODOLIST_DESCRIPTION
+    params: type[Params] = Params
 
     def __init__(self, runtime: Runtime) -> None:
-        shell_kind = _get_shell_kind()
-        self._shell_kind: Literal["bash", "powershell"] = shell_kind
-        super().__init__(description=_tool_description(shell_kind))
+        super().__init__()
         self._runtime = runtime
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        # Read-only mode: strip code fields and warn
-        code_warning: str | None = None
-        if self._runtime.read_only and params.todos is not None:
-            todos_list: list[Todo] = [params.todos] if isinstance(params.todos, Todo) else list(params.todos)
-            stripped_count = 0
-
-            def _strip_code(t: Todo) -> Todo:
-                nonlocal stripped_count
-                update: dict[str, Any] = {"children": [_strip_code(c) for c in t.children]}
-                if t.code:
-                    stripped_count += 1
-                    update["code"] = None
-                return t.model_copy(update=update)
-
-            stripped_todos = [_strip_code(t) for t in todos_list]
-            if stripped_count > 0:
-                code_warning = (
-                    "\n\n<system-warning>\n"
-                    "In read-only mode, `code` is forbidden and will be ignored. "
-                    f"No code will be executed. ({stripped_count} todo(s) affected.)\n"
-                    "</system-warning>"
-                )
-                params = params.model_copy(update={"todos": stripped_todos})
-
         if params.todos is not None:
-            result = await self._write_todos(params.todos, params)
-            if code_warning:
-                # Append warning to output
-                if isinstance(result.output, str):
-                    result = result.model_copy(update={"output": result.output + code_warning})
-            return result
+            return await self._write_todos(params.todos, params)
         return self._read_todos()
 
     # ---- Write mode --------------------------------------------------------
@@ -550,20 +317,29 @@ class TodoList(CallableTool2[Params]):
         """Validate, merge, and persist todos, saving exactly once on success."""
         new_todos: list[Todo] = [raw_todos] if isinstance(raw_todos, Todo) else list(raw_todos)
 
-        # 1. Validate new inputs
-        duplicates = self._find_duplicate_titles(new_todos)
-        if duplicates:
+        # 0. mode='clear' is a write of nothing — combining it with todos is a mistake.
+        if params.mode == "clear" and new_todos:
             return self._error(
-                f"Error: Duplicate todo titles found: {duplicates}",
-                f"Duplicate todo titles found: {duplicates}",
-                hint='TodoSub to update an existing todo, or TodoList to read the tree.',
+                "Error: mode='clear' cannot be combined with todos. "
+                "Use mode='append' or 'overwrite' to write todos, or call with no todos to read.",
+                "mode='clear' cannot be combined with todos.",
             )
 
-        if self._count_all(new_todos) > _MAX_TODOS:
-            return self._error(
-                f"Error: Todo list exceeds maximum limit of {_MAX_TODOS} items.",
-                f"Todo list exceeds maximum limit of {_MAX_TODOS} items.",
-            )
+        # 1. Validate new inputs
+        if params.mode != "clear":
+            duplicates = self._find_duplicate_titles(new_todos)
+            if duplicates:
+                return self._error(
+                    f"Error: Duplicate todo titles found: {duplicates}",
+                    f"Duplicate todo titles found: {duplicates}",
+                    hint='TodoSub to update an existing todo, or TodoList to read the tree.',
+                )
+
+            if self._count_all(new_todos) > _MAX_TODOS:
+                return self._error(
+                    f"Error: Todo list exceeds maximum limit of {_MAX_TODOS} items.",
+                    f"Todo list exceeds maximum limit of {_MAX_TODOS} items.",
+                )
 
         # 2. Load existing state
         old_todos = self._load_todos()
@@ -573,7 +349,20 @@ class TodoList(CallableTool2[Params]):
         # items (overwrite/force_overwrite/clear) so completed ones get archived.
         warnings: list[str] = []
         replaces_list = False
-        if params.mode == "force_overwrite":
+        if params.mode == "clear":
+            if old_todos and not all(t.status == "done" for t in old_todos):
+                unfinished = "\n".join(t.title for t in old_todos if t.status != "done")
+                return self._error(
+                    "Error: Cannot clear todos while old todos are not all done. "
+                    "Next step: mark them done first, "
+                    "or use mode='force_overwrite' with todos=[] to discard them intentionally.\n"
+                    f"Unfinished:\n{unfinished}",
+                    "Cannot clear todos while old todos are not all done.",
+                    display=[self._build_display_block(old_todos)],
+                )
+            final_todos = []
+            replaces_list = True
+        elif params.mode == "force_overwrite":
             final_todos = list(new_todos)
             replaces_list = True
         elif params.mode == "overwrite":
@@ -588,15 +377,30 @@ class TodoList(CallableTool2[Params]):
             final_todos = list(new_todos)
             replaces_list = True
         else:  # append
-            result = self._merge_todos(old_todos, new_todos, clear_requested=True)
+            if not new_todos:
+                # Explicitly empty list is a no-op — use mode='clear' to empty.
+                return self._build_noop_response(old_todos)
+            result = self._merge_todos(old_todos, new_todos)
             if result.error is not None:
                 return result.error
             final_todos = result.todos or []
             warnings.extend(result.warnings)
-            replaces_list = not new_todos  # explicit [] means clear
+
+        # 3b. Enforce maximum tree nesting depth (all modes) so created trees
+        # stay reachable via TodoPush/TodoSub stack navigation: the deepest
+        # pushable level is max_layers, plus one TodoSub level under it.
+        max_layers = self._max_layers()
+        max_depth = max_layers + 1
+        if self._max_tree_depth(final_todos) > max_depth:
+            return self._error(
+                f"Error: Todo tree exceeds maximum nesting depth of {max_depth} levels "
+                f"(todo_max_layers={max_layers}). Flatten the tree, or build it with TodoPush/TodoSub.",
+                f"Todo tree exceeds maximum nesting depth of {max_depth} levels.",
+                display=[self._build_display_block(final_todos)],
+            )
 
         # 4. Regression detection
-        if params.mode != "force_overwrite" and old_todos:
+        if params.mode not in ("force_overwrite", "clear") and old_todos:
             final_todos, regressions = self._check_regressions(old_todos, final_todos)
             if regressions:
                 return self._error(
@@ -620,7 +424,7 @@ class TodoList(CallableTool2[Params]):
                 archived = archived[-_MAX_ARCHIVED_TODOS:]
 
         # 5b. Enforce single in_progress (unless auto_fix or force_overwrite)
-        if params.mode != "force_overwrite":
+        if params.mode not in ("force_overwrite", "clear"):
             conflicts = self._enforce_single_in_progress(final_todos)
             if conflicts:
                 if params.auto_fix:
@@ -649,25 +453,6 @@ class TodoList(CallableTool2[Params]):
                         display=[self._build_display_block(final_todos)],
                     )
 
-        # 5c. Auto-verify code on done transitions. A todo that is `done` now but
-        # was NOT `done` before (including brand-new todos created done) must have
-        # its verification code run; failures revert to pending and are reported.
-        old_status_by_title: dict[str, TodoStatus] = {}
-        def _collect_status(items: list[Todo]) -> None:
-            for t in items:
-                old_status_by_title[t.title] = t.status
-                _collect_status(t.children)
-        _collect_status(old_todos)
-        verification_errors: list[str] = []
-        async def _verify_done_tree(items: list[Todo]) -> None:
-            for t in items:
-                if t.status == "done" and old_status_by_title.get(t.title) != "done" and t.code:
-                    err_msg = await self._run_done_verification(t)
-                    if err_msg:
-                        verification_errors.append(err_msg)
-                await _verify_done_tree(t.children)
-        await _verify_done_tree(final_todos)
-
         # 6. Persist exactly once
         save_error = self._save_todos(final_todos, archived)
         if save_error:
@@ -675,10 +460,6 @@ class TodoList(CallableTool2[Params]):
 
         # 7. Build response
         result = self._build_success_response(final_todos, params.mode, bool(old_todos), warnings)
-        if verification_errors:
-            result = result.model_copy(update={
-                "output": result.output + "\n" + "\n".join(verification_errors),
-            })
         return result
 
     @staticmethod
@@ -737,228 +518,11 @@ class TodoList(CallableTool2[Params]):
         lines: list[str] = []
         for t in selected:
             todo = f"- [{display_status[t.status]}] {t.title}"
-            if t.code:
-                stripped = t.code.strip()
-                if stripped.startswith("!"):
-                    kind_label = "pwsh" if _get_shell_kind() == "powershell" else "bash"
-                elif stripped.lower().endswith((".py", ".sh", ".ps1")) and Path(stripped).is_file():
-                    kind_label = "file"
-                else:
-                    kind_label = "inline"
-                todo += f"  `[code: {kind_label}]`"
             if t.status == "in_progress" and t.notes:
                 todo += f"  Notes: {t.notes}"
             lines.append(todo)
 
         return "\n".join(lines)
-
-    @staticmethod
-    def _code_kind_label(code: str) -> str:
-        """Return the compact kind label for a todo's verification code."""
-        stripped = code.strip()
-        if stripped.startswith("!"):
-            return "pwsh" if _get_shell_kind() == "powershell" else "bash"
-        if stripped.lower().endswith((".py", ".sh", ".ps1")) and Path(stripped).is_file():
-            return "file"
-        return "inline"
-
-    @staticmethod
-    def _resolve_code_executable(code: str) -> tuple[str, str] | None:
-        """Resolve how to execute a todo's code string.
-
-        Returns a ``(kind, payload)`` tuple, or ``None`` when the code has
-        no runnable content. Kinds:
-
-        - ``("shell", command)`` — code starts with ``!`` (shell command;
-          the dialect — bash vs PowerShell — is decided at run time by
-          ``_get_shell_kind()`` in ``_shell_argv``);
-        - ``("shell_file", path)`` — code points to a ``.sh``/``.ps1`` file
-          (the extension routes it to its own shell at run time);
-        - ``("python", path)`` — code points to an existing ``.py`` file;
-        - ``("python_inline", temp_path)`` — inline Python written to a temp file.
-        """
-        if not code:
-            return None
-        stripped = code.strip()
-        if stripped.startswith("!"):
-            command = stripped[1:].strip()
-            return ("shell", command) if command else None
-        fp = Path(code)
-        if fp.is_file():
-            lowered = code.lower()
-            if lowered.endswith(".py"):
-                return ("python", str(fp))
-            if lowered.endswith((".sh", ".ps1")):
-                return ("shell_file", str(fp))
-            return None
-        # Inline Python code — write to temp file
-        import tempfile as _tf
-        fd, path = _tf.mkstemp(suffix=".py", prefix="run_todo_code_")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(code)
-        return ("python_inline", path)
-
-    @staticmethod
-    async def _run_process(
-        argv: list[str],
-        timeout: int,
-        *,
-        not_found_hint: str,
-        env: dict[str, str] | None = None,
-    ) -> tuple[bool, str]:
-        """Run a subprocess with timeout, returning ``(success, output)``."""
-        # Start the child in its own session/process group on POSIX so a timed-
-        # out command's whole tree (grandchildren included) can be killed with
-        # ``os.killpg``; on Windows the process-tree kill goes through
-        # ``taskkill /T`` regardless.  Without this, a verification command
-        # that spawns a child (e.g. ``pytest`` launching a server) would leave
-        # an orphan running after the timeout.
-        spawn_kwargs: dict[str, Any] = {}
-        if os.name != "nt":
-            spawn_kwargs["start_new_session"] = True
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                **spawn_kwargs,
-            )
-        except FileNotFoundError:
-            return False, not_found_hint
-        except Exception as exc:
-            return False, f"Code execution error: {exc}"
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            # Kill the whole process tree, not just the direct child, so a
-            # grandchild holding the pipe write ends cannot keep the todo
-            # verification running (or leak an orphan) after the timeout.
-            from kimix.tools.common import kill_child_tree
-
-            kill_child_tree(proc.pid, force=True)
-            await proc.wait()
-            return False, f"Code execution timed out after {timeout}s."
-
-        output = stdout.decode("utf-8", errors="replace")
-        if stderr:
-            error_text = stderr.decode("utf-8", errors="replace")
-            if output:
-                output += "\n" + error_text
-            else:
-                output = error_text
-
-        if proc.returncode == 0:
-            return True, output or "Code executed successfully (no output)."
-        return False, f"Code failed (exit code {proc.returncode}):\n{output}"
-
-    @staticmethod
-    def _shell_argv(
-        command: str,
-        shell_kind: Literal["bash", "powershell"] | None = None,
-    ) -> tuple[list[str], str, dict[str, str] | None] | None:
-        """Build argv/env for a shell command, plus a not-found hint.
-
-        ``shell_kind`` selects the dialect and defaults to the runtime
-        resolved enabled shell.  Returns ``None`` when the command is an
-        unrepairable PowerShell command.  The third tuple element is the
-        subprocess environment to pass (``None`` = inherit).
-
-        Delegates to ``kimix.tools.file.bash.shell_common`` so the exact same
-        fixer machinery as the Bash / Powershell tools is applied: bash
-        (``prepare_bash_command`` -> ``bash_argv`` with the login flag) and
-        PowerShell (``pwsh_argv``: repair, PS5.1 downgrade, try/catch wrapper).
-        """
-        from kimix.tools.file.bash import shell_common
-
-        kind = shell_kind or _get_shell_kind()
-        if kind == "bash":
-            argv, env = shell_common.bash_argv(
-                shell_common.prepare_bash_command(command), login=True
-            )
-            return argv, f"bash executable not found: {argv[0]}", env
-
-        resolved = shell_common.pwsh_argv(command)
-        if resolved is None:
-            return None  # unrepairable PowerShell command
-        argv, hint = resolved
-        return argv, hint, None
-
-    @staticmethod
-    async def _run_code(
-        code: str,
-        timeout: int = 30,
-        python_exe: str | None = None,
-        executable: tuple[str, str] | str | None = None,
-        shell_kind: Literal["bash", "powershell"] | None = None,
-    ) -> tuple[bool, str]:
-        """Execute a todo's code and return ``(success, output_or_error)``.
-
-        ``executable`` may be a ``(kind, payload)`` tuple as returned by
-        ``_resolve_code_executable``, or a legacy plain ``.py`` path string.
-        When omitted, the executable is resolved from ``code``.  ``shell_kind``
-        selects the dialect for ``!`` shell commands and defaults to the
-        runtime resolved enabled shell.
-        """
-        if executable is None:
-            resolved = TodoList._resolve_code_executable(code)
-        elif isinstance(executable, tuple):
-            resolved = executable
-        else:
-            resolved = ("python", executable)  # legacy plain path
-        if resolved is None:
-            return False, "Todo has no runnable code."
-        kind, payload = resolved
-
-        if kind == "shell":
-            resolved_argv = TodoList._shell_argv(payload, shell_kind)
-            if resolved_argv is None:
-                return False, "Invalid PowerShell command."
-            argv, hint, env = resolved_argv
-            return await TodoList._run_process(argv, timeout, not_found_hint=hint, env=env)
-        if kind == "shell_file":
-            from kimix.tools.file.bash import shell_common
-
-            if payload.lower().endswith(".ps1"):
-                argv, hint = shell_common.pwsh_file_argv(payload)
-                env = None
-            else:
-                argv, env = shell_common.bash_file_argv(payload)
-                hint = f"bash executable not found: {argv[0]}"
-            return await TodoList._run_process(argv, timeout, not_found_hint=hint, env=env)
-
-        # python / python_inline
-        if python_exe is None:
-            python_exe = sys.executable
-        return await TodoList._run_process(
-            [python_exe, payload],
-            timeout,
-            not_found_hint=f"Python executable not found: {python_exe}",
-        )
-
-    @staticmethod
-    def _cleanup_code_tempfile(executable: tuple[str, str] | str | None) -> None:
-        """Clean up a temp file created for inline code execution.
-
-        Accepts either a ``(kind, payload)`` tuple (only ``python_inline``
-        payloads are removed) or a legacy plain path string.
-        """
-        if executable is None:
-            return
-        if isinstance(executable, tuple):
-            kind, payload = executable
-            if kind != "python_inline":
-                return
-            temp_file_path: str | None = payload
-        else:
-            temp_file_path = executable
-        if temp_file_path:
-            try:
-                Path(temp_file_path).unlink(missing_ok=True)
-            except OSError:
-                pass
 
     # Score threshold for user-facing title suggestions. rapidfuzz returns a
     # normalized similarity in [0, 100]; 60 catches minor typos while avoiding
@@ -1026,15 +590,13 @@ class TodoList(CallableTool2[Params]):
         self,
         old_todos: list[Todo],
         new_todos: list[Todo],
-        clear_requested: bool = False,
     ) -> MergeResult:
         """Merge ``new_todos`` into ``old_todos`` using append/update semantics.
 
-        * Existing titles update status (and any provided metadata) in place.
+        * Existing root titles update status (and any provided metadata) in place.
         * Brand-new titles are appended to the end.
-        * An explicitly empty ``new_todos`` (``clear_requested=True``) clears the
-          list only when all old todos are done.
-        * Fuzzy near-matches are reported as non-blocking warnings.
+        * Fuzzy near-matches and titles that already exist deeper in the tree
+          (scope duplicates) are reported as non-blocking warnings.
         """
         if not old_todos:
             return MergeResult(todos=list(new_todos))
@@ -1043,24 +605,82 @@ class TodoList(CallableTool2[Params]):
         old_title_set = set(old_title_list)
 
         warnings = self._detect_fuzzy_warnings(new_todos, old_title_set, old_title_list)
-
-        # Explicitly empty list: treat as clear operation
-        if clear_requested and not new_todos:
-            if not all(t.status == "done" for t in old_todos):
-                unfinished = ", ".join(t.title for t in old_todos if t.status != "done")
-                return MergeResult(
-                    error=self._error(
-                        "Error: Cannot clear todos while old todos are not all done. "
-                        f"Unfinished: {unfinished}\n"
-                        "Next step: mark them done first, "
-                        "or use mode='force_overwrite' to discard them intentionally.",
-                        "Cannot clear todos while old todos are not all done.",
-                    )
-                )
-            return MergeResult(todos=[])
+        warnings.extend(self._detect_scope_duplicates(new_todos, old_todos))
 
         merged = self._merge_by_title_update(old_todos, new_todos)
         return MergeResult(todos=merged, warnings=warnings)
+
+    @staticmethod
+    def _detect_scope_duplicates(
+        new_todos: list[Todo], old_todos: list[Todo]
+    ) -> list[str]:
+        """Warn when a new root title already exists deeper in the existing tree.
+
+        TodoList append merges root-level titles only, so a title that exists
+        only inside a stack scope (a child/grandchild) would be appended as a
+        brand-new root item instead of updating the nested one. The warning is
+        non-blocking because identical titles in different scopes are otherwise
+        legal; it names the nested parent so the caller can switch to TodoSub.
+        """
+        if not old_todos or not new_todos:
+            return []
+        root_titles = {t.title for t in old_todos}
+        nested: dict[str, str] = {}
+
+        def walk(items: list[Todo], path: list[str]) -> None:
+            for t in items:
+                if path:
+                    nested.setdefault(t.title, " > ".join(path))
+                walk(t.children, [*path, t.title])
+
+        walk(old_todos, [])
+        warnings: list[str] = []
+        for t in new_todos:
+            if t.title in root_titles:
+                continue
+            parent = nested.get(t.title)
+            if parent:
+                warnings.append(
+                    f'"{t.title}" already exists in the tree (under "{parent}"); '
+                    "TodoList merges root-level titles only — use TodoSub to update it."
+                )
+        return warnings
+
+    @staticmethod
+    def _max_tree_depth(todos: list[Todo]) -> int:
+        """Return the maximum nesting depth of the tree (root items = depth 1)."""
+        max_depth = 0
+
+        def walk(items: list[Todo], depth: int) -> None:
+            nonlocal max_depth
+            for t in items:
+                if depth > max_depth:
+                    max_depth = depth
+                walk(t.children, depth + 1)
+
+        walk(todos, 1)
+        return max_depth
+
+    def _build_noop_response(self, todos: list[Todo]) -> ToolReturnValue:
+        """Response for an append-mode write with an empty todos list (no-op)."""
+        counts = self._status_counts(todos)
+        total = self._count_all(todos)
+        stats = (
+            f"({total} total: {counts['done']} done, "
+            f"{counts['in_progress']} in progress, {counts['pending']} pending)"
+        )
+        output = f"Todo list unchanged; no todos provided {stats}"
+        active_summary = self._format_todos(todos)
+        if active_summary:
+            output += "\n" + active_summary
+        if total > 0:
+            output += _hint_next(_TODOLIST_SUCCESS_HINT)
+        return ToolReturnValue(
+            is_error=False,
+            output=output,
+            message="No todos provided; todo list unchanged.",
+            display=[self._build_display_block(todos)] if todos else [],
+        )
 
     def _detect_fuzzy_warnings(
         self,
@@ -1110,13 +730,13 @@ class TodoList(CallableTool2[Params]):
 
     @staticmethod
     def _merge_one(old: Todo, new: Todo) -> Todo:
-        """Produce an updated todo preserving old notes/code when new omits them.
+        """Produce an updated todo preserving old notes when new omits them.
 
-        For a same-title update, ``notes``/``code`` are replaced only when the
-        new value is neither ``None`` nor empty/whitespace-only; otherwise the
-        previously stored value is kept. Children of an updated parent are kept
-        unless the new todo explicitly provided its own ``children`` (tracked
-        via pydantic's ``model_fields_set``).
+        For a same-title update, ``notes`` is replaced only when the new value
+        is neither ``None`` nor empty/whitespace-only; otherwise the previously
+        stored value is kept. Children of an updated parent are kept unless the
+        new todo explicitly provided its own ``children`` (tracked via
+        pydantic's ``model_fields_set``).
         """
         return Todo(
             title=old.title,
@@ -1125,11 +745,6 @@ class TodoList(CallableTool2[Params]):
                 new.notes
                 if new.notes is not None and new.notes.strip()
                 else old.notes
-            ),
-            code=(
-                new.code
-                if new.code is not None and new.code.strip()
-                else old.code
             ),
             children=(
                 new.children
@@ -1188,6 +803,7 @@ class TodoList(CallableTool2[Params]):
             "append": "appended",
             "overwrite": "overwritten",
             "force_overwrite": "force overwritten",
+            "clear": "cleared",
         }[mode]
 
         stats = (
@@ -1298,7 +914,6 @@ class TodoList(CallableTool2[Params]):
                         title=todo.title,
                         status=todo.status,
                         notes=todo.notes,
-                        code=todo.code,
                         depth=depth,
                     )
                 )
@@ -1306,68 +921,6 @@ class TodoList(CallableTool2[Params]):
 
         walk(todos, 0)
         return TodoDisplayBlock(items=items)
-
-    async def _run_done_verification(self, todo: Todo) -> str | None:
-        """Run verification code when *todo* is becoming done.
-
-        No-op when the todo has no ``code``. On verification failure (including
-        code that cannot be resolved/executed) the todo is reverted to
-        ``pending`` (with the error appended to its notes) and the error message
-        is returned; on success ``None`` is returned.
-        """
-        if not todo.code:
-            return None
-        executable = TodoList._resolve_code_executable(todo.code)
-        if executable is None:
-            err_msg = f"Todo '{todo.title}' verification failed: code not runnable"
-            todo.status = "pending"
-            todo.notes = ((todo.notes or "") + "\n" + err_msg).strip() or None
-            return err_msg
-        try:
-            success, output = await TodoList._run_code(todo.code, executable=executable)
-        except Exception as exc:
-            success, output = False, str(exc)
-        finally:
-            TodoList._cleanup_code_tempfile(executable)
-        if success:
-            return None
-        err_msg = f"Todo '{todo.title}' verification failed: {output}"
-        todo.status = "pending"
-        todo.notes = ((todo.notes or "") + "\n" + err_msg).strip() or None
-        return err_msg
-
-    async def _verify_and_set_todo_status(self, todo_title: str, status: TodoStatus, append_notes: str = "") -> str | None:
-        """Set a todo's status and auto-verify code when marking `done`.
-
-        When marking a todo `done` (previous status was NOT `done`), if the todo has
-        a `code` field, it is executed for verification. If execution fails, the error
-        is collected and returned as part of the result string.
-        Multiple `done` status changes can each trigger their own verification;
-        errors from each are accumulated into a single newline-separated string.
-
-        Returns error message string on verification/persistence failure, None on success.
-        """
-        todos = self._load_todos()
-        archived = self._load_archived_todos()
-        errors: list[str] = []
-        for t in todos:
-            if t.title == todo_title:
-                was_done = t.status == "done"
-                is_becoming_done = status == "done" and not was_done
-                t.status = status
-                if append_notes:
-                    t.notes = ((t.notes or "") + "\n" + append_notes).strip() or None
-                # Auto-verify code when transitioning to done
-                if is_becoming_done:
-                    err_msg = await self._run_done_verification(t)
-                    if err_msg:
-                        errors.append(err_msg)
-                break
-        combined_errors = "\n".join(errors) if errors else None
-        persist_err = self._save_todos(todos, archived)
-        if persist_err and combined_errors:
-            return persist_err + "\n" + combined_errors
-        return persist_err or combined_errors
 
     # ---- Read mode ---------------------------------------------------------
 
@@ -1392,8 +945,6 @@ class TodoList(CallableTool2[Params]):
                 if len(lines) >= max_lines:
                     return
                 line = f"{'  ' * depth}- [{display_status[t.status]}] {t.title}"
-                if t.code:
-                    line += f"  `[code: {self._code_kind_label(t.code)}]`"
                 if t.status == "in_progress" and t.notes:
                     line += f"  Notes: {t.notes}"
                 lines.append(line)
@@ -1583,8 +1134,6 @@ class TodoList(CallableTool2[Params]):
             if child.status == "done":
                 continue  # keep the scope view short: unfinished items only
             line = f"{base_indent}- [{labels[child.status]}] {child.title}"
-            if child.code:
-                line += f"  `[code: {self._code_kind_label(child.code)}]`"
             deeper = self._count_unfinished_descendants(child)
             if deeper:
                 line += f" … {deeper} sub-task{'s' if deeper != 1 else ''}"
@@ -1721,22 +1270,10 @@ class TodoList(CallableTool2[Params]):
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(data, path)
 
-
 # ── Stack/tree tools: TodoPush / TodoPop / TodoSub ───────────────────────────
 # These operate on the same persisted todo tree as TodoList but navigate a
 # ``todo_stack`` breadcrumb (root → current focus parent) instead of replacing
 # the whole list. See plan: TodoList Stack & Tree Structure.
-
-
-def _tool_code_description() -> str:
-    """Neutral ``code`` field description shared by the stack/tree tools."""
-    return (
-        "Verification code: inline Python, a `.py` file path, a shell command "
-        "prefixed with `!` (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file path. "
-        "Todos involving code changes should attach verification code. "
-        "Omit if this todo has no executable code. "
-        + alias_note("code", "code_file", word=False)
-    )
 
 
 class TodoPushParams(BaseModel):
@@ -1747,11 +1284,6 @@ class TodoPushParams(BaseModel):
         default=None,
         description="Notes. MUST write, be comprehensively, detailed.",
         max_length=65536,
-    )
-    code: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("code", "code_file"),
-        description=_tool_code_description(),
     )
 
     @field_validator("title")
@@ -1774,25 +1306,14 @@ class TodoPush(TodoList):
 
     def __init__(self, runtime: Runtime) -> None:
         # Subclass TodoList so all persistence/scope helpers are shared, but
-        # bypass TodoList.__init__ (it bakes the TodoList description and shell
-        # kind) and let CallableTool2.__init__ read this class's own
-        # name/description/params attrs.
+        # bypass TodoList.__init__ (it bakes the TodoList description) and let
+        # CallableTool2.__init__ read this class's own name/description/params
+        # attrs.
         CallableTool2.__init__(self)
         self._runtime = runtime
 
     @override
     async def __call__(self, params: TodoPushParams) -> ToolReturnValue:
-        code = params.code
-        code_warning = ""
-        if self._runtime.read_only and code:
-            code = None
-            code_warning = (
-                "\n\n<system-warning>\n"
-                "In read-only mode, `code` is forbidden and will be ignored. "
-                "No code will be executed.\n"
-                "</system-warning>"
-            )
-
         title = params.title
         todos = self._load_todos()
         stack = self._load_stack()
@@ -1837,7 +1358,7 @@ class TodoPush(TodoList):
                 ),
             )
 
-        scope.append(Todo(title=title, status="pending", notes=params.notes, code=code))
+        scope.append(Todo(title=title, status="pending", notes=params.notes))
         save_error = self._save_todos(todos, self._load_archived_todos())
         if save_error:
             hint = "Use TodoList to read the tree and retry TodoPush."
@@ -1867,8 +1388,6 @@ class TodoPush(TodoList):
         )
         if warnings:
             output += "\n" + "\n".join(warnings)
-        if code_warning:
-            output += code_warning
         return ToolReturnValue(
             is_error=False,
             output=output,
@@ -1884,10 +1403,8 @@ class TodoPopParams(BaseModel):
 class TodoPop(TodoList):
     name: str = "TodoPop"
     description: str = (
-        "Pop the current focus parent: run verification code for every code-bearing "
-        "sub-todo, then mark it and all its sub-todos done and return to the parent "
-        "scope. If any sub-todo's verification fails, the pop is aborted (the stack "
-        "stays intact) and the failures are reported."
+        "Pop the current focus parent: mark it and all its sub-todos done and "
+        "return to the parent scope."
     )
     params: type[TodoPopParams] = TodoPopParams
 
@@ -1923,29 +1440,9 @@ class TodoPop(TodoList):
             )
 
         popped_title = node.title
-        # Run verification code for every code-bearing todo in the subtree before
-        # marking anything done. Any failure aborts the pop (stack kept intact) so
-        # a pending child is never stranded under a done parent.
-        verification_errors: list[str] = []
-        async def _verify_subtree(items: list[Todo]) -> None:
-            for t in items:
-                if t.status != "done" and t.code:
-                    err_msg = await self._run_done_verification(t)
-                    if err_msg:
-                        verification_errors.append(err_msg)
-                await _verify_subtree(t.children)
-        await _verify_subtree([node])
-        if verification_errors:
-            hint = "Fix the failing code and retry TodoPop, or TodoSub to update items."
-            return ToolError(
-                message="Verification failed; todo not popped.",
-                brief=hint,
-                output=(
-                    "Error: Cannot pop \u2014 sub-todo verification failed:\n"
-                    + "\n".join(verification_errors)
-                    + _hint_error(hint)
-                ),
-            )
+        unfinished = self._count_unfinished_descendants(node)
+        if node.status != "done":
+            unfinished += 1
         self._mark_subtree_done(node)
         n = self._count_all([node])
         new_stack = healed_stack[:-1]
@@ -1972,8 +1469,14 @@ class TodoPop(TodoList):
             render
             + "\n"
             + f'Popped "{popped_title}" — {n} sub-todo(s) marked done.'
-            + _hint_next("TodoPush to start the next parent, or TodoList to read the tree.")
         )
+        if unfinished:
+            output += (
+                f'\nNote: "{popped_title}" had {unfinished} unfinished item(s) — '
+                "all marked done. Use TodoSub with force=True or TodoList "
+                "mode='force_overwrite' to reopen if that was a mistake."
+            )
+        output += _hint_next("TodoPush to start the next parent, or TodoList to read the tree.")
         if warnings:
             output += "\n" + "\n".join(warnings)
         return ToolReturnValue(
@@ -1983,33 +1486,36 @@ class TodoPop(TodoList):
             display=[self._build_display_block(todos)],
         )
 
-
 class TodoSubParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     title: str = Field(description="Title", min_length=1, max_length=65536)
-    status: TodoStatus = Field(
-        default="pending",
-        description="Status. One of: pending, in_progress, done.",
+    status: TodoStatus | None = Field(
+        default=None,
+        description=(
+            "Status. One of: pending, in_progress, done. "
+            "Omit to keep the existing status (new items default to pending)."
+        ),
     )
     notes: str | None = Field(
         default=None,
         description="Notes. MUST write, be comprehensively, detailed.",
         max_length=65536,
     )
-    code: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("code", "code_file"),
-        description=_tool_code_description(),
-    )
     rename_to: str | None = Field(
         default=None,
         description="Rename the matched sub-todo to this title.",
     )
+    force: bool = Field(
+        default=False,
+        description="Allow regressing a 'done' item back to pending/in_progress.",
+    )
 
     @field_validator("status", mode="before")
     @classmethod
-    def _validate_status(cls, v: Any) -> str:
+    def _validate_status(cls, v: Any) -> str | None:
+        if v is None:
+            return None
         return _canonical_status(v)
 
     @field_validator("title")
@@ -2028,13 +1534,12 @@ class TodoSubParams(BaseModel):
         stripped = v.strip()
         return stripped if stripped else None
 
-
 class TodoSub(TodoList):
     name: str = "TodoSub"
     description: str = (
-        "Read/write/edit a sub-todo under the current parent scope. Same-title "
-        "calls update status/notes/code; new titles append a child. Marking a "
-        "todo done runs its verification code."
+        "Create/update a sub-todo under the current parent scope. Same-title "
+        "calls update status/notes (status is preserved when omitted); new titles "
+        "append a child. Set force=True to reopen a 'done' item."
     )
     params: type[TodoSubParams] = TodoSubParams
 
@@ -2046,17 +1551,6 @@ class TodoSub(TodoList):
 
     @override
     async def __call__(self, params: TodoSubParams) -> ToolReturnValue:
-        code = params.code
-        code_warning = ""
-        if self._runtime.read_only and code:
-            code = None
-            code_warning = (
-                "\n\n<system-warning>\n"
-                "In read-only mode, `code` is forbidden and will be ignored. "
-                "No code will be executed.\n"
-                "</system-warning>"
-            )
-
         todos = self._load_todos()
         stack = self._load_stack()
         node, _depth, healed_stack, warnings = self._resolve_scope(todos)
@@ -2071,26 +1565,56 @@ class TodoSub(TodoList):
                 ),
             )
 
+        # Defensive depth guard: children of the deepest pushable node sit at
+        # max_layers + 1; anything deeper is unreachable via stack navigation.
+        max_layers = self._max_layers()
+        if len(healed_stack) + 1 > max_layers + 1:
+            hint = "Use TodoList to read the tree and flatten it, then TodoPush/TodoSub to rebuild."
+            return ToolError(
+                message=f"Cannot add sub-todos deeper than {max_layers + 1} layers.",
+                brief=hint,
+                output=(
+                    f"Error: Cannot add sub-todos deeper than {max_layers + 1} layers "
+                    f"(todo_max_layers={max_layers})."
+                    + _hint_error(hint)
+                ),
+            )
+
         scope = node.children if node is not None else todos
         parent_title = node.title if node is not None else "root"
         title = params.title
         existing = next((t for t in scope if t.title == title), None)
-        errors: list[str] = []
 
         if existing is None:
             # New title → append child (same-title would have matched above).
-            new_todo = Todo(title=title, status=params.status, notes=params.notes, code=code)
-            scope.append(new_todo)
-            # A brand-new sub-todo created directly as done with code must also
-            # be verified (same contract as TodoList write mode).
-            if params.status == "done" and code:
-                err_msg = await self._run_done_verification(new_todo)
-                if err_msg:
-                    errors.append(err_msg)
+            scope.append(
+                Todo(
+                    title=title,
+                    status=params.status if params.status is not None else "pending",
+                    notes=params.notes,
+                )
+            )
             verb = "added"
             final_title = title
         else:
-            # Same title → write: rename, then update status/notes/code.
+            # Same title → write: rename, then update status/notes.
+            # Regression guard (mirrors TodoList): done → pending/in_progress
+            # is blocked unless force=True. Status is preserved when omitted,
+            # so a bare same-title call never resets an item to pending.
+            new_status = params.status if params.status is not None else existing.status
+            if existing.status == "done" and new_status != "done" and not params.force:
+                hint = (
+                    f'Use TodoSub "{title}" with force=True to reopen a done item, '
+                    "or TodoList with mode='force_overwrite' to restart the whole list."
+                )
+                return ToolError(
+                    message=f'Cannot regress completed todo "{title}" back to {new_status}.',
+                    brief=hint,
+                    output=(
+                        f'Error: Cannot regress completed todo "{title}" back to {new_status}.'
+                        + _hint_error(hint)
+                    ),
+                )
             if params.rename_to and params.rename_to != title:
                 if any(t.title == params.rename_to for t in scope if t is not existing):
                     hint = f'Use TodoSub "{params.rename_to}" to update instead of renaming.'
@@ -2110,20 +1634,9 @@ class TodoSub(TodoList):
                     healed_stack[-1] = params.rename_to
                 title = params.rename_to
 
-            was_done = existing.status == "done"
-            new_status = params.status
             # None/empty keeps old values, mirroring TodoList._merge_one.
             if params.notes is not None and params.notes.strip():
                 existing.notes = params.notes
-            if code is not None and code.strip():
-                existing.code = code
-            # pending→done runs code verification on this child only.
-            existing.status = new_status
-            if new_status == "done" and not was_done and existing.code:
-                err_msg = await self._run_done_verification(existing)
-                if err_msg:
-                    errors.append(err_msg)
-                    new_status = existing.status  # reverted to pending on failure
             existing.status = new_status
             verb = "updated"
             final_title = title
@@ -2147,15 +1660,11 @@ class TodoSub(TodoList):
 
         render = self._render_scope(todos, healed_stack)
         output = render + "\n" + f'Sub-todo "{final_title}" {verb} under "{parent_title}".'
-        if errors:
-            output += "\n" + "\n".join(errors)
         output += _hint_next(
             f'TodoSub "<next>" for more sub-todos, or TodoPop to finish "{parent_title}".'
         )
         if warnings:
             output += "\n" + "\n".join(warnings)
-        if code_warning:
-            output += code_warning
         return ToolReturnValue(
             is_error=False,
             output=output,

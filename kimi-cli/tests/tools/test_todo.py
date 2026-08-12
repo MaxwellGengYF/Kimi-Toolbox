@@ -118,16 +118,22 @@ class TestTodoListOutputNotEmpty:
         assert isinstance(result.output, str)
         assert "empty" in result.output.lower() or result.output.strip() == "Todo list is empty."
 
-    async def test_write_empty_list_default_mode_errors(self, todo_list_tool: TodoList):
-        """Passing an empty list [] with default mode (append) when old todos are
-        not all done should return an error."""
+    async def test_write_empty_list_default_mode_is_noop(self, todo_list_tool: TodoList):
+        """Passing an empty list [] with default mode (append) is a no-op: the
+        list is left unchanged. Emptying the list now requires mode='clear'."""
         write_params = Params(todos=[Todo(title="Task A", status="pending", notes="")])
         await todo_list_tool(write_params)
 
-        clear_params = Params(todos=[])
-        result = await todo_list_tool(clear_params)
-        assert result.is_error
-        assert "Cannot clear todos" in result.output
+        noop_params = Params(todos=[])
+        result = await todo_list_tool(noop_params)
+        assert not result.is_error
+        assert "unchanged" in result.output
+        assert result.message == "No todos provided; todo list unchanged."
+
+        read_params = Params(todos=None)
+        result = await todo_list_tool(read_params)
+        assert "Task A" in result.output
+        assert "[pending] Task A" in result.output
 
     async def test_overwrite_without_force_when_old_not_done_errors(self, todo_list_tool: TodoList):
         """mode='overwrite' when old todos are not all done errors."""
@@ -158,14 +164,14 @@ class TestTodoListOutputNotEmpty:
         assert "Task A" not in str(result.display)
 
     async def test_write_empty_list_when_all_done_clears(self, todo_list_tool: TodoList):
-        """Passing an empty list [] when all old todos are done should clear."""
+        """mode='clear' with an empty list when all old todos are done clears."""
         write_params = Params(todos=[Todo(title="Task A", status="done", notes="")])
         await todo_list_tool(write_params)
 
-        clear_params = Params(todos=[])
+        clear_params = Params(todos=[], mode="clear")
         result = await todo_list_tool(clear_params)
         assert not result.is_error
-        assert result.output == "Todo list appended (0 total: 0 done, 0 in progress, 0 pending)"
+        assert result.output == "Todo list cleared (0 total: 0 done, 0 in progress, 0 pending)"
 
         read_params = Params(todos=None)
         result = await todo_list_tool(read_params)
@@ -1051,42 +1057,36 @@ class TestTodoListInternals:
             ]
         ) == ["A", "B"]
 
-    def test_merge_one_updates_notes_and_code_when_filled_and_different(self):
-        """_merge_one replaces notes/code when the new value is filled and different."""
+    def test_merge_one_updates_notes_when_filled_and_different(self):
+        """_merge_one replaces notes when the new value is filled and different."""
         from kimi_cli.tools.todo import TodoList
 
-        old = Todo(title="A", status="pending", notes="old notes", code="old code")
-        new = Todo(title="A", status="done", notes="new notes", code="new code")
+        old = Todo(title="A", status="pending", notes="old notes")
+        new = Todo(title="A", status="done", notes="new notes")
         merged = TodoList._merge_one(old, new)
         assert merged.title == "A"
         assert merged.status == "done"
         assert merged.notes == "new notes"
-        assert merged.code == "new code"
 
-    def test_merge_one_keeps_old_notes_and_code_when_new_none_or_empty(self):
-        """_merge_one keeps old notes/code when the new value is None or empty."""
+    def test_merge_one_keeps_old_notes_when_new_none_or_empty(self):
+        """_merge_one keeps old notes when the new value is None or empty."""
         from kimi_cli.tools.todo import TodoList
 
-        old = Todo(title="A", status="pending", notes="old notes", code="old code")
-        for new_notes, new_code in [
-            (None, None),
-            ("", ""),
-            ("   ", "   "),
-        ]:
-            new = Todo(title="A", status="done", notes=new_notes, code=new_code)
+        old = Todo(title="A", status="pending", notes="old notes")
+        for new_notes in [None, "", "   "]:
+            new = Todo(title="A", status="done", notes=new_notes)
             merged = TodoList._merge_one(old, new)
             assert merged.notes == "old notes", f"notes lost for {new_notes!r}"
-            assert merged.code == "old code", f"code lost for {new_code!r}"
             assert merged.status == "done"
 
-    def test_merge_one_keeps_old_notes_but_updates_code(self):
-        """_merge_one can update one field while preserving the other."""
+    def test_merge_one_updates_status_without_touching_notes(self):
+        """_merge_one can update status while preserving notes."""
         from kimi_cli.tools.todo import TodoList
 
-        old = Todo(title="A", status="pending", notes="old notes", code="old code")
-        merged = TodoList._merge_one(old, Todo(title="A", status="pending", notes="", code="new code"))
+        old = Todo(title="A", status="pending", notes="old notes")
+        merged = TodoList._merge_one(old, Todo(title="A", status="in_progress", notes=""))
         assert merged.notes == "old notes"
-        assert merged.code == "new code"
+        assert merged.status == "in_progress"
 
     def test_merge_todos_empty_old(self):
         """_merge_todos with empty old returns new."""
@@ -1099,28 +1099,27 @@ class TestTodoListInternals:
         assert len(result.todos) == 1
         assert result.todos[0].title == "A"
 
-    def test_merge_todos_empty_new_when_all_done(self):
-        """_merge_todos with explicit empty new and all old done returns empty."""
+    def test_merge_todos_empty_new_keeps_old(self):
+        """_merge_todos with an explicit empty new list is a no-op: the old
+        list is returned unchanged (clearing moved to mode='clear')."""
         from kimi_cli.tools.todo import TodoList
 
         tool = object.__new__(TodoList)
-        result = tool._merge_todos(
-            [Todo(title="A", status="done", notes="")], [], clear_requested=True
-        )
+        result = tool._merge_todos([Todo(title="A", status="done", notes="")], [])
         assert result.error is None
         assert result.todos is not None
-        assert len(result.todos) == 0
+        assert [t.title for t in result.todos] == ["A"]
 
-    def test_merge_todos_empty_new_when_not_done_errors(self):
-        """_merge_todos with explicit empty new and incomplete old returns error."""
+    def test_merge_todos_empty_new_keeps_pending_old(self):
+        """Empty new never clears: pending old items are preserved."""
         from kimi_cli.tools.todo import TodoList
 
         tool = object.__new__(TodoList)
-        result = tool._merge_todos(
-            [Todo(title="A", status="pending", notes="")], [], clear_requested=True
-        )
-        assert result.error is not None
-        assert result.error.is_error
+        result = tool._merge_todos([Todo(title="A", status="pending", notes="")], [])
+        assert result.error is None
+        assert result.todos is not None
+        assert [t.title for t in result.todos] == ["A"]
+        assert result.todos[0].status == "pending"
 
     def test_merge_todos_superset_when_all_done(self):
         """_merge_todos with superset titles when all old done returns new."""
@@ -1541,7 +1540,7 @@ class TestTodoListActionableErrors:
     async def test_clear_error_contains_next_step(self, todo_list_tool: TodoList):
         await todo_list_tool(Params(todos=[Todo(title="A", status="pending", notes="")]))
 
-        result = await todo_list_tool(Params(todos=[]))
+        result = await todo_list_tool(Params(todos=[], mode="clear"))
         assert result.is_error
         assert "Cannot clear todos" in result.output
         assert "Next step:" in result.output
@@ -1599,7 +1598,7 @@ class TestTodoListArchive:
     async def test_clear_archives_done_todos(self, todo_list_tool: TodoList):
         await todo_list_tool(Params(todos=[Todo(title="Done A", status="done", notes="")]))
 
-        result = await todo_list_tool(Params(todos=[]))
+        result = await todo_list_tool(Params(todos=[], mode="clear"))
         assert not result.is_error
 
         read = await todo_list_tool(Params(todos=None))
@@ -1712,265 +1711,3 @@ class TestTodoListSubagentSaveFailure:
         assert result.is_error
         assert "Failed to save subagent todos" in result.output
         assert "disk full" in result.output
-
-
-class TestTodoCodeExecution:
-    """Tests for code execution and auto-verification on done."""
-
-    def test_resolve_code_executable_inline(self) -> None:
-        """Inline code produces a temp file."""
-        resolved = TodoList._resolve_code_executable("print('hello')")
-        assert resolved is not None
-        kind, path = resolved
-        assert kind == "python_inline"
-        assert path.endswith(".py")
-        assert Path(path).exists()
-        Path(path).unlink(missing_ok=True)
-
-    def test_resolve_code_executable_nonexistent(self) -> None:
-        """Non-existent .py file is treated as inline code (temp file)."""
-        resolved = TodoList._resolve_code_executable("nonexistent.py")
-        assert resolved is not None
-        kind, path = resolved
-        assert kind == "python_inline"
-        assert path.endswith(".py")
-        Path(path).unlink(missing_ok=True)
-
-    def test_resolve_code_executable_empty(self) -> None:
-        """Empty string returns None."""
-        path = TodoList._resolve_code_executable("")
-        assert path is None
-
-    def test_resolve_code_executable_shell(self) -> None:
-        """`!`-prefixed code resolves to a shell command."""
-        resolved = TodoList._resolve_code_executable("!pytest tests/ -x -q")
-        assert resolved == ("shell", "pytest tests/ -x -q")
-
-    def test_resolve_code_executable_shell_empty(self) -> None:
-        """A bare `!` has no runnable content."""
-        assert TodoList._resolve_code_executable("!") is None
-
-    def test_resolve_code_executable_shell_file(self, tmp_path: Path) -> None:
-        """A .sh/.ps1 file path resolves to shell_file."""
-        sh = tmp_path / "check.sh"
-        sh.write_text("exit 0\n", encoding="utf-8")
-        resolved = TodoList._resolve_code_executable(str(sh))
-        assert resolved == ("shell_file", str(sh))
-        ps1 = tmp_path / "check.ps1"
-        ps1.write_text("exit 0\n", encoding="utf-8")
-        resolved_ps1 = TodoList._resolve_code_executable(str(ps1))
-        assert resolved_ps1 == ("shell_file", str(ps1))
-
-    def test_resolve_code_executable_py_file(self, tmp_path: Path) -> None:
-        """A .py file path resolves to python."""
-        py = tmp_path / "check.py"
-        py.write_text("print('ok')\n", encoding="utf-8")
-        resolved = TodoList._resolve_code_executable(str(py))
-        assert resolved == ("python", str(py))
-
-    def test_cleanup_code_tempfile_tuple(self) -> None:
-        """Cleanup removes only python_inline temp files from tuples."""
-        import os
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_")
-        with os.fdopen(fd, "w") as f:
-            f.write("print('x')")
-        TodoList._cleanup_code_tempfile(("python_inline", path))
-        assert not Path(path).exists()
-        # Non-temp kinds are left alone.
-        fd2, path2 = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_keep_")
-        with os.fdopen(fd2, "w") as f:
-            f.write("print('y')")
-        TodoList._cleanup_code_tempfile(("python", path2))
-        assert Path(path2).exists()
-        Path(path2).unlink(missing_ok=True)
-
-    async def test_run_code_shell_success(self) -> None:
-        """`!`-prefixed shell command runs and succeeds."""
-        success, output = await TodoList._run_code("!echo shell_ok_marker")
-        assert success
-        assert "shell_ok_marker" in output
-
-    async def test_run_code_shell_failure(self) -> None:
-        """Shell command with non-zero exit code fails verification."""
-        success, output = await TodoList._run_code("!exit 1")
-        assert not success
-        assert "exit code 1" in output
-
-    async def test_run_code_shell_file(self, tmp_path: Path) -> None:
-        """A shell script file is executed via the platform shell."""
-        import sys as _sys
-
-        if _sys.platform == "win32":
-            script = tmp_path / "check.ps1"
-            script.write_text("Write-Output 'script_ok_marker'\n", encoding="utf-8")
-        else:
-            script = tmp_path / "check.sh"
-            script.write_text("echo script_ok_marker\n", encoding="utf-8")
-        success, output = await TodoList._run_code(str(script))
-        assert success
-        assert "script_ok_marker" in output
-
-    def test_cleanup_code_tempfile_removes_file(self) -> None:
-        """Cleanup removes the temp file."""
-        import os
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix=".py", prefix="test_cleanup_")
-        with os.fdopen(fd, "w") as f:
-            f.write("print('x')")
-        assert Path(path).exists()
-        TodoList._cleanup_code_tempfile(path)
-        assert not Path(path).exists()
-
-    def test_cleanup_code_tempfile_none(self) -> None:
-        """Cleanup with None does nothing."""
-        TodoList._cleanup_code_tempfile(None)  # should not raise
-
-    def test_cleanup_code_tempfile_nonexistent(self) -> None:
-        """Cleanup with nonexistent path does nothing."""
-        TodoList._cleanup_code_tempfile("C:\\nonexistent_file_xyz.py")  # should not raise
-
-    async def test_run_code_success(self) -> None:
-        """Successful code execution returns (True, output)."""
-        success, output = await TodoList._run_code("print('hello_world')")
-        assert success
-        assert "hello_world" in output
-
-    async def test_run_code_failure(self) -> None:
-        """Failing code execution returns (False, error)."""
-        success, output = await TodoList._run_code("raise RuntimeError('boom')")
-        assert not success
-        assert "boom" in output
-
-    async def test_run_code_timeout(self) -> None:
-        """Code that times out returns error."""
-        success, output = await TodoList._run_code(
-            "import time; time.sleep(5)", timeout=1
-        )
-        assert not success
-        assert "timed out" in output.lower()
-
-    async def test_verify_and_set_todo_status_marks_done(self, todo_list_tool: TodoList) -> None:
-        """_verify_and_set_todo_status marks a todo done."""
-        await todo_list_tool(Params(todos=[Todo(title="TestDone", status="pending", notes="")]))
-        err = await todo_list_tool._verify_and_set_todo_status("TestDone", "done")
-        assert err is None
-        read = await todo_list_tool(Params(todos=None))
-        assert "[done] TestDone" in read.output
-
-    async def test_verify_and_set_todo_status_appends_notes(self, todo_list_tool: TodoList) -> None:
-        """_verify_and_set_todo_status appends notes when provided."""
-        await todo_list_tool(Params(todos=[Todo(title="TestNotes", status="pending", notes="initial")]))
-        err = await todo_list_tool._verify_and_set_todo_status("TestNotes", "done", append_notes="completed")
-        assert err is None
-        # Verify by reading todos
-        todos = todo_list_tool._load_todos()
-        for t in todos:
-            if t.title == "TestNotes":
-                assert t.notes is not None
-                assert "initial" in t.notes
-                assert "completed" in t.notes
-                break
-
-    async def test_verify_and_set_todo_status_marks_pending(self, todo_list_tool: TodoList) -> None:
-        """_verify_and_set_todo_status can change status back to pending."""
-        await todo_list_tool(Params(todos=[Todo(title="TestPending", status="done", notes="")]))
-        err = await todo_list_tool._verify_and_set_todo_status("TestPending", "pending")
-        assert err is None
-        read = await todo_list_tool(Params(todos=None))
-        assert "[pending] TestPending" in read.output
-
-    async def test_verify_auto_verifies_code_on_done_success(self, todo_list_tool: TodoList) -> None:
-        """Setting a todo done with working code succeeds."""
-        await todo_list_tool(Params(todos=[Todo(title="CodeOk", status="pending", code="print('ok')")]))
-        err = await todo_list_tool._verify_and_set_todo_status("CodeOk", "done")
-        # Should succeed (or have verification error if code runs ok)
-        if err:
-            # Could be persistence error, but code should pass
-            assert "verification failed" not in err
-
-    async def test_verify_auto_verifies_code_on_done_failure(self, todo_list_tool: TodoList) -> None:
-        """Setting a todo done with failing code reverts to pending."""
-        await todo_list_tool(Params(todos=[Todo(title="CodeFail", status="pending", code="raise ValueError('test_fail')")]))
-        err = await todo_list_tool._verify_and_set_todo_status("CodeFail", "done")
-        assert err is not None
-        assert "verification failed" in err
-        # Should be reverted to pending
-        todos = todo_list_tool._load_todos()
-        for t in todos:
-            if t.title == "CodeFail":
-                assert t.status == "pending"
-                break
-
-    async def test_verify_no_code_on_done_transition(self, todo_list_tool: TodoList) -> None:
-        """Todo without code should not trigger verification when marked done."""
-        await todo_list_tool(Params(todos=[Todo(title="NoCode", status="pending")]))
-        err = await todo_list_tool._verify_and_set_todo_status("NoCode", "done")
-        assert err is None
-
-    async def test_verify_does_not_run_when_already_done(self, todo_list_tool: TodoList) -> None:
-        """Already-done todo should not re-run code."""
-        await todo_list_tool(Params(todos=[Todo(title="AlreadyDone", status="done", code="print('hello')")]))
-        err = await todo_list_tool._verify_and_set_todo_status("AlreadyDone", "done")
-        assert err is None
-
-    async def test_verify_accumulates_errors(self, todo_list_tool: TodoList) -> None:
-        """Multiple done triggers accumulate errors."""
-        await todo_list_tool(Params(todos=[
-            Todo(title="Fail1", status="pending", code="raise ValueError('err1')"),
-            Todo(title="Fail2", status="pending", code="raise ValueError('err2')"),
-        ]))
-        err1 = await todo_list_tool._verify_and_set_todo_status("Fail1", "done")
-        err2 = await todo_list_tool._verify_and_set_todo_status("Fail2", "done")
-        assert err1 is not None
-        assert err2 is not None
-        assert "err1" in err1 or "err2" in err2 or True
-
-
-class TestTodoListWriteVerification:
-    """Reflection fix: TodoList write mode runs verification code on done
-    transitions (pending/in_progress -> done) and reverts failures to pending."""
-
-    async def test_write_done_transition_runs_code_success(
-        self, todo_list_tool: TodoList
-    ) -> None:
-        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
-        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="print('ok')")]))
-        assert not res.is_error
-        assert "verification failed" not in res.output
-        todos = todo_list_tool._load_todos()
-        assert todos[0].status == "done"
-
-    async def test_write_done_transition_failure_reverts_to_pending(
-        self, todo_list_tool: TodoList
-    ) -> None:
-        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
-        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="raise ValueError('boom')")]))
-        assert not res.is_error
-        assert "verification failed" in res.output
-        todos = todo_list_tool._load_todos()
-        assert todos[0].status == "pending"
-        assert todos[0].notes is not None
-        assert "verification failed" in todos[0].notes
-
-    async def test_write_new_todo_created_done_with_code_verifies(
-        self, todo_list_tool: TodoList
-    ) -> None:
-        """Brand-new todo created directly as done with code is verified."""
-        res = await todo_list_tool(Params(todos=[Todo(title="New", status="done", code="raise ValueError('boom')")]))
-        assert not res.is_error
-        assert "verification failed" in res.output
-        todos = todo_list_tool._load_todos()
-        assert todos[0].status == "pending"
-
-    async def test_write_already_done_todo_skips_code(
-        self, todo_list_tool: TodoList
-    ) -> None:
-        """Re-sending an already-done todo does not re-run its code."""
-        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
-        await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="print('ok')")]))
-        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="raise ValueError('boom')")]))
-        assert not res.is_error
-        assert "verification failed" not in res.output
-        todos = todo_list_tool._load_todos()
-        assert todos[0].status == "done"

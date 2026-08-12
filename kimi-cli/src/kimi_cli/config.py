@@ -203,18 +203,18 @@ Default is 3."""
     injection. Default is 6."""
 
     verification_gate_enabled: bool = Field(default=True)
-    """When true, a turn that ends with unfinished todos, failing todo
-    verification, or unverified code edits is nudged to continue instead of
-    finishing. Applies at the soul layer, so it covers CLI, server,
-    subagent, and DAG/flow sessions. Default is true."""
+    """When true, a turn that ends with unfinished todos or unverified code
+    edits is nudged to continue instead of finishing. Applies at the soul
+    layer, so it covers CLI, server, subagent, and DAG/flow sessions.
+    Default is true."""
     verification_gate_max_nudges: int = Field(default=2, ge=0, le=10)
     """Maximum number of verification-gate nudges per turn before the gate
     lets the turn finish anyway (deadlock prevention). Default is 2."""
     cli_closing_reminder_rounds: int = Field(default=1, ge=0, le=5)
-    """Number of CLI-layer closing reminder rounds (todo + code-todo checks)
-    after a successful prompt. The soul-layer verification gate is the
-    primary mechanism; this is the CLI fallback. 0 disables the CLI
-    fallback. Default is 1."""
+    """Number of CLI-layer closing reminder rounds (todo checks) after a
+    successful prompt. The soul-layer verification gate is the primary
+    mechanism; this is the CLI fallback. 0 disables the CLI fallback.
+    Default is 1."""
 
     budget_reminder_enabled: bool = Field(default=False)
     """When true, inject budget-awareness reminders as step (or wall-clock)

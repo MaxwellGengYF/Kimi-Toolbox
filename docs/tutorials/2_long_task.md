@@ -112,10 +112,8 @@
 1. **待办提醒轮次**：由 `loop_control.cli_closing_reminder_rounds` 控制（默认 `1`，范围 0–5）。每轮检查会话中未完成的 `todos`（含子待办与备注，并带上截断后的原始请求作为上下文）：
    - 第 1 轮以「Todo review...」提示；后续轮次（`strong=True`）以「Final todo review...」发出 CRITICAL 强提醒，要求先把所有待办标记为 `done` 再结束。
    - 若所有待办均已完成，则无需提醒。
-2. **代码待办检查**：随后还有一轮代码检查循环，通过 `kimi_cli.tools.todo.verify.verify_code_todos` **自动运行**待办项附带的验证代码（`code` 字段）——通过验证的待办会自动标记为 `done`，失败的汇总为提醒再次提示 Agent 修复。
-3. **收尾清理**：全部结束后清除会话中的待办（`_clear_session_todos`）；若指定了 `export_todo_list_path`（须以 `.json` 结尾），会先把待办列表导出为 JSON 再清理；若 `close_session_after_prompt=True` 还会关闭会话。
-
-该机制与 `TodoList` 工具配合，确保长任务不会遗漏中间步骤，并自动验证「带验证代码的待办」是否真正通过。
+2. **收尾清理**：全部结束后清除会话中的待办（`_clear_session_todos`）；若指定了 `export_todo_list_path`（须以 `.json` 结尾），会先把待办列表导出为 JSON 再清理；若 `close_session_after_prompt=True` 还会关闭会话。
+该机制与 `TodoList` 工具配合，确保长任务不会遗漏中间步骤。
 
 ---
 
@@ -134,12 +132,9 @@
 
 ```python
 class Todo:
-    title: str                # 待办事项标题
-    status: str               # 状态："pending" | "in_progress" | "done"
-    notes: str | None         # 备注（可选）
-    code: str | None          # 验证代码（可选）：内联 Python、.py 路径、
-                              # 以 `!` 开头的 shell 命令、或 .sh/.ps1 路径
-
+    title: str # 待办事项标题
+    status: str # 状态："pending" | "in_progress" | "done"
+    notes: str | None # 备注（可选）
 class Params:
     todos: list[Todo] | Todo | None  # 省略或 null 时读取；提供时写入（也接受别名 items）
 ```

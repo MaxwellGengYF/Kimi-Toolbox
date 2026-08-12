@@ -176,50 +176,6 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
     return "\n".join(lines)
 
 
-async def _maybe_build_code_todo_reminder(session: Session, *, strong: bool = False) -> str | None:
-    """Check todos with code: run pending/in_progress code for verification.
-
-    Delegates to the shared ``kimi_cli.tools.todo.verify.verify_code_todos``
-    (B-4): code todos that pass are auto-marked done; failures are collected
-    into a reminder string (or None if all code passed or no code todos).
-    """
-    from kimi_cli.tools.todo.verify import verify_code_todos
-
-    cli = getattr(session, "_cli", None)
-    if cli is None:
-        return None
-
-    runtime = getattr(cli, "_runtime", None)
-    role = getattr(runtime, "role", "root") if runtime is not None else "root"
-
-    # Get the TodoList tool instance from the runtime's toolset
-    toolset = getattr(getattr(getattr(cli, "soul", None), "agent", None), "toolset", None)
-    if toolset is None:
-        return None
-    todo_tool = toolset.find("TodoList")
-    if todo_tool is None:
-        return None
-
-    if role == "root":
-        state = getattr(getattr(cli, "session", None), "state", None)
-        if state is None:
-            return None
-        todos_raw = getattr(state, "todos", None) or []
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is None or subagent_id is None:
-            return None
-        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-        data = _read_subagent_state(state_file)
-        todos_raw = data.get("todos", []) if isinstance(data.get("todos"), list) else []
-
-    try:
-        return await verify_code_todos(todo_tool, list(todos_raw), strong=strong)
-    except Exception:
-        return None
-
-
 def _get_cli_closing_reminder_rounds(session: Session) -> int:
     """Read ``cli_closing_reminder_rounds`` from the session's loop control.
 
@@ -743,38 +699,6 @@ async def prompt_async(
                 except Exception as reminder_exc:
                     base._stream.colorful_print_word(
                         f"Todo reminder failed: {reminder_exc}",
-                        fg=Color.BRIGHT_RED,
-                        styles=[Style.BOLD],
-                        require_new_line=True,
-                    )
-                    break
-
-            # Code-todo reminder loop (replaces old goal enforcement loop)
-            # Auto-verification happens inside _verify_and_set_todo_status
-            # when a todo is marked `done`. This loop only provides reminders.
-            max_code_attempts = closing_rounds
-            for attempt in range(max_code_attempts):
-                code_reminder = await _maybe_build_code_todo_reminder(session, strong=(attempt > 0))
-                if code_reminder is None:
-                    break
-                if len(code_reminder) > 65536:
-                    name, new_id = _export_to_temp_file(content=code_reminder)
-                    code_reminder = f"read and execute: `{name}`"
-                label = "Code check..." if attempt == 0 else "Final code check..."
-                try:
-                    await _run_single_prompt(
-                        session,
-                        code_reminder,
-                        output_function,
-                        cancel_callable,
-                        merge_wire_messages,
-                        info_print,
-                        label=label,
-                        format_output=True,
-                    )
-                except Exception as reminder_exc:
-                    base._stream.colorful_print_word(
-                        f"Code todo reminder failed: {reminder_exc}",
                         fg=Color.BRIGHT_RED,
                         styles=[Style.BOLD],
                         require_new_line=True,

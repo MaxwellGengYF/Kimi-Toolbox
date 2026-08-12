@@ -1,7 +1,6 @@
 """Tests for Defects 4.1-4.4: TodoList improvements."""
 from __future__ import annotations
 
-import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,67 +22,6 @@ class TestTodoListSingleInProgress:
         ))
         assert result.is_error
         assert "in_progress" in result.output.lower()
-
-
-class TestTodoCodeField:
-
-
-    def test_merge_preserves_code_when_new_omits(self) -> None:
-        old = Todo(title="task", status="pending", code="print('old')")
-        new = Todo(title="task", status="done")  # code omitted
-        merged = TodoList._merge_one(old, new)
-        assert merged.code == "print('old')"
-
-    def test_merge_updates_code_when_new_provides(self) -> None:
-        old = Todo(title="task", status="pending", code="print('old')")
-        new = Todo(title="task", status="done", code="print('new')")
-        merged = TodoList._merge_one(old, new)
-        assert merged.code == "print('new')"
-
-    def test_merge_keeps_code_when_new_is_empty_string(self) -> None:
-        """Empty/whitespace code from new does not clear the stored code."""
-        old = Todo(title="task", status="pending", code="print('old')")
-        new = Todo(title="task", status="done", code="")
-        merged = TodoList._merge_one(old, new)
-        assert merged.code == "print('old')"
-
-
-class TestTodoShellBackwardCompat:
-    """Smoke tests that shell-aware execution keeps the static defaults working."""
-
-    def test_resolve_code_executable_shell_prefix(self) -> None:
-        assert TodoList._resolve_code_executable("!pytest tests/ -x -q") == (
-            "shell",
-            "pytest tests/ -x -q",
-        )
-
-    @pytest.mark.asyncio
-    async def test_run_code_accepts_legacy_executable_path(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A legacy plain `.py` path passed as `executable` still routes to python."""
-        captured: dict[str, object] = {}
-
-        async def fake_run_process(
-            argv: list[str],
-            timeout: int,
-            *,
-            not_found_hint: str,
-            env: dict[str, str] | None = None,
-        ) -> tuple[bool, str]:
-            captured["argv"] = argv
-            captured["env"] = env
-            return True, "ok"
-
-        monkeypatch.setattr(TodoList, "_run_process", fake_run_process)
-        ok, out = await TodoList._run_code(
-            "C:/nonexistent/script.py", executable="C:/nonexistent/script.py"
-        )
-        assert ok and out == "ok"
-        argv = captured["argv"]
-        assert isinstance(argv, list) and argv[0] == sys.executable
-        assert argv[1] == "C:/nonexistent/script.py"
-        assert captured["env"] is None
 
 
 class TestAllDoneReminderWrite:
@@ -149,7 +87,7 @@ class TestAllDoneReminderRead:
 
         # Mock internal state: all todos done, no archived
         tl._load_todos = MagicMock(return_value=[
-            MagicMock(status="done", title="task", notes=None, code=None)
+            MagicMock(status="done", title="task", notes=None)
         ])
         tl._load_archived_todos = MagicMock(return_value=[])
 
@@ -170,7 +108,7 @@ class TestAllDoneReminderRead:
         tl = TodoList(runtime=mock_runtime)
 
         tl._load_todos = MagicMock(return_value=[
-            MagicMock(status="done", title="task", notes=None, code=None)
+            MagicMock(status="done", title="task", notes=None)
         ])
         tl._load_archived_todos = MagicMock(return_value=[])
 
@@ -280,7 +218,7 @@ class TestAllDoneReminderReadTruncation:
         tl = TodoList(runtime=mock_runtime)
 
         tl._load_todos = MagicMock(return_value=[
-            MagicMock(status="done", title="task", notes=None, code=None)
+            MagicMock(status="done", title="task", notes=None)
         ])
         tl._load_archived_todos = MagicMock(return_value=[])
 
@@ -297,7 +235,7 @@ class TestAllDoneReminderReadTruncation:
         tl = TodoList(runtime=mock_runtime)
 
         tl._load_todos = MagicMock(return_value=[
-            MagicMock(status="done", title="task", notes=None, code=None)
+            MagicMock(status="done", title="task", notes=None)
         ])
         tl._load_archived_todos = MagicMock(return_value=[])
 

@@ -110,7 +110,7 @@ Triggered when context token ratio hits `compaction_trigger_ratio` or free space
 
 The `KimiSoul` core loop actively keeps long runs on track — no manual babysitting. It works in CLI, server, and sub-agent sessions alike.
 
-- **Verification Gate** — a turn can't end while todos are unfinished, todo verification fails, or files were edited without running any check. Failing checks are fed back to the agent to fix.
+- **Verification Gate** — a turn can't end while todos are unfinished, or while files were edited without running any check. Failing checks are fed back to the agent to fix.
 - **Anti-loop detection** — catches repeated edits to the same file across different tools, and the same error recurring without a root-cause fix; nudges the agent to change strategy.
 - **Todo reminders** — unfinished todos are periodically re-surfaced at the end of the context, so goals never drift out of attention.
 - **Compact reminders** — when context fills up (~70%), the agent is prompted to compact on its own terms before forced auto-compaction kicks in.
@@ -119,13 +119,10 @@ The `KimiSoul` core loop actively keeps long runs on track — no manual babysit
 - **Decision-aware compaction** — compaction summaries preserve a `Decisions & Conclusions` and a `Verification Status` section, so early decisions and verified work survive.
 - **Context pruning** — stale tool outputs, thinking blocks, and near-duplicate content are automatically elided to reclaim context space.
 
-### TodoList with Executable Verification
-
-The `TodoList` tool tracks multi-step plans and *proves* they are done:
-
-- Attach verification `code` to any todo: inline Python, a `.py` file, a `!`-prefixed shell command (e.g. `!pytest tests/ -x -q`), or a `.sh`/`.ps1` file.
-- Marking a todo `done` automatically runs its verification — failures are returned as errors and block completion via the Verification Gate.
+### TodoList
+The `TodoList` tool tracks multi-step plans:
 - Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
+- Nested sub-todos via `TodoPush`/`TodoSub`/`TodoPop` with a `Stack:` breadcrumb.
 
 ### Best-of-N Sampling
 

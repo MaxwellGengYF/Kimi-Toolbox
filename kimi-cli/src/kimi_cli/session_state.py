@@ -28,7 +28,6 @@ class TodoItemState(BaseModel):
     title: str
     status: TodoStatus
     notes: str | None = None
-    code: str | None = None
     # Sub todos (children). Default empty so old state files stay valid.
     children: list[TodoItemState] = Field(default_factory=list)
 

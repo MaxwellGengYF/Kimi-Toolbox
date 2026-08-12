@@ -3,13 +3,11 @@
 Phase 10 of the "TodoList Stack & Tree Structure" plan:
 
 - TodoPush: push a parent onto the stack scope (breadcrumb), depth limits.
-- TodoSub: add / update / rename children under the current scope, with
-  pending→done code verification on a single child.
-- TodoPop: mark the focus subtree done (no verification) and ascend.
+- TodoSub: add / update / rename children under the current scope.
+- TodoPop: mark the focus subtree done and ascend.
 - Stack persistence (root + subagent), auto-heal of broken stacks.
 - format_todo_injection stack breadcrumb + tree indentation.
 - TodoReminderProvider signature sensitivity to stack / child changes.
-- Read-only recursive code strip.
 - Native-gated recursive status counts.
 - Cross-tool "Next:" / corrective-hint output contracts.
 
@@ -19,7 +17,6 @@ fixture; tools are instantiated directly as ``TodoPush(runtime)`` etc.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 import orjson
@@ -180,21 +177,20 @@ class TestTodoSubChildren:
         assert child.status == "in_progress"
         assert child.notes == "keep me"
 
-    async def test_same_title_update_replaces_nonempty_notes_and_code(
+    async def test_same_title_update_replaces_nonempty_notes(
         self, runtime: Runtime
     ) -> None:
         push = TodoPush(runtime)
         sub = TodoSub(runtime)
         await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child", notes="old", code="print('old')"))
+        await sub(TodoSubParams(title="child", notes="old"))
 
         res = await sub(
-            TodoSubParams(title="child", status="in_progress", notes="new", code="print('new')")
+            TodoSubParams(title="child", status="in_progress", notes="new")
         )
         assert not res.is_error
         child = _read_root_todo(sub, "Parent").children[0]
         assert child.notes == "new"
-        assert child.code == "print('new')"
         assert child.status == "in_progress"
 
     async def test_rename_edits_title(self, runtime: Runtime) -> None:
@@ -249,51 +245,6 @@ class TestTodoSubChildren:
         # Nothing changed.
         children = [c.title for c in _read_root_todo(sub, "Parent").children]
         assert children == ["a", "b"]
-
-    async def test_done_verification_success(self, runtime: Runtime) -> None:
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child", code="print('ok')"))
-
-        res = await sub(TodoSubParams(title="child", status="done"))
-        assert not res.is_error
-        assert "verification failed" not in res.output
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.status == "done"
-
-    async def test_done_verification_failure_reverts_to_pending(
-        self, runtime: Runtime
-    ) -> None:
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child", code="raise ValueError('boom')"))
-
-        res = await sub(TodoSubParams(title="child", status="done"))
-        # Verification failure is non-blocking: the tool succeeds but reports it.
-        assert not res.is_error
-        assert "verification failed" in res.output
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.status == "pending"
-        assert child.notes is not None
-        assert "verification failed" in child.notes
-
-    async def test_done_without_code_skips_verification(self, runtime: Runtime) -> None:
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child"))
-
-        res = await sub(TodoSubParams(title="child", status="done"))
-        assert not res.is_error
-        assert "verification" not in res.output.lower()
-        assert _read_root_todo(sub, "Parent").children[0].status == "done"
-
-
-# ---------------------------------------------------------------------------
-# 3. Multiple sub-todos under one parent
-# ---------------------------------------------------------------------------
 
 
 class TestMultipleSubTodos:
@@ -609,14 +560,11 @@ class TestPersistenceRoundTrip:
         # Root session is untouched.
         assert runtime.session.state.todo_stack == []
 
-    async def test_push_persists_code_field(self, runtime: Runtime) -> None:
+    async def test_push_persists_notes_field(self, runtime: Runtime) -> None:
         push = TodoPush(runtime)
-        res = await push(TodoPushParams(title="P", code="print('hello')"))
+        res = await push(TodoPushParams(title="P", notes="hello"))
         assert not res.is_error
-        # The scope render shows the focus node's children, so the code
-        # indicator is visible in the display block instead.
-        assert res.display[0].items[0].code == "print('hello')"
-        assert _read_root_todo(push, "P").code == "print('hello')"
+        assert _read_root_todo(push, "P").notes == "hello"
 
     async def test_todolist_same_title_update_keeps_children(self, runtime: Runtime) -> None:
         """TodoList append on the same root title must not destroy the tree."""
@@ -760,72 +708,6 @@ class TestReminderSignature:
 
 
 # ---------------------------------------------------------------------------
-# 10. Read-only recursive code strip
-# ---------------------------------------------------------------------------
-
-
-class TestReadOnlyStripRecursive:
-    async def test_todolist_strips_code_recursively(self, runtime: Runtime) -> None:
-        ro_runtime = replace(runtime, read_only=True)
-        tool = TodoList(ro_runtime)
-        res = await tool(
-            Params(
-                todos=[
-                    Todo(
-                        title="P",
-                        status="pending",
-                        code="print('root')",
-                        children=[Todo(title="c", status="pending", code="print('child')")],
-                    )
-                ]
-            )
-        )
-        assert not res.is_error
-        assert "In read-only mode, `code` is forbidden" in res.output
-        assert "2 todo(s) affected" in res.output
-        todos = tool._load_todos()
-        assert todos[0].code is None
-        assert todos[0].children[0].code is None
-
-    async def test_todolist_read_only_without_code_has_no_warning(
-        self, runtime: Runtime
-    ) -> None:
-        ro_runtime = replace(runtime, read_only=True)
-        tool = TodoList(ro_runtime)
-        res = await tool(
-            Params(
-                todos=[
-                    Todo(
-                        title="P",
-                        status="pending",
-                        children=[Todo(title="c", status="pending")],
-                    )
-                ]
-            )
-        )
-        assert not res.is_error
-        assert "read-only" not in res.output.lower()
-
-    async def test_push_strips_code_in_read_only(self, runtime: Runtime) -> None:
-        ro_runtime = replace(runtime, read_only=True)
-        push = TodoPush(ro_runtime)
-        res = await push(TodoPushParams(title="P", code="print('x')"))
-        assert not res.is_error
-        assert "In read-only mode, `code` is forbidden" in res.output
-        assert _read_root_todo(push, "P").code is None
-
-    async def test_sub_strips_code_in_read_only(self, runtime: Runtime) -> None:
-        ro_runtime = replace(runtime, read_only=True)
-        push = TodoPush(ro_runtime)
-        sub = TodoSub(ro_runtime)
-        await push(TodoPushParams(title="P"))
-        res = await sub(TodoSubParams(title="c", code="print('x')"))
-        assert not res.is_error
-        assert "In read-only mode, `code` is forbidden" in res.output
-        assert _read_root_todo(sub, "P").children[0].code is None
-
-
-# ---------------------------------------------------------------------------
 # 11. Native-gated recursive status counts
 # ---------------------------------------------------------------------------
 
@@ -936,9 +818,9 @@ class TestCrossToolHints:
     async def test_todolist_zero_total_write_suppresses_hint(self, runtime: Runtime) -> None:
         tool = TodoList(runtime)
         await tool(Params(todos=[Todo(title="A", status="done")]))
-        res = await tool(Params(todos=[]))
+        res = await tool(Params(todos=[], mode="clear"))
         assert not res.is_error
-        assert res.output == "Todo list appended (0 total: 0 done, 0 in progress, 0 pending)"
+        assert res.output == "Todo list cleared (0 total: 0 done, 0 in progress, 0 pending)"
         assert "Next:" not in res.output
 
     async def test_push_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
@@ -1069,7 +951,7 @@ class TestTodoListErrorHints:
     async def test_clear_error_names_todolist_and_push(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         await lst(Params(todos=[Todo(title="A", status="pending")]))
-        res = await lst(Params(todos=[]))
+        res = await lst(Params(todos=[], mode="clear"))
         assert res.is_error
         assert "Cannot clear todos" in res.output
         assert "Hint: " in res.output
@@ -1082,79 +964,3 @@ class TestTodoListErrorHints:
         assert not res.is_error
         assert "Todo list is empty." in res.output
         assert "Next: TodoPush to start a parent todo, or TodoList to read the tree." in res.output
-
-
-# ---------------------------------------------------------------------------
-# 3b. Verification on done transitions (TodoList/TodoSub/TodoPop)
-# ---------------------------------------------------------------------------
-class TestVerificationOnDone:
-    async def test_todosub_new_title_created_done_with_code_verifies(
-        self, runtime: Runtime
-    ) -> None:
-        """A brand-new sub-todo created directly as done with code is verified."""
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        res = await sub(TodoSubParams(
-            title="child", status="done", code="raise ValueError('boom')"
-        ))
-        assert not res.is_error
-        assert "verification failed" in res.output
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.status == "pending"  # reverted on verification failure
-        assert child.notes is not None
-        assert "verification failed" in child.notes
-
-    async def test_todosub_new_title_done_with_code_success(self, runtime: Runtime) -> None:
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        res = await sub(TodoSubParams(
-            title="child", status="done", code="print('ok')"
-        ))
-        assert not res.is_error
-        assert "verification failed" not in res.output
-        assert _read_root_todo(sub, "Parent").children[0].status == "done"
-
-    async def test_todopop_verifies_code_bearing_subtodos(self, runtime: Runtime) -> None:
-        """TodoPop runs verification code for sub-todos; passing code allows pop."""
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        pop = TodoPop(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="ok", code="print('ok')"))
-        res = await pop(TodoPopParams())
-        assert not res.is_error
-        assert 'Popped "Parent"' in res.output
-        parent = _read_root_todo(pop, "Parent")
-        assert parent.status == "done"
-        assert parent.children[0].status == "done"
-
-    async def test_todopop_aborts_on_verification_failure(self, runtime: Runtime) -> None:
-        """A failing sub-todo verification aborts the pop and keeps the stack."""
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        pop = TodoPop(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="bad", code="raise ValueError('boom')"))
-        res = await pop(TodoPopParams())
-        assert res.is_error
-        assert "verification failed" in res.output
-        assert "Cannot pop" in res.output
-        # Stack kept intact; parent not marked done. The abort does not persist
-        # any state change (the pop simply did not happen).
-        assert pop._load_stack() == ["Parent"]
-        parent = _read_root_todo(pop, "Parent")
-        assert parent.status == "pending"
-        assert parent.children[0].status == "pending"
-        assert parent.children[0].notes is None  # nothing persisted on abort
-
-    async def test_todopop_without_code_skips_verification(self, runtime: Runtime) -> None:
-        push = TodoPush(runtime)
-        sub = TodoSub(runtime)
-        pop = TodoPop(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="plain"))
-        res = await pop(TodoPopParams())
-        assert not res.is_error
-        assert 'Popped "Parent"' in res.output

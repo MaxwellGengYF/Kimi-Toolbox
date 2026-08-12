@@ -4,10 +4,7 @@ When the agent tries to end a turn (``stop_reason == "no_tool_calls"``),
 the gate checks whether the turn is *actually* finished:
 
 1. unfinished todos remain (root or subagent scope);
-2. todos with verification ``code`` exist whose verification fails
-   (the verification is executed here — successful ones are auto-marked
-   done, which may by itself clear the gate);
-3. the turn modified files (edit-class tool calls) but ran no
+2. the turn modified files (edit-class tool calls) but ran no
    verification-class call at all.
 
 If any condition hits, the gate returns a reminder text and the turn
@@ -79,7 +76,7 @@ class VerificationGate:
                     has_edits = True
                 if name in VERIFICATION_TOOL_HINTS:
                     # A TodoList call only counts as verification when it
-                    # actually marks something done (which runs its code).
+                    # actually marks something done.
                     if name == "TodoList":
                         if VerificationGate._todolist_marks_done(tool_call.function.arguments):
                             has_verification = True
@@ -132,31 +129,13 @@ class VerificationGate:
                 lines.append(f"- … and {len(unfinished) - _MAX_UNFINISHED_LISTED} more")
             reasons.append("\n".join(lines))
 
-        # Condition 2: todos with verification code that fails.
-        code_todos = [t for t in unfinished if getattr(t, "code", None)]
-        if code_todos:
-            todo_tool = None
-            try:
-                todo_tool = soul.agent.toolset.find("TodoList")
-            except Exception:
-                todo_tool = None
-            if todo_tool is not None:
-                from kimi_cli.tools.todo.verify import verify_code_todos
-
-                try:
-                    code_reminder = await verify_code_todos(todo_tool, code_todos)
-                except Exception:
-                    code_reminder = None
-                if code_reminder:
-                    reasons.append(code_reminder)
-
-        # Condition 3: edits this turn but no verification-class call.
+        # Condition 2: edits this turn but no verification-class call.
         turn_history = self._current_turn_history(soul)
         has_edits, has_verification = self._classify_turn_tool_calls(turn_history)
         if has_edits and not has_verification:
             reasons.append(
                 "You modified code this turn but ran no verification "
-                "(no tests/check commands, no todo verification). "
+                "(no tests/check commands). "
                 "Run the project's tests or a verification command before finishing."
             )
 

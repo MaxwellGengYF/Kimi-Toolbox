@@ -27,8 +27,8 @@ EDIT_TOOLS: frozenset[str] = frozenset(
 SHELL_TOOLS: frozenset[str] = frozenset({"Bash", "Powershell", "Run"})
 
 # Tools that can act as verification signals for the P2 gate:
-# marking a todo `done` triggers its attached verification code; shell
-# tools can run the project's own test/check commands.
+# marking a todo `done` signals completion; shell tools can run the
+# project's own test/check commands.
 VERIFICATION_TOOL_HINTS: frozenset[str] = frozenset({"TodoList"}) | SHELL_TOOLS
 
 # Argument keys that carry the target file path for edit tools.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import orjson
 from kosong.message import Message, TextPart, ToolCall
@@ -16,8 +16,8 @@ from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.verification_gate import VerificationGate
 
 
-def _todo(title: str, status: str, code: str | None = None) -> Any:
-    return SimpleNamespace(title=title, status=status, code=code, notes=None)
+def _todo(title: str, status: str) -> Any:
+    return SimpleNamespace(title=title, status=status, notes=None)
 
 
 def _make_soul(
@@ -88,51 +88,7 @@ async def test_no_todos_no_edits_clean() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Condition 2: failing todo verification code
-# ---------------------------------------------------------------------------
-
-
-async def test_failing_code_todo_blocks_with_tail() -> None:
-    gate = VerificationGate(max_nudges=2)
-    todo_tool = MagicMock()
-    # verify_code_todos now delegates entirely to _verify_and_set_todo_status,
-    # which runs the code once and returns an error message on failure.
-    todo_tool._verify_and_set_todo_status = AsyncMock(
-    return_value="Todo 'verify me' verification failed: exit code 3"
-    )
-    soul = _make_soul(
-    todos=[_todo("verify me", "in_progress", code="import sys; sys.exit(3)")],
-    todo_tool=todo_tool,
-    )
-    msg = await gate.check(soul)
-    assert msg is not None
-    assert "verification failed" in msg
-    assert "exit code 3" in msg
-
-
-async def test_passing_code_todo_auto_marks_done() -> None:
-    gate = VerificationGate(max_nudges=2)
-    marked: list[str] = []
-
-    class _Tool:
-        async def _verify_and_set_todo_status(self, title: str, status: str) -> None:
-            marked.append(title)
-
-    soul = _make_soul(
-        todos=[_todo("verify me", "in_progress", code="print('fine')")],
-        todo_tool=_Tool(),
-    )
-    msg = await gate.check(soul)
-    # Verification passed and the todo was auto-marked done -> the only
-    # remaining reason could be condition 1 (the mock loader is static and
-    # still reports the todo as unfinished), but condition 2 must not fire.
-    if msg is not None:
-        assert "verification failed" not in msg
-    assert marked == ["verify me"]
-
-
-# ---------------------------------------------------------------------------
-# Condition 3: edits without verification
+# Condition 2: edits without verification
 # ---------------------------------------------------------------------------
 
 

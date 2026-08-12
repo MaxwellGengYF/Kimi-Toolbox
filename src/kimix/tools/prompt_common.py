@@ -31,9 +31,9 @@ __all__ = [
 def accepts_alias_text(*names: str, word: bool = True) -> str:
     """Return the "Accepts `a` or `b`." prose for a parameter with aliases.
 
-    ``names`` are the accepted spellings in canonical-first order, e.g.
-    ``accepts_alias_text("cmd", "command")``.  With three or more names the
-    last two are joined with "or" (e.g. ``code | code_file``).  ``word``
+      ``names`` are the accepted spellings in canonical-first order, e.g.
+      ``accepts_alias_text("cmd", "command")``.  With three or more names the
+      last two are joined with "or" (e.g. ``path | file_path | filename``).  ``word``
     controls the " parameter" suffix (tool descriptions vs param fields).
     Delegates to ``kosong.tooling.alias_note`` so every tool (kimix *and*
     kimi-cli) shares one implementation.

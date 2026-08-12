@@ -4,7 +4,6 @@ Covers:
 - Runtime.read_only flag (default, propagation via copy_for_subagent)
 - KimiToolset blocking blocked tools when read_only=True
 - KimiToolset allowing unblocked tools when read_only=True
-- TodoList stripping code fields when read_only=True
 """
 from __future__ import annotations
 
@@ -13,8 +12,6 @@ from unittest.mock import MagicMock
 import pytest
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.toolset import _READ_ONLY_BLOCKED_TOOLS, KimiToolset
-from kimi_cli.tools.todo import Params as TodoListParams
-from kimi_cli.tools.todo import Todo, TodoList
 from kimi_cli.wire.types import ToolCall, ToolResult
 from kosong.tooling import ToolError
 
@@ -183,87 +180,3 @@ class TestKimiToolsetReadOnlyBlocking:
             assert not _result_is_blocked(result), (
                 f"Tool '{tool_name}' should NOT be blocked when read_only=False"
             )
-
-
-# =========================================================================
-# Phase 6.3 — TodoList code stripping in read_only mode
-# =========================================================================
-
-
-class TestTodoListReadOnly:
-    """Verify TodoList strips code fields when read_only=True."""
-
-    @pytest.fixture
-    def mock_runtime(self) -> MagicMock:
-        return MagicMock()
-
-    async def test_code_stripped_when_read_only(self, mock_runtime: MagicMock) -> None:
-        """code field is set to None when todo has code and read_only=True."""
-        mock_runtime.read_only = True
-        tl = TodoList(runtime=mock_runtime)
-
-        # Mock persistence to avoid side effects
-        tl._load_todos = MagicMock(return_value=[])
-        tl._load_archived_todos = MagicMock(return_value=[])
-        tl._save_todos = MagicMock(return_value=None)
-
-        result = await tl(TodoListParams(
-            todos=[
-                Todo(title="task A", status="pending", code="print('hello')"),
-                Todo(title="task B", status="pending", code="!pytest"),
-                Todo(title="task C", status="pending"),  # no code
-            ],
-            mode="append",
-        ))
-
-        # Should succeed with a warning
-        assert not result.is_error
-        # Warning should mention code stripping
-        assert "<system-warning>" in result.output
-        assert "code" in result.output.lower()
-        assert "2 todo(s) affected" in result.output
-
-    async def test_read_only_false_preserves_code(
-        self, mock_runtime: MagicMock,
-    ) -> None:
-        """code field is preserved when read_only=False."""
-        mock_runtime.read_only = False
-        tl = TodoList(runtime=mock_runtime)
-
-        tl._load_todos = MagicMock(return_value=[])
-        tl._load_archived_todos = MagicMock(return_value=[])
-        tl._save_todos = MagicMock(return_value=None)
-
-        result = await tl(TodoListParams(
-            todos=[
-                Todo(title="task A", status="pending", code="print('hello')"),
-            ],
-            mode="append",
-        ))
-
-        # Should succeed without a warning about code stripping
-        assert not result.is_error
-        assert "<system-warning>" not in result.output
-
-    async def test_no_warning_when_no_code_in_todos(
-        self, mock_runtime: MagicMock,
-    ) -> None:
-        """No warning emitted when no todos have code fields."""
-        mock_runtime.read_only = True
-        tl = TodoList(runtime=mock_runtime)
-
-        tl._load_todos = MagicMock(return_value=[])
-        tl._load_archived_todos = MagicMock(return_value=[])
-        tl._save_todos = MagicMock(return_value=None)
-
-        result = await tl(TodoListParams(
-            todos=[
-                Todo(title="task A", status="pending"),
-                Todo(title="task B", status="done"),
-            ],
-            mode="append",
-        ))
-
-        # Should succeed without warning
-        assert not result.is_error
-        assert "<system-warning>" not in result.output
