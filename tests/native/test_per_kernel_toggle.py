@@ -21,12 +21,9 @@ ALL_KERNELS = [
     "INDEX",
     "SEARCH",
     "PARSE",
-    "SOUL",
     "TOOLS",
     "STREAM",
     "CODEC",
-    "JSON",
-    "CONCURRENCY",
     "GLOB",
 ]
 

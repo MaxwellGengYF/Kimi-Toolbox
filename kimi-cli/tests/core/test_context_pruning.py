@@ -868,13 +868,9 @@ def _big_notification(text: str = "n") -> Message:
 
 class TestCurrentTurnProtection:
     @pytest.fixture(autouse=True)
-    def _force_python_path(self, monkeypatch):
-        """These tests assert exact selection/identity; force the pure-Python
-        policy engine so the native kernel's (opaque) budget math cannot skew
-        the expected outcome."""
-        monkeypatch.setattr(
-            "kimi_cli.soul.context_pruning.kernel_module", lambda name: None
-        )
+    def _force_python_path(self):
+        """These tests assert exact selection/identity; the native SOUL kernel
+        was removed, so the pure-Python policy engine is always used."""
 
     def test_current_turn_index_protects_turn(self):
         """With current_turn_index=k nothing at index >= k may be dropped/elided."""
@@ -1028,11 +1024,9 @@ class TestCurrentTurnProtection:
 
 class TestCacheDepthFloor:
     @pytest.fixture(autouse=True)
-    def _force_python_path(self, monkeypatch):
-        """Force the pure-Python policy engine for exact selection assertions."""
-        monkeypatch.setattr(
-            "kimi_cli.soul.context_pruning.kernel_module", lambda name: None
-        )
+    def _force_python_path(self):
+        """The native SOUL kernel was removed; the pure-Python policy engine
+        is always used for exact selection assertions."""
 
     def test_floor_protects_head_notification(self):
         """A notification at index 5 is protected with min_cache_prefix_depth=100;

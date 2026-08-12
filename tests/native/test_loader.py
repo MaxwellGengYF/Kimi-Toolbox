@@ -86,8 +86,8 @@ def test_get_module_returns_submodule_or_none():
 
 
 def test_use_native_consistent_with_availability():
-    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "SOUL", "TOOLS", "STREAM",
-                   "CODEC", "JSON", "CONCURRENCY"):
+    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "TOOLS", "STREAM",
+                   "CODEC"):
         assert knl.use_native(kernel) is (knl.NATIVE_AVAILABLE and True)
 
 

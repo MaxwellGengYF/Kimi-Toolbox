@@ -33,8 +33,7 @@ Env toggles (same contract as the shim):
 * ``KIMIX_NATIVE=1`` — require native; raise ImportError if unavailable.
 * ``KIMIX_NATIVE=auto`` (default) — native when importable, fallback otherwise.
 * ``KIMIX_NATIVE_<KERNEL>=0`` — disable one kernel (TEXT|INDEX|SEARCH|PARSE|
-  SOUL|TOOLS|STREAM|CODEC|JSON|CONCURRENCY|DIFF|GLOB|IMAGE|TODO|WORKSPACE)
-  while the rest stay native.
+  TOOLS|STREAM|CODEC|DIFF|GLOB) while the rest stay native.
 * ``KIMIX_BASE=<dir>`` — kimix-base repo root for the dev-only fallback
   (priority 4); defaults to the ``kimix-base`` sibling of this repo root.
 """
@@ -59,17 +58,11 @@ _KERNELS = (
     "INDEX",
     "SEARCH",
     "PARSE",
-    "SOUL",
     "TOOLS",
     "STREAM",
     "CODEC",
-    "JSON",
-    "CONCURRENCY",
     "DIFF",
     "GLOB",
-    "IMAGE",
-    "TODO",
-    "WORKSPACE",
 )
 
 # The _KERNELS tuple above is informational; the actual per-kernel gate is

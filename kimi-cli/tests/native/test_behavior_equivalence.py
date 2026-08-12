@@ -427,7 +427,7 @@ def test_build_export_markdown_equivalence():
 
 
 # ---------------------------------------------------------------------------
-# JSON kernels (acp/session.py incremental lexer)
+# ACP session lexer (pure-Python streamingjson accumulation)
 # ---------------------------------------------------------------------------
 
 ACP_ARGS_STREAM = [
@@ -444,65 +444,56 @@ ACP_ARGS_STREAM = [
 ]
 
 
-def _tool_call_state_pair(args, tool_name, work_dir):
-    """Construct one _ToolCallState with native off and one with native on."""
-    import kimi_cli.native_loader as nl
+_FEED_PARTS = ["{", '"cmd": "ls -la"', ', "note": "x"}']
+
+
+def _tool_call_state(args, tool_name, work_dir):
+    """Build one ``_ToolCallState`` (pure-Python streamingjson path only)."""
     from kimi_cli.acp.session import _ToolCallState
     from kimi_cli.wire.types import ToolCall
 
-    def make(native: bool):
-        orig = nl.use_native
-        try:
-            nl.use_native = lambda k: native
-            tc = ToolCall(id="call_1", function={"name": tool_name, "arguments": args})
-            return _ToolCallState(tc, work_dir)
-        finally:
-            nl.use_native = orig
-
-    return make(True), make(False)
+    tc = ToolCall(id="call_1", function={"name": tool_name, "arguments": args})
+    return _ToolCallState(tc, work_dir)
 
 
-@pytest.mark.parametrize("args,tool_name,work_dir", ACP_ARGS_STREAM)
-def test_acp_lexer_get_title_equivalence(args, tool_name, work_dir):
-    from kaos.path import KaosPath
-
-    work = KaosPath(work_dir) if work_dir else None
-    native_state, python_state = _tool_call_state_pair(args, tool_name, work)
-    # Feed a few incremental parts the same way on both.
-    parts = ["{", '"cmd": "ls -la"', ', "note": "x"}']
-    for part in parts:
-        native_state.append_args_part(part)
-        python_state.append_args_part(part)
-    native = native_state.get_title()
-    python = python_state.get_title()
-    _assert_equivalent(native, python, (args, tool_name))
-
-
-@pytest.mark.parametrize("args,tool_name,work_dir", ACP_ARGS_STREAM)
-def test_acp_lexer_buffer_equivalence(args, tool_name, work_dir):
-    """The native lexer's buffer() must equal the streamingjson accumulation."""
+def _reference_title(args, tool_name, work_dir):
+    """Title computed directly from a streamingjson lexer, mirroring
+    ``_ToolCallState``'s accumulation + ``extract_key_argument``."""
     import streamingjson
 
-    native_state, _ = _tool_call_state_pair(args, "Read", None)
+    from kimi_cli.tools import extract_key_argument
+
     lexer = streamingjson.Lexer()
     if args:
         lexer.append_string(args)
+    for part in _FEED_PARTS:
+        lexer.append_string(part)
+    subtitle = extract_key_argument(lexer, tool_name, work_dir)
+    return f"{tool_name}: {subtitle}" if subtitle else tool_name
+
+
+@pytest.mark.parametrize("args,tool_name,work_dir", ACP_ARGS_STREAM)
+def test_acp_lexer_get_title_matches_reference(args, tool_name, work_dir):
+    from kaos.path import KaosPath
+
+    work = KaosPath(work_dir) if work_dir else None
+    state = _tool_call_state(args, tool_name, work)
+    for part in _FEED_PARTS:
+        state.append_args_part(part)
+    expected = _reference_title(args, tool_name, work)
+    _assert_equivalent(state.get_title(), expected, (args, tool_name))
+
+
+@pytest.mark.parametrize("args,tool_name,work_dir", ACP_ARGS_STREAM)
+def test_acp_lexer_buffer_accumulates_all_parts(args, tool_name, work_dir):
+    """_ToolCallState accumulates every fed argument part (the native
+    incremental lexer was removed; accumulation is the contract)."""
+    state = _tool_call_state(args, "Read", None)
     parts = ['{"x": 1}', '{"x": 1, "y": 2}']
     for part in parts:
-        native_state.append_args_part(part)
-        lexer.append_string(part)
-    if native_state._native_lexer is not None:
-        if native_state._native_lexer.has_error():
-            # Documented deviation: the native lexer freezes its buffer after a
-            # parse error (streamingjson keeps accumulating). get_title() is the
-            # behavioral gate and is covered by the test above; here we only
-            # require buffer parity on the non-error path.
-            return
-        _assert_equivalent(
-            native_state._native_lexer.buffer().decode("utf-8", "surrogatepass"),
-            lexer.complete_json(),
-            (args,),
-        )
+        state.append_args_part(part)
+    expected = (args or "") + "".join(parts)
+    _assert_equivalent(state.args, expected, (args,))
 
 
 # ---------------------------------------------------------------------------

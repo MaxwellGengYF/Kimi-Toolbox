@@ -6,8 +6,7 @@ by the native C++ runtime compiled in the
 default, or wherever `KIMIX_BASE` points) (`runtime_py.pyd` on Windows /
 `runtime_py.so` on Linux & macOS — the platform-dependent suffix of the same
 pybind11 extension, with submodules `text` / `index` / `search` / `parse` /
-`soul` / `tools` / `stream` / `codec` / `json` / `concurrency` / `diff` /
-`glob` / `image` / `todo` / `workspace`).
+`tools` / `stream` / `codec` / `diff` / `glob`).
 
 **The native library is an OPTIONAL acceleration path.** Every integrated
 kernel keeps its original pure-Python body: when the binaries are missing (or
@@ -100,7 +99,7 @@ new hoisted call-site pattern ≈ 0.15 µs (~2×).
 | `KIMIX_NATIVE=0` | pure Python everywhere (never imports the native extension) |
 | `KIMIX_NATIVE=1` | **require** native; `ImportError` if the extension (`.pyd`/`.so`) is missing |
 | `KIMIX_NATIVE=auto` (default) | native when importable, Python fallback otherwise |
-| `KIMIX_NATIVE_<KERNEL>=0` | disable one kernel (TEXT / INDEX / SEARCH / PARSE / SOUL / TOOLS / STREAM / CODEC / JSON / CONCURRENCY / DIFF / GLOB / IMAGE / TODO / WORKSPACE) |
+| `KIMIX_NATIVE_<KERNEL>=0` | disable one kernel (TEXT / INDEX / SEARCH / PARSE / TOOLS / STREAM / CODEC / DIFF / GLOB) |
 | `KIMIX_BASE=<dir>` | kimix-base repo root for the dev-only fallback & `sync_native.py` (default: the `kimix-base` sibling of this checkout) |
 
 Per-kernel toggles make every kernel switchable and reversible without code
@@ -136,22 +135,23 @@ behavior-equivalence tests:
 | PARSE | all 7 comment parsers via `parser/base.py::native_parse_result`; `bash_fix.fix_bash_command`; `bash_tool._process_unquoted`; `pwsh_fix.fix_pwsh_command` | `parse.parse`/`fix_bash_command`/`_process_unquoted`/`fix_pwsh_command` | parse C 1 MB **2.1x** |
 | INDEX | `src/kimix/retrieval.py` `NgramTokenizer` (normalize/detect_n/tokenize) | `index.NgramTokenizer` | — |
 | SEARCH | `src/kimix/retrieval.py` `jaro_similarity`/`jaro_winkler_similarity`/`sorensen_dice_coefficient`/`ngram_overlap`/`LevenshteinAutomaton._damerau_levenshtein`/`_freq_lower_bound` | `search.*` | — |
-| JSON | `kimi_cli/acp/session.py` `_ToolCallState` incremental tool-args lexer | `json.IncrementalJsonLexer` | — |
-| WORKSPACE | `src/kimix/tools/swarm/best_of_n.py` workspace snapshot/diff/changed-files | `workspace.snapshot`/`diff_snapshots`/`changed_files` | — |
 | GLOB | `kimi_cli/tools/file/glob.py` gitignore parsing / single-source-dir matching | `glob.parse_gitignore` / `glob.is_ignored` | — |
 | DIFF | `kimi_cli/utils/diff.py` `format_unified_diff`/`_build_diff_blocks_sync` | `diff.unified_diff`/`diff_hunks` | — |
-| IMAGE | `kimi_cli/utils/image_compress.py` `format_byte_size`/`sniff_image_dimensions`/`_is_animated_webp` | `image.format_byte_size`/`sniff_dimensions`/`is_animated_webp` | — |
 | CODEC | `kimi_cli/wire/server.py` `_frame_jsonrpc` (JSON-RPC framing); `kimi_cli/wire/file.py` `_dump_line` (jsonl record) | `codec.JsonRpcFrameWriter`/`JsonlRecorder` | — |
-| TODO | `kimi_cli/tools/todo/__init__.py` `TodoList._status_counts` | `todo.status_counts` | — |
-| SOUL | `kimi_cli/soul/context_pruning.py` `ContextPruner.prune` native fast path | `soul.prune_history` | — |
 
 Equivalence tests: `tests/native/` (130 tests) + `kimi-cli/tests/native/`
 (186 tests, incl. `test_additional_kernels_equivalence.py`) — every wired kernel
 is run through the SAME corpus with the gate forced on vs off and outputs
 asserted identical (return values, bytes, errors, determinism, thread-safety
 smoke). kimix-base `python/tests/` adds per-kernel parity tests (incl.
-`test_diff.py` / `test_image.py` / `test_todo.py`) and the C++ kernels are
-tested by `tests/unit/native/test_{diff,image,todo}.cpp`.
+`test_diff.py`) and the C++ kernels are tested by
+`tests/unit/native/test_diff.cpp`.
+
+> **Removed kernels:** json, image, concurrency, todo, workspace, soul were
+> **deleted** (C++ sources, py bindings, shims, and tests) because their native
+> kernels measured <2× faster (or slower) than the pure-Python fallback (see
+> `NATIVE_BENCHMARK_REPORT.md`). All call sites now use the pure-Python
+> implementations only; the loader no longer lists those kernels.
 
 ## Additional shim modules (exposed + parity-tested, not wired to app code)
 
@@ -162,9 +162,7 @@ because the native contracts do not match the app's data model bit-for-bit:
 
 | module | public API | why it is shim-only |
 |---|---|---|
-| `concurrency` | `MpscEventBus`, `IdGenerator` | the app SSE / bus layers (`src/kimix/server/bus.py`) use string ids (`evt_<hex>`) and `asyncio.Queue` semantics; `MpscEventBus` is a bounded DROP_OLDEST ring with offset-based subscribers and `IdGenerator` yields ints — wiring them would change the wire format, so they stay shim-only (parity-tested in kimix-base `python/tests/test_concurrency.py`) |
 | `codec` | `serialize_envelope`/`deserialize_envelope`, `canonicalize_payload`, `WireMergeBuffer`, `ArgsBuffer`, `RecvBuffer`, `build_sse_frame` | the app's envelope/tool-call paths are pydantic-model-centric; the codec is bytes-in/bytes-out. The JSON-RPC framing (`JsonRpcFrameWriter`) and jsonl record (`JsonlRecorder`) kernels ARE wired (see the table above); the envelope/buffer kernels are exposed for future server work |
-| `soul` | `build_payload`, `normalize_tool_call_ids`, `prune_scan`, `count_leading_reminders`, `build_normalize_plan`, `build_compaction_prompt`, `apply_normalize_plan`, `apply_id_fixes` | `prune_history` is wired in `context_pruning.py`; the remaining functions have no matching app call site (the soul flows operate on pydantic `Message` objects with option-dependent behavior; the shim works on plain-dict plans) and stay shim-only for future parity work |
 | `diff` | `inline_diff_ranges` | `unified_diff`/`diff_hunks` are wired in `utils/diff.py`; `inline_diff_ranges` targets the rich diff renderer's rendered-text offsets (`_build_offset_map(raw, rendered, tab_size)`) whose contract differs from the shim's plain-string variant — kept shim-only |
 
 ## Deliberately NOT integrated (and why)
@@ -241,3 +239,72 @@ usually be overwritten in place even while mapped, so no `.old` dance is needed.
 4. A kernel whose equivalence test is red or absent MUST default to
    pure Python (gate off) — do not merge a routing change without its
    equivalence test.
+
+## Updating the native version (kimix-base → kimi-agent)
+
+A version bump is a **two-repo, three-file** change. Make it minimal: only the
+version config files are touched — never hard-code the version anywhere else.
+
+### Where the version lives
+
+| repo | file | role |
+|---|---|---|
+| kimix-base | `version.txt` (root) | **single source of truth** (`X.Y.Z`). `publish.py`, `bootstrap.py` and the Python shim all read it; `src/xmake.lua` generates the C++ `kimix_version.h` header from it at build time, so `runtime_py.version()` reports `kimix-runtime <version>`. |
+| kimi-agent | `KIMIX_NATIVE_VERSION` (root) | fallback marker read by `native_loader._fallback_version()` and synced by `install.py`. Keep the file **without a trailing newline** (matches git history). |
+| kimi-agent | `install.py` → `KIMIX_BASE_VERSION` | used for the GitHub release download URL and binary verification; `_sync_kimix_native_version(KIMIX_BASE_VERSION)` rewrites `KIMIX_NATIVE_VERSION` during install. |
+
+### Minimal-change workflow (0.5.1 → 0.6.0 example)
+
+1. `kimix-base/version.txt`: `0.5.1` → `0.6.0`
+2. `kimi-agent/KIMIX_NATIVE_VERSION`: `0.5.1` → `0.6.0`
+3. `kimi-agent/install.py`: `KIMIX_BASE_VERSION = "0.5.1"` → `"0.6.0"`
+
+That is the whole diff. Do **not** edit `bin/kimix_native/__init__.py` (it reads
+`version.txt` at runtime), `src/kimix/native_loader.py` or
+`kimi-cli/src/kimi_cli/native_loader.py` (they read `KIMIX_NATIVE_VERSION`).
+
+### Rebuild + re-stage (the version is baked into the binary)
+
+Because the C++ build embeds the version at compile time, bumping the config is
+not enough — the staged binary must be rebuilt and re-synced or the consistency
+tests fail (`test_verify_native_binaries_repo_bin` compares the staged
+`runtime_py` version against `KIMIX_BASE_VERSION`):
+
+```bash
+cd <kimix-base>
+xmake f -p windows -a x64 --toolchain=msvc -m release -c -y
+xmake build -y runtime_py            # note: `-y` before the target name
+
+cd <kimi-agent>
+python tools/sync_native.py          # copies the fresh runtime_py.pyd into bin\
+```
+
+### Pitfall: `bin/release/runtime_py.pyd` is shared across platforms
+
+The `runtime_py` xmake target uses `set_extension(".pyd")` on **all** platforms,
+and Linux needs the file importable as `runtime_py.so`, so the WSL/Linux build
+writes the module **and overwrites `bin/release/runtime_py.pyd`** with a Linux
+ELF. `publish.py` builds Windows first, then Linux — so after a full publish the
+on-disk `.pyd` is a Linux binary. If you then run `tools/sync_native.py` on
+Windows, `bin/runtime_py.pyd` is an ELF and importing it fails with
+`ImportError: DLL load failed ... %1 is not a valid Win32 application`.
+
+**Fix:** always rebuild the Windows target *after* any Linux/WSL build and
+before `sync_native.py` (the sequence above). Sanity-check the file is a real
+Windows PE (`MZ`/`PE\x00\x00` magic, x64) or simply:
+
+```bash
+python -c "import sys; sys.path.insert(0, r'<repo>\bin'); import runtime_py; print(runtime_py.version())"
+# expect: kimix-runtime 0.6.0
+```
+
+### Verification
+
+```bash
+cd <kimi-agent>
+python -m pytest tests/test_install_kimix_native.py tests/native/test_loader.py -q
+# 39 passed, 2 skipped
+```
+
+`KIMIX_NATIVE=0` fallback also picks up the new version automatically:
+`native_loader.version()` → `kimix-native 0.6.0 (python fallback)`.

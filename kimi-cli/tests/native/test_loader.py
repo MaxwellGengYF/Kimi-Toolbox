@@ -88,16 +88,15 @@ def test_get_module_returns_submodule_or_none():
 
 
 def test_use_native_consistent_with_availability():
-    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "SOUL", "TOOLS", "STREAM",
-                   "CODEC", "JSON", "CONCURRENCY"):
+    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "TOOLS", "STREAM",
+                   "CODEC"):
         assert knl.use_native(kernel) is (knl.NATIVE_AVAILABLE and True)
 
 
 def test_use_native_case_variants():
     """Upper/lower/title spellings of a known kernel resolve identically."""
-    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "SOUL", "TOOLS", "STREAM",
-                   "CODEC", "JSON", "CONCURRENCY", "DIFF", "GLOB", "IMAGE",
-                   "TODO", "WORKSPACE"):
+    for kernel in ("TEXT", "INDEX", "SEARCH", "PARSE", "TOOLS", "STREAM",
+                   "CODEC", "DIFF", "GLOB"):
         expected = knl.use_native(kernel)
         assert knl.use_native(kernel.lower()) is expected
         assert knl.use_native(kernel.title()) is expected
@@ -113,8 +112,8 @@ def test_use_native_unknown_kernel_memoized():
 def test_kernel_module_eager():
     """kernel_module is exposed eagerly on the wrapper and delegates."""
     assert "kernel_module" in knl.__all__
-    mod = knl.kernel_module("SOUL")
-    assert mod is (knl.get_module("soul") if knl.use_native("SOUL") else None)
+    mod = knl.kernel_module("SEARCH")
+    assert mod is (knl.get_module("search") if knl.use_native("SEARCH") else None)
 
 
 def test_get_module_unknown_returns_none():

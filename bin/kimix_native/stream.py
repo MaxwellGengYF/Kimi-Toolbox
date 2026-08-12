@@ -140,7 +140,16 @@ def _compat_fold_line(line: str, fold_col: int) -> list[str]:
 
 
 class _CompatLineProcessor:
-    """Buffering Python implementation of the LineProcessor semantics."""
+    """Pure-Python mirror of the native LineProcessor semantics.
+
+    Mirrors runtime/stream/line_processor.h exactly:
+      - ANSI stripping is streaming (safe at chunk boundaries);
+      - CRLF / lone-CR are normalized to LF (the CR may span chunk edges);
+      - dedup_mode 0 emits completed lines on feed() (streaming);
+      - dedup modes 1/2 buffer raw lines and emit the deduped result at
+        flush();
+      - the final unterminated line is emitted at flush().
+    """
 
     def __init__(
         self,
@@ -159,7 +168,9 @@ class _CompatLineProcessor:
         self._max_bytes = max_bytes
         self._max_lines = max_lines
         self._fold_col = fold_col
-        self._chunks: list[str] = []
+        self._line_buf = ""  # current (possibly partial) line, no terminator
+        self._pending_cr = False  # saw '\r', waiting to see if '\n' follows
+        self._lines: list[str] = []  # buffered raw lines for dedup modes
         self._bytes = 0
         self._cps = 0
         self._count = 0
@@ -169,32 +180,68 @@ class _CompatLineProcessor:
     def feed(self, chunk) -> list[str]:
         if isinstance(chunk, (bytes, bytearray)):
             chunk = bytes(chunk).decode("utf-8", "surrogatepass")
-        self._chunks.append(str(chunk))
-        return []  # buffered; emitted at flush
+        chunk = str(chunk)
+        if self._strip_ansi:
+            chunk = _ANSI_ESCAPE_RE.sub("", chunk)
+        out: list[str] = []
+        for ch in chunk:
+            if self._pending_cr:
+                self._pending_cr = False
+                if ch == "\n":
+                    # CRLF: consume both; the LF terminates the line.
+                    self._finish_line(out)
+                    continue
+                # lone CR from the previous chunk terminates the line, then
+                # the current char is processed normally below.
+                self._finish_line(out)
+            if ch == "\r":
+                self._pending_cr = True
+                continue
+            if ch == "\n":
+                self._finish_line(out)
+                continue
+            self._line_buf += ch
+        return out
 
     def flush(self) -> list[str]:
-        text = "".join(self._chunks)
-        self._chunks = []
-        if self._strip_ansi:
-            text = _ANSI_ESCAPE_RE.sub("", text)
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        lines = text.splitlines()
-        if self._dedup_mode == 1:
-            lines = self._dedup_counter(lines)
-        elif self._dedup_mode == 2:
-            lines = self._dedup_block(lines)
         out: list[str] = []
+        # Resolve trailing state: a pending lone CR at EOF terminates the
+        # line; otherwise emit the final unterminated line if it has content.
+        if self._pending_cr:
+            self._pending_cr = False
+            self._finish_line(out)
+        elif self._line_buf:
+            self._finish_line(out)
+        if self._dedup_mode == 1:
+            lines = self._dedup_counter(self._lines)
+        elif self._dedup_mode == 2:
+            lines = self._dedup_block(self._lines)
+        else:
+            lines = self._lines  # mode 0 already emitted on feed; nothing left
+        self._lines = []
         for line in lines:
             for seg in _compat_fold_line(line, self._fold_col):
                 self._emit(seg, out)
         return out
 
     def reset(self) -> None:
-        self._chunks = []
+        self._line_buf = ""
+        self._pending_cr = False
+        self._lines = []
         self._bytes = 0
         self._cps = 0
         self._count = 0
         self._exhausted = False
+
+    # -- internals -------------------------------------------------------
+    def _finish_line(self, out: list[str]) -> None:
+        """A line terminator was reached: process the completed line."""
+        if self._dedup_mode == 0:
+            for seg in _compat_fold_line(self._line_buf, self._fold_col):
+                self._emit(seg, out)
+        else:
+            self._lines.append(self._line_buf)
+        self._line_buf = ""
 
     def bytes_written(self) -> int:
         return self._bytes

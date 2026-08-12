@@ -96,15 +96,50 @@ def comment_spans(lang: str, data: bytes) -> list[tuple[int, int, int]]:
 # _compat: reference algorithms (vendored parsers) -> span list
 # ---------------------------------------------------------------------------
 
+# Marker-byte lengths for languages whose reference parser reports comment
+# content WITHOUT the delimiters (the native kernel spans always cover the
+# content, markers excluded — see runtime/parse/comment_scanner.h).  For
+# python/shell/lisp the reference content already includes the marker, so no
+# adjustment is needed there.  pascal block comments use "(*" (2) or "{" (1)
+# depending on the actual source, so it is resolved from the text.
+_MARKER_LEN = {
+    ("c", "line"): 2,
+    ("c", "block"): 2,
+    ("c", "doc"): 3,
+    ("sql", "line"): 2,
+    ("sql", "block"): 2,
+    ("html", "block"): 4,  # <!--
+    ("html", "doc"): 2,    # <?
+    ("pascal", "line"): 2,  # //
+}
+
+
 def _compat_spans(lang: str, data: bytes) -> list[tuple[int, int, int]]:
-    """Run the vendored reference parser and convert its comments to spans."""
+    """Run the vendored reference parser and convert its comments to spans.
+
+    The native kernel reports (start, end) as the comment CONTENT with the
+    delimiters excluded.  The reference parser reports the marker position
+    (line/column) and a content string that includes the marker only for
+    python/shell/lisp — mirror both so the spans are byte-identical.
+    """
     text = data.decode("utf-8", "surrogatepass")
     result = _COMPAT_PARSERS[lang]().parse(text)
     spans = []
     for c in result.comments:
         start = _byte_offset(text, c.line, c.column)
-        end = start + len(c.content.encode("utf-8", "surrogatepass"))
-        spans.append((start, end, _KIND_NAMES.index(c.kind)))
+        content = c.content.encode("utf-8", "surrogatepass")
+        kind = _KIND_NAMES.index(c.kind)
+        if lang in ("python", "shell", "lisp"):
+            # Reference content includes the marker(s) -> spans already match.
+            end = start + len(content)
+        else:
+            marker = _MARKER_LEN.get((lang, c.kind))
+            if marker is None and lang == "pascal" and c.kind == "block":
+                marker = 2 if text[start : start + 2] == "(*" else 1
+            assert marker is not None, (lang, c.kind)
+            start += marker
+            end = start + len(content)
+        spans.append((start, end, kind))
     return spans
 
 
@@ -354,7 +389,9 @@ def parse(lang: str, source: str) -> ParseResult:
             char_spans = [(mapping[s], mapping[e], k) for s, e, k in spans]
         comments = _comments_from_spans(lang, source, char_spans)
         return ParseResult(
-            language=lang,
+            # Reference contract: ``language`` is the parser display name
+            # ("C", "Python", "SQL", ...), not the lowercase routing key.
+            language=_COMPAT_PARSERS[lang].name,
             comments=comments,
             code_without_comments=_code_without_comments(lang, source, char_spans),
         )

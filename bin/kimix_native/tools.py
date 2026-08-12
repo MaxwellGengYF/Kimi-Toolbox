@@ -69,11 +69,195 @@ import regex as re
 import orjson
 
 from . import _native, use_native
-from .json import _compat_indent2
-from .soul import _build_structure
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
+
+
+# ---------------------------------------------------------------------------
+# Inlined helpers formerly imported from the removed json/soul shims
+# (kimix_native.json / kimix_native.soul were deleted — the native kernels
+# they wrapped measured <2x faster than Python and were removed; the kept
+# tools kernel still needs these pure-Python helpers).
+# ---------------------------------------------------------------------------
+
+
+def _enc(s: str) -> bytes:
+    return s.encode("utf-8", "surrogatepass")
+
+
+def _dec(b: bytes) -> str:
+    return b.decode("utf-8", "surrogatepass")
+
+
+def _compact(obj) -> bytes:
+    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
+
+    Falls back to the stdlib serializer for values orjson rejects (lone
+    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
+    """
+    try:
+        return orjson.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogatepass"
+        )
+
+
+def _compat_indent2(obj) -> bytes:
+    """orjson OPT_INDENT_2-style pretty bytes (2-space indent, raw UTF-8).
+
+    Uses orjson's OPT_INDENT_2 directly when possible (byte-identical to the
+    native serializer for JSON-able values); falls back to the hand-rolled
+    renderer for values orjson rejects (lone surrogates, >64-bit ints).
+    """
+    try:
+        return orjson.dumps(obj, option=orjson.OPT_INDENT_2)
+    except (TypeError, ValueError):
+        return _enc(_render_indent2(obj, 0))
+
+
+def _esc_indent2(s: str) -> str:
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 0x20:
+            out.append("\\u%04x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _render_indent2(v, level: int) -> str:
+    if v is None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, (int, float)):
+        if isinstance(v, float):
+            r = repr(v)
+            if "e" not in r and "E" not in r and "." not in r:
+                r += ".0"
+            return r
+        return str(v)
+    if isinstance(v, str):
+        return '"' + _esc_indent2(v) + '"'
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        pad = "  " * (level + 1)
+        items = [pad + _render_indent2(x, level + 1) for x in v]
+        return "[\n" + ",\n".join(items) + "\n" + "  " * level + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        pad = "  " * (level + 1)
+        items = [pad + '"' + _esc_indent2(str(k)) + '": ' + _render_indent2(x, level + 1)
+                 for k, x in v.items()]
+        return "{\n" + ",\n".join(items) + "\n" + "  " * level + "}"
+    return '"' + _esc_indent2(str(v)) + '"'
+
+
+_ROLE_TO_INT = {"system": 0, "user": 1, "assistant": 2, "tool": 3}
+
+# content-part "type" -> part_kind (0 text 1 think 2 tool_call 3 image
+# 4 audio 5 file 6 other)
+_PART_TYPE_KIND = {
+    "text": 0,
+    "think": 1,
+    "tool_call": 2,
+    "image_url": 3,
+    "audio_url": 4,
+    "video_url": 5,
+    "file": 5,
+}
+
+
+def _part_kind(part: dict) -> int:
+    return _PART_TYPE_KIND.get(part.get("type", ""), 6)
+
+
+def _part_dump(part: dict) -> bytes:
+    """exclude_none part dump (what the payload builder embeds verbatim)."""
+    return _compact({k: v for k, v in part.items() if v is not None})
+
+
+def _encode_message(msg: dict, buf: bytearray, spans: dict) -> None:
+    """Append the message's strings to the shared buffer, recording spans."""
+    role = _ROLE_TO_INT.get(msg.get("role"), 1)
+    spans["roles"].append(role)
+    # tool_call_id
+    tcid = msg.get("tool_call_id")
+    if tcid is None:
+        spans["tool_call_ids"].append(None)
+    else:
+        data = _enc(tcid)
+        start = len(buf)
+        buf += data
+        spans["tool_call_ids"].append((start, start + len(data)))
+    # tool_calls
+    tcs = msg.get("tool_calls")
+    if tcs is None:
+        spans["tool_calls"].append(None)
+    else:
+        call_spans = []
+        for tc in tcs:
+            fn = tc.get("function", {})
+            tid = _enc(tc.get("id", ""))
+            name = _enc(fn.get("name", ""))
+            args = fn.get("arguments")
+            id_s = len(buf)
+            buf += tid
+            id_e = len(buf)
+            name_s = len(buf)
+            buf += name
+            name_e = len(buf)
+            if args is None:
+                args_s = -1
+                args_e = 0
+            else:
+                adata = _enc(args)
+                args_s = len(buf)
+                buf += adata
+                args_e = len(buf)
+            call_spans.append((id_s, id_e, name_s, name_e, args_s, args_e))
+        spans["tool_calls"].append(call_spans)
+    # content parts
+    part_spans = []
+    for part in msg.get("content") or []:
+        kind = _part_kind(part)
+        if kind in (0, 1):
+            text = _enc(part.get("text") or part.get("think") or "")
+        else:
+            text = _part_dump(part)
+        start = len(buf)
+        buf += text
+        part_spans.append((start, start + len(text), kind))
+    spans["parts"].append(part_spans)
+
+
+def _build_structure(history: list[dict]) -> tuple[bytes, dict]:
+    buf = bytearray()
+    spans = {"roles": [], "parts": [], "tool_calls": [], "tool_call_ids": []}
+    for msg in history:
+        _encode_message(msg, buf, spans)
+    return bytes(buf), spans
 
 
 # ---------------------------------------------------------------------------

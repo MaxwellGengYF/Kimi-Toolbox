@@ -21,17 +21,10 @@ from pydantic import (
 from pydantic.json_schema import GenerateJsonSchema
 
 from kimi_cli import logger
-from kimi_cli.native_loader import (
-    get_module as _native_get_module,
-    use_native as _native_use_native,
-)
 from kimi_cli.session_state import TodoItemState, TodoStatus
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
-
-# Resolved once at import time (stable runtime: result never changes).
-_NATIVE_TODO = _native_get_module("todo")
 
 
 @functools.lru_cache(maxsize=1)
@@ -1221,16 +1214,6 @@ class TodoList(CallableTool2[Params]):
     @staticmethod
     def _status_counts(todos: list[Todo]) -> dict[TodoStatus, int]:
         """Count todos by status across the whole tree (recursive)."""
-        # Native acceleration only when the tree is flat (the native kernel has
-        # no tree notion); otherwise fall back to the pure-Python recursive
-        # counter below.
-        if (
-            _native_use_native("TODO")
-            and _NATIVE_TODO is not None
-            and all(not t.children for t in todos)
-        ):
-            raw = _NATIVE_TODO.status_counts([{"title": t.title, "status": t.status} for t in todos])
-            return {"pending": raw["pending"], "in_progress": raw["in_progress"], "done": raw["done"]}
         counts: dict[TodoStatus, int] = {"pending": 0, "in_progress": 0, "done": 0}
 
         def walk(items: list[Todo]) -> None:

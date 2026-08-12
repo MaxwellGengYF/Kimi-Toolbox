@@ -21,12 +21,9 @@ KERNEL_PROBES = {
     "INDEX": "n.use_native('INDEX')",
     "SEARCH": "n.use_native('SEARCH')",
     "PARSE": "n.use_native('PARSE')",
-    "SOUL": "n.use_native('SOUL')",
     "TOOLS": "n.use_native('TOOLS')",
     "STREAM": "n.use_native('STREAM')",
     "CODEC": "n.use_native('CODEC')",
-    "JSON": "n.use_native('JSON')",
-    "CONCURRENCY": "n.use_native('CONCURRENCY')",
     "GLOB": "n.use_native('GLOB')",
 }
 

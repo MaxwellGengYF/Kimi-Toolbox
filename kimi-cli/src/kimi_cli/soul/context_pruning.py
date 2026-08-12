@@ -5,9 +5,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from kosong.message import Message, ToolCall
+from kosong.message import Message
 
-from kimi_cli.native_loader import kernel_module
 from kimi_cli.notifications.llm import is_notification_message
 from kimi_cli.soul.message import (
     coalesce_tool_metadata,
@@ -61,71 +60,6 @@ class PruningResult:
     earliest_removed_index: int | None
     """The earliest (smallest) index at which a change was made.
     ``None`` if nothing was removed/elided. Used for cache-depth logging."""
-
-
-# ---------------------------------------------------------------------------
-# Native shim helpers
-# ---------------------------------------------------------------------------
-
-
-def _message_to_dict(message: Message) -> dict[str, Any]:
-    """Serialize a kosong Message to the dict schema used by kimix_native.soul."""
-    d: dict[str, Any] = {"role": message.role}
-    content = message.content
-    if isinstance(content, str):
-        d["content"] = content
-    elif isinstance(content, (list, tuple)):
-        d["content"] = [part.model_dump(exclude_none=True) for part in content]
-    elif content is not None:
-        d["content"] = [content.model_dump(exclude_none=True)]
-    if message.tool_calls:
-        d["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in message.tool_calls]
-    if message.tool_call_id is not None:
-        d["tool_call_id"] = message.tool_call_id
-    if message.name is not None:
-        d["name"] = message.name
-    if message.partial is not None:
-        d["partial"] = message.partial
-    return d
-
-
-def _dict_to_message(d: dict[str, Any]) -> Message:
-    """Reconstruct a kosong Message from a kimix_native.soul result dict."""
-    content_in = d.get("content")
-    if isinstance(content_in, str):
-        content_out: list[Any] = [TextPart(text=content_in)]
-    elif isinstance(content_in, (list, tuple)):
-        content_out = []
-        for part in content_in:
-            if isinstance(part, dict):
-                content_out.append(ContentPart.model_validate(part))
-            else:
-                content_out.append(TextPart(text=str(part)))
-    else:
-        content_out = []
-
-    tool_calls = None
-    if d.get("tool_calls"):
-        tool_calls = [
-            ToolCall(
-                type=tc.get("type", "function"),
-                id=tc.get("id", ""),
-                function=ToolCall.FunctionBody(
-                    name=tc.get("function", {}).get("name", ""),
-                    arguments=tc.get("function", {}).get("arguments"),
-                ),
-            )
-            for tc in d["tool_calls"]
-        ]
-
-    return Message(
-        role=d["role"],
-        content=content_out,
-        tool_calls=tool_calls,
-        tool_call_id=d.get("tool_call_id"),
-        name=d.get("name"),
-        partial=d.get("partial"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -855,10 +789,6 @@ class ContextPruner:
                 earliest_removed_index=None,
             )
 
-        # Cap budget by max_fraction_per_pass
-        max_prune = int(current_tokens * self._max_fraction_per_pass)
-        budget = min(budget, max_prune)
-
         # ── Tier C — micro-compress stale tool messages in place (plan §8.3) ──
         # Cheapest tier: deterministic, idempotent character-level compression
         # applied *before* any drop/elide decisions, so the A/B tiers operate
@@ -896,34 +826,15 @@ class ContextPruner:
             )
             self._ref_counter = next_ref
 
-        # Native fast path (GIL-released C++ kernel) on the compressed history
-        soul_mod = kernel_module("SOUL")
-        if soul_mod is not None:
-            try:
-                base = self._native_prune(
-                    work_history,
-                    budget,
-                    current_turn_index=current_turn_index,
-                    min_cache_prefix_depth=min_cache_prefix_depth,
-                )
-            except Exception:
-                # Fall through to the pure-Python implementation on any native
-                # error so pruning never blocks the soul.
-                base = self._python_prune(
-                    work_history,
-                    max_context_size=max_context_size,
-                    current_turn_index=current_turn_index,
-                    min_cache_prefix_depth=min_cache_prefix_depth,
-                    model=model,
-                )
-        else:
-            base = self._python_prune(
-                work_history,
-                max_context_size=max_context_size,
-                current_turn_index=current_turn_index,
-                min_cache_prefix_depth=min_cache_prefix_depth,
-                model=model,
-            )
+        # Pure-Python Tier A/B prune implementation (native SOUL kernel was
+        # removed: measured <2x faster than Python, see NATIVE_BENCHMARK_REPORT.md).
+        base = self._python_prune(
+            work_history,
+            max_context_size=max_context_size,
+            current_turn_index=current_turn_index,
+            min_cache_prefix_depth=min_cache_prefix_depth,
+            model=model,
+        )
 
         return self._finalize_prune_result(
             history,
@@ -1354,136 +1265,6 @@ class ContextPruner:
                 )
 
         return result
-
-    # ------------------------------------------------------------------
-    # Native fast path
-    # ------------------------------------------------------------------
-
-    def _native_prune(
-        self,
-        history: Sequence[Message],
-        budget: int,
-        *,
-        current_turn_index: int | None = None,
-        min_cache_prefix_depth: int | None = None,
-    ) -> PruningResult:
-        """Run the C++ prune_history kernel and convert the result back.
-
-        The kernel does not know the cache-depth floor (cache-03), so when
-        ``min_cache_prefix_depth`` is set the result is validated here and a
-        violation raises, letting the caller fall back to the pure-Python
-        implementation that enforces the floor.
-        """
-        soul_mod = kernel_module("SOUL")
-        if soul_mod is None:
-            raise RuntimeError("native SOUL module is not available")
-
-        messages = [_message_to_dict(m) for m in history]
-
-        policy = {
-            "stable_prefix_messages": self._stable_prefix_messages,
-            "recent_messages_protected": self._recent_messages_protected,
-            "current_turn_index": current_turn_index,
-            "drop_notifications": self._ephemeral_notifications,
-            "drop_task_snapshots": self._ephemeral_task_snapshots,
-            "drop_dmail": self._ephemeral_dmail_notices,
-            "drop_checkpoints": self._ephemeral_checkpoint_markers,
-            "max_elision_tokens": max(0, int(budget)),
-            "tool_output_min_tokens": self._tool_output_min_tokens,
-            "superseded_read_enabled": self._substantive_enabled,
-            "oversized_output_enabled": self._substantive_enabled,
-            "stale_tool_result_enabled": self._substantive_enabled,
-        }
-
-        result = soul_mod.prune_history(messages, policy)
-
-        if not result["elided"] and result["freed_tokens"] == 0:
-            return PruningResult(
-                messages=list(history),
-                elided=[],
-                freed_tokens=0,
-                earliest_removed_index=None,
-            )
-
-        # Cache-depth floor validation (cache-03): the kernel does not know
-        # the configured floor and may drop below it — refuse its result so
-        # the Python fallback (which enforces the floor via
-        # ``_compute_protected_indices``) runs.
-        if min_cache_prefix_depth is not None:
-            raw_earliest = result.get("earliest_removed_index")
-            if raw_earliest is None:
-                raw_indices = [rec["index"] for rec in result.get("elided", [])]
-                raw_earliest = min(raw_indices) if raw_indices else None
-            if raw_earliest is not None:
-                head_floor = min(
-                    len(history),
-                    max(self._stable_prefix_messages, min_cache_prefix_depth),
-                )
-                if raw_earliest < head_floor:
-                    raise ValueError(
-                        "native prune_history ignored min_cache_prefix_depth "
-                        f"(earliest={raw_earliest} < head_floor={head_floor})"
-                    )
-
-        # NOTE: the min-payoff gate is applied in _finalize_prune_result so
-        # Tier C savings count towards the combined pass.
-
-        elided_by_index = {rec["index"]: rec for rec in result["elided"]}
-        result_messages_dicts = result["messages"]
-        result_idx = 0
-        out_messages: list[Message] = []
-        elided_records: list[ElidedRecord] = []
-        removed_indices: list[int] = []
-        ref_offset = self._ref_counter
-
-        for i, orig_dict in enumerate(messages):
-            if (
-                result_idx < len(result_messages_dicts)
-                and result_messages_dicts[result_idx] is orig_dict
-            ):
-                out_messages.append(_dict_to_message(orig_dict))
-                result_idx += 1
-                continue
-
-            if i not in elided_by_index:
-                # Tier A drop
-                removed_indices.append(i)
-                continue
-
-            rec = elided_by_index[i]
-            old_ref = rec["ref"]
-            new_ref = f"prune_{ref_offset + len(elided_records)}"
-            rec["ref"] = new_ref
-
-            stub_dict = result_messages_dicts[result_idx]
-            stub_text = stub_dict["content"][0]["text"]
-            stub_text = stub_text.replace(f"id={old_ref}", f"id={new_ref}")
-            stub_dict["content"][0]["text"] = stub_text
-
-            out_messages.append(_dict_to_message(stub_dict))
-            elided_records.append(
-                ElidedRecord(
-                    index=i,
-                    role=rec["role"],
-                    kind=rec["kind"],
-                    summary=rec["summary"],
-                    original_text=rec["original_text"],
-                    ref=new_ref,
-                )
-            )
-            result_idx += 1
-
-        self._ref_counter += len(elided_records)
-
-        removed_indices.extend(rec.index for rec in elided_records)
-        earliest = min(removed_indices) if removed_indices else None
-
-        return PruningResult(
-            messages=out_messages,
-            elided=elided_records,
-            freed_tokens=result["freed_tokens"],
-            earliest_removed_index=earliest,
-        )
 
     # ------------------------------------------------------------------
     # Hysteresis helpers

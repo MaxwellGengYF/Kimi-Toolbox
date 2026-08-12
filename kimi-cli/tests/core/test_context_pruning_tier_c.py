@@ -273,11 +273,8 @@ class TestPruneTierC:
         assert tier_b_recs, "Tier B elision should have produced a record"
         assert "[prefix:" not in tier_b_recs[0].original_text  # true original archived
 
-    def test_layer1_metadata_coalescing(self, monkeypatch):
+    def test_layer1_metadata_coalescing(self):
         """Adjacent identical <system> metadata is merged during the prune pass."""
-        import kimi_cli.soul.context_pruning as cp
-
-        monkeypatch.setattr(cp, "kernel_module", lambda name: None)  # Python path
         pruner = _default_pruner()
         history = [
             _user("hello"),
@@ -296,10 +293,7 @@ class TestPruneTierC:
             isinstance(p, TextPart) and "[×2]" in p.text for p in tool_msgs[0].content
         )
 
-    def test_coalescing_never_empties_system_only_message(self, monkeypatch):
-        import kimi_cli.soul.context_pruning as cp
-
-        monkeypatch.setattr(cp, "kernel_module", lambda name: None)  # Python path
+    def test_coalescing_never_empties_system_only_message(self):
         pruner = _default_pruner()
         history = [
             _user("hello"),
@@ -312,11 +306,8 @@ class TestPruneTierC:
             assert len(m.content) >= 1  # never empty
             assert m.tool_call_id is not None
 
-    def test_python_path_merges_tier_c(self, monkeypatch):
-        """Even when the native kernel is unavailable, Tier C still runs."""
-        import kimi_cli.soul.context_pruning as cp
-
-        monkeypatch.setattr(cp, "kernel_module", lambda name: None)
+    def test_python_path_merges_tier_c(self):
+        """Tier C runs on the pure-Python path (native SOUL kernel removed)."""
         pruner = _default_pruner()
         history = [_user("hello"), _tool(_grep_style_text())]
         result = pruner.prune(history, context_usage=0.8, max_context_size=100_000)
@@ -324,10 +315,7 @@ class TestPruneTierC:
         text = "".join(p.text for p in result.messages[1].content if isinstance(p, TextPart))
         assert "[prefix:" in text
 
-    def test_prune_with_policy_propagates_flag(self, monkeypatch):
-        import kimi_cli.soul.context_pruning as cp
-
-        monkeypatch.setattr(cp, "kernel_module", lambda name: None)
+    def test_prune_with_policy_propagates_flag(self):
         pruner = _default_pruner()
         history = [_user("hello"), _tool(_grep_style_text())]
         result = pruner.prune_with_policy(history, target_token_count=1)
