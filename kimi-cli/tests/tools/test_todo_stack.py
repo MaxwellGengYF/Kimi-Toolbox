@@ -273,7 +273,7 @@ class TestTodoSubChildren:
         res = await sub(TodoSubParams(title="child", status="done"))
         # Verification failure is non-blocking: the tool succeeds but reports it.
         assert not res.is_error
-        assert "Sub-todo 'child' verification failed:" in res.output
+        assert "verification failed" in res.output
         child = _read_root_todo(sub, "Parent").children[0]
         assert child.status == "pending"
         assert child.notes is not None
@@ -1082,3 +1082,79 @@ class TestTodoListErrorHints:
         assert not res.is_error
         assert "Todo list is empty." in res.output
         assert "Next: TodoPush to start a parent todo, or TodoList to read the tree." in res.output
+
+
+# ---------------------------------------------------------------------------
+# 3b. Verification on done transitions (TodoList/TodoSub/TodoPop)
+# ---------------------------------------------------------------------------
+class TestVerificationOnDone:
+    async def test_todosub_new_title_created_done_with_code_verifies(
+        self, runtime: Runtime
+    ) -> None:
+        """A brand-new sub-todo created directly as done with code is verified."""
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        await push(TodoPushParams(title="Parent"))
+        res = await sub(TodoSubParams(
+            title="child", status="done", code="raise ValueError('boom')"
+        ))
+        assert not res.is_error
+        assert "verification failed" in res.output
+        child = _read_root_todo(sub, "Parent").children[0]
+        assert child.status == "pending"  # reverted on verification failure
+        assert child.notes is not None
+        assert "verification failed" in child.notes
+
+    async def test_todosub_new_title_done_with_code_success(self, runtime: Runtime) -> None:
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        await push(TodoPushParams(title="Parent"))
+        res = await sub(TodoSubParams(
+            title="child", status="done", code="print('ok')"
+        ))
+        assert not res.is_error
+        assert "verification failed" not in res.output
+        assert _read_root_todo(sub, "Parent").children[0].status == "done"
+
+    async def test_todopop_verifies_code_bearing_subtodos(self, runtime: Runtime) -> None:
+        """TodoPop runs verification code for sub-todos; passing code allows pop."""
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        pop = TodoPop(runtime)
+        await push(TodoPushParams(title="Parent"))
+        await sub(TodoSubParams(title="ok", code="print('ok')"))
+        res = await pop(TodoPopParams())
+        assert not res.is_error
+        assert 'Popped "Parent"' in res.output
+        parent = _read_root_todo(pop, "Parent")
+        assert parent.status == "done"
+        assert parent.children[0].status == "done"
+
+    async def test_todopop_aborts_on_verification_failure(self, runtime: Runtime) -> None:
+        """A failing sub-todo verification aborts the pop and keeps the stack."""
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        pop = TodoPop(runtime)
+        await push(TodoPushParams(title="Parent"))
+        await sub(TodoSubParams(title="bad", code="raise ValueError('boom')"))
+        res = await pop(TodoPopParams())
+        assert res.is_error
+        assert "verification failed" in res.output
+        assert "Cannot pop" in res.output
+        # Stack kept intact; parent not marked done. The abort does not persist
+        # any state change (the pop simply did not happen).
+        assert pop._load_stack() == ["Parent"]
+        parent = _read_root_todo(pop, "Parent")
+        assert parent.status == "pending"
+        assert parent.children[0].status == "pending"
+        assert parent.children[0].notes is None  # nothing persisted on abort
+
+    async def test_todopop_without_code_skips_verification(self, runtime: Runtime) -> None:
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        pop = TodoPop(runtime)
+        await push(TodoPushParams(title="Parent"))
+        await sub(TodoSubParams(title="plain"))
+        res = await pop(TodoPopParams())
+        assert not res.is_error
+        assert 'Popped "Parent"' in res.output

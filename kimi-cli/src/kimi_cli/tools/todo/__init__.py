@@ -133,8 +133,10 @@ def _tool_description(kind: Literal["bash", "powershell"]) -> str:
         "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
         "Each todo may include a `code` field with inline Python, a `.py` file path, "
         f"{code_desc}. "
-        "Todos involving code changes should attach verification `code`.\n"
-        "When a todo is marked as `done` (previous status was not done), its `code` is automatically executed for verification.\n"
+        "Todos involving code changes should attach verification `code`; "
+        "verification runs whenever a todo is marked `done` (pending/in_progress -> done) "
+        "via `TodoList`, `TodoSub`, or `TodoPop` — and at turn end by the verification gate. "
+        "A failing verification reverts the todo to `pending` and reports the error.\n"
         "If verification fails, errors are accumulated and returned; multiple `done` triggers accumulate multiple errors.\n"
         "When a todo stack is active (a parent was pushed), the tree is shown with a `Stack:` breadcrumb — "
         "use TodoSub to add or edit items under the current parent and TodoPop to finish it.\n"
@@ -510,7 +512,7 @@ class TodoList(CallableTool2[Params]):
                 params = params.model_copy(update={"todos": stripped_todos})
 
         if params.todos is not None:
-            result = self._write_todos(params.todos, params)
+            result = await self._write_todos(params.todos, params)
             if code_warning:
                 # Append warning to output
                 if isinstance(result.output, str):
@@ -540,7 +542,7 @@ class TodoList(CallableTool2[Params]):
             return in_progress
         return None
 
-    def _write_todos(
+    async def _write_todos(
         self,
         raw_todos: list[Todo] | Todo,
         params: Params,
@@ -647,13 +649,37 @@ class TodoList(CallableTool2[Params]):
                         display=[self._build_display_block(final_todos)],
                     )
 
+        # 5c. Auto-verify code on done transitions. A todo that is `done` now but
+        # was NOT `done` before (including brand-new todos created done) must have
+        # its verification code run; failures revert to pending and are reported.
+        old_status_by_title: dict[str, TodoStatus] = {}
+        def _collect_status(items: list[Todo]) -> None:
+            for t in items:
+                old_status_by_title[t.title] = t.status
+                _collect_status(t.children)
+        _collect_status(old_todos)
+        verification_errors: list[str] = []
+        async def _verify_done_tree(items: list[Todo]) -> None:
+            for t in items:
+                if t.status == "done" and old_status_by_title.get(t.title) != "done" and t.code:
+                    err_msg = await self._run_done_verification(t)
+                    if err_msg:
+                        verification_errors.append(err_msg)
+                await _verify_done_tree(t.children)
+        await _verify_done_tree(final_todos)
+
         # 6. Persist exactly once
         save_error = self._save_todos(final_todos, archived)
         if save_error:
             return self._error(save_error, "Failed to save todos.")
 
         # 7. Build response
-        return self._build_success_response(final_todos, params.mode, bool(old_todos), warnings)
+        result = self._build_success_response(final_todos, params.mode, bool(old_todos), warnings)
+        if verification_errors:
+            result = result.model_copy(update={
+                "output": result.output + "\n" + "\n".join(verification_errors),
+            })
+        return result
 
     @staticmethod
     def _error(
@@ -1281,6 +1307,35 @@ class TodoList(CallableTool2[Params]):
         walk(todos, 0)
         return TodoDisplayBlock(items=items)
 
+    async def _run_done_verification(self, todo: Todo) -> str | None:
+        """Run verification code when *todo* is becoming done.
+
+        No-op when the todo has no ``code``. On verification failure (including
+        code that cannot be resolved/executed) the todo is reverted to
+        ``pending`` (with the error appended to its notes) and the error message
+        is returned; on success ``None`` is returned.
+        """
+        if not todo.code:
+            return None
+        executable = TodoList._resolve_code_executable(todo.code)
+        if executable is None:
+            err_msg = f"Todo '{todo.title}' verification failed: code not runnable"
+            todo.status = "pending"
+            todo.notes = ((todo.notes or "") + "\n" + err_msg).strip() or None
+            return err_msg
+        try:
+            success, output = await TodoList._run_code(todo.code, executable=executable)
+        except Exception as exc:
+            success, output = False, str(exc)
+        finally:
+            TodoList._cleanup_code_tempfile(executable)
+        if success:
+            return None
+        err_msg = f"Todo '{todo.title}' verification failed: {output}"
+        todo.status = "pending"
+        todo.notes = ((todo.notes or "") + "\n" + err_msg).strip() or None
+        return err_msg
+
     async def _verify_and_set_todo_status(self, todo_title: str, status: TodoStatus, append_notes: str = "") -> str | None:
         """Set a todo's status and auto-verify code when marking `done`.
 
@@ -1303,22 +1358,10 @@ class TodoList(CallableTool2[Params]):
                 if append_notes:
                     t.notes = ((t.notes or "") + "\n" + append_notes).strip() or None
                 # Auto-verify code when transitioning to done
-                if is_becoming_done and t.code:
-                    executable = TodoList._resolve_code_executable(t.code)
-                    if executable is not None:
-                        try:
-                            success, output = await TodoList._run_code(t.code, executable=executable)
-                        except Exception as exc:
-                            success, output = False, str(exc)
-                        finally:
-                            TodoList._cleanup_code_tempfile(executable)
-
-                        if not success:
-                            err_msg = f"Todo '{t.title}' verification failed: {output}"
-                            errors.append(err_msg)
-                            # Revert status to pending on verification failure
-                            t.status = "pending"
-                            t.notes = ((t.notes or "") + "\n" + err_msg).strip() or None
+                if is_becoming_done:
+                    err_msg = await self._run_done_verification(t)
+                    if err_msg:
+                        errors.append(err_msg)
                 break
         combined_errors = "\n".join(errors) if errors else None
         persist_err = self._save_todos(todos, archived)
@@ -1841,9 +1884,10 @@ class TodoPopParams(BaseModel):
 class TodoPop(TodoList):
     name: str = "TodoPop"
     description: str = (
-        "Pop the current focus parent: mark it and all its sub-todos done and "
-        "return to the parent scope. Pop marks everything done without running "
-        "verification code."
+        "Pop the current focus parent: run verification code for every code-bearing "
+        "sub-todo, then mark it and all its sub-todos done and return to the parent "
+        "scope. If any sub-todo's verification fails, the pop is aborted (the stack "
+        "stays intact) and the failures are reported."
     )
     params: type[TodoPopParams] = TodoPopParams
 
@@ -1879,6 +1923,29 @@ class TodoPop(TodoList):
             )
 
         popped_title = node.title
+        # Run verification code for every code-bearing todo in the subtree before
+        # marking anything done. Any failure aborts the pop (stack kept intact) so
+        # a pending child is never stranded under a done parent.
+        verification_errors: list[str] = []
+        async def _verify_subtree(items: list[Todo]) -> None:
+            for t in items:
+                if t.status != "done" and t.code:
+                    err_msg = await self._run_done_verification(t)
+                    if err_msg:
+                        verification_errors.append(err_msg)
+                await _verify_subtree(t.children)
+        await _verify_subtree([node])
+        if verification_errors:
+            hint = "Fix the failing code and retry TodoPop, or TodoSub to update items."
+            return ToolError(
+                message="Verification failed; todo not popped.",
+                brief=hint,
+                output=(
+                    "Error: Cannot pop \u2014 sub-todo verification failed:\n"
+                    + "\n".join(verification_errors)
+                    + _hint_error(hint)
+                ),
+            )
         self._mark_subtree_done(node)
         n = self._count_all([node])
         new_stack = healed_stack[:-1]
@@ -2012,7 +2079,14 @@ class TodoSub(TodoList):
 
         if existing is None:
             # New title → append child (same-title would have matched above).
-            scope.append(Todo(title=title, status=params.status, notes=params.notes, code=code))
+            new_todo = Todo(title=title, status=params.status, notes=params.notes, code=code)
+            scope.append(new_todo)
+            # A brand-new sub-todo created directly as done with code must also
+            # be verified (same contract as TodoList write mode).
+            if params.status == "done" and code:
+                err_msg = await self._run_done_verification(new_todo)
+                if err_msg:
+                    errors.append(err_msg)
             verb = "added"
             final_title = title
         else:
@@ -2044,23 +2118,12 @@ class TodoSub(TodoList):
             if code is not None and code.strip():
                 existing.code = code
             # pending→done runs code verification on this child only.
+            existing.status = new_status
             if new_status == "done" and not was_done and existing.code:
-                executable = TodoList._resolve_code_executable(existing.code)
-                if executable is not None:
-                    try:
-                        success, output = await TodoList._run_code(existing.code, executable=executable)
-                    except Exception as exc:
-                        success, output = False, str(exc)
-                    finally:
-                        TodoList._cleanup_code_tempfile(executable)
-                    if not success:
-                        errors.append(f"Sub-todo '{title}' verification failed: {output}")
-                        new_status = "pending"
-                        existing.notes = (
-                            (existing.notes or "")
-                            + "\n"
-                            + f"Sub-todo '{title}' verification failed: {output}"
-                        ).strip() or None
+                err_msg = await self._run_done_verification(existing)
+                if err_msg:
+                    errors.append(err_msg)
+                    new_status = existing.status  # reverted to pending on failure
             existing.status = new_status
             verb = "updated"
             final_title = title

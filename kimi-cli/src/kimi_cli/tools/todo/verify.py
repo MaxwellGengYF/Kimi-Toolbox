@@ -33,16 +33,14 @@ async def verify_code_todos(
 
     For each todo with ``code`` whose status is not ``done``:
 
-    - the code is executed via :meth:`TodoList._run_code`;
-    - on success the todo is marked ``done`` (no re-run, since the status
-      transition already happened inside ``_verify_and_set_todo_status``);
-    - on failure the error tail is collected into the reminder.
-
+    - the todo is marked ``done`` via ``_verify_and_set_todo_status``, which runs
+      its verification code exactly once (the same single-execution contract used
+      by TodoList/TodoSub/TodoPop);
+    - on failure the todo is reverted to ``pending`` and the error tail is
+      collected into the reminder.
     Returns a reminder string listing the failures, or ``None`` when no
     code todo failed (or none exist). Never raises.
     """
-    from kimi_cli.tools.todo import TodoList as _TodoList
-
     failures: list[str] = []
     for todo in todos:
         code = _attr(todo, "code")
@@ -52,26 +50,11 @@ async def verify_code_todos(
             continue
 
         try:
-            executable = _TodoList._resolve_code_executable(code)  # pyright: ignore[reportPrivateUsage]
-            if executable is None:
-                failures.append(f"  - [{status}] {title}: code not runnable")
-                continue
-            try:
-                success, output = await _TodoList._run_code(code, executable=executable)  # pyright: ignore[reportPrivateUsage]
-            except Exception as exc:
-                success, output = False, str(exc)
-            finally:
-                _TodoList._cleanup_code_tempfile(executable)  # pyright: ignore[reportPrivateUsage]
-        except Exception as exc:  # never break the caller on verification bugs
-            success, output = False, str(exc)
-
-        if success:
-            try:
-                await todo_tool._verify_and_set_todo_status(title, "done")  # pyright: ignore[reportPrivateUsage]
-            except Exception:
-                pass
-        else:
-            failures.append(f"  - [{status}] {title}: verification failed — {output[:_MAX_FAILURE_OUTPUT_CHARS]}")
+            err_msg = await todo_tool._verify_and_set_todo_status(title, "done")  # pyright: ignore[reportPrivateUsage]
+        except Exception as exc:
+            err_msg = str(exc)
+        if err_msg:
+            failures.append(f"  - [{status}] {title}: {err_msg[:_MAX_FAILURE_OUTPUT_CHARS]}")
 
     if not failures:
         return None

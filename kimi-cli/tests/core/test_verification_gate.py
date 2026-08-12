@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 from kosong.message import Message, TextPart, ToolCall
@@ -95,10 +95,14 @@ async def test_no_todos_no_edits_clean() -> None:
 async def test_failing_code_todo_blocks_with_tail() -> None:
     gate = VerificationGate(max_nudges=2)
     todo_tool = MagicMock()
-    todo_tool._verify_and_set_todo_status = MagicMock()
+    # verify_code_todos now delegates entirely to _verify_and_set_todo_status,
+    # which runs the code once and returns an error message on failure.
+    todo_tool._verify_and_set_todo_status = AsyncMock(
+    return_value="Todo 'verify me' verification failed: exit code 3"
+    )
     soul = _make_soul(
-        todos=[_todo("verify me", "in_progress", code="import sys; sys.exit(3)")],
-        todo_tool=todo_tool,
+    todos=[_todo("verify me", "in_progress", code="import sys; sys.exit(3)")],
+    todo_tool=todo_tool,
     )
     msg = await gate.check(soul)
     assert msg is not None

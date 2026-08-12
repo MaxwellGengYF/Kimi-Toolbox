@@ -253,38 +253,43 @@ class TestE2EPromptCodeTodoReminder:
         # Mock the tool instance on the toolset
         toolset = mock_session._cli.soul.agent.toolset
         todo_tool = MagicMock()
-        todo_tool._verify_and_set_todo_status = AsyncMock()
+        # verify_code_todos delegates entirely to _verify_and_set_todo_status
+        # (which runs the code once); None means the code passed.
+        todo_tool._verify_and_set_todo_status = AsyncMock(return_value=None)
         toolset.find.return_value = todo_tool
-
         with patch("kimi_cli.tools.todo.TodoList._resolve_code_executable", return_value="/tmp/fake.py"):
             with patch("kimi_cli.tools.todo.TodoList._run_code", AsyncMock(return_value=(True, "ok"))):
                 result = await _maybe_build_code_todo_reminder(mock_session)
-
         assert result is None  # No failures
         todo_tool._verify_and_set_todo_status.assert_called_once_with("E2ETask", "done")
 
     @pytest.mark.asyncio
+    @pytest.mark.asyncio
     async def test_reminder_accumulates_failures(self, mock_session: MagicMock) -> None:
         """_maybe_build_code_todo_reminder accumulates multiple failures."""
         from kimix.utils.prompt import _maybe_build_code_todo_reminder
-
         state = MagicMock()
         state.todos = [
             MagicMock(title="FailA", status="pending", code="bad_code_a"),
             MagicMock(title="FailB", status="pending", code="bad_code_b"),
         ]
         mock_session._cli.session = MagicMock(state=state)
-
-        with patch("kimi_cli.tools.todo.TodoList._resolve_code_executable", return_value="/tmp/fake.py"):
-            with patch("kimi_cli.tools.todo.TodoList._run_code", AsyncMock(return_value=(False, "error!"))):
-                result = await _maybe_build_code_todo_reminder(mock_session)
-
+        toolset = mock_session._cli.soul.agent.toolset
+        todo_tool = MagicMock()
+        # Each failing verification returns an error message from
+        # _verify_and_set_todo_status (single-execution delegation).
+        todo_tool._verify_and_set_todo_status = AsyncMock(
+            side_effect=[
+                "Todo 'FailA' verification failed: boom_a",
+                "Todo 'FailB' verification failed: boom_b",
+            ]
+        )
+        toolset.find.return_value = todo_tool
+        result = await _maybe_build_code_todo_reminder(mock_session)
         assert result is not None
         assert "FailA" in result
         assert "FailB" in result
         assert "verification failed" in result
-
-    @pytest.mark.asyncio
     async def test_prompt_async_enforcement_loop(self, mock_session: MagicMock) -> None:
         """The enforcement loop in prompt_async uses _maybe_build_code_todo_reminder."""
         from kimix.utils.prompt import _maybe_build_code_todo_reminder

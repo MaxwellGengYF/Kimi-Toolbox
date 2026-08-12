@@ -1925,3 +1925,52 @@ class TestTodoCodeExecution:
         assert err1 is not None
         assert err2 is not None
         assert "err1" in err1 or "err2" in err2 or True
+
+
+class TestTodoListWriteVerification:
+    """Reflection fix: TodoList write mode runs verification code on done
+    transitions (pending/in_progress -> done) and reverts failures to pending."""
+
+    async def test_write_done_transition_runs_code_success(
+        self, todo_list_tool: TodoList
+    ) -> None:
+        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
+        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="print('ok')")]))
+        assert not res.is_error
+        assert "verification failed" not in res.output
+        todos = todo_list_tool._load_todos()
+        assert todos[0].status == "done"
+
+    async def test_write_done_transition_failure_reverts_to_pending(
+        self, todo_list_tool: TodoList
+    ) -> None:
+        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
+        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="raise ValueError('boom')")]))
+        assert not res.is_error
+        assert "verification failed" in res.output
+        todos = todo_list_tool._load_todos()
+        assert todos[0].status == "pending"
+        assert todos[0].notes is not None
+        assert "verification failed" in todos[0].notes
+
+    async def test_write_new_todo_created_done_with_code_verifies(
+        self, todo_list_tool: TodoList
+    ) -> None:
+        """Brand-new todo created directly as done with code is verified."""
+        res = await todo_list_tool(Params(todos=[Todo(title="New", status="done", code="raise ValueError('boom')")]))
+        assert not res.is_error
+        assert "verification failed" in res.output
+        todos = todo_list_tool._load_todos()
+        assert todos[0].status == "pending"
+
+    async def test_write_already_done_todo_skips_code(
+        self, todo_list_tool: TodoList
+    ) -> None:
+        """Re-sending an already-done todo does not re-run its code."""
+        await todo_list_tool(Params(todos=[Todo(title="T", status="pending")]))
+        await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="print('ok')")]))
+        res = await todo_list_tool(Params(todos=[Todo(title="T", status="done", code="raise ValueError('boom')")]))
+        assert not res.is_error
+        assert "verification failed" not in res.output
+        todos = todo_list_tool._load_todos()
+        assert todos[0].status == "done"
