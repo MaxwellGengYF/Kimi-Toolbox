@@ -521,6 +521,7 @@ async def _resolve_subagent_session(
 
     session = await utils._create_session_async(
         session_id=session_id,
+        work_dir=parent_session.work_dir,
         agent_file=base._default_agent_file_dir / "agent_subagent.json",
         agent_type=agent_type,
         provider_dict=default_sub_provider,

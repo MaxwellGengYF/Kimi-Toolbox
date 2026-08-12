@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import orjson
-
 import kimix.base as base
+from kaos.path import KaosPath
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
 from kosong.message import ContentPart
@@ -891,10 +891,30 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
         planner_provider["loop_control"]["compact_reminder_enabled"] = False
         planner_provider["loop_control"]["todo_reminder_enabled"] = False
         planner_provider["loop_control"]["target_churn_enabled"] = False
+        # Inherit the caller's working directory so relative plan paths and
+        # AGENTS.md/skills resolution match the session that spawned the planner
+        # (a planner session that defaults to the process CWD cannot find the
+        # repo files the caller references).
+        planner_work_dir = None
+        try:
+            from kimix.utils import _globals as _session_globals
+
+            default = _session_globals._default_session
+            if default is not None:
+                raw = getattr(default, "work_dir", None)
+                if raw is None:
+                    cli = getattr(default, "_cli", None)
+                    cli_session = getattr(cli, "session", None) if cli is not None else None
+                    raw = getattr(cli_session, "work_dir", None)
+                if raw is not None:
+                    planner_work_dir = raw if isinstance(raw, KaosPath) else KaosPath(str(raw))
+        except Exception:
+            planner_work_dir = None
         planner_session = await _create_session_async(
             agent_type=SystemPromptType.TodoMaker,
             agent_file='agent_planner.json',
             provider_dict=planner_provider,
+            work_dir=planner_work_dir,
         )
         planner_session.get_custom_data()["plan_writing_path"] = plan_file
 

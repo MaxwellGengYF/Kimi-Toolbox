@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import kimix.base as base
 import kimix.utils as utils
+from kaos.path import KaosPath
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from kimi_agent_sdk import Session as SdkSession
 from kimix.tools.prompt_common import accepts_alias_text
@@ -62,6 +63,27 @@ def _cli_session_id(session: Any) -> str:
     cli = getattr(session, "_cli", None)
     cli_session = getattr(cli, "session", None) if cli is not None else None
     return str(getattr(cli_session, "id", None) or "")
+
+
+def _session_work_dir(session: Any) -> KaosPath | None:
+    """Best-effort working directory of a (possibly SDK-wrapped) session.
+
+    ``kimi_cli.session.Session`` exposes ``.work_dir`` directly; the SDK
+    wrapper (``kimi_agent_sdk.Session``) keeps it at
+    ``session._cli.session.work_dir``. Returns ``None`` when the session has
+    no resolvable work dir (callers fall back to the process CWD).
+    """
+    if session is None:
+        return None
+    raw = getattr(session, "work_dir", None)
+    if raw:
+        return raw if isinstance(raw, KaosPath) else KaosPath(str(raw))
+    cli = getattr(session, "_cli", None)
+    cli_session = getattr(cli, "session", None) if cli is not None else None
+    nested = getattr(cli_session, "work_dir", None)
+    if nested:
+        return nested if isinstance(nested, KaosPath) else KaosPath(str(nested))
+    return None
 
 
 def _sdk_session_by_id(session_id: str) -> SdkSession | None:
@@ -466,10 +488,13 @@ class Agent(CallableTool2):
                 if params.context_files or params.context_data:
                     context_parts = ["<context>"]
                     if params.context_files:
-                        work_dir = Path(self._session.dir) if hasattr(self._session, "dir") else Path(".")
+                        work_dir = _session_work_dir(self._session)
+                        base_dir = (
+                            Path(str(work_dir)) if work_dir is not None else Path(".")
+                        )
                         for fp in params.context_files:
                             try:
-                                file_path = work_dir / fp
+                                file_path = base_dir / fp
                                 content = file_path.read_text(encoding="utf-8", errors="replace")
                                 context_parts.append(f"<file path='{fp}'>\n{content}\n</file>")
                             except Exception as e:
@@ -652,6 +677,7 @@ class Agent(CallableTool2):
 
         session = await _create_session_async(
             session_id=session_id,
+            work_dir=_session_work_dir(self._session),
             agent_file=base._default_agent_file_dir / 'agent_subagent.json',
             agent_type=SystemPromptType.TrivialSubAgent,
             provider_dict=default_sub_provider,

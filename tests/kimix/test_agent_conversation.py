@@ -1,6 +1,7 @@
 """Tests for the conversational Agent system."""
 
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -936,3 +937,137 @@ async def test_agent_response_injection(
     assert entry.pending_question is None
     assert entry.state == "running"
     _unregister_entry("resp-id")
+
+
+# ---------------------------------------------------------------------------
+# Work-dir inheritance + context_files base (reflection fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_work_dir_inherited_by_sub_session(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """Sub-agent sessions must inherit the parent's working directory so the
+    system prompt WORK DIR and relative paths resolve against the same repo."""
+    from kaos.path import KaosPath
+
+    mock_session.work_dir = KaosPath(str(Path.cwd()))
+    mock_session.custom_config = {"chat_provider": None}
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ):
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                await agent(SubAgentParams(prompt="do X"))
+
+    assert mock_create.await_args is not None
+    _, kwargs = mock_create.await_args
+    assert kwargs.get("work_dir") == KaosPath(str(Path.cwd()))
+
+
+async def test_agent_work_dir_sdk_wrapped_session(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """SDK-wrapped sessions (session._cli.session.work_dir) resolve too."""
+    from kaos.path import KaosPath
+
+    inner = MagicMock()
+    inner.work_dir = KaosPath(str(Path.cwd()))
+    cli = MagicMock()
+    cli.session = inner
+    mock_session.work_dir = None
+    mock_session._cli = cli
+    mock_session.custom_config = {"chat_provider": None}
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ):
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                await agent(SubAgentParams(prompt="do X"))
+
+    assert mock_create.await_args is not None
+    _, kwargs = mock_create.await_args
+    assert kwargs.get("work_dir") == KaosPath(str(Path.cwd()))
+
+
+async def test_agent_context_files_resolve_against_work_dir(
+    mock_session: MagicMock, mock_sub_session: MagicMock, tmp_path
+) -> None:
+    """context_files must resolve against the parent's work_dir, not the
+    session cache dir (self._session.dir)."""
+    from kaos.path import KaosPath
+
+    marker = tmp_path / "marker.txt"
+    marker.write_text("hello marker", encoding="utf-8")
+    mock_session.work_dir = KaosPath(str(tmp_path))
+    mock_session.custom_config = {"chat_provider": None}
+    # Ensure the session dir differs from the work dir: a file that exists in
+    # the session dir but not the work dir must NOT be picked up.
+    session_dir = tmp_path / "session_cache"
+    session_dir.mkdir(exist_ok=True)
+    mock_session.dir = str(session_dir)
+
+    captured: list[str] = []
+
+    async def fake_prompt(prompt_str, **kwargs):
+        captured.append(prompt_str)
+        return None
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock, side_effect=fake_prompt
+        ):
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                await agent(
+                    SubAgentParams(prompt="do X", context_files=["marker.txt"])
+                )
+
+    assert captured, "prompt_async should have been called"
+    assert "<file path='marker.txt'>\nhello marker\n</file>" in captured[0]
+
+
+async def test_agent_work_dir_none_falls_back_to_cwd(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """No resolvable work_dir on the parent must not crash the create call."""
+    mock_session.work_dir = None
+    mock_session._cli = None
+    mock_session.custom_config = {"chat_provider": None}
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ):
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                result = await agent(SubAgentParams(prompt="do X"))
+
+    assert not result.is_error
+    assert mock_create.await_args is not None
+    _, kwargs = mock_create.await_args
+    assert kwargs.get("work_dir") is None

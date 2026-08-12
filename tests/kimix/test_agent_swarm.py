@@ -1,6 +1,7 @@
 """Tests for the AgentSwarm tool."""
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -284,3 +285,37 @@ async def test_resume_agent_ids(mock_session: MagicMock, monkeypatch):
 # ---------------------------------------------------------------------------
 # parallel_sample mode (P7 best-of-N) validation
 # ---------------------------------------------------------------------------
+
+
+async def test_swarm_subagent_inherits_parent_work_dir(
+    mock_session: MagicMock, monkeypatch
+):
+    """Swarm sub-agent sessions must inherit the parent session's work_dir so
+    they resolve relative paths and AGENTS.md against the same repo."""
+    from kaos.path import KaosPath
+
+    fake_prompt = AsyncMock(side_effect=lambda *, prompt_str, session, output_function, **kwargs: output_function(f"ok {prompt_str}", MessageType.Text))
+    monkeypatch.setattr("kimix.tools.swarm.utils.prompt_async", fake_prompt)
+    monkeypatch.setattr("kimix.tools.swarm.utils.close_session_async", AsyncMock())
+    fake_sub = SimpleNamespace(id="sub-wd", get_custom_config=lambda: {})
+    created: list[dict[str, object]] = []
+
+    async def fake_create_session_async(**kwargs):
+        created.append(kwargs)
+        return fake_sub
+
+    monkeypatch.setattr(
+        "kimix.tools.swarm.utils._create_session_async", fake_create_session_async
+    )
+
+    work_dir = KaosPath(str(Path.cwd()))
+    mock_session.work_dir = work_dir
+    tool = AgentSwarm(mock_session)
+    result = await tool(AgentSwarmParams(
+        description="test swarm wd",
+        prompt_template="process {{item}}",
+        items=["x", "y"],
+    ))
+    assert result.is_error is False
+    assert created, "sub-agent session should have been created"
+    assert all(c.get("work_dir") == work_dir for c in created)
