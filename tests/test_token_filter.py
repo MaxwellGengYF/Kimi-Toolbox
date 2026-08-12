@@ -160,6 +160,53 @@ def test_truncate_max_lines_zero():
     assert _truncate_lines(out, 0) == out  # max_lines <= 0 → no truncation
 
 
+def test_truncate_preserves_first_error_in_folded_middle():
+    # An error buried in the middle must survive head/tail folding so a
+    # failed build/test never hides its first diagnostic behind the marker.
+    lines = [f"info_{i}" for i in range(500)]
+    lines.insert(250, "error: build failed at step 42")
+    out = "\n".join(lines)
+    result = _truncate_lines(out, 50)
+    assert "error: build failed at step 42" in result
+    assert "error-context line(s) preserved" in result
+    # Context around the error is kept too (error inserted at index 250,
+    # so the 2-after lines live at indices 251/252 -> "info_250"/"info_251").
+    assert "info_248" in result
+    assert "info_251" in result
+    assert result.endswith("info_499")
+
+
+def test_truncate_error_in_head_needs_no_preservation():
+    # Error already inside the kept head: no extra preservation note.
+    lines = [f"info_{i}" for i in range(500)]
+    lines.insert(10, "error: early failure")
+    out = "\n".join(lines)
+    result = _truncate_lines(out, 50)
+    assert "error: early failure" in result
+    assert "error-context line(s) preserved" not in result
+
+
+def test_truncate_preserve_errors_opt_out_folds_error_away():
+    # Explicit opt-out restores the plain head/tail fold: the error is
+    # folded away exactly as before this feature existed.
+    lines = [f"info_{i}" for i in range(500)]
+    lines.insert(250, "error: build failed")
+    out = "\n".join(lines)
+    result = _truncate_lines(out, 50, preserve_errors=False)
+    assert "error: build failed" not in result
+    assert "lines omitted" in result
+    assert "error-context line(s) preserved" not in result
+
+
+def test_truncate_no_errors_unchanged():
+    lines = [f"line_{i}" for i in range(1000)]
+    out = "\n".join(lines)
+    result = _truncate_lines(out, 100)
+    assert "error-context line(s) preserved" not in result
+    assert result.splitlines()[0] == "line_0"
+    assert result.splitlines()[-1] == "line_999"
+
+
 # ── _token_filter_output integration tests ──────────────────────────
 
 @pytest.mark.asyncio
@@ -598,6 +645,74 @@ async def test_token_filter_default_still_single_line():
     assert "ERROR  (5 repeats)" in result
     assert "details  (5 repeats)" in result
     assert orig_path is not None
+
+
+# ── Error-preserving token filtering ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_token_filter_keeps_distinct_error_lines_verbatim():
+    # Four near-identical compiler errors differing only in the line number.
+    # The near-dup stage would collapse errors at lines 13-15 behind a
+    # "[×3 near-dup ...]" marker; error-aware filtering must keep them all
+    # visible because each line number is a distinct diagnostic.
+    out = "\n".join(
+        f"error: file.cpp({n},5): error: no matching function for call to 'foo'"
+        for n in range(12, 16)
+    )
+    result, orig_path = await _token_filter_output(
+        out, token_kill=True, max_lines=None
+    )
+    assert "near-dup" not in result
+    assert "file.cpp(12,5)" in result
+    assert "file.cpp(13,5)" in result
+    assert "file.cpp(14,5)" in result
+    assert "file.cpp(15,5)" in result
+    # Nothing lossy ran, so the output is unchanged and no original is saved.
+    assert orig_path is None
+
+
+@pytest.mark.asyncio
+async def test_token_filter_preserve_errors_opt_out_allows_near_dup():
+    # Opting out restores the old behavior: near-dup collapse hides the
+    # distinct error lines behind a marker (documented contract of the flag).
+    out = "\n".join(
+        f"error: file.cpp({n},5): error: no matching function for call to 'foo'"
+        for n in range(12, 16)
+    )
+    result, _ = await _token_filter_output(
+        out, token_kill=True, max_lines=None, preserve_errors=False
+    )
+    assert "near-dup" in result
+    assert "file.cpp(13,5)" not in result
+
+
+@pytest.mark.asyncio
+async def test_token_filter_disables_prefix_fold_for_errors():
+    # A log with a shared timestamp prefix AND error lines must not have its
+    # lines rewritten by prefix folding while diagnostics are present.
+    lines = [f"2026-01-01 00:00:00.000 INFO stage_{i} ok" for i in range(20)]
+    lines.append("2026-01-01 00:00:00.000 ERROR boom")
+    out = "\n".join(lines)
+    result, _ = await _token_filter_output(out, token_kill=True, max_lines=None)
+    assert "ts-prefix folded" not in result
+    assert "prefix" not in result.splitlines()[0]
+    assert "ERROR boom" in result
+
+
+@pytest.mark.asyncio
+async def test_token_filter_truncate_keeps_error_in_middle():
+    # End-to-end: with max_lines truncation, an error in the folded-away
+    # middle region is still shown.
+    lines = [f"step_{i} ok" for i in range(500)]
+    lines.insert(250, "error: stage 2 failed")
+    out = "\n".join(lines)
+    result, orig_path = await _token_filter_output(
+        out, token_kill=True, max_lines=50
+    )
+    assert "error: stage 2 failed" in result
+    assert "error-context line(s) preserved" in result
+    assert orig_path is not None  # truncation changed the output
 
 
 # ── Absolute-path rtk rewrite (no PATH reliance) ─────────────────────

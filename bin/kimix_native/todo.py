@@ -45,11 +45,16 @@ def _normalize_code(v: Any) -> str | None:
 
 def _todo_item(v: dict[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize a raw todo dict."""
+    raw_children = v.get("children")
+    children = (
+        [_todo_item(c) for c in raw_children] if isinstance(raw_children, list) else []
+    )
     return {
         "title": _normalize_title(v.get("title")),
         "status": _canonical_status(v.get("status")),
         "notes": _normalize_notes(v.get("notes")),
         "code": _normalize_code(v.get("code")),
+        "children": children,
     }
 
 
@@ -62,12 +67,18 @@ def _format_title_list(titles: list[str]) -> str:
 
 
 def _merge_one(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """Produce an updated todo preserving old notes/code when new omits them."""
+    """Produce an updated todo preserving old notes/code when new omits them.
+
+    Children of the old item are preserved unless the new item carries its own
+    (non-empty) children — mirrors ``TodoList._merge_one`` so tree data is
+    never dropped on a same-title update.
+    """
     return {
         "title": old["title"],
         "status": new["status"],
         "notes": new["notes"] if new["notes"] is not None else old["notes"],
         "code": new["code"] if new["code"] is not None else old["code"],
+        "children": new["children"] if new["children"] else old.get("children", []),
     }
 
 

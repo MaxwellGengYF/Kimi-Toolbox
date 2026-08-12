@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import xxhash
 from kosong.message import Message
 
-from kimi_cli.session_state import TodoItemState
+from kimi_cli.session_state import TodoItemState, flatten_todo_tree
 from kimi_cli.soul.dynamic_injection import DynamicInjection, DynamicInjectionProvider
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ class TodoReminderProvider(DynamicInjectionProvider):
         *,
         interval_steps: int = 10,
         max_items: int = _MAX_REMINDER_ITEMS,
+        stack_loader: Callable[[], list[str]] | None = None,
     ) -> None:
         """
         Args:
@@ -49,22 +50,41 @@ class TodoReminderProvider(DynamicInjectionProvider):
             interval_steps: Minimum steps between repeated injections of an
                 unchanged todo list.
             max_items: Maximum number of unfinished items shown per reminder.
+            stack_loader: Optional zero-arg callable returning the current
+                ``todo_stack`` breadcrumb (root → current focus parent). Must
+                never raise; ``None`` means root scope (no breadcrumb).
         """
         self._todos_loader = todos_loader
         self._interval_steps = max(1, interval_steps)
         self._max_items = max_items
+        self._stack_loader = stack_loader
         self._last_injected_step: int | None = None
         self._last_signature: str | None = None
 
     @staticmethod
-    def _signature(unfinished: list[TodoItemState]) -> str:
-        """Hash of (title, status) pairs — detects any meaningful change."""
+    def _signature(
+        todos: Sequence[TodoItemState],
+        stack: Sequence[str] = (),
+    ) -> str:
+        """Hash of stack titles plus (depth, status, title) tree pairs.
+
+        Recursive over children (via :func:`flatten_todo_tree`) and includes the
+        stack breadcrumb, so any edit inside a scope — including a child status
+        change or a push/pop — changes the signature and re-triggers the
+        reminder.
+        """
         digest = xxhash.xxh64()
-        for item in unfinished:
-            digest.update(item.status.encode("utf-8"))
+        for title in stack:
+            digest.update(title.encode("utf-8"))
+            digest.update(b"\x02")
+        digest.update(b"\x03")
+        for depth, item in flatten_todo_tree(todos):
+            digest.update(str(depth).encode("utf-8"))
             digest.update(b"\x00")
-            digest.update(item.title.encode("utf-8"))
+            digest.update(item.status.encode("utf-8"))
             digest.update(b"\x01")
+            digest.update(item.title.encode("utf-8"))
+            digest.update(b"\x04")
         return digest.hexdigest()
 
     async def get_injections(
@@ -79,14 +99,23 @@ class TodoReminderProvider(DynamicInjectionProvider):
         except Exception:
             return []
 
-        unfinished = [t for t in todos if t.status != "done"]
+        stack: list[str] = []
+        if self._stack_loader is not None:
+            try:
+                stack = list(self._stack_loader())
+            except Exception:
+                stack = []
+
+        # Unfinished items across the whole tree (done items and their finished
+        # descendants are excluded; pending children of a done parent survive).
+        unfinished = flatten_todo_tree(todos)
         if not unfinished:
             # Reset so the next unfinished todo triggers an immediate reminder.
             self._last_injected_step = None
             self._last_signature = None
             return []
 
-        signature = self._signature(unfinished)
+        signature = self._signature(todos, stack)
         step_no = soul._current_step_no
 
         if self._last_injected_step is not None:
@@ -101,8 +130,10 @@ class TodoReminderProvider(DynamicInjectionProvider):
         lines = [
             "Reminder — unfinished TodoList tasks (re-injected to keep your plan in focus):",
         ]
-        for item in unfinished[: self._max_items]:
-            lines.append(f"- [{item.status}] {item.title}")
+        if stack:
+            lines.append(f"- (stack: {' > '.join(stack)})")
+        for depth, item in unfinished[: self._max_items]:
+            lines.append(f"{'  ' * depth}- [{item.status}] {item.title}")
         if len(unfinished) > self._max_items:
             lines.append(f"- … and {len(unfinished) - self._max_items} more (call `TodoList` to read all)")
         lines.append(

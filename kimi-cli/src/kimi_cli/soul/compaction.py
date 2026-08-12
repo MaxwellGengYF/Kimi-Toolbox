@@ -262,6 +262,7 @@ class SimpleCompaction:
         options: CompactionOptions | None = None,
         recorder: LLMRequestRecorder | None = None,
         todos_loader: Callable[[], Sequence[TodoItemState]] | None = None,
+        todos_stack_loader: Callable[[], Sequence[str]] | None = None,
     ) -> CompactionResult:
         options = options if options is not None else CompactionOptions()
         prepare_result = self.prepare(
@@ -318,8 +319,11 @@ class SimpleCompaction:
         # Failure-isolated — a broken loader must never break compaction.
         if todos_loader is not None:
             try:
+                stack = todos_stack_loader() if todos_stack_loader is not None else None
                 injection = format_todo_injection(
-                    todos_loader(), max_items=options.todos_max_items or 20
+                    todos_loader(),
+                    max_items=options.todos_max_items or 20,
+                    stack=stack,
                 )
             except Exception:
                 injection = None

@@ -701,18 +701,34 @@ def _dedup_output(
     return "\n".join(result)
 
 
-def _truncate_lines(output: str, max_lines: int) -> str:
+def _truncate_lines(
+    output: str,
+    max_lines: int,
+    *,
+    preserve_errors: bool = True,
+    error_context_lines: int = 2,
+) -> str:
     """Truncate to max_lines with head/tail fold.
 
     Preserves first floor(max_lines/2) lines and last ceil(max_lines/2)-1 lines.
     The middle is replaced with a fold marker indicating how many lines
     were omitted and referencing the original file if available.
 
+    When ``preserve_errors`` is enabled and the output contains a diagnostic
+    line (compiler error, traceback, test failure, ...) that would fall inside
+    the folded-away region, the first diagnostic line and up to
+    ``error_context_lines`` surrounding lines are kept, so a failed build or
+    test never hides its first error behind the fold.
+
     If total_lines <= max_lines, returns output unchanged.
 
     Args:
         output: The output string to truncate.
         max_lines: Maximum number of lines to keep (min 3).
+        preserve_errors: Keep the first diagnostic line (with context) when it
+            would otherwise be folded away.
+        error_context_lines: Number of lines of context kept around the first
+            preserved diagnostic line.
 
     Returns:
         Truncated output string with fold marker.
@@ -728,7 +744,25 @@ def _truncate_lines(output: str, max_lines: int) -> str:
     omitted = n - head_n - tail_n
     head = "\n".join(lines[:head_n])
     tail = "\n".join(lines[-tail_n:]) if tail_n > 0 else ""
-    fold = f"\n\n[... {omitted} lines omitted ...]\n\n"
+
+    preserved: list[str] = []
+    if preserve_errors:
+        err_idx = _find_error_line_index(output)  # 1-based
+        if err_idx is not None:
+            e = err_idx - 1  # 0-based
+            omitted_lo = head_n
+            omitted_hi = n - tail_n  # exclusive
+            if omitted_lo <= e < omitted_hi:
+                lo = max(omitted_lo, e - error_context_lines)
+                hi = min(omitted_hi, e + error_context_lines + 1)
+                preserved = lines[lo:hi]
+
+    marker_note = (
+        f" ({len(preserved)} error-context line(s) preserved)" if preserved else ""
+    )
+    fold = f"\n\n[... {omitted} lines omitted{marker_note} ...]\n\n"
+    if preserved:
+        return head + "\n" + "\n".join(preserved) + fold + tail
     if tail:
         return head + fold + tail
     return head + fold
@@ -1115,14 +1149,15 @@ async def _token_filter_output(
     max_lines: int | None = None,
     rtk_rewritten: bool = False,
     max_block_lines: int = 1,
+    preserve_errors: bool = True,
 ) -> tuple[str, str | None]:
     """Run the token filter post-process pipeline on shell output.
 
     Stages run in order:
-      1. Strip ANSI escape codes (via rich, merged with dedup step)
-      2. Dedup (collapse repeated lines/blocks, when token_kill=True and RTK was not used)
-      3. Truncate (head/tail fold to max_lines)
-      4. Save original to temp file only if the result differs from the input
+    1. Strip ANSI escape codes (via rich, merged with dedup step)
+    2. Dedup (collapse repeated lines/blocks, when token_kill=True and RTK was not used)
+    3. Truncate (head/tail fold to max_lines)
+    4. Save original to temp file only if the result differs from the input
 
     Args:
         output: Raw output string (ANSI already stripped by ProcessTask).
@@ -1135,6 +1170,15 @@ async def _token_filter_output(
         max_block_lines: Maximum height of a repeating block for dedup.
             Default 1 keeps single-line dedup. Values >= 2 enable multi-line
             block detection.
+        preserve_errors: When True (default) and the output contains diagnostic
+            lines (compiler errors, tracebacks, test failures), the lossy
+            annotated micro-compress stages (prefix fold, banner drop,
+            intra-line dedup, near-dup collapse) are disabled and truncation
+            keeps the first diagnostic line visible.  A near-dup collapse can
+            fold two DISTINCT errors that differ only in a counter (e.g. the
+            same diagnostic at different lines) into one marker — exactly the
+            signal needed to fix a broken build — so error output is preserved
+            verbatim instead of being treated like benign log spam.
 
     Returns:
         (filtered_output, original_path).
@@ -1150,6 +1194,11 @@ async def _token_filter_output(
     # Keep the raw original so we can tell whether the post-process result
     # actually differs. Only generate a temp file when it does.
     original_output = output
+
+    # Detect diagnostics up-front (before any lossy stage) so error output is
+    # never mangled or hidden: the annotated micro-compress stages are only
+    # safe for benign log spam, not for the text that diagnoses a failure.
+    has_errors = preserve_errors and _find_error_line_index(output) is not None
 
     # Step 1: Strip ANSI escape codes (via rich, merged with dedup step)
     # When dedup is enabled, first strip any remaining ANSI codes using rich's
@@ -1167,19 +1216,27 @@ async def _token_filter_output(
             MicroCompressConfig,
             compress as _mc_compress,
         )
+        if has_errors:
+            # Diagnostics are the most valuable signal for a failed build:
+            # run only the lossless stages so error text is preserved verbatim
+            # (identical-line dedup below still collapses true redundancy).
+            config = MicroCompressConfig(lossless_only=True)
+        else:
+            config = MicroCompressConfig()
         output = _mc_compress(
             output,
             kind="log",
-            config=MicroCompressConfig(),
+            config=config,
         )
 
     # Step 3: Dedup (preserves line order)
     if apply_dedup:
         output = _dedup_output(output, max_block_lines=max_block_lines)
 
-    # Step 4: Truncate (head/tail fold)
+    # Step 4: Truncate (head/tail fold), keeping the first diagnostic line
+    # visible so a failed build/test never hides its error behind the fold.
     if max_lines is not None:
-        output = _truncate_lines(output, max_lines)
+        output = _truncate_lines(output, max_lines, preserve_errors=preserve_errors)
 
     # Only save the original when the filter actually changed the output.
     if output == original_output:

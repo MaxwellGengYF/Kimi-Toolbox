@@ -29,6 +29,8 @@ class TodoItemState(BaseModel):
     status: TodoStatus
     notes: str | None = None
     code: str | None = None
+    # Sub todos (children). Default empty so old state files stay valid.
+    children: list[TodoItemState] = Field(default_factory=list)
 
 
 # ── Compression re-injection (Hermes parity) ────────────────────────────────
@@ -51,19 +53,51 @@ TODO_INJECTION_TRUNCATION_MARKER = "… [truncated]"
 
 
 # A plain (non-`None`) title is required for an item to be injected.
+def flatten_todo_tree(
+    todos: Sequence[TodoItemState],
+    *,
+    include_done: bool = False,
+) -> list[tuple[int, TodoItemState]]:
+    """Flatten a todo tree depth-first into ``(depth, item)`` pairs.
+
+    ``depth`` is the nesting level (root items are ``0``; each child adds 1).
+    When ``include_done`` is False (default), ``done`` items are omitted from
+    the output but their (possibly unfinished) descendants are still
+    traversed, so a finished parent never hides pending children.
+
+    Pure function: no I/O, and it never raises on malformed input (defensive
+    ``getattr`` for ``status``/``children``).
+    """
+    out: list[tuple[int, TodoItemState]] = []
+
+    def walk(item: TodoItemState, depth: int) -> None:
+        if include_done or getattr(item, "status", None) != "done":
+            out.append((depth, item))
+        for child in getattr(item, "children", None) or []:
+            walk(child, depth + 1)
+
+    for item in todos:
+        walk(item, 0)
+    return out
+
+
 def format_todo_injection(
     todos: Sequence[TodoItemState],
     *,
     max_items: int = 20,
     max_chars: int = 4096,
     per_title_chars: int = 200,
+    stack: Sequence[str] | None = None,
 ) -> str | None:
     """Render the active (unfinished) todo list for compaction re-injection.
 
     Hermes-style parity: only ``pending``/``in_progress`` items are included
     (``done`` items are excluded so the model does not re-do finished work)
     and the result is appended to the compaction output under
-    :data:`TODO_INJECTION_HEADER`.
+    :data:`TODO_INJECTION_HEADER`.  Flat (child-less) lists render
+    byte-identically to previous versions; tree items are indented 2 spaces
+    per depth.  When ``stack`` is provided (non-empty), a breadcrumb line
+    ``- (stack: A > B)`` is emitted under the header.
 
     Pure function: no I/O, and it must never raise on malformed input
     (defensive ``getattr`` on ``status``/``title``; malformed items are
@@ -77,6 +111,8 @@ def format_todo_injection(
             from the tail (never a partial line) and the truncation marker
             is appended.
         per_title_chars: Per-title truncation length.
+        stack: Optional breadcrumb of ancestor titles (root to current focus
+            parent). Emitted as a single ``- (stack: ...)`` line.
 
     Returns:
         The formatted injection text, or ``None`` when there is nothing to
@@ -84,15 +120,20 @@ def format_todo_injection(
     """
     if not todos:
         return None
+    flat = flatten_todo_tree(todos)
+    if not flat:
+        return None
     lines: list[str] = []
-    for item in todos:
+    if stack:
+        lines.append(f"- (stack: {' > '.join(stack)})")
+    for depth, item in flat:
         status = getattr(item, "status", None)
         title = getattr(item, "title", None)
         if status not in TODO_INJECTION_MARKERS or not title:
             continue  # defensive: skip malformed items, never raise
         if len(title) > per_title_chars:
             title = title[:per_title_chars] + TODO_INJECTION_TRUNCATION_MARKER
-        lines.append(f"- {TODO_INJECTION_MARKERS[status]} {title} ({status})")
+        lines.append(f"{'  ' * depth}- {TODO_INJECTION_MARKERS[status]} {title} ({status})")
     if not lines:
         return None
     if len(lines) > max_items:
@@ -141,6 +182,9 @@ class SessionState(BaseModel):
     # Todo list state
     todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     archived_todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    # Todo stack: breadcrumb of ancestor titles from root to current focus
+    # parent (used by TodoPush/TodoPop/TodoSub). Persisted with state.json.
+    todo_stack: list[str] = Field(default_factory=list)
 
 
 _LEGACY_METADATA_FILENAME = "metadata.json"

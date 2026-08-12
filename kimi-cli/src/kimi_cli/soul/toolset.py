@@ -281,6 +281,31 @@ def _build_platform_redirects() -> dict[str, str]:
     """Build the platform-aware normalized redirect map."""
     _redirects = dict(TOOL_NAME_REDIRECTS)
 
+    # TodoList stack/tree tools: common LLM variants for TodoPush/TodoPop/
+    # TodoSub and tree-reading names for TodoList.
+    _redirects.update({
+        "PushTodo": "TodoPush",
+        "TodoParent": "TodoPush",
+        "TodoDown": "TodoPush",
+        "PopTodo": "TodoPop",
+        "TodoUp": "TodoPop",
+        "TodoClose": "TodoPop",
+        "TodoFinish": "TodoPop",
+        "SubTodo": "TodoSub",
+        "TodoChild": "TodoSub",
+        "TodoAdd": "TodoSub",
+        "AddSubTodo": "TodoSub",
+        "TodoDetail": "TodoSub",
+        "TodoUpdate": "TodoSub",
+        "TodoEdit": "TodoSub",
+        "TodoTree": "TodoList",
+        "TodoStack": "TodoList",
+        "TodoHierarchy": "TodoList",
+        "TodoListPush": "TodoPush",
+        "TodoListPop": "TodoPop",
+        "TodoListSub": "TodoSub",
+    })
+
     if sys.platform == "win32":
         # Windows: redirect all shell names to Powershell.
         _redirects.update({

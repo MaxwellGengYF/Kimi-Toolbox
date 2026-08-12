@@ -21,6 +21,9 @@ class TodoDisplayItem(BaseModel):
     status: TodoStatus
     notes: str | None = None
     code: str | None = None
+    # Nesting depth of the item in the todo tree (root items are 0).
+    # Backward compatible: defaults to 0 so flat lists render unchanged.
+    depth: int = 0
 
 
 class TodoDisplayBlock(DisplayBlock):

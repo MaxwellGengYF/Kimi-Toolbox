@@ -180,6 +180,9 @@ Default is 3."""
     todo_compact_injection_max_items: int = Field(default=20, ge=1, le=100)
     """Maximum unfinished items re-injected into the compaction output.
     Default is 20."""
+    todo_max_layers: int = Field(default=4, ge=1, le=8)
+    """Maximum TodoList tree/stack depth (layers). push beyond this errors.
+    Default 4."""
 
     target_churn_enabled: bool = Field(default=False)
     """When true, inject a reminder when the agent repeatedly modifies the same

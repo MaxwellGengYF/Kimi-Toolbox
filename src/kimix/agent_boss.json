@@ -17,6 +17,9 @@
       "kimix.tools.agent:AgentClose",
       "kimix.tools.swarm:AgentSwarm",
       "kimi_cli.tools.todo:TodoList",
+      "kimi_cli.tools.todo:TodoPush",
+      "kimi_cli.tools.todo:TodoPop",
+      "kimi_cli.tools.todo:TodoSub",
       "kimi_cli.tools.memory:Retrieve",
       "kimix.tools.context:ContextUsage",
       "kimix.tools.context:Compact"
