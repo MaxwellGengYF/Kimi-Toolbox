@@ -97,20 +97,20 @@ class TestTodoListOutputNotEmpty:
         read = await todo_list_tool(Params(todos=None))
         assert "[done] Old task" in read.output
 
-    async def test_write_empty_list_clears_todos_when_overwrite(self, todo_list_tool: TodoList):
-        """Passing an empty list [] with mode='force_overwrite' clears all todos."""
+    async def test_write_empty_list_replaces_with_force(self, todo_list_tool: TodoList):
+        """Passing an empty list [] with mode='replace' + force=True clears all todos."""
         # Write some todos first
         write_params = Params(todos=[Todo(title="Task A", status="pending", notes="")])
         await todo_list_tool(write_params)
 
-        # Clear with empty list + overwrite mode + force
-        clear_params = Params(todos=[], mode="force_overwrite")
+        # Clear with empty list + replace mode + force
+        clear_params = Params(todos=[], mode="replace", force=True)
         result = await todo_list_tool(clear_params)
         assert not result.is_error
         assert result.output == (
-            "Todo list force overwritten (0 total: 0 done, 0 in progress, 0 pending)"
+            "Todo list replaced (0 total: 0 done, 0 in progress, 0 pending)"
         )
-        assert "mode='force_overwrite'" in result.message
+        assert "force=True" in result.message
 
         # Verify cleared
         read_params = Params(todos=None)
@@ -135,30 +135,30 @@ class TestTodoListOutputNotEmpty:
         assert "Task A" in result.output
         assert "[pending] Task A" in result.output
 
-    async def test_overwrite_without_force_when_old_not_done_errors(self, todo_list_tool: TodoList):
-        """mode='overwrite' when old todos are not all done errors."""
+    async def test_replace_without_force_when_old_not_done_errors(self, todo_list_tool: TodoList):
+        """mode='replace' when old todos are not all done errors."""
         write_params = Params(todos=[Todo(title="Task A", status="pending", notes="")])
         await todo_list_tool(write_params)
 
-        overwrite_params = Params(
-            todos=[Todo(title="New task", status="pending", notes="")], mode="overwrite"
+        replace_params = Params(
+            todos=[Todo(title="New task", status="pending", notes="")], mode="replace"
         )
-        result = await todo_list_tool(overwrite_params)
+        result = await todo_list_tool(replace_params)
         assert result.is_error
-        assert "Cannot overwrite todos" in result.output
+        assert "Cannot replace todos" in result.output
         assert "Task A" in result.output
 
-    async def test_overwrite_without_force_when_all_old_done_succeeds(
+    async def test_replace_without_force_when_all_old_done_succeeds(
         self, todo_list_tool: TodoList
     ):
-        """mode='overwrite' succeeds when all old todos are done."""
+        """mode='replace' succeeds when all old todos are done."""
         write_params = Params(todos=[Todo(title="Task A", status="done", notes="")])
         await todo_list_tool(write_params)
 
-        overwrite_params = Params(
-            todos=[Todo(title="New task", status="pending", notes="")], mode="overwrite"
+        replace_params = Params(
+            todos=[Todo(title="New task", status="pending", notes="")], mode="replace"
         )
-        result = await todo_list_tool(overwrite_params)
+        result = await todo_list_tool(replace_params)
         assert not result.is_error
         assert "New task" in str(result.display)
         assert "Task A" not in str(result.display)
@@ -269,23 +269,24 @@ class TestTodoListActiveSummary:
         assert "All todos are done." in result.output
         assert "All todos are done." in result.message
 
-    async def test_write_summary_with_overwrite_warning(self, todo_list_tool: TodoList):
-        """Warning from mode='force_overwrite' is in message; active summary is in output."""
+    async def test_write_summary_with_force_warning(self, todo_list_tool: TodoList):
+        """Warning from force=True is in message; active summary is in output."""
         await todo_list_tool(Params(todos=[Todo(title="Old task", status="pending", notes="")]))
         params = Params(
             todos=[
                 Todo(title="Forced pending", status="pending", notes=""),
                 Todo(title="Forced in progress", status="in_progress", notes=""),
             ],
-            mode="force_overwrite",
+            mode="replace",
+            force=True,
         )
         result = await todo_list_tool(params)
         assert not result.is_error
-        assert result.output.startswith("Todo list force overwritten")
+        assert result.output.startswith("Todo list replaced")
         assert "- [pending] Forced pending" in result.output
         assert "- [in progress] Forced in progress" in result.output
         assert "mode" not in result.output
-        assert "mode='force_overwrite'" in result.message
+        assert "force=True" in result.message
 
     async def test_write_summary_order_matches_persisted_order(self, todo_list_tool: TodoList):
         """Active todos are listed in the exact order they appear after the write."""
@@ -452,15 +453,15 @@ class TestTodoListValidation:
         assert result.is_error
         assert "exceeds maximum limit of 4096" in result.output
 
-    async def test_overwrite_outputs_warning(self, todo_list_tool: TodoList):
-        """mode='force_overwrite' should include a warning in the message."""
+    async def test_replace_with_force_outputs_warning(self, todo_list_tool: TodoList):
+        """force=True on mode='replace' should include a warning in the message."""
         await todo_list_tool(Params(todos=[Todo(title="Old task", status="pending", notes="")]))
         params = Params(
-            todos=[Todo(title="Task", status="pending", notes="")], mode="force_overwrite"
+            todos=[Todo(title="Task", status="pending", notes="")], mode="replace", force=True
         )
         result = await todo_list_tool(params)
         assert not result.is_error
-        assert "mode='force_overwrite'" in result.message
+        assert "force=True" in result.message
 
     async def test_status_regression_blocked(self, todo_list_tool: TodoList):
         """Changing a done todo back to pending/in_progress should be blocked."""
@@ -519,8 +520,8 @@ class TestTodoListNewListValidation:
         assert "New task" in read_result.output
         assert "Old task" in read_result.output
 
-    async def test_overwrite_bypasses_validation(self, todo_list_tool: TodoList):
-        """mode='force_overwrite' should bypass the incomplete-todo check."""
+    async def test_replace_with_force_bypasses_validation(self, todo_list_tool: TodoList):
+        """mode='replace' + force=True should bypass the incomplete-todo check."""
         await todo_list_tool(
             Params(
                 todos=[
@@ -533,7 +534,8 @@ class TestTodoListNewListValidation:
         result = await todo_list_tool(
             Params(
                 todos=[Todo(title="New task", status="done", notes="")],
-                mode="force_overwrite",
+                mode="replace",
+                force=True,
             )
         )
         assert not result.is_error
@@ -1162,8 +1164,8 @@ class TestTodoListInternals:
 class TestTodoListRegression:
     """Test edge cases around status regression and overwrite mode."""
 
-    async def test_regression_allowed_with_overwrite(self, todo_list_tool: TodoList):
-        """mode='force_overwrite' allows regressing done todos."""
+    async def test_regression_allowed_with_force(self, todo_list_tool: TodoList):
+        """mode='replace' + force=True allows regressing done todos."""
         await todo_list_tool(
             Params(
                 todos=[
@@ -1179,11 +1181,12 @@ class TestTodoListRegression:
                     Todo(title="A", status="done", notes=""),
                     Todo(title="B", status="pending", notes=""),
                 ],
-                mode="force_overwrite",
+                mode="replace",
+                force=True,
             )
         )
         assert not result.is_error
-        assert "mode='force_overwrite'" in result.message
+        assert "force=True" in result.message
 
         read = await todo_list_tool(Params(todos=None))
         assert "[pending] B" in read.output
@@ -1280,9 +1283,9 @@ class TestTodoListRegression:
             )
         )
 
-        # Replace with new list using overwrite (all old todos are done)
+        # Replace with new list using replace (all old todos are done)
         result = await todo_list_tool(
-            Params(todos=[Todo(title="C", status="pending", notes="")], mode="overwrite")
+            Params(todos=[Todo(title="C", status="pending", notes="")], mode="replace")
         )
         assert not result.is_error
 
@@ -1294,31 +1297,59 @@ class TestTodoListRegression:
         assert "Archived: 2 completed todo(s)." in read.output
 
 
-class TestTodoListForceOverwriteMode:
-    """Test the force_overwrite write mode and its synonyms."""
+class TestTodoListReplaceForceMode:
+    """Test the replace write mode and its force flag (incl. legacy spellings)."""
 
-    async def test_force_overwrite_replaces_incomplete_todos(self, todo_list_tool: TodoList):
+    async def test_replace_with_force_replaces_incomplete_todos(self, todo_list_tool: TodoList):
+        await todo_list_tool(Params(todos=[Todo(title="Old task", status="pending", notes="")]))
+        result = await todo_list_tool(
+            Params(
+                todos=[Todo(title="New task", status="done", notes="")],
+                mode="replace",
+                force=True,
+            )
+        )
+        assert not result.is_error
+        assert "force=True" in result.message
+        read = await todo_list_tool(Params(todos=None))
+        assert "New task" in read.output
+        assert "Old task" not in read.output
+
+    async def test_replace_with_force_on_empty_list_no_warning(self, todo_list_tool: TodoList):
+        """When the existing todo list is empty, a force replace should not warn."""
+        result = await todo_list_tool(
+            Params(
+                todos=[Todo(title="New task", status="pending", notes="")],
+                mode="replace",
+                force=True,
+            )
+        )
+        assert not result.is_error
+        assert "force_overwrite" not in result.message
+        assert "force=True" not in result.message
+        assert result.message == "Todo list replaced."
+
+    async def test_legacy_force_overwrite_mode_still_accepted(self, todo_list_tool: TodoList):
+        """Legacy mode='force_overwrite' maps to mode='replace' + force=True."""
         await todo_list_tool(Params(todos=[Todo(title="Old task", status="pending", notes="")]))
         result = await todo_list_tool(
             Params(todos=[Todo(title="New task", status="done", notes="")], mode="force_overwrite")
         )
         assert not result.is_error
-        assert "mode='force_overwrite'" in result.message
+        assert "force=True" in result.message
         read = await todo_list_tool(Params(todos=None))
         assert "New task" in read.output
         assert "Old task" not in read.output
 
-
-    async def test_force_overwrite_on_empty_list_no_warning(self, todo_list_tool: TodoList):
-        """When the existing todo list is empty, force_overwrite should not warn."""
+    async def test_legacy_overwrite_mode_maps_to_replace(self, todo_list_tool: TodoList):
+        """Legacy mode='overwrite' maps to replace (all-done guard preserved)."""
+        # Unfinished old todos block the legacy overwrite spelling.
+        await todo_list_tool(Params(todos=[Todo(title="Old task", status="pending", notes="")]))
         result = await todo_list_tool(
-            Params(
-                todos=[Todo(title="New task", status="pending", notes="")], mode="force_overwrite"
-            )
+            Params(todos=[Todo(title="New task", status="done", notes="")], mode="overwrite")
         )
-        assert not result.is_error
-        assert "force_overwrite" not in result.message
-        assert result.message == "Todo list force overwritten."
+        assert result.is_error
+        assert "Cannot replace todos" in result.output
 
 
 class TestTodoListCallingJsonString:
@@ -1509,15 +1540,16 @@ class TestTodoListInProgressConstraint:
         )
         assert not result.is_error
 
-    async def test_force_overwrite_bypasses_constraint(self, todo_list_tool: TodoList):
-        """force_overwrite mode should bypass the single in_progress constraint."""
+    async def test_force_bypasses_single_in_progress(self, todo_list_tool: TodoList):
+        """force=True should bypass the single in_progress constraint."""
         result = await todo_list_tool(
             Params(
                 todos=[
                     Todo(title="X", status="in_progress", notes=""),
                     Todo(title="Y", status="in_progress", notes=""),
                 ],
-                mode="force_overwrite",
+                mode="replace",
+                force=True,
             )
         )
         assert not result.is_error
@@ -1535,7 +1567,7 @@ class TestTodoListActionableErrors:
         assert result.is_error
         assert "Cannot regress completed todos" in result.output
         assert "Next step:" in result.output
-        assert "mode='force_overwrite'" in result.output
+        assert "force=True" in result.output
 
     async def test_clear_error_contains_next_step(self, todo_list_tool: TodoList):
         await todo_list_tool(Params(todos=[Todo(title="A", status="pending", notes="")]))
@@ -1544,7 +1576,7 @@ class TestTodoListActionableErrors:
         assert result.is_error
         assert "Cannot clear todos" in result.output
         assert "Next step:" in result.output
-        assert "mode='force_overwrite'" in result.output
+        assert "force=True" in result.output
 
 
 class TestTodoListReadTruncation:
@@ -1552,7 +1584,7 @@ class TestTodoListReadTruncation:
 
     async def test_read_truncates_after_100_items(self, todo_list_tool: TodoList):
         todos = [Todo(title=f"Task {i:03d}", status="pending", notes="") for i in range(150)]
-        await todo_list_tool(Params(todos=todos, mode="force_overwrite"))
+        await todo_list_tool(Params(todos=todos, mode="replace", force=True))
 
         result = await todo_list_tool(Params(todos=None))
         assert not result.is_error
@@ -1564,7 +1596,7 @@ class TestTodoListReadTruncation:
 
     async def test_read_no_truncation_at_100_items(self, todo_list_tool: TodoList):
         todos = [Todo(title=f"Task {i:03d}", status="pending", notes="") for i in range(100)]
-        await todo_list_tool(Params(todos=todos, mode="force_overwrite"))
+        await todo_list_tool(Params(todos=todos, mode="replace", force=True))
 
         result = await todo_list_tool(Params(todos=None))
         assert not result.is_error
@@ -1574,9 +1606,9 @@ class TestTodoListReadTruncation:
 
 
 class TestTodoListArchive:
-    """Tests for auto-archiving of completed todos on overwrite/clear."""
+    """Tests for auto-archiving of completed todos on replace/clear."""
 
-    async def test_overwrite_archives_done_todos(self, todo_list_tool: TodoList):
+    async def test_replace_archives_done_todos(self, todo_list_tool: TodoList):
         await todo_list_tool(
             Params(
                 todos=[
@@ -1587,7 +1619,7 @@ class TestTodoListArchive:
         )
 
         result = await todo_list_tool(
-            Params(todos=[Todo(title="Fresh", status="pending", notes="")], mode="overwrite")
+            Params(todos=[Todo(title="Fresh", status="pending", notes="")], mode="replace")
         )
         assert not result.is_error
 
@@ -1605,7 +1637,7 @@ class TestTodoListArchive:
         assert "empty" in read.output.lower()
         assert "Archived: 1 completed todo(s)." in read.output
 
-    async def test_force_overwrite_archives_only_dropped_done_todos(
+    async def test_force_replace_archives_only_dropped_done_todos(
         self, todo_list_tool: TodoList
     ):
         await todo_list_tool(
@@ -1621,7 +1653,8 @@ class TestTodoListArchive:
         result = await todo_list_tool(
             Params(
                 todos=[Todo(title="Done kept", status="pending", notes="")],
-                mode="force_overwrite",
+                mode="replace",
+                force=True,
             )
         )
         assert not result.is_error
@@ -1643,10 +1676,10 @@ class TestTodoListArchive:
 
     async def test_archive_capped_at_500(self, todo_list_tool: TodoList):
         todos = [Todo(title=f"Old {i}", status="done", notes="") for i in range(550)]
-        await todo_list_tool(Params(todos=todos, mode="force_overwrite"))
+        await todo_list_tool(Params(todos=todos, mode="replace", force=True))
 
         result = await todo_list_tool(
-            Params(todos=[Todo(title="Fresh", status="pending", notes="")], mode="overwrite")
+            Params(todos=[Todo(title="Fresh", status="pending", notes="")], mode="replace")
         )
         assert not result.is_error
 

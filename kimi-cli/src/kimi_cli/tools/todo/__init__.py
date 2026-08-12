@@ -32,9 +32,9 @@ _TODOLIST_DESCRIPTION = (
     "NOTE: TodoList writes only match root-level titles. Titles inside the active stack scope (children) are "
     "NOT updated by this tool — use TodoSub to add or edit items under the current parent. "
     "Passing todos=[] is a no-op (list unchanged); use mode='clear' to empty the list.\n"
-    "mode='overwrite' replaces the list only when every existing todo is done; "
-    "mode='force_overwrite' replaces the list unconditionally; "
-    "mode='clear' empties the list (errors unless every old todo is done).\n"
+    "mode='replace' replaces the list only when every existing todo is done (errors otherwise); "
+    "set force=True to replace unconditionally; "
+    "mode='clear' empties the list (errors unless every old todo is done, or force=True).\n"
     "Keep exactly one item in_progress at a time and mark items done immediately after finishing them.\n"
     "When a todo stack is active (a parent was pushed), the tree is shown with a `Stack:` breadcrumb — "
     "use TodoSub to add or edit items under the current parent and TodoPop to finish it."
@@ -81,10 +81,11 @@ _TODOLIST_SUCCESS_HINT = (
 )
 
 # Mode map — only canonical values accepted
-_MODE_MAP: dict[str, Literal["overwrite", "append", "force_overwrite", "clear"]] = {
-    "overwrite": "overwrite",
+_MODE_MAP: dict[str, Literal["append", "replace", "clear"]] = {
     "append": "append",
-    "force_overwrite": "force_overwrite",
+    "replace": "replace",
+    # Legacy spelling: 'overwrite' is the old name for replace-with-all-done-guard.
+    "overwrite": "replace",
     "clear": "clear",
 }
 
@@ -174,13 +175,22 @@ class Params(BaseModel):
         "Passing an empty list [] is a no-op (use mode='clear' to empty the list). "
         + alias_note("todos", "items", word=False),
     )
-    mode: Literal["overwrite", "append", "force_overwrite", "clear"] = Field(
+    mode: Literal["append", "replace", "clear"] = Field(
         default="append",
         description=(
-            "Write mode: 'overwrite' safely replaces the existing todo list only when all old todos are done; "
-            "'append' merges the provided todos into the existing list (existing root titles are updated, new titles are appended; empty list is a no-op); "
-            "'force_overwrite' replaces the existing todo list unconditionally; "
-            "'clear' empties the list (errors unless all old todos are done)."
+            "Write mode: 'append' merges the provided todos into the existing list "
+            "(existing root titles are updated, new titles are appended; empty list is a no-op); "
+            "'replace' replaces the existing todo list only when every existing todo is done "
+            "(errors otherwise); 'clear' empties the list (errors unless every old todo is done). "
+            "Set force=True to replace or clear even with unfinished todos."
+        ),
+    )
+    force: bool = Field(
+        default=False,
+        description=(
+            "When True, mode='replace' and mode='clear' bypass the all-done guard "
+            "(and skip regression and single-in_progress checks). "
+            "Legacy 'force_overwrite' mode maps to mode='replace' with force=True."
         ),
     )
     match_mode: Literal["exact", "fuzzy"] = Field(
@@ -202,15 +212,38 @@ class Params(BaseModel):
     def _validate_mode(cls, v: Any) -> str:
         if not isinstance(v, str):
             raise ValueError(
-                "Invalid mode. Must be 'overwrite', 'append', 'force_overwrite', or 'clear'."
+                "Invalid mode. Must be 'append', 'replace', or 'clear'."
             )
         normalized = v.strip().lower().replace("-", "_")
         canonical = _MODE_MAP.get(normalized)
         if canonical is None:
             raise ValueError(
-                f"Invalid mode '{v}'. Must be 'overwrite', 'append', 'force_overwrite', or 'clear'."
+                f"Invalid mode '{v}'. Must be 'append', 'replace', or 'clear'."
             )
         return canonical
+
+    @model_validator(mode="before")
+    @classmethod
+    def _translate_legacy_force_modes(cls, data: Any) -> Any:
+        """Translate legacy 'force_overwrite' mode spellings into replace+force.
+
+        Runs before field validation so the canonical ``mode``/``force`` values
+        reach ``_validate_mode`` and the write branches.
+        """
+        if isinstance(data, dict):
+            mode = data.get("mode")
+            if isinstance(mode, str):
+                norm = mode.strip().lower().replace("-", "_").replace(" ", "_")
+                if norm in (
+                    "force_overwrite",
+                    "force_override",
+                    "force",
+                    "forcewrite",
+                    "forceoverride",
+                ):
+                    data["mode"] = "replace"
+                    data["force"] = True
+        return data
 
     @field_validator("todos", mode="before")
     @classmethod
@@ -321,7 +354,7 @@ class TodoList(CallableTool2[Params]):
         if params.mode == "clear" and new_todos:
             return self._error(
                 "Error: mode='clear' cannot be combined with todos. "
-                "Use mode='append' or 'overwrite' to write todos, or call with no todos to read.",
+                "Use mode='append' or 'replace' to write todos, or call with no todos to read.",
                 "mode='clear' cannot be combined with todos.",
             )
 
@@ -346,34 +379,33 @@ class TodoList(CallableTool2[Params]):
         old_archived = self._load_archived_todos()
 
         # 3. Branch on write mode. ``replaces_list`` marks modes that drop old
-        # items (overwrite/force_overwrite/clear) so completed ones get archived.
+        # items (replace/clear) so completed ones get archived.
         warnings: list[str] = []
         replaces_list = False
         if params.mode == "clear":
             if old_todos and not all(t.status == "done" for t in old_todos):
-                unfinished = "\n".join(t.title for t in old_todos if t.status != "done")
-                return self._error(
-                    "Error: Cannot clear todos while old todos are not all done. "
-                    "Next step: mark them done first, "
-                    "or use mode='force_overwrite' with todos=[] to discard them intentionally.\n"
-                    f"Unfinished:\n{unfinished}",
-                    "Cannot clear todos while old todos are not all done.",
-                    display=[self._build_display_block(old_todos)],
-                )
+                if not params.force:
+                    unfinished = "\n".join(t.title for t in old_todos if t.status != "done")
+                    return self._error(
+                        "Error: Cannot clear todos while old todos are not all done. "
+                        "Next step: mark them done first, "
+                        "or call with mode='clear' and force=True to discard them intentionally.\n"
+                        f"Unfinished:\n{unfinished}",
+                        "Cannot clear todos while old todos are not all done.",
+                        display=[self._build_display_block(old_todos)],
+                    )
             final_todos = []
             replaces_list = True
-        elif params.mode == "force_overwrite":
-            final_todos = list(new_todos)
-            replaces_list = True
-        elif params.mode == "overwrite":
+        elif params.mode == "replace":
             if old_todos and not all(t.status == "done" for t in old_todos):
-                unfinished = "\n".join(t.title for t in old_todos if t.status != "done")
-                return self._error(
-                    "Error: Cannot overwrite todos while old todos are not all done. "
-                    "Use mode='force_overwrite' if you really want to discard unfinished work.\n"
-                    f"Unfinished:\n{unfinished}",
-                    "Cannot overwrite todos while old todos are not all done.",
-                )
+                if not params.force:
+                    unfinished = "\n".join(t.title for t in old_todos if t.status != "done")
+                    return self._error(
+                        "Error: Cannot replace todos while old todos are not all done. "
+                        "Use force=True if you really want to discard unfinished work.\n"
+                        f"Unfinished:\n{unfinished}",
+                        "Cannot replace todos while old todos are not all done.",
+                    )
             final_todos = list(new_todos)
             replaces_list = True
         else:  # append
@@ -400,19 +432,19 @@ class TodoList(CallableTool2[Params]):
             )
 
         # 4. Regression detection
-        if params.mode not in ("force_overwrite", "clear") and old_todos:
+        if not params.force and params.mode != "clear" and old_todos:
             final_todos, regressions = self._check_regressions(old_todos, final_todos)
             if regressions:
                 return self._error(
                     "Error: Cannot regress completed todos back to pending/in_progress: "
                     + ", ".join(regressions)
                     + "\nNext step: resend with these items kept as 'done', "
-                    "or use mode='force_overwrite' to restart them intentionally.",
+                    "or use force=True to restart them intentionally.",
                     "Cannot regress completed todos.",
                     display=[self._build_display_block(final_todos)],
                 )
 
-        # 5. Archive completed todos dropped by overwrite/force_overwrite/clear
+        # 5. Archive completed todos dropped by replace/clear
         archived = list(old_archived)
         if replaces_list and old_todos:
             kept_titles = {t.title for t in final_todos}
@@ -423,8 +455,8 @@ class TodoList(CallableTool2[Params]):
                 archived.extend(self._item_states(newly_archived))
                 archived = archived[-_MAX_ARCHIVED_TODOS:]
 
-        # 5b. Enforce single in_progress (unless auto_fix or force_overwrite)
-        if params.mode not in ("force_overwrite", "clear"):
+        # 5b. Enforce single in_progress (unless auto_fix or force)
+        if not params.force and params.mode != "clear":
             conflicts = self._enforce_single_in_progress(final_todos)
             if conflicts:
                 if params.auto_fix:
@@ -447,7 +479,7 @@ class TodoList(CallableTool2[Params]):
                         f"Error: Multiple items are in_progress: {conflicts}. "
                         "Keep exactly one item in_progress at a time. "
                         "Mark the current item as 'done' before starting another, "
-                        "use mode='force_overwrite' to override, "
+                        "use force=True to override, "
                         "or set auto_fix=True to automatically resolve conflicts.",
                         "Multiple items in_progress",
                         display=[self._build_display_block(final_todos)],
@@ -459,7 +491,9 @@ class TodoList(CallableTool2[Params]):
             return self._error(save_error, "Failed to save todos.")
 
         # 7. Build response
-        result = self._build_success_response(final_todos, params.mode, bool(old_todos), warnings)
+        result = self._build_success_response(
+            final_todos, params.mode, bool(old_todos), warnings, params.force
+        )
         return result
 
     @staticmethod
@@ -794,6 +828,7 @@ class TodoList(CallableTool2[Params]):
         mode: str,
         had_old_todos: bool,
         warnings: list[str],
+        force: bool = False,
     ) -> ToolReturnValue:
         display_block = self._build_display_block(todos)
         active_summary = self._format_todos(todos)
@@ -801,8 +836,7 @@ class TodoList(CallableTool2[Params]):
 
         mode_msg = {
             "append": "appended",
-            "overwrite": "overwritten",
-            "force_overwrite": "force overwritten",
+            "replace": "replaced",
             "clear": "cleared",
         }[mode]
 
@@ -833,9 +867,9 @@ class TodoList(CallableTool2[Params]):
         message_lines: list[str] = [f"Todo list {mode_msg}."]
         if counts["pending"] == 0 and counts["in_progress"] == 0 and len(todos) > 0:
             message_lines.append(all_done_reminder)
-        if mode == "force_overwrite" and had_old_todos:
+        if force and had_old_todos:
             message_lines.append(
-                "Warning: mode='force_overwrite' replaces the existing todo list and bypasses merge validation logic."
+                "Warning: force=True bypassed the all-done guard and replaced the existing todo list."
             )
         if counts["in_progress"] > 1:
             message_lines.append(
@@ -1399,12 +1433,22 @@ class TodoPush(TodoList):
 class TodoPopParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    complete: bool = Field(
+        default=False,
+        description=(
+            "When True, mark the current focus parent and all its sub-todos done "
+            "before popping. Default False: pop succeeds only when everything under "
+            "the focus parent is already done; otherwise it errors."
+        ),
+    )
+
 
 class TodoPop(TodoList):
     name: str = "TodoPop"
     description: str = (
-        "Pop the current focus parent: mark it and all its sub-todos done and "
-        "return to the parent scope."
+        "Pop the current focus parent and return to the parent scope. "
+        "Errors when the focus parent or any sub-todo is unfinished, unless "
+        "complete=True (marks them all done first)."
     )
     params: type[TodoPopParams] = TodoPopParams
 
@@ -1443,6 +1487,24 @@ class TodoPop(TodoList):
         unfinished = self._count_unfinished_descendants(node)
         if node.status != "done":
             unfinished += 1
+
+        # Pure scope-exit guard: popping must not silently complete unfinished work.
+        if unfinished and not params.complete:
+            hint = (
+                f'"{popped_title}" has {unfinished} unfinished item(s). '
+                "Finish them with TodoSub, or call TodoPop with complete=True "
+                "to mark them done and pop."
+            )
+            return ToolError(
+                message=f'Cannot pop "{popped_title}": {unfinished} unfinished item(s).',
+                brief="Finish them or pass complete=True.",
+                output=(
+                    f'Error: Cannot pop "{popped_title}" — {unfinished} unfinished item(s).\n'
+                    f"Stack: {' > '.join(healed_stack)}"
+                    + _hint_error(hint)
+                ),
+            )
+
         self._mark_subtree_done(node)
         n = self._count_all([node])
         new_stack = healed_stack[:-1]
@@ -1465,16 +1527,19 @@ class TodoPop(TodoList):
             )
 
         render = self._render_scope(todos, new_stack)
-        output = (
-            render
-            + "\n"
-            + f'Popped "{popped_title}" — {n} sub-todo(s) marked done.'
-        )
+        if params.complete:
+            output = (
+                render
+                + "\n"
+                + f'Popped "{popped_title}" — {n} sub-todo(s) marked done.'
+            )
+        else:
+            output = render + "\n" + f'Popped "{popped_title}".'
         if unfinished:
             output += (
                 f'\nNote: "{popped_title}" had {unfinished} unfinished item(s) — '
                 "all marked done. Use TodoSub with force=True or TodoList "
-                "mode='force_overwrite' to reopen if that was a mistake."
+                "mode='replace' with force=True to reopen if that was a mistake."
             )
         output += _hint_next("TodoPush to start the next parent, or TodoList to read the tree.")
         if warnings:
@@ -1605,7 +1670,7 @@ class TodoSub(TodoList):
             if existing.status == "done" and new_status != "done" and not params.force:
                 hint = (
                     f'Use TodoSub "{title}" with force=True to reopen a done item, '
-                    "or TodoList with mode='force_overwrite' to restart the whole list."
+                    "or TodoList with mode='replace' and force=True to restart the whole list."
                 )
                 return ToolError(
                     message=f'Cannot regress completed todo "{title}" back to {new_status}.',

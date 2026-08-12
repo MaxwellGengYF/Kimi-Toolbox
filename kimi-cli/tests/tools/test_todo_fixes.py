@@ -7,7 +7,8 @@ Covers the fixes applied to kimi_cli.tools.todo:
 2. mode='clear' is explicit; an empty todos=[] in append mode is a no-op.
 3. TodoList writes merge root-level titles only, and warn (non-blocking) when
    a new root title already exists deeper in the tree.
-4. TodoPop warns when it marks unfinished items done.
+4. TodoPop errors on an unfinished scope unless complete=True; with
+   complete=True it marks the focus subtree done.
 5. Maximum tree nesting depth (todo_max_layers + 1) is enforced at write time.
 
 Mirrors test_todo_stack.py style: async tests with the ``runtime`` fixture;
@@ -134,12 +135,12 @@ class TestTodoSubStatusPreservationAndRegression:
 
 
 # ---------------------------------------------------------------------------
-# Fix 4: TodoPop warns when it marks unfinished items done
+# Fix 4: TodoPop errors on unfinished scope unless complete=True
 # ---------------------------------------------------------------------------
 
 
-class TestTodoPopUnfinishedWarning:
-    async def test_pop_warns_when_marking_unfinished_items(self, runtime: Runtime) -> None:
+class TestTodoPopCompleteGuard:
+    async def test_pop_without_complete_errors_on_unfinished(self, runtime: Runtime) -> None:
         push = TodoPush(runtime)
         sub = TodoSub(runtime)
         pop = TodoPop(runtime)
@@ -148,6 +149,25 @@ class TestTodoPopUnfinishedWarning:
         await sub(TodoSubParams(title="c2", status="in_progress"))
 
         res = await pop(TodoPopParams())
+        assert res.is_error
+        assert "unfinished" in res.output
+        assert "complete=True" in res.output
+        assert "Finish them" in res.output
+        # State unchanged: nothing was marked done, stack still on Parent.
+        assert pop._load_stack() == ["Parent"]
+        parent = _read_root_todo(pop, "Parent")
+        assert parent.status == "pending"
+        assert [c.status for c in parent.children] == ["pending", "in_progress"]
+
+    async def test_pop_with_complete_marks_unfinished_items(self, runtime: Runtime) -> None:
+        push = TodoPush(runtime)
+        sub = TodoSub(runtime)
+        pop = TodoPop(runtime)
+        await push(TodoPushParams(title="Parent"))
+        await sub(TodoSubParams(title="c1"))  # pending
+        await sub(TodoSubParams(title="c2", status="in_progress"))
+
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert "Note:" in res.output
         assert "had 3 unfinished item(s)" in res.output
@@ -168,7 +188,8 @@ class TestTodoPopUnfinishedWarning:
 
         res = await pop(TodoPopParams())
         assert not res.is_error
-        assert 'Popped "Parent" — 3 sub-todo(s) marked done.' in res.output
+        assert 'Popped "Parent".' in res.output
+        assert "marked done" not in res.output
         assert "Note:" not in res.output
 
 
@@ -211,12 +232,20 @@ class TestTodoListClearModeAndNoop:
         # Display block reflects the current (unchanged) state.
         assert len(res.display) == 1
 
-    async def test_clear_error_names_force_overwrite_escape_hatch(self, runtime: Runtime) -> None:
+    async def test_clear_error_names_force_escape_hatch(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         await lst(Params(todos=[Todo(title="A", status="pending")]))
         res = await lst(Params(todos=[], mode="clear"))
         assert res.is_error
-        assert "mode='force_overwrite'" in res.output
+        assert "force=True" in res.output
+
+    async def test_clear_with_force_discards_unfinished(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        await lst(Params(todos=[Todo(title="A", status="pending")]))
+        res = await lst(Params(todos=[], mode="clear", force=True))
+        assert not res.is_error
+        read = await lst(Params(todos=None))
+        assert "empty" in read.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +384,7 @@ class TestTodoListDepthCap:
         assert res.is_error
         assert "maximum nesting depth of 2 levels" in res.output
 
-    async def test_depth_cap_applies_to_force_overwrite(self, runtime: Runtime) -> None:
+    async def test_depth_cap_applies_to_replace_with_force(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         deep = Todo(
             title="L1",
@@ -386,7 +415,7 @@ class TestTodoListDepthCap:
                 )
             ],
         )
-        res = await lst(Params(todos=[deep], mode="force_overwrite"))
+        res = await lst(Params(todos=[deep], mode="replace", force=True))
         assert res.is_error
         assert "maximum nesting depth" in res.output
 

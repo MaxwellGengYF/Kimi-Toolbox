@@ -610,9 +610,10 @@ VALUE_ALIASES_CHAT_ROLE: dict[str, str] = {
     "fail": "error",
 }
 
-# --- Mode: overwrite / append / force_overwrite ---
+# --- Mode: overwrite / append / replace(+force) ---
 # sources:
-#   kimi_cli/tools/todo/__init__.py:147 (Literal["overwrite", "append", "force_overwrite"])
+#   kimi_cli/tools/todo/__init__.py (mode Literal["append", "replace", "clear"] + force flag;
+#     legacy "overwrite" → "replace", "force_overwrite" → mode='replace' force=True)
 #   src/kimix/tools/note/__init__.py:36 (Literal["overwrite", "append"])
 #   kimi_cli/tools/file/write.py:73 (Literal["overwrite", "append"])
 VALUE_ALIASES_OVERWRITE_MODE: dict[str, str] = {

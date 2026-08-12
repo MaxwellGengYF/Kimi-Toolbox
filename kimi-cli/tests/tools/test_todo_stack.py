@@ -4,7 +4,7 @@ Phase 10 of the "TodoList Stack & Tree Structure" plan:
 
 - TodoPush: push a parent onto the stack scope (breadcrumb), depth limits.
 - TodoSub: add / update / rename children under the current scope.
-- TodoPop: mark the focus subtree done and ascend.
+- TodoPop: pop the focus subtree (errors when unfinished unless complete=True).
 - Stack persistence (root + subagent), auto-heal of broken stacks.
 - format_todo_injection stack breadcrumb + tree indentation.
 - TodoReminderProvider signature sensitivity to stack / child changes.
@@ -304,7 +304,7 @@ class TestTodoPop:
         await push(TodoPushParams(title="Child"))
         await sub(TodoSubParams(title="grand"))
 
-        res = await pop(TodoPopParams())
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert 'Popped "Child" — 2 sub-todo(s) marked done.' in res.output
         assert "Next: TodoPush to start the next parent, or TodoList to read the tree." in res.output
@@ -330,7 +330,7 @@ class TestTodoPop:
         await sub(TodoSubParams(title="c1"))
         await sub(TodoSubParams(title="c2"))
 
-        res = await pop(TodoPopParams())
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert 'Popped "Parent" — 3 sub-todo(s) marked done.' in res.output
         assert pop._load_stack() == []
@@ -351,7 +351,7 @@ class TestTodoPop:
         pop = TodoPop(runtime)
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
-        await lst(Params(todos=[Todo(title="Z", status="pending")], mode="force_overwrite"))
+        await lst(Params(todos=[Todo(title="Z", status="pending")], mode="replace", force=True))
 
         res = await pop(TodoPopParams())
         assert res.is_error
@@ -414,8 +414,10 @@ class TestAutoHeal:
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
         await push(TodoPushParams(title="B"))
-        # Remove B (a child of A) via force_overwrite — A becomes a leaf.
-        await lst(Params(todos=[Todo(title="A", status="pending")], mode="force_overwrite"))
+        # Remove B (a child of A) via replace+force — A becomes a leaf.
+        await lst(
+            Params(todos=[Todo(title="A", status="pending")], mode="replace", force=True)
+        )
 
         res = await push(TodoPushParams(title="C"))
         assert not res.is_error
@@ -431,7 +433,9 @@ class TestAutoHeal:
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
         await push(TodoPushParams(title="B"))
-        await lst(Params(todos=[Todo(title="A", status="pending")], mode="force_overwrite"))
+        await lst(
+            Params(todos=[Todo(title="A", status="pending")], mode="replace", force=True)
+        )
 
         res = await sub(TodoSubParams(title="new child"))
         assert not res.is_error
@@ -445,9 +449,11 @@ class TestAutoHeal:
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
         await push(TodoPushParams(title="B"))
-        await lst(Params(todos=[Todo(title="A", status="pending")], mode="force_overwrite"))
+        await lst(
+            Params(todos=[Todo(title="A", status="pending")], mode="replace", force=True)
+        )
 
-        res = await pop(TodoPopParams())
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert "Todo stack healed" in res.output
         assert 'Popped "A" — 1 sub-todo(s) marked done.' in res.output
@@ -459,7 +465,9 @@ class TestAutoHeal:
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
         # Replace the entire root list, dropping A entirely.
-        await lst(Params(todos=[Todo(title="Z", status="pending")], mode="force_overwrite"))
+        await lst(
+            Params(todos=[Todo(title="Z", status="pending")], mode="replace", force=True)
+        )
 
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
@@ -470,7 +478,9 @@ class TestAutoHeal:
         push = TodoPush(runtime)
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
-        await lst(Params(todos=[Todo(title="Z", status="pending")], mode="force_overwrite"))
+        await lst(
+            Params(todos=[Todo(title="Z", status="pending")], mode="replace", force=True)
+        )
 
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
@@ -547,7 +557,7 @@ class TestPersistenceRoundTrip:
         await sub(TodoSubParams(title="c1"))
         await sub(TodoSubParams(title="c2", status="in_progress"))
 
-        res = await pop(TodoPopParams())
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert 'Popped "S" — 3 sub-todo(s) marked done.' in res.output
         assert pop._load_stack() == []
@@ -843,7 +853,7 @@ class TestCrossToolHints:
         push = TodoPush(runtime)
         pop = TodoPop(runtime)
         await push(TodoPushParams(title="A"))
-        res = await pop(TodoPopParams())
+        res = await pop(TodoPopParams(complete=True))
         assert not res.is_error
         assert "Next: TodoPush to start the next parent, or TodoList to read the tree." in res.output
 
@@ -887,7 +897,9 @@ class TestCrossToolHints:
         push = TodoPush(runtime)
         lst = TodoList(runtime)
         await push(TodoPushParams(title="A"))
-        await lst(Params(todos=[Todo(title="Z", status="pending")], mode="force_overwrite"))
+        await lst(
+            Params(todos=[Todo(title="Z", status="pending")], mode="replace", force=True)
+        )
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
         assert "TodoList" in res.brief
