@@ -777,6 +777,51 @@ def _reflection_context_stats(session: Any) -> str:
     return 'visible above'
 
 
+def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path, kimi_cli_tools_dir: Path) -> str:
+    """Return the exact file path of every builtin tool, one tool per line.
+
+    Mirrors the worker tool manifest in ``src/kimix/agent_worker.json``
+    (``kimix.tools.*`` and ``kimi_cli.tools.*``). Paths are relative to the
+    repo root (e.g. ``src/kimix/tools/file/bash/bash_tool.py``) so the
+    reflection agent can edit the precise source file.
+    """
+
+    def rel(p: Path) -> str:
+        try:
+            return p.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            return p.resolve().as_posix()
+
+    tools: list[tuple[str, Path]] = [
+        ('Bash', kimix_tools_dir / 'file' / 'bash' / 'bash_tool.py'),
+        ('Powershell', kimix_tools_dir / 'file' / 'bash' / 'pwsh_tool.py'),
+        ('Run', kimix_tools_dir / 'file' / 'run.py'),
+        ('Python', kimix_tools_dir / 'py' / '__init__.py'),
+        ('TaskOutput', kimix_tools_dir / 'background' / '__init__.py'),
+        ('TodoList', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('TodoPush', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('TodoPop', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('TodoSub', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('Retrieve', kimi_cli_tools_dir / 'memory' / '__init__.py'),
+        ('ReadFile', kimi_cli_tools_dir / 'file' / 'read.py'),
+        ('ReadMediaFile', kimi_cli_tools_dir / 'file' / 'read_media.py'),
+        ('EditFile', kimi_cli_tools_dir / 'file' / 'replace.py'),
+        ('WriteFile', kimi_cli_tools_dir / 'file' / 'write.py'),
+        ('Agent', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('AskAgent', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('AgentList', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('AgentClose', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('AgentSwarm', kimix_tools_dir / 'swarm' / '__init__.py'),
+        ('Glob', kimi_cli_tools_dir / 'file' / 'glob.py'),
+        ('Grep', kimi_cli_tools_dir / 'file' / 'grep_local.py'),
+        ('FetchURL', kimix_tools_dir / 'web' / 'fetch_url.py'),
+        ('SearchWeb', kimi_cli_tools_dir / 'web' / 'search.py'),
+        ('ContextUsage', kimix_tools_dir / 'context' / '__init__.py'),
+        ('Compact', kimix_tools_dir / 'context' / '__init__.py'),
+    ]
+    return '\n'.join(f'- `{name}` — `{rel(path)}`' for name, path in tools)
+
+
 def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -> str:
     """Build the /reflection prompt embedding source paths, AGENTS.md and rules."""
     agent_src = Path(__file__).resolve().parent.parent          # ...\src\kimix
@@ -796,6 +841,7 @@ def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -
     if report_path is None:
         report_path = repo_root / 'docs' / f'reflection_report_{pendulum.now().format("YYYYMMDD_HHMMSS")}.md'
     context_stats = _reflection_context_stats(session)
+    builtin_tools = _builtin_tools_listing(repo_root, kimix_tools_dir, kimi_cli_tools_dir)
     return f'''# Reflection Task
 
 Reflect on the conversation context above. Find misunderstandings caused by the
@@ -807,6 +853,10 @@ current agent design, then change the source code to make this project better.
   - `{kimix_tools_dir}`
   - `{kimi_cli_tools_dir}`
 - Current context: {context_stats} (full conversation is visible above)
+
+## Builtin tools (exact file paths)
+Every builtin tool and the exact file where its implementation lives:
+{builtin_tools}
 
 ## Architecture map (source of truth)
 - System prompt: `{system_prompt_path}` — builds the per-role system prompt as
