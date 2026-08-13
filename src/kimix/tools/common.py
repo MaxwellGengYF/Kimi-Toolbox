@@ -396,21 +396,26 @@ def _original_saved_message(original_path: str | None) -> str:
     return f"[original saved to {_display_temp_path(original_path)}]"
 
 
-def _command_saved_message(command: str, ext: str) -> str:
+def _command_saved_message(command: str, ext: str, tool_name: str) -> str:
     """Save a failed *command* to a temp script file when it is long.
 
     Commands longer than 50 characters are written to the shared temp folder
     (via :func:`_create_script_file`) with the shell-appropriate extension
     (``.sh`` / ``.ps1``) so the failing command can be inspected or re-run
     directly from the returned path.  Returns a short suffix like
-    ``[command saved to .kimix_cache/tmp_<pid>/0.sh]``, or ``""`` for empty
+    ``[command saved to .kimix_cache/tmp_<pid>/0.sh] Edit the saved script and
+    run it again with this tool (<tool_name>) to retry.``, or ``""`` for empty
     or short commands (saving them adds no value).  Callers append the result
     to the tool ``message`` unconditionally.
     """
     if not command or len(command) <= 50:
         return ""
     script_path = _create_script_file(command, ext=ext)
-    return f"[command saved to {_display_temp_path(script_path)}]"
+    saved = f"[command saved to {_display_temp_path(script_path)}]"
+    return (
+        f"{saved} Edit the saved script and run it again with this tool"
+        f" ({tool_name}) to retry."
+    )
 
 
 def _maybe_export_output(output: str, key: Path | None = None) -> str:

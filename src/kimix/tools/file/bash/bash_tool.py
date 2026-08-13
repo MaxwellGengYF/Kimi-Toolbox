@@ -864,7 +864,7 @@ class Bash(CallableTool2[BashParams]):
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             # Long failing commands are preserved as a re-runnable `.sh` script
             # in the shared temp folder so the exact source is never lost.
-            cmd_suffix = _command_saved_message(params.cmd, ".sh")
+            cmd_suffix = _command_saved_message(params.cmd, ".sh", "Bash")
             if cmd_suffix:
                 msg = f"{msg} {cmd_suffix}"
             if suffix:

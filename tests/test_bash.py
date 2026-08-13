@@ -4926,9 +4926,10 @@ class TestBashFailedCommandSaved:
             result = await bash_instance(BashParams(cmd=long_cmd))
         assert isinstance(result, ToolError)
         assert "[command saved to .kimix_cache/tmp_" in result.message
-        assert result.message.rstrip("]").endswith(".sh")
-        saved = result.message.split("[command saved to ", 1)[1].rstrip("]")
+        saved = result.message.split("[command saved to ", 1)[1].split("]", 1)[0]
+        assert saved.endswith(".sh")
         assert Path(saved).read_text(encoding="utf-8") == long_cmd
+        assert "Edit the saved script and run it again with this tool (bash) to retry." in result.message
 
     async def test_short_failed_command_not_saved(self, bash_instance: Bash) -> None:
         process_task = self._failed_process_task()
@@ -4996,9 +4997,10 @@ class TestPowershellFailedCommandSaved:
             result = await pwsh_instance(PowershellParams(cmd=long_cmd))
         assert isinstance(result, ToolError)
         assert "[command saved to .kimix_cache/tmp_" in result.message
-        assert result.message.rstrip("]").endswith(".ps1")
-        saved = result.message.split("[command saved to ", 1)[1].rstrip("]")
+        saved = result.message.split("[command saved to ", 1)[1].split("]", 1)[0]
+        assert saved.endswith(".ps1")
         assert Path(saved).read_text(encoding="utf-8") == long_cmd
+        assert "Edit the saved script and run it again with this tool (powershell) to retry." in result.message
 
     async def test_short_failed_command_not_saved(
         self, pwsh_instance: Powershell

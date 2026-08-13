@@ -577,7 +577,7 @@ class Powershell(CallableTool2[PowershellParams]):
             msg += transform_warning
             # Long failing commands are preserved as a re-runnable `.ps1` script
             # in the shared temp folder so the exact source is never lost.
-            cmd_suffix = _command_saved_message(params.cmd, ".ps1")
+            cmd_suffix = _command_saved_message(params.cmd, ".ps1", "PowerShell")
             if cmd_suffix:
                 msg = f"{msg} {cmd_suffix}"
             if suffix:
