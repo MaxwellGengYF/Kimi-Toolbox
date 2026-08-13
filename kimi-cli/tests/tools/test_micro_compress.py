@@ -477,6 +477,69 @@ def test_near_duplicate_collapse_idempotent():
     assert once == twice
 
 
+def test_near_duplicate_collapse_preserves_distinct_identifier_rows():
+    """Distinct identifier rows must survive: the ``a→b`` marker would be a
+    misleading range when the intermediate values are absent, and the model
+    needs the individual values (e.g. duplicate P-numbers during a merge)."""
+    lines = [
+        "P-022: 2 occurrences",
+        "P-053: 2 occurrences",
+        "P-055: 2 occurrences",
+        "P-056: 2 occurrences",
+        "P-057: 2 occurrences",
+    ]
+    text = "\n".join(lines)
+    result = near_duplicate_collapse(text, kind="log")
+    assert result == text
+    assert "near-dup" not in result
+
+
+def test_near_duplicate_collapse_preserves_non_contiguous_numeric_ids():
+    """Numeric fields that skip values are identifiers, not counters."""
+    lines = [f"ID {i} active" for i in [5, 8, 11, 14, 17]]
+    text = "\n".join(lines)
+    result = near_duplicate_collapse(text, kind="log")
+    assert result == text
+
+
+def test_near_duplicate_collapse_counter_decreasing():
+    """A monotonic decreasing counter is still a safe range collapse."""
+    lines = [f"Countdown {i} seconds" for i in range(10, 2, -1)]
+    text = "\n".join(lines)
+    result = near_duplicate_collapse(text, kind="log")
+    assert "near-dup" in result
+
+
+def test_near_duplicate_collapse_preserves_multiple_varying_fields():
+    """Runs where more than one numeric field varies are not a simple counter
+    (each line is a distinct entry) and must be preserved."""
+    lines = [
+        "row 1 of 10",
+        "row 2 of 20",
+        "row 3 of 30",
+        "row 4 of 40",
+        "row 5 of 50",
+    ]
+    text = "\n".join(lines)
+    result = near_duplicate_collapse(text, kind="log")
+    assert result == text
+
+
+def test_near_duplicate_collapse_preserves_non_numeric_variation():
+    """Near-duplicate lines that differ in a non-numeric token (e.g. file
+    names) are distinct entries, not counters."""
+    lines = [
+        "changed: foo.py",
+        "changed: bar.py",
+        "changed: baz.py",
+        "changed: qux.py",
+        "changed: quux.py",
+    ]
+    text = "\n".join(lines)
+    result = near_duplicate_collapse(text, kind="log")
+    assert result == text
+
+
 # ---------------------------------------------------------------------------
 # Stage 9 — elide_low_value_content (opt-in)
 # ---------------------------------------------------------------------------

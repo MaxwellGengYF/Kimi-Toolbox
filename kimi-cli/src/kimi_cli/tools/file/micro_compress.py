@@ -612,8 +612,14 @@ def near_duplicate_collapse(
 ) -> str:
     """Collapse runs of ≥ *min_run* adjacent near-duplicate lines.
 
-    Lines differing only in a small counter/numeric field → first line +
-    ``[×k near-dup, fieldN a→b]``.
+    Lines differing only in a small **contiguous counter** field → first line +
+    ``[×k near-dup, fieldN a→b]``.  The ``a→b`` marker is only emitted when the
+    changing numeric field forms a contiguous counter sequence (e.g. ``item 5``
+    … ``item 14``); near-duplicate lines that differ in *discrete identifiers*
+    (e.g. ``P-053: 2 occurrences`` vs ``P-055: 2 occurrences``) are kept as-is,
+    because collapsing them behind a range marker would hide distinct values the
+    model may need to act on, and a ``a→b`` range would be misleading when the
+    intermediate values are absent.
     """
     if config is None:
         config = MicroCompressConfig()
@@ -643,7 +649,7 @@ def near_duplicate_collapse(
         # Skip runs of perfectly identical lines — the existing ``dedup_lines``
         # stage owns those (it reports the count in its own marker format).
         has_distinct = any(ln != lines[i] for ln in lines[i:j])
-        if run_len >= min_run and has_distinct:
+        if run_len >= min_run and has_distinct and _is_counter_run(lines[i:j]):
             result.append(lines[i])
             result.append(_near_dup_marker(lines[i:j]))
             i = j
@@ -651,6 +657,51 @@ def near_duplicate_collapse(
             result.append(lines[i])
             i += 1
     return "\n".join(result)
+
+
+def _is_counter_run(run_lines: list[str]) -> bool:
+    """Return True when a near-duplicate run differs only in a contiguous counter.
+
+    A run is a *counter* when every line has the same shape and exactly one
+    numeric field varies, and the varying values form a contiguous increasing
+    (or decreasing) sequence with step ±1.  This guarantees the ``[×k near-dup,
+    fieldN a→b]`` marker is a truthful range rather than a lossy collapse of
+    distinct identifiers.
+
+    Runs whose differing field skips values (e.g. ``P-053``/``P-055``/``P-057``)
+    or whose variation is non-numeric are NOT counters and are preserved verbatim.
+    """
+    if len(run_lines) < 2:
+        return False
+    first_tokens = re.findall(r"\d+", run_lines[0])
+    if not first_tokens:
+        return False
+    n_fields = len(first_tokens)
+    # Every line must have the same number of numeric fields so the field
+    # positions line up.
+    for line in run_lines[1:]:
+        if len(re.findall(r"\d+", line)) != n_fields:
+            return False
+    # Find the single field that varies across the run; all other fields must be
+    # constant.  A line that differs from the first in more than one numeric
+    # field is a different entry, not a counter increment.
+    varying_idx: int | None = None
+    for field in range(n_fields):
+        values = [int(re.findall(r"\d+", ln)[field]) for ln in run_lines]
+        if all(v == values[0] for v in values):
+            continue
+        if varying_idx is not None:
+            # More than one field varies — not a simple counter.
+            return False
+        varying_idx = field
+    if varying_idx is None:
+        # No field varies: identical lines, owned by ``dedup_lines``.
+        return False
+    values = [int(re.findall(r"\d+", ln)[varying_idx]) for ln in run_lines]
+    steps = {values[k + 1] - values[k] for k in range(len(values) - 1)}
+    # Allow monotonic ±1 steps only; anything else (e.g. 053→055→057) means the
+    # values are discrete identifiers and must be preserved.
+    return steps in ({1}, {-1})
 
 
 def _near_dup_marker(run_lines: list[str]) -> str:
