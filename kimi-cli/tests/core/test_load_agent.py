@@ -149,7 +149,6 @@ def test_load_tools_valid(runtime: Runtime):
     )
     assert len(toolset.tools) == snapshot(2)
 
-
 def test_load_tools_invalid(runtime: Runtime):
     """Test loading with invalid tool paths."""
     tool_paths = ["kimi_cli.tools.nonexistent:Tool", "kimi_cli.tools.todo:TodoList"]
@@ -164,11 +163,101 @@ def test_load_tools_invalid(runtime: Runtime):
                 Session: runtime.session,
                 DenwaRenji: runtime.denwa_renji,
                 Approval: runtime.approval,
+                Environment: runtime.environment,
             },
         )
         raise AssertionError("should fail to load non-existing tool")
     except InvalidToolError as e:
         assert "kimi_cli.tools.nonexistent:Tool" in str(e)
+
+
+def test_load_tools_by_tool_name_string(runtime: Runtime):
+    """Agent manifests may list tools by their tool name string (e.g.
+    ``kimi_cli.tools.file:read``) instead of the Python class name."""
+    from kimi_cli.vfs import VFS
+
+    tool_paths = [
+        "kimi_cli.tools.todo:todo_write",
+        "kimi_cli.tools.web:web_search",
+        "kimi_cli.tools.file:read",
+    ]
+    toolset = KimiToolset()
+    toolset.load_tools(
+        tool_paths,
+        {
+            Runtime: runtime,
+            Config: runtime.config,
+            BuiltinSystemPromptArgs: runtime.builtin_args,
+            Session: runtime.session,
+            DenwaRenji: runtime.denwa_renji,
+            Approval: runtime.approval,
+            Environment: runtime.environment,
+            VFS: None,
+        },
+    )
+    assert len(toolset.tools) == snapshot(3)
+    for name in ("todo_write", "web_search", "read"):
+        assert toolset.find(name) is not None, f"tool {name!r} was not registered"
+
+
+def test_find_tool_class_by_name_resolves_tool_name_strings():
+    """_find_tool_class_by_name maps a tool name string to its class."""
+    import importlib
+
+    from kimi_cli.soul.toolset import KimiToolset
+
+    module = importlib.import_module("kimi_cli.tools.file")
+    tool_cls = KimiToolset._find_tool_class_by_name(module, "read")
+    assert tool_cls is not None
+    assert tool_cls.__name__ == "ReadFile"
+    assert tool_cls.name == "read"
+
+    expected = {
+        "read_image": "ReadMediaFile",
+        "glob": "Glob",
+        "grep": "Grep",
+        "edit": "EditFile",
+        "write": "WriteFile",
+    }
+    for tool_name, class_name in expected.items():
+        resolved = KimiToolset._find_tool_class_by_name(module, tool_name)
+        assert resolved is not None, f"{tool_name!r} did not resolve"
+        assert resolved.__name__ == class_name, f"{tool_name!r} resolved to {resolved.__name__}"
+
+    web_module = importlib.import_module("kimi_cli.tools.web")
+    search_web = KimiToolset._find_tool_class_by_name(web_module, "web_search")
+    assert search_web is not None and search_web.__name__ == "SearchWeb"
+
+    todo_module = importlib.import_module("kimi_cli.tools.todo")
+    todo_list = KimiToolset._find_tool_class_by_name(todo_module, "todo_write")
+    assert todo_list is not None and todo_list.__name__ == "TodoList"
+
+
+def test_shipped_agent_manifests_use_tool_name_strings():
+    """Every entry in src/kimix/agent_*.json uses the tool name string and resolves."""
+    import importlib
+    import json
+
+    from kimi_cli.soul.toolset import KimiToolset
+
+    manifests_dir = Path(__file__).resolve().parents[3] / "src" / "kimix"
+    manifests = sorted(manifests_dir.glob("agent_*.json"))
+    assert manifests, f"no agent manifests under {manifests_dir}"
+    checked = 0
+    for manifest in manifests:
+        tools = json.loads(manifest.read_text(encoding="utf-8"))["agent"]["tools"]
+        for entry in tools:
+            module_name, class_name = entry.rsplit(":", 1)
+            module = importlib.import_module(module_name)
+            tool_cls = getattr(module, class_name, None)
+            if not isinstance(tool_cls, type):
+                tool_cls = KimiToolset._find_tool_class_by_name(module, class_name)
+            assert tool_cls is not None, f"{entry} did not resolve"
+            assert (
+                tool_cls.name == class_name
+            ), f"{entry} resolves to {tool_cls.__name__} (name={tool_cls.name!r})"
+            checked += 1
+    assert checked >= 21
 
 
 async def test_load_agent_invalid_tools(agent_file_invalid_tools: Path, runtime: Runtime):

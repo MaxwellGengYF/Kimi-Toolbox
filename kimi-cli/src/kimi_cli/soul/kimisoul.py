@@ -88,7 +88,7 @@ from kimi_cli.soul.message import (
 )
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
-from kimi_cli.tools.context_prune import ContextPrune
+from kimi_cli.tools.context_prune import context_prune
 from kimi_cli.tools.todo import TodoList
 from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.export import perform_export
@@ -287,7 +287,7 @@ class KimiSoul:
         # Phase 3: History index for semantic retrieval over past turns
         # Lazy import to avoid circular dependency with kimix.retrieval
         from kimi_cli.soul.history_index import HistoryIndex
-        from kimi_cli.tools.context_prune import ContextPrune
+        from kimi_cli.tools.context_prune import context_prune
 
         history_index_path = (
             agent.runtime.session.dir / "history_index" / f"{agent.runtime.session.id}.json"
@@ -333,15 +333,15 @@ class KimiSoul:
 
         # Register context-management tools if the toolset supports it
         if isinstance(agent.toolset, KimiToolset):
-            # Attach the history index to the Retrieve tool so it can search
+            # Attach the history index to the retrieve tool so it can search
             # past conversation turns.
-            from kimi_cli.tools.memory import Retrieve
-            retrieve_tool = agent.toolset.find("Retrieve")
-            if not isinstance(retrieve_tool, Retrieve):
-                retrieve_tool = Retrieve()
+            from kimi_cli.tools.memory import retrieve
+            retrieve_tool = agent.toolset.find("retrieve")
+            if not isinstance(retrieve_tool, retrieve):
+                retrieve_tool = retrieve()
                 agent.toolset.add(retrieve_tool)
             retrieve_tool.attach_history_index(self._history_index)
-            agent.toolset.add(ContextPrune(self))
+            agent.toolset.add(context_prune(self))
 
         self._checkpoint_with_user_message = False
 

@@ -29,17 +29,17 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
             "kimi_cli.tools.todo:TodoList",
-            'kimi_cli.tools.todo:TodoPush',
-            'kimi_cli.tools.todo:TodoPop',
-            'kimi_cli.tools.todo:TodoSub',
-            'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
+            'kimi_cli.tools.todo:todo_push',
+            'kimi_cli.tools.todo:todo_pop',
+            'kimi_cli.tools.todo:todo_sub',
+            'kimi_cli.tools.memory:retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
-            "kimi_cli.tools.web:FetchURL",
+            "kimi_cli.tools.web:fetch_url",
         ]
     )
     subagents = {
@@ -70,14 +70,14 @@ def test_load_default_agent_spec():
     )
     assert subagent_specs["coder"].model == snapshot(None)
     assert subagent_specs["coder"].allowed_tools == snapshot(
-        ['kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
+        ['kimi_cli.tools.memory:retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
-            "kimi_cli.tools.web:FetchURL",
+            "kimi_cli.tools.web:fetch_url",
         ]
     )
     assert subagent_specs["coder"].exclude_tools == snapshot(
@@ -92,17 +92,17 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
             "kimi_cli.tools.todo:TodoList",
-            'kimi_cli.tools.todo:TodoPush',
-            'kimi_cli.tools.todo:TodoPop',
-            'kimi_cli.tools.todo:TodoSub',
-            'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
+            'kimi_cli.tools.todo:todo_push',
+            'kimi_cli.tools.todo:todo_pop',
+            'kimi_cli.tools.todo:todo_sub',
+            'kimi_cli.tools.memory:retrieve', "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
-            "kimi_cli.tools.web:FetchURL",
+            "kimi_cli.tools.web:fetch_url",
         ]
     )
     sub_subagents = {
@@ -152,7 +152,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.web:SearchWeb",
-            "kimi_cli.tools.web:FetchURL",
+            "kimi_cli.tools.web:fetch_url",
         ]
     )
     assert subagent_specs["explore"].exclude_tools == snapshot(
@@ -169,17 +169,17 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
             "kimi_cli.tools.todo:TodoList",
-            'kimi_cli.tools.todo:TodoPush',
-            'kimi_cli.tools.todo:TodoPop',
-            'kimi_cli.tools.todo:TodoSub',
-            "kimi_cli.tools.memory:Retrieve", 'kimi_cli.tools.file:ReadFile',
+            'kimi_cli.tools.todo:todo_push',
+            'kimi_cli.tools.todo:todo_pop',
+            'kimi_cli.tools.todo:todo_sub',
+            "kimi_cli.tools.memory:retrieve", 'kimi_cli.tools.file:ReadFile',
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
             "kimi_cli.tools.file:EditFile",
             'kimi_cli.tools.web:SearchWeb',
-            'kimi_cli.tools.web:FetchURL',
+            'kimi_cli.tools.web:fetch_url',
         ]
     )
     sub_subagents = {
@@ -247,7 +247,7 @@ agent:
     CUSTOM_ARG: "custom_value"
   exclude_tools:
     - "kimi_cli.tools.web:SearchWeb"
-    - "kimi_cli.tools.web:FetchURL"
+    - "kimi_cli.tools.web:fetch_url"
 """)
 
         spec = load_agent_spec(extending_agent)
@@ -262,21 +262,21 @@ agent:
                 "kimi_cli.tools.agent:Agent",
                 "kimi_cli.tools.ask_user:AskUserQuestion",
                 "kimi_cli.tools.todo:TodoList",
-                'kimi_cli.tools.todo:TodoPush',
-                'kimi_cli.tools.todo:TodoPop',
-                'kimi_cli.tools.todo:TodoSub',
-                'kimi_cli.tools.memory:Retrieve', "kimi_cli.tools.file:ReadFile",
+                'kimi_cli.tools.todo:todo_push',
+                'kimi_cli.tools.todo:todo_pop',
+                'kimi_cli.tools.todo:todo_sub',
+                'kimi_cli.tools.memory:retrieve', "kimi_cli.tools.file:ReadFile",
                 "kimi_cli.tools.file:ReadMediaFile",
                 "kimi_cli.tools.file:Glob",
                 "kimi_cli.tools.file:Grep",
                 "kimi_cli.tools.file:WriteFile",
                 "kimi_cli.tools.file:EditFile",
                 "kimi_cli.tools.web:SearchWeb",
-                "kimi_cli.tools.web:FetchURL",
+                "kimi_cli.tools.web:fetch_url",
             ]
         )
         assert spec.exclude_tools == snapshot(
-            ["kimi_cli.tools.web:SearchWeb", "kimi_cli.tools.web:FetchURL"]
+            ["kimi_cli.tools.web:SearchWeb", "kimi_cli.tools.web:fetch_url"]
         )
         assert "coder" in spec.subagents
 

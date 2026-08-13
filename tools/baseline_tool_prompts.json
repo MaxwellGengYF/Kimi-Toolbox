@@ -1,5 +1,5 @@
 {
- "Bash": {
+ "bash": {
   "description": "Execute a bash command. Supports Unix-style / POSIX bash syntax. Accepts `cmd` or `command` parameter. `cwd`/`workdir` sets the working directory for this command. Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. Output longer than `max_lines` is collapsed via head+tail fold (first N + last N lines, with middle replaced by a truncation marker). Set `max_lines=None` for unlimited output. Start a persistent session with interactive=True, then reuse the same tool with task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. Send 'exit' to close the session. On Windows, unquoted backslash paths are auto-converted to forward slashes (`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved.",
   "schema": {
    "description": "Parameters for the Bash tool — execute a bash command.",

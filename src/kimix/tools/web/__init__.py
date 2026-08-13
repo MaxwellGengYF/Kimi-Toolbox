@@ -1,3 +1,3 @@
-from .fetch_url import FetchURL
+from .fetch_url import fetch_url
 
-__all__ = ["FetchURL"]
+__all__ = ["fetch_url"]

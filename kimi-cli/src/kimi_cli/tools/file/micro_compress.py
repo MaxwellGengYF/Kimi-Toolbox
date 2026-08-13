@@ -133,6 +133,7 @@ _TOOL_KINDS: dict[str, str] = {
     "pwsh": "log",
     "run": "log",
     "python": "log",
+    "fetch_url": "prose",
     "fetchurl": "prose",
     "fetch": "prose",
     "grep": "log",

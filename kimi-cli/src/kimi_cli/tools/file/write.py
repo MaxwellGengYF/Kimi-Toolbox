@@ -4,7 +4,7 @@ from typing import Literal, override
 import json_repair
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, DisplayBlock, ToolError, ToolReturnValue, alias_note
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from kimi_cli import logger
 from kimi_cli.session import Session
@@ -29,7 +29,7 @@ from kimi_cli.vfs import VFS
 
 from .utils import resolve_vfs
 
-_BASE_DESCRIPTION = "Write content to a file."
+_BASE_DESCRIPTION = "Create or fully replace a UTF-8 text file."
 
 # Fuzzy mode map — maps common synonyms to canonical values
 _MODE_MAP: dict[str, Literal["overwrite", "append"]] = {
@@ -61,14 +61,31 @@ _MODE_MAP: dict[str, Literal["overwrite", "append"]] = {
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    path: str = Field(
-        alias="file_path",  # common LLM variant
-        description="File path. "
-        + alias_note("path", "file_path", word=False),
+    file_path: str = Field(
+        validation_alias=AliasChoices("file_path", "path"),
+        description="Path to write, resolved by the filesystem backend. "
+        + alias_note("file_path", "path", word=False),
     )
     content: str = Field(
-        alias="text",  # common LLM variant
-        description="Content to write. " + alias_note("content", "text", word=False),
+        validation_alias=AliasChoices("content", "text"),
+        description="Full UTF-8 text content to write. "
+        + alias_note("content", "text", word=False),
+    )
+    sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
+        default=None,
+        description=(
+            "The wider sandbox mode this file operation needs "
+            "(`workspace-write` or `danger-full-access`). Only valid as a "
+            "one-shot retry of an operation the sandbox just denied; requires "
+            "justification and user approval."
+        ),
+    )
+    justification: str | None = Field(
+        default=None,
+        description=(
+            "Required with sandbox_permissions: one sentence for the user "
+            "explaining why this exact file operation needs the wider access."
+        ),
     )
     mode: Literal["overwrite", "append"] = Field(
         description="Write mode: overwrite or append.",
@@ -102,7 +119,7 @@ class Params(BaseModel):
 
 
 class WriteFile(CallableTool2[Params]):
-    name: str = "WriteFile"
+    name: str = "write"
     description: str = _BASE_DESCRIPTION
     params: type[Params] = Params
 
@@ -156,26 +173,26 @@ class WriteFile(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        display_path = params.path.replace("\\", "/")
+        display_path = params.file_path.replace("\\", "/")
         # TODO: checks:
         # - check if the path may contain secrets
-        if not params.path:
+        if not params.file_path:
             return ToolError(
                 message="File path cannot be empty.",
                 brief="Empty file path",
             )
 
         try:
-            p = kaos_path_from_tool_input(params.path, self._work_dir)
+            p = kaos_path_from_tool_input(params.file_path, self._work_dir)
             logical_path = p
             display_logical_path = str(logical_path).replace("\\", "/")
             _outside = not is_within_directory(logical_path.canonical(), self._work_dir)
-            err, path_is_inside = await self._validate_path(logical_path, params.path)
+            err, path_is_inside = await self._validate_path(logical_path, params.file_path)
             if err:
                 err.message = f"[out of work-dir] {err.message}" if _outside else err.message
                 return err
 
-            p = await resolve_vfs(params.path, self._vfs, for_write=True, work_dir=self._work_dir)
+            p = await resolve_vfs(params.file_path, self._vfs, for_write=True, work_dir=self._work_dir)
             display_p = str(p).replace("\\", "/")
 
             if await p.is_dir():
@@ -274,10 +291,13 @@ class WriteFile(CallableTool2[Params]):
             )
 
             # Request approval
+            approval_text = f"Write file `{display_logical_path}`"
+            if params.justification:
+                approval_text += f" — {params.justification}"
             result = await self._approval.request(
                 self.name,
                 action,
-                f"Write file `{display_logical_path}`",
+                approval_text,
                 display=diff_blocks,
             )
             if not result:
@@ -298,7 +318,7 @@ class WriteFile(CallableTool2[Params]):
                 actual_size = (await p.stat()).st_size
             except Exception as e:
                 logger.warning(
-                    "WriteFile verification failed: {path}: {error}", path=params.path, error=e
+                    "WriteFile verification failed: {path}: {error}", path=params.file_path, error=e
                 )
                 return ToolError(
                     message=(
@@ -360,12 +380,12 @@ class WriteFile(CallableTool2[Params]):
 
         except Exception as e:
             logger.warning(
-                "WriteFile failed: {path}: {error}", path=params.path, error=e
+                "WriteFile failed: {path}: {error}", path=params.file_path, error=e
             )
             _outside_ex = False
             with contextlib.suppress(Exception):
                 _outside_ex = not is_within_directory(
-                    kaos_path_from_tool_input(params.path, self._work_dir).canonical(),
+                    kaos_path_from_tool_input(params.file_path, self._work_dir).canonical(),
                     self._work_dir,
                 )
             return ToolError(

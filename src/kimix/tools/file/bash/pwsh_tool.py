@@ -13,7 +13,7 @@ import sys
 from typing import TYPE_CHECKING, Literal
 
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 from kimi_cli.tools.utils import load_desc
@@ -209,14 +209,61 @@ class PowershellParams(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    cmd: str = Field(
+    command: str = Field(
         default="",
-        alias="command",  # LLM can use "command" instead of "cmd"
+        validation_alias=AliasChoices("command", "cmd"),
         description=(
-            "PowerShell command or input text for an existing session. "
-            + accepts_alias_text("cmd", "command", word=False)
+            "The PowerShell command to execute. "
+            + accepts_alias_text("command", "cmd", word=False)
             + " The value may also be a path to an existing `.ps1` script file, "
             "which is executed via PowerShell (e.g. `scripts/deploy.ps1`)."
+        ),
+    )
+    description: str | None = Field(
+        default=None,
+        description=(
+            "Clear, concise description of what the command does in active "
+            "voice, 5-10 words (shown in the UI)."
+        ),
+    )
+    timeoutMs: int = Field(
+        default=30000,
+        validation_alias=AliasChoices("timeoutMs", "timeout"),
+        ge=1,
+        le=900000,
+        description=(
+            "Timeout in milliseconds. The executor applies its configured "
+            "default and cap, and kills the command on expiry. "
+            + accepts_alias_text("timeoutMs", "timeout", word=False)
+        ),
+    )
+    workdir: str | None = Field(
+        default=None,
+        description=(
+            "Working directory for this command. Defaults to the session "
+            "workspace; a relative path is resolved against it."
+        ),
+    )
+    run_in_background: bool = Field(
+        default=False,
+        description=(
+            "Run in the background and return a job id immediately "
+            "(collect with job_output, stop with job_kill). No timeout applies."
+        ),
+    )
+    sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
+        default=None,
+        description=(
+            "The wider sandbox mode this command needs (`workspace-write` or "
+            "`danger-full-access`). Only valid as a one-shot retry of a command "
+            "the sandbox just denied; requires justification and user approval."
+        ),
+    )
+    justification: str | None = Field(
+        default=None,
+        description=(
+            "Required with sandbox_permissions: one sentence for the user "
+            "explaining why this exact command needs the wider access."
         ),
     )
     mode: Literal["execute", "send", "interactive"] = mode_field(
@@ -224,22 +271,33 @@ class PowershellParams(BaseModel):
         send_desc="Execute the command in background, return task_id immediately.",
         interactive_desc="Start a persistent PowerShell REPL, return task_id for further input.",
     )
-    timeout: int = timeout_field()
     task_id: str | None = task_id_field("cmd")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
+
+    @property
+    def timeout(self) -> int:
+        """Legacy accessor: timeout in seconds (converted from ``timeoutMs``)."""
+        return max(1, self.timeoutMs // 1000)
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_mode(cls, data: dict) -> dict:
         """Convert deprecated boolean flags and mode aliases to canonical names."""
-        return normalize_mode_validator(data)
+        data = normalize_mode_validator(data)
+        if isinstance(data, dict):
+            # Legacy `timeout` (seconds) -> canonical `timeoutMs` (milliseconds).
+            if "timeoutMs" not in data and data.get("timeout") is not None:
+                data = {**data, "timeoutMs": int(data["timeout"]) * 1000}
+            if data.get("run_in_background", False):
+                data["mode"] = "send"
+        return data
 
-    _validate_cmd = shell_cmd_required_validator("cmd")
+    _validate_cmd = shell_cmd_required_validator("command")
 
 class Powershell(CallableTool2[PowershellParams]):
 
-    name: str = "Powershell"
+    name: str = "pwsh"
     description: str = ""
     params: type[PowershellParams] = PowershellParams
 
@@ -334,7 +392,7 @@ class Powershell(CallableTool2[PowershellParams]):
             ToolOk on success, ToolError on failure or timeout.
         """
         # Hardline safety floor: never spawn a process for destructive commands.
-        blocked = self._hardline_blocked(params.cmd)
+        blocked = self._hardline_blocked(params.command)
         if blocked is not None:
             return blocked
 
@@ -345,7 +403,7 @@ class Powershell(CallableTool2[PowershellParams]):
         if params.mode == "send":
             return await self._execute_background(params)
 
-        if params.mode != "interactive" and not params.cmd:
+        if params.mode != "interactive" and not params.command:
             return ToolError(
                 output="Empty command.",
                 message="No command specified.",
@@ -354,7 +412,7 @@ class Powershell(CallableTool2[PowershellParams]):
 
         # Rewrite known commands through RTK before any PS5.1 syntax transform.
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, True, pwsh=True
+            params.command, True, pwsh=True
         )
         self._resolve_pwsh()
         if self._pwsh_path is not None:
@@ -412,7 +470,7 @@ class Powershell(CallableTool2[PowershellParams]):
         if isinstance(pattern, ToolError):
             return pattern
 
-        if params.cmd and self._forbidden_keywords:
+        if params.command and self._forbidden_keywords:
             # PowerShell is case-insensitive: compare lowercased strings.
             normalized_cmd = " ".join(cmd.split()).lower()
             for keyword in self._forbidden_keywords:
@@ -462,7 +520,7 @@ class Powershell(CallableTool2[PowershellParams]):
                 output="",
                 message=(
                     f"Interactive PowerShell started. task_id: `{task_id}`. "
-                    "Use task_id to send commands and TaskOutput to read results. "
+                    "Use task_id to send commands and job_output to read results. "
                     "Send 'exit' to close the session."
                 ) + transform_warning,
                 brief="Interactive PowerShell started",
@@ -479,6 +537,13 @@ class Powershell(CallableTool2[PowershellParams]):
         #    native exit code from external programs (otherwise all non-zero
         #    codes are flattened to 1).
         from kimix.tools.file.bash import shell_common
+
+        # Report semantics: each call runs in a fresh pwsh process, so a
+        # requested workdir is applied with Set-Location instead of relying
+        # on persisted cwd state.
+        if params.workdir:
+            workdir = params.workdir.replace("'", "''")
+            cmd = f"Set-Location -LiteralPath '{workdir}'; {cmd}"
 
         raw_command = shell_common.wrap_pwsh_command(cmd)
         encoded_cmd, param_name, was_encoded = self._maybe_encode_command(raw_command)
@@ -529,8 +594,8 @@ class Powershell(CallableTool2[PowershellParams]):
         if await process_task.thread_is_alive():
             output = await process_task.stream.pop_output() if process_task.stream else ""
             output = await _maybe_export_output_async(output)
-            guidance = foreground_background_guidance(params.cmd)
-            message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`."
+            guidance = foreground_background_guidance(params.command)
+            message = f"Running in background. task_id: `{task_id}`. use `job_output`."
             if guidance:
                 message += f" {guidance}"
             return ToolError(
@@ -549,8 +614,8 @@ class Powershell(CallableTool2[PowershellParams]):
 
         # Exit-code semantics + failure hints run on the raw output (the
         # redacted text is what gets displayed/exported below).
-        meaning = interpret_exit_code(params.cmd, real_exit_code)
-        hint = annotate_failure(output, params.cmd, real_exit_code)
+        meaning = interpret_exit_code(params.command, real_exit_code)
+        hint = annotate_failure(output, params.command, real_exit_code)
 
         # Unify success/error path: always pass the real exit code.
         processed, output_path, output_truncated, original_path = await self._process_output(
@@ -577,7 +642,7 @@ class Powershell(CallableTool2[PowershellParams]):
             msg += transform_warning
             # Long failing commands are preserved as a re-runnable `.ps1` script
             # in the shared temp folder so the exact source is never lost.
-            cmd_suffix = _command_saved_message(params.cmd, ".ps1", "PowerShell")
+            cmd_suffix = _command_saved_message(params.command, ".ps1", "PowerShell")
             if cmd_suffix:
                 msg = f"{msg} {cmd_suffix}"
             if suffix:
@@ -658,7 +723,7 @@ class Powershell(CallableTool2[PowershellParams]):
 
     async def _execute_background(self, params: PowershellParams) -> ToolReturnValue:
         """Execute a PowerShell command in background and return immediately with task_id."""
-        cmd = params.cmd
+        cmd = params.command
         note = ""
         if cmd:
             # Same PowerShell-aware parser as the foreground path: repair
@@ -692,7 +757,7 @@ class Powershell(CallableTool2[PowershellParams]):
         task_id = await process_task.start(self._session, "pwsh")
 
         return ToolOk(
-            output=f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
+            output=f"Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output.",
             message=f"Command started in background. task_id: `{task_id}`" + note,
             brief="Background task started",
         )
@@ -728,7 +793,7 @@ class Powershell(CallableTool2[PowershellParams]):
         await stream.pop_output()
 
         rtk_cmd, rtk_rewritten = _maybe_rewrite_shell_command_with_rtk(
-            params.cmd, True, pwsh=True
+            params.command, True, pwsh=True
         )
         input_text = rtk_cmd
         if not input_text.endswith("\n"):
@@ -813,7 +878,7 @@ class Powershell(CallableTool2[PowershellParams]):
     ) -> ToolReturnValue:
         """Build a ToolOk response with a structured output block."""
         processed, output_path, output_truncated, original_path = await self._process_output(
-            params.cmd, params, output, rtk_rewritten=rtk_rewritten
+            params.command, params, output, rtk_rewritten=rtk_rewritten
         )
         if status != "completed":
             real_exit_code = None
@@ -822,7 +887,7 @@ class Powershell(CallableTool2[PowershellParams]):
             if real_exit_code is None:
                 real_exit_code = 0 if await stream.success() else None
         if exit_code_meaning is None and real_exit_code is not None:
-            exit_code_meaning = interpret_exit_code(params.cmd, real_exit_code)
+            exit_code_meaning = interpret_exit_code(params.command, real_exit_code)
         block = _build_session_output_block(
             task_id=task_id,
             status=status,

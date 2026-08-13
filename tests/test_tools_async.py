@@ -20,7 +20,7 @@ from kimix.tools.background.utils import (
     remove_task_id,
 )
 from kimix.tools.py import Params as PyParams
-from kimix.tools.py import Python
+from kimix.tools.py import python
 
 
 @pytest.fixture
@@ -255,7 +255,7 @@ class TestTaskOutput:
 # ---------------------------------------------------------------------------
 class TestPython:
     async def test_foreground_success(self, mock_session: MagicMock) -> None:
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="print('hello_py')", timeout=10)
         result = await tool(params)
         # Output is now a structured block containing the script output
@@ -265,7 +265,7 @@ class TestPython:
         assert "task_id:" in output_str
 
     async def test_foreground_failure(self, mock_session: MagicMock) -> None:
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="import sys; sys.exit(1)", timeout=10)
         result = await tool(params)
         output_str = str(result.output)
@@ -275,7 +275,7 @@ class TestPython:
         assert isinstance(result, ToolError)
 
     async def test_foreground_timeout(self, mock_session: MagicMock) -> None:
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="import time; time.sleep(100)", timeout=3)
         result = await tool(params)
         assert "timeout" in str(result.message).lower() or "background" in str(result.message).lower()
@@ -284,7 +284,7 @@ class TestPython:
             remove_task_id(mock_session, tid)
 
     async def test_dest_export(self, mock_session: MagicMock, tmp_path: Path) -> None:
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         dest = tmp_path / "py_out.txt"
         params = PyParams(code="print('dest_out')", timeout=10, output_path=str(dest))
         result = await tool(params)
@@ -298,7 +298,7 @@ class TestPython:
         with patch(
             "kimix.tools.background.utils.DEFAULT_INACTIVITY_TIMEOUT", 2.0
         ):
-            tool = Python(session=mock_session)
+            tool = python(session=mock_session)
             params = PyParams(code="import time; time.sleep(120)", timeout=90)
             result = await tool(params)
             assert isinstance(result, ToolError)
@@ -312,7 +312,7 @@ class TestPython:
         """Run an existing .py file directly."""
         py_file = tmp_path / "hello.py"
         py_file.write_text("print('hello_from_file')", encoding='utf-8')
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code=str(py_file), timeout=10)
         result = await tool(params)
         output_str = str(result.output)
@@ -324,7 +324,7 @@ class TestPython:
         """Run an existing .py file that exits with error."""
         py_file = tmp_path / "fail.py"
         py_file.write_text("import sys; sys.exit(42)", encoding='utf-8')
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code=str(py_file), timeout=10)
         result = await tool(params)
         # Should be a ToolError with structured output
@@ -337,7 +337,7 @@ class TestPython:
         py_file = tmp_path / "greet.py"
         py_file.write_text("print('file_dest_out')", encoding='utf-8')
         dest = tmp_path / "file_out.txt"
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code=str(py_file), timeout=10, output_path=str(dest))
         result = await tool(params)
         assert dest.exists()
@@ -346,7 +346,7 @@ class TestPython:
 
     async def test_file_not_found_treated_as_code(self, mock_session: MagicMock) -> None:
         """A .py path that does not exist should be treated as inline code."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         # "nonexistent.py" doesn't exist, so it's treated as inline code.
         # It compiles fine (attribute access ``nonexistent.py``) and then
         # fails at runtime with NameError.
@@ -362,7 +362,7 @@ class TestPython:
     ) -> None:
         """Genuinely broken inline code is caught by the compile pre-check
         before any subprocess spawn, so the response has no task_id."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="def broken(:", timeout=10)
         result = await tool(params)
         assert isinstance(result, ToolError)
@@ -374,7 +374,7 @@ class TestPython:
 
     async def test_interactive_start_no_code(self, mock_session: MagicMock) -> None:
         """interactive=True, code=""  -> returns ToolOk with task_id."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="", interactive=True, timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
@@ -386,7 +386,7 @@ class TestPython:
 
     async def test_interactive_start_with_code(self, mock_session: MagicMock) -> None:
         """interactive=True, code="print('hi')" -> returns ToolOk with task_id."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="print('hi')", interactive=True, timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
@@ -398,7 +398,7 @@ class TestPython:
 
     async def test_interactive_with_wait_pattern(self, mock_session: MagicMock) -> None:
         """interactive=True, wait_for_pattern waits and matches."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         # The Python interactive REPL prints '>>> ' as a prompt
         params = PyParams(
             code="print('ready')",
@@ -417,7 +417,7 @@ class TestPython:
 
     async def test_continue_session(self, mock_session: MagicMock) -> None:
         """Start interactive, then call again with task_id and new code."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         # Start interactive
         start_params = PyParams(code="", interactive=True, timeout=5)
         start_result = await tool(start_params)
@@ -441,7 +441,7 @@ class TestPython:
 
     async def test_continue_session_not_found(self, mock_session: MagicMock) -> None:
         """task_id="nonexistent" -> ToolError."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="print('test')", task_id="nonexistent", timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolError)
@@ -449,7 +449,7 @@ class TestPython:
 
     async def test_max_lines_truncation(self, mock_session: MagicMock) -> None:
         """max_lines=10 on long output -> output is truncated."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         # Generate 50 lines of output
         code = "for i in range(50): print(f'line_{i}')"
         params = PyParams(code=code, timeout=10, max_lines=10)
@@ -478,7 +478,7 @@ class TestPython:
 
     async def test_mode_background(self, mock_session: MagicMock) -> None:
         """mode='background' (alias for 'send') starts a task and returns immediately."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="import time; time.sleep(100)", mode="background", timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
@@ -489,7 +489,7 @@ class TestPython:
 
     async def test_mode_send_new_name(self, mock_session: MagicMock) -> None:
         """mode='send' starts a task and returns immediately."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="import time; time.sleep(100)", mode="send", timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
@@ -500,7 +500,7 @@ class TestPython:
 
     async def test_mode_interactive(self, mock_session: MagicMock) -> None:
         """mode='interactive' starts a persistent REPL."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="", mode="interactive", timeout=5)
         result = await tool(params)
         assert isinstance(result, ToolOk)
@@ -511,7 +511,7 @@ class TestPython:
 
     async def test_mode_execute_default(self, mock_session: MagicMock) -> None:
         """mode='execute' (default) executes code and waits."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="print('run_mode_test')", mode="execute", timeout=10)
         result = await tool(params)
         output_str = str(result.output)
@@ -520,7 +520,7 @@ class TestPython:
 
     async def test_mode_run_alias_still_works(self, mock_session: MagicMock) -> None:
         """mode='run' (alias for 'execute') still works."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         params = PyParams(code="print('run_alias_test')", mode="run", timeout=10)
         result = await tool(params)
         output_str = str(result.output)
@@ -531,7 +531,7 @@ class TestPython:
         self, mock_session: MagicMock
     ) -> None:
         """If captured output contains rtk fold markers, the full stream is saved."""
-        tool = Python(session=mock_session)
+        tool = python(session=mock_session)
         output = (
             "2 matches in 2 files:\n\n"
             "src/a.py:1:match\n"

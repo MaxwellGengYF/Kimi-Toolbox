@@ -29,13 +29,13 @@ class FakeStatus:
 
 
 # Default tool names exposed by FakeSession's stub toolset, mirroring the
-# real kimix toolset so display-name resolution (write_file -> WriteFile,
-# AppendFile -> WriteFile, ...) works exactly as in production.
+# real kimix toolset so display-name resolution (write_file -> write,
+# AppendFile -> write, ...) works exactly as in production.
 _DEFAULT_TOOL_NAMES = (
-    "WriteFile", "WritePlan", "ReadFile", "ReadPlan", "EditFile", "EditPlan",
-    "Python", "Agent", "AgentList", "AgentClose", "Run", "Powershell",
-    "Bash", "Grep", "Glob", "FetchURL", "TodoList", "TaskOutput",
-    "Compact", "ContextUsage", "Retrieve",
+    "write", "WritePlan", "read", "ReadPlan", "edit", "EditPlan",
+    "python", "subagent", "list_agents", "interrupt_agent", "Run", "pwsh",
+    "bash", "grep", "glob", "fetch_url", "todo_write", "job_output",
+    "compact", "context_usage", "retrieve",
 )
 
 
@@ -54,7 +54,7 @@ class FakeSession:
             # Stub the session._cli.soul.agent.toolset.tools chain used by
             # kimix.ui.stream._session_tool_names for display-name resolution.
             # ``find`` is stubbed too: kimix.utils.prompt looks up the
-            # TodoList tool instance via toolset.find("TodoList").
+            # todo_write tool instance via toolset.find("todo_write").
             self._cli = SimpleNamespace(
                 soul=SimpleNamespace(
                     agent=SimpleNamespace(
@@ -206,7 +206,7 @@ async def test_print_agent_json_streams_writefile_content_token_by_token(monkeyp
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -218,7 +218,7 @@ async def test_print_agent_json_streams_writefile_content_token_by_token(monkeyp
     plain = _plain(chunks)
 
     # Header printed exactly once when the ToolCall arrives.
-    assert output.count("⚡ WriteFile") == 1
+    assert output.count("⚡ write") == 1
     # Short arguments print inline on the header line (key:value).
     assert " path:x.py" in plain
     # The long content value is printed decoded, across fragments.
@@ -234,7 +234,7 @@ async def test_print_agent_json_stream_decodes_escapes(monkeypatch: Any) -> None
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -256,7 +256,7 @@ async def test_print_agent_json_stream_handles_split_unicode_escape(monkeypatch:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -277,7 +277,7 @@ async def test_print_agent_json_split_unicode_escape_right_after_backslash_u(mon
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -306,7 +306,7 @@ async def test_stream_malformed_unicode_escape_does_not_swallow_quote(monkeypatc
     await base.print_agent_json(
         ToolCall(
             id="call-1",
-            function=ToolCall.FunctionBody(name="Python", arguments=None),
+            function=ToolCall.FunctionBody(name="python", arguments=None),
         ),
         session,
     )
@@ -331,7 +331,7 @@ async def test_stream_malformed_unicode_escape_does_not_swallow_quote(monkeypatc
     # The remaining argument prints normally under its own label.
     assert " mode:run" in plain
     # The tool result renders on its own line, not merged into the code.
-    assert "\n✓ Python" in plain
+    assert "\n✓ python" in plain
 
 
 async def test_stream_malformed_unicode_escape_recovers_mid_string(monkeypatch: Any) -> None:
@@ -343,7 +343,7 @@ async def test_stream_malformed_unicode_escape_recovers_mid_string(monkeypatch: 
     await base.print_agent_json(
         ToolCall(
             id="call-1",
-            function=ToolCall.FunctionBody(name="Python", arguments=None),
+            function=ToolCall.FunctionBody(name="python", arguments=None),
         ),
         session,
     )
@@ -368,7 +368,7 @@ async def test_stream_malformed_unicode_escape_recovers_mid_string(monkeypatch: 
         session,
     )
     plain = _plain(chunks)
-    assert "\n✓ Python" in plain
+    assert "\n✓ python" in plain
 
 
 async def test_stream_single_backslash_windows_path_preserved(monkeypatch: Any) -> None:
@@ -382,7 +382,7 @@ async def test_stream_single_backslash_windows_path_preserved(monkeypatch: Any) 
     await base.print_agent_json(
         ToolCall(
             id="call-1",
-            function=ToolCall.FunctionBody(name="Python", arguments=None),
+            function=ToolCall.FunctionBody(name="python", arguments=None),
         ),
         session,
     )
@@ -405,7 +405,7 @@ async def test_stream_single_backslash_windows_path_preserved(monkeypatch: Any) 
         session,
     )
     plain = _plain(chunks)
-    assert "\n✓ Python" in plain
+    assert "\n✓ python" in plain
 
 
 async def test_stream_unknown_escape_keeps_backslash(monkeypatch: Any) -> None:
@@ -417,7 +417,7 @@ async def test_stream_unknown_escape_keeps_backslash(monkeypatch: Any) -> None:
     await base.print_agent_json(
         ToolCall(
             id="call-1",
-            function=ToolCall.FunctionBody(name="Python", arguments=None),
+            function=ToolCall.FunctionBody(name="python", arguments=None),
         ),
         session,
     )
@@ -439,7 +439,7 @@ async def test_stream_unknown_escape_keeps_backslash(monkeypatch: Any) -> None:
         session,
     )
     plain = _plain(chunks)
-    assert "\n✓ Python" in plain
+    assert "\n✓ python" in plain
 
 
 async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: Any) -> None:
@@ -447,7 +447,7 @@ async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: 
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -467,14 +467,14 @@ async def test_print_agent_json_stream_prints_compact_short_values(monkeypatch: 
 
 async def test_streamed_short_args_print_inline(monkeypatch: Any) -> None:
     """Short scalar arguments (e.g. ``timeout``) print inline after the tool
-    header — ``⚡ Powershell Get-Date timeout:30`` — instead of each
+    header — ``⚡ pwsh Get-Date timeout:30`` — instead of each
     occupying its own ``timeout:\n30`` line beneath the header."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     await base.print_agent_json(
         ToolCall(
             id="call-inline-timeout",
-            function=ToolCall.FunctionBody(name="Powershell", arguments=None),
+            function=ToolCall.FunctionBody(name="pwsh", arguments=None),
         ),
         session,
     )
@@ -493,7 +493,7 @@ async def test_print_agent_json_stream_finished_by_tool_result(monkeypatch: Any)
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -511,7 +511,7 @@ async def test_print_agent_json_stream_finished_by_tool_result(monkeypatch: Any)
     # The truncated stream line is terminated before the tool result prints.
     assert "partial\n" in plain
     # Tracked tool call renders as `✓ {ToolName}` header + dim `  {message}`.
-    assert "\n✓ WriteFile" in plain
+    assert "\n✓ write" in plain
     assert "\n  ok" in plain
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
@@ -522,7 +522,7 @@ async def test_print_agent_json_merged_tool_call_prints_full_content_once(monkey
     args = orjson.dumps({"path": "big.py", "content": "full body here"}).decode("utf-8")
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=args),
+        function=ToolCall.FunctionBody(name="write", arguments=args),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -537,14 +537,14 @@ async def test_print_agent_json_merged_tool_call_prints_full_content_once(monkey
 
 async def test_any_tool_streams_short_args_inline(monkeypatch: Any) -> None:
     """Every tool streams — there is no whitelist.  A complete ToolCall for
-    Grep prints the header plus all short arguments inline on one line."""
+    grep prints the header plus all short arguments inline on one line."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
 
     tool_call = ToolCall(
         id="call-1",
         function=ToolCall.FunctionBody(
-            name="Grep",
+            name="grep",
             arguments='{"pattern": "def ", "path": ".", "-n": true}',
         ),
     )
@@ -555,10 +555,10 @@ async def test_any_tool_streams_short_args_inline(monkeypatch: Any) -> None:
     plain = _plain(chunks)
 
     # Header printed exactly once, with all short args inline (key:value).
-    assert output.count("⚡ Grep") == 1
-    assert "⚡ Grep pattern:def " in plain
+    assert output.count("⚡ grep") == 1
+    assert "⚡ grep pattern:def " in plain
     assert " path:." in plain
-    # The Grep CLI-flag alias ``-n`` displays under its canonical name.
+    # The grep CLI-flag alias ``-n`` displays under its canonical name.
     assert " line_number:True" in plain
     # Stream finished (complete JSON): no printer left behind.
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
@@ -573,12 +573,12 @@ async def test_any_tool_streams_fragmented_args(monkeypatch: Any) -> None:
 
     tool_call = ToolCall(
         id="call-2",
-        function=ToolCall.FunctionBody(name="Grep", arguments=None),
+        function=ToolCall.FunctionBody(name="grep", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
     # Header printed immediately; stream printer was created.
-    assert "⚡ Grep" in _plain(chunks)
+    assert "⚡ grep" in _plain(chunks)
     assert base._TOOL_CALL_STREAM_KEY in session._tmp_data
 
     # Send fragments that build up complete JSON.
@@ -587,10 +587,10 @@ async def test_any_tool_streams_fragmented_args(monkeypatch: Any) -> None:
 
     plain = _plain(chunks)
 
-    assert "⚡ Grep pattern:def " in plain
+    assert "⚡ grep pattern:def " in plain
     assert " path:." in plain
     # Only one header.
-    assert plain.count("⚡ Grep") == 1
+    assert plain.count("⚡ grep") == 1
     assert base._TOOL_CALL_STREAM_KEY not in session._tmp_data
 
 
@@ -665,8 +665,8 @@ async def test_unknown_tool_truncated_stream_recovers(monkeypatch: Any) -> None:
 
 def test_tool_header_color_always_bright_magenta() -> None:
     for name in (
-        "Python", "WriteFile", "WritePlan", "EditFile", "Bash", "Powershell",
-        "Grep", "ReadFile", "TodoList", "Agent", "Compact", "NoSuchTool",
+        "python", "write", "WritePlan", "edit", "bash", "pwsh",
+        "grep", "read", "todo_write", "subagent", "compact", "NoSuchTool",
     ):
         assert base._tool_header_color(name) is base.Color.BRIGHT_MAGENTA
 
@@ -695,7 +695,7 @@ async def test_stream_prints_with_alias_old_string(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+        function=ToolCall.FunctionBody(name="edit", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -710,7 +710,7 @@ async def test_stream_prints_with_alias_old_string(monkeypatch: Any) -> None:
     plain = base._strip_ansi("".join(chunks))
 
     # Header printed.
-    assert "\x1b[95m\u26a1 EditFile\x1b[0m" in output
+    assert "\x1b[95m\u26a1 edit\x1b[0m" in output
     # Old value displayed in bright red, labeled "old:" (canonical).
     assert "\x1b[91maaa\x1b[0m" in output, "old_string value should be bright red"
     assert "\nold:\n" in plain, "alias old_string should display as canonical 'old:'"
@@ -758,7 +758,7 @@ async def test_stream_alias_text_maps_to_content(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -785,7 +785,7 @@ async def test_stream_alias_source_code_maps_to_code(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="Python", arguments=None),
+        function=ToolCall.FunctionBody(name="python", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -812,7 +812,7 @@ async def test_stream_alias_task_maps_to_prompt(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="Agent", arguments=None),
+        function=ToolCall.FunctionBody(name="subagent", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -838,7 +838,7 @@ async def test_stream_colors_writefile_header_and_content_white(monkeypatch: Any
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -847,7 +847,7 @@ async def test_stream_colors_writefile_header_and_content_white(monkeypatch: Any
 
     output = "".join(chunks)
     # Header is always bright magenta.
-    assert "\x1b[95m⚡ WriteFile\x1b[0m" in output
+    assert "\x1b[95m⚡ write\x1b[0m" in output
     # Streamed content value color-coded bright black.
     assert "\x1b[90mhello\x1b[0m" in output
     # Short args stay inline on the header line (magenta, space prefix).
@@ -859,7 +859,7 @@ async def test_stream_colors_editfile_old_red_new_green(monkeypatch: Any) -> Non
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+        function=ToolCall.FunctionBody(name="edit", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -869,7 +869,7 @@ async def test_stream_colors_editfile_old_red_new_green(monkeypatch: Any) -> Non
     )
 
     output = "".join(chunks)
-    assert "\x1b[95m⚡ EditFile\x1b[0m" in output   # header bright magenta
+    assert "\x1b[95m⚡ edit\x1b[0m" in output   # header bright magenta
     assert "\x1b[91maaa\x1b[0m" in output            # old -> bright red
     assert "\x1b[92mbbb\x1b[0m" in output            # new -> bright green
 
@@ -881,7 +881,7 @@ async def test_stream_prints_only_stream_keys_on_new_line(monkeypatch: Any) -> N
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+        function=ToolCall.FunctionBody(name="edit", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -893,7 +893,7 @@ async def test_stream_prints_only_stream_keys_on_new_line(monkeypatch: Any) -> N
     plain = _plain(chunks)
 
     # Short arg (path) is inline on the header line.
-    assert "⚡ EditFile path:f.py" in plain
+    assert "⚡ edit path:f.py" in plain
     # Streamed old/new values get their own labeled lines.
     assert "\nold:\naaa" in plain
     assert "\nnew:\nbbb" in plain
@@ -908,7 +908,7 @@ async def test_stream_colors_python_code_blue(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="Python", arguments=None),
+        function=ToolCall.FunctionBody(name="python", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -916,7 +916,7 @@ async def test_stream_colors_python_code_blue(monkeypatch: Any) -> None:
         ToolCallPart(arguments_part='{"code": "print(1)"}'), session)
 
     output = "".join(chunks)
-    assert "\x1b[95m⚡ Python\x1b[0m" in output      # header bright magenta
+    assert "\x1b[95m⚡ python\x1b[0m" in output      # header bright magenta
     assert "\x1b[94mprint(1)\x1b[0m" in output       # code -> bright blue
 
 
@@ -925,7 +925,7 @@ async def test_stream_colors_agent_prompt(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="Agent", arguments=None),
+        function=ToolCall.FunctionBody(name="subagent", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -933,18 +933,18 @@ async def test_stream_colors_agent_prompt(monkeypatch: Any) -> None:
         ToolCallPart(arguments_part='{"prompt": "do it"}'), session)
 
     output = "".join(chunks)
-    assert "\x1b[95m⚡ Agent\x1b[0m" in output       # header magenta (unchanged)
+    assert "\x1b[95m⚡ subagent\x1b[0m" in output       # header magenta (unchanged)
     assert "\x1b[93mdo it\x1b[0m" in output          # prompt -> bright yellow
 
 
 async def test_tool_header_color_compact_path_and_fallback(monkeypatch: Any) -> None:
-    # Non-whitelisted tool (compact path): Grep header is bright magenta too.
+    # Non-whitelisted tool (compact path): grep header is bright magenta too.
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     await base.print_agent_json(
         ToolCall(id="c1", function=ToolCall.FunctionBody(
-            name="Grep", arguments='{"pattern": "def "}')), session)
-    assert "\x1b[95m⚡ Grep" in "".join(chunks)
+            name="grep", arguments='{"pattern": "def "}')), session)
+    assert "\x1b[95m⚡ grep" in "".join(chunks)
 
     # Unknown tool (compact path, default case): also bright magenta header.
     chunks2 = _capture_base_stream(monkeypatch)
@@ -967,7 +967,7 @@ async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> 
     tool_call = ToolCall(
         id="call-1",
         function=ToolCall.FunctionBody(
-            name="Powershell", arguments='{"cmd": "git diff --stat"}'),
+            name="pwsh", arguments='{"cmd": "git diff --stat"}'),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -986,9 +986,9 @@ async def test_tool_header_not_reprinted_after_tool_result(monkeypatch: Any) -> 
     await base.print_agent_json(TextPart(text="next step"), session)
 
     plain = _plain(chunks)
-    assert plain.count("⚡ Powershell") == 1
+    assert plain.count("⚡ pwsh") == 1
     # Result renders as `✓ {ToolName}` (tracked call) + dim `  {message}`.
-    assert "✓ Powershell" in plain
+    assert "✓ pwsh" in plain
     assert "\n  ok" in plain
 
 
@@ -1008,12 +1008,12 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
 
     # Proxy-style stream: header with empty args, then a single full-args part.
     await base.print_agent_json(
-        ToolCall(id="call-1", function=ToolCall.FunctionBody(name="Glob", arguments="")),
+        ToolCall(id="call-1", function=ToolCall.FunctionBody(name="glob", arguments="")),
         session,
     )
     await base.print_agent_json(ToolCallPart(arguments_part='{"pattern": "*.a"}'), session)
     await base.print_agent_json(
-        ToolCall(id="call-2", function=ToolCall.FunctionBody(name="Glob", arguments="")),
+        ToolCall(id="call-2", function=ToolCall.FunctionBody(name="glob", arguments="")),
         session,
     )
     await base.print_agent_json(ToolCallPart(arguments_part='{"pattern": "*.b"}'), session)
@@ -1035,9 +1035,9 @@ async def test_tool_header_not_reprinted_for_in_flight_call_on_earlier_results(
     await base.print_agent_json(TextPart(text="next step"), session)
 
     plain = _plain(chunks)
-    assert plain.count("⚡ Glob") == 2
-    # Each tracked result renders as `✓ Glob` header + dim `  ok` line.
-    assert plain.count("✓ Glob") == 2
+    assert plain.count("⚡ glob") == 2
+    # Each tracked result renders as `✓ glob` header + dim `  ok` line.
+    assert plain.count("✓ glob") == 2
     assert plain.count("\n  ok") == 2
 
 
@@ -1100,11 +1100,11 @@ def test_format_tool_args_generic_new_tool() -> None:
 
 
 async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch: Any) -> None:
-    """End-to-end: the printed ``⚡ Powershell`` / ``⚡ Bash`` tool-call header
+    """End-to-end: the printed ``⚡ pwsh`` / ``⚡ bash`` tool-call header
     must include the command **inline** (on the same line) regardless of whether
     the LLM sent it under the advertised ``command`` alias or the ``cmd`` field
     name.  Both forms produce identical inline output ``⚡ Name Get-Date``."""
-    for tool_name in ("Powershell", "Bash"):
+    for tool_name in ("pwsh", "bash"):
         for key in ("command", "cmd"):
             chunks = _capture_base_stream(monkeypatch)
             session = FakeSession()
@@ -1120,7 +1120,7 @@ async def test_powershell_bash_tool_call_header_prints_command_alias(monkeypatch
             )
             plain = _plain(chunks)
             # Header and command appear on the same line (inline).
-            # The output looks like: ⚡ Powershell Get-Date
+            # The output looks like: ⚡ pwsh Get-Date
             assert f"\u26a1 {tool_name} " in plain, (
                 f"{tool_name}: inline header+command missing for {key!r} args: {plain!r}"
             )
@@ -1138,7 +1138,7 @@ async def test_powershell_bash_streamed_fragments_print_command_alias(monkeypatc
     arguments followed by ToolCallPart fragments.  The stream printer is
     created for every tool and the command is printed **inline** after the
     header as fragments arrive."""
-    for tool_name in ("Powershell", "Bash"):
+    for tool_name in ("pwsh", "bash"):
         chunks = _capture_base_stream(monkeypatch)
         session = FakeSession()
         await base.print_agent_json(
@@ -1193,7 +1193,7 @@ def _capture_base_stream_with_flush(monkeypatch: Any) -> tuple[list[str], list[b
 
 
 async def test_compact_path_tool_header_flushes(monkeypatch: Any) -> None:
-    """Fix 1: Compact-path headers (TaskOutput, etc.) must use ``flush=True``
+    """Fix 1: Compact-path headers (job_output, etc.) must use ``flush=True``
     so the ``\u26a1`` line appears immediately, not buffered for seconds."""
     chunks, flush_flags = _capture_base_stream_with_flush(monkeypatch)
     session = FakeSession()
@@ -1202,7 +1202,7 @@ async def test_compact_path_tool_header_flushes(monkeypatch: Any) -> None:
         ToolCall(
             id="call-1",
             function=ToolCall.FunctionBody(
-                name="TaskOutput",
+                name="job_output",
                 arguments='{"task_id": "pwsh_xxx"}',
             ),
         ),
@@ -1210,7 +1210,7 @@ async def test_compact_path_tool_header_flushes(monkeypatch: Any) -> None:
     )
 
     plain = _plain(chunks)
-    assert "\u26a1 TaskOutput" in plain
+    assert "\u26a1 job_output" in plain
     assert any(flush_flags), (
         "No flush=True found — compact-path tool header did not flush"
     )
@@ -1224,7 +1224,7 @@ async def test_fragmented_compact_header_flushes(monkeypatch: Any) -> None:
 
     # Empty-args header + one fragment that completes the JSON.
     await base.print_agent_json(
-        ToolCall(id="call-1", function=ToolCall.FunctionBody(name="Glob", arguments="")),
+        ToolCall(id="call-1", function=ToolCall.FunctionBody(name="glob", arguments="")),
         session,
     )
     await base.print_agent_json(
@@ -1233,7 +1233,7 @@ async def test_fragmented_compact_header_flushes(monkeypatch: Any) -> None:
     )
 
     plain = _plain(chunks)
-    assert "\u26a1 Glob" in plain
+    assert "\u26a1 glob" in plain
     assert any(flush_flags), (
         "No flush=True found — fragmented compact header did not flush"
     )
@@ -1248,13 +1248,13 @@ async def test_stream_path_header_flushes(monkeypatch: Any) -> None:
     await base.print_agent_json(
         ToolCall(
             id="call-1",
-            function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+            function=ToolCall.FunctionBody(name="write", arguments=None),
         ),
         session,
     )
 
     plain = _plain(chunks)
-    assert "\u26a1 WriteFile" in plain
+    assert "\u26a1 write" in plain
     assert any(flush_flags), (
         "No flush=True found — stream-path tool header did not flush"
     )
@@ -1308,7 +1308,7 @@ async def test_short_args_print_on_one_header_line(monkeypatch: Any) -> None:
     """Short arguments never break onto their own lines — the whole call
     renders as a single ``⚡ Name key:value key:value`` line::
 
-        ⚡ EditFile path:C:\\dev\\kimi-agent\\src\\kimix\\ui\\stream.py line_offset:1125 max_char:15000
+        ⚡ edit path:C:\\dev\\kimi-agent\\src\\kimix\\ui\\stream.py line_offset:1125 max_char:15000
     """
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
@@ -1318,7 +1318,7 @@ async def test_short_args_print_on_one_header_line(monkeypatch: Any) -> None:
         ToolCall(
             id="call-short-args",
             function=ToolCall.FunctionBody(
-                name="EditFile",
+                name="edit",
                 arguments=orjson.dumps(
                     {"path": path, "line_offset": 1125, "max_char": 15000}
                 ).decode("utf-8"),
@@ -1328,11 +1328,11 @@ async def test_short_args_print_on_one_header_line(monkeypatch: Any) -> None:
     )
 
     plain = _plain(chunks)
-    expected = f"⚡ EditFile path:{path} line_offset:1125 max_char:15000"
+    expected = f"⚡ edit path:{path} line_offset:1125 max_char:15000"
     assert expected in plain, f"one-line header+args missing: {plain!r}"
     # The header line is a single line: no newline between header and args.
     header_line = next(
-        line for line in plain.splitlines() if line.startswith("⚡ EditFile")
+        line for line in plain.splitlines() if line.startswith("⚡ edit")
     )
     assert header_line == expected
 
@@ -1369,7 +1369,7 @@ async def test_new_tool_streams_without_code_change(monkeypatch: Any) -> None:
 
 
 async def test_stream_fuzzy_alias_old_str_new_str(monkeypatch: Any) -> None:
-    """Anthropic-style EditFile: Claude's native editor uses ``old_str`` /
+    """Anthropic-style edit: Claude's native editor uses ``old_str`` /
     ``new_str``.  kosong's FIELD_ALIASES_FILE repairs them to ``old`` /
     ``new`` at execution, so the streamed display must show the canonical
     ``old:`` / ``new:`` labels with live red/green values — not a truncated
@@ -1378,7 +1378,7 @@ async def test_stream_fuzzy_alias_old_str_new_str(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+        function=ToolCall.FunctionBody(name="edit", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -1401,7 +1401,7 @@ async def test_stream_fuzzy_alias_old_str_new_str(monkeypatch: Any) -> None:
 
 
 async def test_stream_fuzzy_alias_data_maps_to_content(monkeypatch: Any) -> None:
-    """kimi-style WriteFile: models frequently emit ``data`` (or ``body``)
+    """kimi-style write: models frequently emit ``data`` (or ``body``)
     instead of ``content``; kosong repairs it, so the display must stream it
     under the canonical ``content:`` label."""
     for key in ("data", "body"):
@@ -1409,7 +1409,7 @@ async def test_stream_fuzzy_alias_data_maps_to_content(monkeypatch: Any) -> None
         session = FakeSession()
         tool_call = ToolCall(
             id=f"call-{key}",
-            function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+            function=ToolCall.FunctionBody(name="write", arguments=None),
         )
 
         await base.print_agent_json(tool_call, session)
@@ -1436,7 +1436,7 @@ async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="WriteFile", arguments=None),
+        function=ToolCall.FunctionBody(name="write", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)
@@ -1454,7 +1454,7 @@ async def test_stream_fuzzy_alias_file_maps_to_path(monkeypatch: Any) -> None:
 
 async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
     """kimi-style hallucinated tool name ``write_file``: kosong's
-    normalize_tool_name auto-correct resolves it to ``WriteFile`` at
+    normalize_tool_name auto-correct resolves it to ``write`` at
     execution, so the display must resolve it too — the header shows the
     canonical name resolved against the session's live toolset and the
     content streams live."""
@@ -1468,7 +1468,7 @@ async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
     await base.print_agent_json(tool_call, session)
     # Stream printer must be created for the resolved tool.
     assert base._TOOL_CALL_STREAM_KEY in session._tmp_data, (
-        "no stream printer for resolved name 'write_file' -> 'WriteFile'"
+        "no stream printer for resolved name 'write_file' -> 'write'"
     )
     await base.print_agent_json(
         ToolCallPart(arguments_part='{"path": "x.py", "content": "hello world"}'),
@@ -1479,7 +1479,7 @@ async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
     plain = base._strip_ansi(output)
 
     # Header shows the resolved canonical name.
-    assert "\x1b[95m\u26a1 WriteFile\x1b[0m" in output
+    assert "\x1b[95m\u26a1 write\x1b[0m" in output
     assert "\ncontent:\n" in plain
     assert "\x1b[90mhello world\x1b[0m" in output
     assert base._stream._last_char_was_newline is True
@@ -1487,9 +1487,9 @@ async def test_stream_snake_case_tool_name_write_file(monkeypatch: Any) -> None:
 
 async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
     """kosong's TOOL_NAME_REDIRECTS maps common wrong names onto real tools
-    (AppendFile -> WriteFile, ReplaceFile -> EditFile).  The streaming
+    (AppendFile -> write, ReplaceFile -> edit).  The streaming
     display must follow the same redirect so these calls stream live."""
-    # AppendFile -> WriteFile: content streams.
+    # AppendFile -> write: content streams.
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     await base.print_agent_json(
@@ -1500,7 +1500,7 @@ async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
         session,
     )
     assert base._TOOL_CALL_STREAM_KEY in session._tmp_data, (
-        "no stream printer for redirected name 'AppendFile' -> 'WriteFile'"
+        "no stream printer for redirected name 'AppendFile' -> 'write'"
     )
     await base.print_agent_json(
         ToolCallPart(arguments_part='{"path": "x.py", "content": "appended"}'),
@@ -1508,11 +1508,11 @@ async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
     )
     output = "".join(chunks)
     plain = base._strip_ansi(output)
-    assert "\x1b[95m\u26a1 WriteFile\x1b[0m" in output
+    assert "\x1b[95m\u26a1 write\x1b[0m" in output
     assert "\ncontent:\n" in plain
     assert "\x1b[90mappended\x1b[0m" in output
 
-    # ReplaceFile -> EditFile: old/new stream with colors.
+    # ReplaceFile -> edit: old/new stream with colors.
     chunks2 = _capture_base_stream(monkeypatch)
     session2 = FakeSession()
     await base.print_agent_json(
@@ -1523,7 +1523,7 @@ async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
         session2,
     )
     assert base._TOOL_CALL_STREAM_KEY in session2._tmp_data, (
-        "no stream printer for redirected name 'ReplaceFile' -> 'EditFile'"
+        "no stream printer for redirected name 'ReplaceFile' -> 'edit'"
     )
     await base.print_agent_json(
         ToolCallPart(
@@ -1533,7 +1533,7 @@ async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
     )
     output2 = "".join(chunks2)
     plain2 = base._strip_ansi(output2)
-    assert "\x1b[95m\u26a1 EditFile\x1b[0m" in output2
+    assert "\x1b[95m\u26a1 edit\x1b[0m" in output2
     assert "\nold:\n" in plain2
     assert "\nnew:\n" in plain2
     assert "\x1b[91maaa\x1b[0m" in output2
@@ -1542,13 +1542,13 @@ async def test_stream_redirected_tool_names(monkeypatch: Any) -> None:
 
 async def test_stream_fuzzy_alias_changes_maps_to_edit(monkeypatch: Any) -> None:
     """Models sometimes emit ``changes`` instead of ``edit``/``edits`` for
-    EditFile; kosong repairs the key.  The nested old/new values must still
+    edit; kosong repairs the key.  The nested old/new values must still
     stream under the canonical labels."""
     chunks = _capture_base_stream(monkeypatch)
     session = FakeSession()
     tool_call = ToolCall(
         id="call-1",
-        function=ToolCall.FunctionBody(name="EditFile", arguments=None),
+        function=ToolCall.FunctionBody(name="edit", arguments=None),
     )
 
     await base.print_agent_json(tool_call, session)

@@ -4112,7 +4112,7 @@ class TestBashInteractiveArgumentBuilding:
             assert isinstance(result, ToolOk)
             assert "task-456" in result.message
             assert "task_id" in result.message
-            assert "TaskOutput" in result.message
+            assert "job_output" in result.message
             mock_instance.wait.assert_not_called()
 
 
@@ -5000,7 +5000,7 @@ class TestPowershellFailedCommandSaved:
         saved = result.message.split("[command saved to ", 1)[1].split("]", 1)[0]
         assert saved.endswith(".ps1")
         assert Path(saved).read_text(encoding="utf-8") == long_cmd
-        assert "Edit the saved script and run it again with this tool (powershell) to retry." in result.message
+        assert "Edit the saved script and run it again with this tool (PowerShell) to retry." in result.message
 
     async def test_short_failed_command_not_saved(
         self, pwsh_instance: Powershell

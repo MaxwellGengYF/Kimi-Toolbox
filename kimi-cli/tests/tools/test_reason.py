@@ -13,19 +13,19 @@ from kimi_cli.tools.reason import ToolCallReason
 
 
 class MockWriteFileParams(BaseModel):
-    path: str
+    file_path: str
     content: str
     reason: str = ""
 
 
 class MockEditFileParams(BaseModel):
-    path: str
+    file_path: str
     edit: Any
     reason: str = ""
 
 
 class MockWriteFileTool(CallableTool2[MockWriteFileParams]):
-    name: str = "WriteFile"
+    name: str = "write"
     description: str = "Mock write"
     params: type[MockWriteFileParams] = MockWriteFileParams
 
@@ -34,7 +34,7 @@ class MockWriteFileTool(CallableTool2[MockWriteFileParams]):
 
 
 class MockEditFileTool(CallableTool2[MockEditFileParams]):
-    name: str = "EditFile"
+    name: str = "edit"
     description: str = "Mock edit"
     params: type[MockEditFileParams] = MockEditFileParams
 
@@ -79,13 +79,13 @@ class TestToolCallReasonAdd:
     """Test add_tool_call_reason method."""
 
     def test_add_write_file(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        params = MockWriteFileParams(path=str(tmp_path / "a.py"), content="hello", reason="create file")
+        params = MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="hello", reason="create file")
         tracker.add_tool_call_reason(params, write_tool)
 
         assert len(tracker) == 1
         abs_path = str((tmp_path / "a.py").resolve())
         assert abs_path in tracker._records
-        assert tracker._records[abs_path] == ["WriteFile"]
+        assert tracker._records[abs_path] == ["write"]
 
     def test_add_edit_file_single(self, tracker: ToolCallReason, edit_tool: MockEditFileTool, tmp_path: Path):
         from pydantic import BaseModel, Field
@@ -96,14 +96,14 @@ class TestToolCallReasonAdd:
             replace_all: bool = Field(default=False)
 
         params = MockEditFileParams(
-            path=str(tmp_path / "b.py"),
+            file_path=str(tmp_path / "b.py"),
             edit=Edit(old="foo", new="bar"),
             reason="fix typo",
         )
         tracker.add_tool_call_reason(params, edit_tool)
 
         abs_path = str((tmp_path / "b.py").resolve())
-        assert tracker._records[abs_path] == ["EditFile"]
+        assert tracker._records[abs_path] == ["edit"]
 
     def test_add_edit_file_list(self, tracker: ToolCallReason, edit_tool: MockEditFileTool, tmp_path: Path):
         from pydantic import BaseModel, Field
@@ -114,39 +114,39 @@ class TestToolCallReasonAdd:
             replace_all: bool = Field(default=False)
 
         params = MockEditFileParams(
-            path=str(tmp_path / "c.py"),
+            file_path=str(tmp_path / "c.py"),
             edit=[Edit(old="a", new="1"), Edit(old="b", new="2")],
             reason="batch update",
         )
         tracker.add_tool_call_reason(params, edit_tool)
 
         abs_path = str((tmp_path / "c.py").resolve())
-        assert tracker._records[abs_path] == ["EditFile"]
+        assert tracker._records[abs_path] == ["edit"]
 
     def test_add_edit_file_none_edit(self, tracker: ToolCallReason, edit_tool: MockEditFileTool, tmp_path: Path):
-        params = MockEditFileParams(path=str(tmp_path / "d.py"), edit=None, reason="noop")
+        params = MockEditFileParams(file_path=str(tmp_path / "d.py"), edit=None, reason="noop")
         tracker.add_tool_call_reason(params, edit_tool)
 
         abs_path = str((tmp_path / "d.py").resolve())
-        assert tracker._records[abs_path] == ["EditFile"]
+        assert tracker._records[abs_path] == ["edit"]
 
     def test_add_wrong_tool_raises(self, tracker: ToolCallReason, wrong_tool: MockWrongTool, tmp_path: Path):
-        params = MockWriteFileParams(path=str(tmp_path / "x.py"), content="x")
-        with pytest.raises(ValueError, match="Expected WriteFile or EditFile"):
+        params = MockWriteFileParams(file_path=str(tmp_path / "x.py"), content="x")
+        with pytest.raises(ValueError, match="Expected write or edit"):
             tracker.add_tool_call_reason(params, wrong_tool)
 
     def test_add_empty_path_raises(self, tracker: ToolCallReason, write_tool: MockWriteFileTool):
-        params = MockWriteFileParams(path="", content="x")
-        with pytest.raises(ValueError, match="non-empty 'path'"):
+        params = MockWriteFileParams(file_path="", content="x")
+        with pytest.raises(ValueError, match="non-empty 'file_path'"):
             tracker.add_tool_call_reason(params, write_tool)
 
     def test_add_multiple_same_path(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
         path = str(tmp_path / "multi.py")
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v1", reason="first"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v2", reason="second"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v1", reason="first"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v2", reason="second"), write_tool)
 
         abs_path = str((tmp_path / "multi.py").resolve())
-        assert tracker._records[abs_path] == ["WriteFile", "WriteFile"]
+        assert tracker._records[abs_path] == ["write", "write"]
 
 
 class TestToolCallReasonFormattedPrint:
@@ -158,12 +158,12 @@ class TestToolCallReasonFormattedPrint:
 
     def test_formatted_print_single_write_file(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
         path = str(tmp_path / "a.py")
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="hello world", reason="init"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="hello world", reason="init"), write_tool)
 
         result = tracker.formatted_print([path])
         abs_path = str(Path(path).resolve())
         assert f"- {abs_path}" in result
-        assert "(WriteFile)" in result
+        assert "(write)" in result
         assert "hello world" not in result
         assert "--- old ---" not in result
 
@@ -177,12 +177,12 @@ class TestToolCallReasonFormattedPrint:
 
         path = str(tmp_path / "b.py")
         tracker.add_tool_call_reason(
-            MockEditFileParams(path=path, edit=Edit(old="old_text", new="new_text"), reason="update"),
+            MockEditFileParams(file_path=path, edit=Edit(old="old_text", new="new_text"), reason="update"),
             edit_tool,
         )
 
         result = tracker.formatted_print([path])
-        assert "(EditFile)" in result
+        assert "(edit)" in result
         assert "--- old ---" not in result
         assert "old_text" not in result
         assert "new_text" not in result
@@ -190,20 +190,20 @@ class TestToolCallReasonFormattedPrint:
     def test_formatted_print_multiple_paths(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
         path1 = str(tmp_path / "a.py")
         path2 = str(tmp_path / "b.py")
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path1, content="a", reason="ra"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path2, content="b", reason="rb"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path1, content="a", reason="ra"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path2, content="b", reason="rb"), write_tool)
 
         result = tracker.formatted_print([path1, path2])
-        assert "(WriteFile)" in result
+        assert "(write)" in result
         assert "- " in result
 
     def test_formatted_print_multiple_records_same_path(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
         path = str(tmp_path / "a.py")
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v1", reason="r1"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v2", reason="r2"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v1", reason="r1"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v2", reason="r2"), write_tool)
 
         result = tracker.formatted_print([path])
-        assert "(WriteFile, WriteFile)" in result
+        assert "(write, write)" in result
 
     def test_formatted_print_returns_string_not_prints(self, tracker: ToolCallReason, tmp_path: Path):
         result = tracker.formatted_print([str(tmp_path / "none.py")])
@@ -214,8 +214,8 @@ class TestToolCallReasonChangedFiles:
     """Test changed_files and to_markdown."""
 
     def test_changed_files_sorted(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "z.py"), content="z", reason="rz"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a", reason="ra"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "z.py"), content="z", reason="rz"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a", reason="ra"), write_tool)
         assert tracker.changed_files == sorted(tracker.changed_files)
         assert len(tracker.changed_files) == 2
 
@@ -223,18 +223,18 @@ class TestToolCallReasonChangedFiles:
         assert tracker.to_markdown() == ""
 
     def test_to_markdown_content(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a", reason="ra"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a", reason="ra"), write_tool)
         md = tracker.to_markdown()
         assert md.startswith("Changed files:")
         assert "a.py" in md
-        assert "(WriteFile)" in md
+        assert "(write)" in md
 
     def test_to_markdown_multiple_records(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
         path = str(tmp_path / "a.py")
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v1", reason="r1"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=path, content="v2", reason="r2"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v1", reason="r1"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=path, content="v2", reason="r2"), write_tool)
         md = tracker.to_markdown()
-        assert "(WriteFile, WriteFile)" in md
+        assert "(write, write)" in md
 
 
 class TestToolCallReasonLifecycle:
@@ -247,18 +247,18 @@ class TestToolCallReasonLifecycle:
         assert not tracker
 
     def test_len_and_bool_with_records(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a"), write_tool)
         assert len(tracker) == 1
         assert bool(tracker)
 
     def test_clear(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a"), write_tool)
         tracker.clear()
         assert len(tracker) == 0
         assert not tracker
 
     def test_len_multiple_paths_and_records(self, tracker: ToolCallReason, write_tool: MockWriteFileTool, tmp_path: Path):
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "b.py"), content="b"), write_tool)
-        tracker.add_tool_call_reason(MockWriteFileParams(path=str(tmp_path / "a.py"), content="a2"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "b.py"), content="b"), write_tool)
+        tracker.add_tool_call_reason(MockWriteFileParams(file_path=str(tmp_path / "a.py"), content="a2"), write_tool)
         assert len(tracker) == 3

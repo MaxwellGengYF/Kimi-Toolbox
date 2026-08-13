@@ -10,7 +10,7 @@ from typing import override
 
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue, alias_note
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from kimi_cli.native_loader import (
     get_module as _native_get_module,
@@ -68,7 +68,7 @@ def _is_unsafe_recursive_pattern(pattern: str) -> bool:
 
 
 WINDOWS_PATH_HINT = (
-    "Windows: `directory` accepts native (`C:\\Users\\foo`) and POSIX-style "
+    "Windows: `path` accepts native (`C:\\Users\\foo`) and POSIX-style "
     "(`/c/Users/foo`) paths. Results use backslashes — convert to forward "
     "slashes for shell commands."
 )
@@ -389,11 +389,22 @@ def _get_gitignore_rules(root: Path) -> list[_GitignoreRule]:
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    pattern: str = Field(description="Glob pattern. Unsafe recursive patterns (``**``, ``**/*``, ``**/**``, etc.) are forbidden.")
-    directory: str | None = Field(
-        alias="path",  # common LLM variant
-        description="Absolute search path. Defaults to working directory. "
-        + alias_note("directory", "path", word=False),
+    pattern: str = Field(
+        description=(
+            "Glob pattern to match file paths against (e.g. `**/*.ts`, "
+            "`src/**/*.test.js`). A pattern with no \"/\" matches the basename "
+            "at any depth, so `*` and `*.ts` both search the whole tree; include "
+            "a separator to anchor the depth. Unsafe recursive patterns "
+            "(``**``, ``**/*``, ``**/**``, etc.) are forbidden."
+        )
+    )
+    path: str | None = Field(
+        validation_alias=AliasChoices("path", "directory"),
+        description=(
+            "Directory to search in. Defaults to the session workspace; a "
+            "relative path resolves against it. "
+            + alias_note("path", "directory", word=False)
+        ),
         default=None,
     )
     include_dirs: bool = Field(
@@ -432,7 +443,7 @@ class Params(BaseModel):
 
 
 class Glob(CallableTool2[Params]):
-    name: str = "Glob"
+    name: str = "glob"
     description: str = _description_for_os("")
     params: type[Params] = Params
     def __init__(self, runtime: Runtime, vfs: VFS | None = None) -> None:
@@ -479,9 +490,8 @@ class Glob(CallableTool2[Params]):
                     ),
                     brief=f"Unsafe pattern: {pattern}",
                 )
-
-            if params.directory:
-                dir_path = kaos_path_from_tool_input(params.directory, self._work_dir)
+            if params.path:
+                dir_path = kaos_path_from_tool_input(params.path, self._work_dir)
             else:
                 dir_path = self._work_dir
             dir_path = await resolve_vfs(str(dir_path), self._vfs, for_write=False, work_dir=self._work_dir)

@@ -26,7 +26,7 @@ def __getattr__(name: str) -> Any:
 
 
 class Params(BaseModel):
-    query: str = Field(description="Search query.")
+    query: str = Field(description="The search query.")
     limit: int = Field(
         description="Number of results. Prefer a specific query over a high limit.",
         default=5,
@@ -40,8 +40,11 @@ class Params(BaseModel):
 
 
 class SearchWeb(CallableTool2[Params]):
-    name: str = "SearchWeb"
-    description: str = "Search the web."
+    name: str = "web_search"
+    description: str = (
+        "Search the web for current information. Returns an optional summary "
+        "answer and a list of source URLs."
+    )
     params: type[Params] = Params
 
     def __init__(self, config: Config, runtime: Runtime):

@@ -1,4 +1,4 @@
-"""Tests for the ContextPrune tool."""
+"""Tests for the context_prune tool."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from kosong.message import Message
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.context_pruning import ContextPruner
 from kimi_cli.soul.history_index import HistoryIndex
-from kimi_cli.tools.context_prune import ContextPrune, Params
+from kimi_cli.tools.context_prune import context_prune, Params
 from kimi_cli.wire.types import StatusUpdate, TextPart, ThinkPart
 
 
 def _make_soul(tmp_path: Path, **overrides: Any) -> SimpleNamespace:
-    """Build a minimal mock KimiSoul for ContextPrune tests."""
+    """Build a minimal mock KimiSoul for context_prune tests."""
     history_index_path = tmp_path / "history_index.json"
     history_index = HistoryIndex(persist_path=history_index_path)
 
@@ -100,7 +100,7 @@ def _system_reminder(text: str) -> Message:
 
 @pytest.fixture
 def tool(tmp_path: Path):
-    return ContextPrune(_make_soul(tmp_path))
+    return context_prune(_make_soul(tmp_path))
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def wire_capture(monkeypatch):
 
 class TestContextPruneTool:
     @pytest.mark.asyncio
-    async def test_dry_run_reports_no_mutation(self, tool: ContextPrune, wire_capture):
+    async def test_dry_run_reports_no_mutation(self, tool: context_prune, wire_capture):
         # Long system reminder so current tokens exceed the target
         await tool._soul.context.append_message(_system_reminder("x" * 5000))
         await tool._soul.context.append_message(_user("hello"))
@@ -137,7 +137,7 @@ class TestContextPruneTool:
         assert not wire_capture  # no status update on dry run
 
     @pytest.mark.asyncio
-    async def test_prune_mode_mutates_history(self, tool: ContextPrune, wire_capture):
+    async def test_prune_mode_mutates_history(self, tool: context_prune, wire_capture):
         await tool._soul.context.append_message(_system_reminder("x" * 5000))
         await tool._soul.context.append_message(_user("hello"))
         await tool._soul.context.append_message(_assistant("hi"))
@@ -158,20 +158,20 @@ class TestContextPruneTool:
         assert len(wire_capture) == 0  # no wire in tests
 
     @pytest.mark.asyncio
-    async def test_compact_mode_calls_compaction(self, tool: ContextPrune):
+    async def test_compact_mode_calls_compaction(self, tool: context_prune):
         result = await tool(Params(mode="compact", dry_run=False))
         assert not result.is_error
         assert result.message == "Context compacted"
         assert tool._soul._compact_called() is True
 
     @pytest.mark.asyncio
-    async def test_compact_mode_dry_run_does_not_call_compaction(self, tool: ContextPrune):
+    async def test_compact_mode_dry_run_does_not_call_compaction(self, tool: context_prune):
         result = await tool(Params(mode="compact", dry_run=True))
         assert "Dry run" in result.output
         assert tool._soul._compact_called() is False
 
     @pytest.mark.asyncio
-    async def test_strip_reasoning_mode_removes_think_parts(self, tool: ContextPrune):
+    async def test_strip_reasoning_mode_removes_think_parts(self, tool: context_prune):
         await tool._soul.context.append_message(_assistant_with_think("old reasoning"))
         await tool._soul.context.append_message(_user("hello"))
         await tool._soul.context.append_message(_assistant("tail"))
@@ -207,7 +207,7 @@ class TestContextPruneTool:
                 )
             ),
         )
-        tool = ContextPrune(soul)
+        tool = context_prune(soul)
         await tool._soul.context.append_message(_assistant_with_think("old reasoning"))
         await tool._soul.context.append_message(_user("hello"))
 
@@ -224,7 +224,7 @@ class TestContextPruneTool:
         assert any(isinstance(p, ThinkPart) and p.think == "" for p in old_assistant.content)
 
     @pytest.mark.asyncio
-    async def test_tool_refuses_to_remove_only_turn(self, tool: ContextPrune):
+    async def test_tool_refuses_to_remove_only_turn(self, tool: context_prune):
         await tool._soul.context.append_message(_user("hello"))
         await tool._soul.context.append_message(_assistant("hi"))
 
@@ -234,7 +234,7 @@ class TestContextPruneTool:
         assert "only one user/assistant pair" in result.message
 
     @pytest.mark.asyncio
-    async def test_tool_preserves_tool_call_pairs(self, tool: ContextPrune):
+    async def test_tool_preserves_tool_call_pairs(self, tool: context_prune):
         await tool._soul.context.append_message(_user("read file"))
         await tool._soul.context.append_message(
             Message(
@@ -262,7 +262,7 @@ class TestContextPruneTool:
         assert "call_1" in tool_ids
 
     @pytest.mark.asyncio
-    async def test_tool_indexes_elided_content(self, tool: ContextPrune):
+    async def test_tool_indexes_elided_content(self, tool: context_prune):
         await tool._soul.context.append_message(_user("hello"))
         await tool._soul.context.append_message(_assistant("call tool"))
         await tool._soul.context.append_message(_tool("x" * 4000))
@@ -284,12 +284,12 @@ class TestContextPruneTool:
         assert "x" * 10 in tool_turns[0]["text"]
 
     @pytest.mark.asyncio
-    async def test_invalid_keep_recent_turns_rejected(self, tool: ContextPrune):
+    async def test_invalid_keep_recent_turns_rejected(self, tool: context_prune):
         with pytest.raises(Exception):
             await tool(Params(mode="prune", keep_recent_turns=25))
 
     @pytest.mark.asyncio
-    async def test_subagent_pruning_blocked_by_default(self, tool: ContextPrune):
+    async def test_subagent_pruning_blocked_by_default(self, tool: context_prune):
         tool._soul.runtime.role = "subagent"
         await tool._soul.context.append_message(_user("hello"))
         await tool._soul.context.append_message(_assistant("hi"))
@@ -300,7 +300,7 @@ class TestContextPruneTool:
         assert "subagents" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_subagent_pruning_allowed_when_enabled(self, tool: ContextPrune):
+    async def test_subagent_pruning_allowed_when_enabled(self, tool: context_prune):
         tool._soul.runtime.role = "subagent"
         tool._soul._loop_control.prune_subagents = True
         await tool._soul.context.append_message(_system_reminder("x" * 5000))

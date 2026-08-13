@@ -81,8 +81,8 @@ class Params(BaseModel):
         return self
 
 
-class Python(CallableTool2[Params]):
-    name: str = "Python"
+class python(CallableTool2[Params]):
+    name: str = "python"
     description: str = (
         "Execute Python code or run a .py file directly. "
         "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
@@ -378,7 +378,7 @@ class Python(CallableTool2[Params]):
             output="",
             message=(
                 f"Interactive Python started. task_id: `{task_id}`. "
-                "Use task_id to send commands and TaskOutput to read results. "
+                "Use task_id to send commands and job_output to read results. "
                 "Send 'exit()' to close the session."
             ),
             brief="Interactive Python started",
@@ -429,7 +429,7 @@ class Python(CallableTool2[Params]):
 
         if background:
             return ToolOk(
-                output=f"{source_label} saved to `{display_script_path}`. Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
+                output=f"{source_label} saved to `{display_script_path}`. Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output.",
                 brief="Background task started"
             )
 
@@ -473,7 +473,7 @@ class Python(CallableTool2[Params]):
             output = await _maybe_export_output_async(output)
             return ToolError(
                 output=output,
-                message=f"{source_label} saved to `{display_script_path}`. Running in background. task_id: `{task_id}`. use `TaskOutput`",
+                message=f"{source_label} saved to `{display_script_path}`. Running in background. task_id: `{task_id}`. use `job_output`",
                 brief="Timeout"
             )
 

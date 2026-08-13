@@ -198,5 +198,5 @@ def todo_list_tool(mock_runtime: MagicMock):
 
 @pytest.fixture
 def fetch_url_tool():
-    from kimi_cli.tools.web.fetch import FetchURL
-    return FetchURL(config=MagicMock(), runtime=MagicMock())
+    from kimi_cli.tools.web.fetch import fetch_url
+    return fetch_url(config=MagicMock(), runtime=MagicMock())

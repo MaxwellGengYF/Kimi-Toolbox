@@ -75,9 +75,9 @@ class VerificationGate:
                 if name in EDIT_TOOLS:
                     has_edits = True
                 if name in VERIFICATION_TOOL_HINTS:
-                    # A TodoList call only counts as verification when it
+                    # A todo_write call only counts as verification when it
                     # actually marks something done.
-                    if name == "TodoList":
+                    if name == "todo_write":
                         if VerificationGate._todolist_marks_done(tool_call.function.arguments):
                             has_verification = True
                     else:
@@ -100,7 +100,8 @@ class VerificationGate:
         if not isinstance(todos, list):
             return False
         return any(
-            isinstance(t, dict) and t.get("status") == "done" for t in todos
+            isinstance(t, dict) and t.get("status") in ("done", "completed")
+            for t in todos
         )
 
     # ------------------------------------------------------------------
@@ -122,7 +123,7 @@ class VerificationGate:
             todos = []
         unfinished = [t for t in todos if t.status != "done"]
         if unfinished:
-            lines = ["Unfinished TodoList tasks remain:"]
+            lines = ["Unfinished todo_write tasks remain:"]
             for item in unfinished[:_MAX_UNFINISHED_LISTED]:
                 lines.append(f"- [{item.status}] {item.title}")
             if len(unfinished) > _MAX_UNFINISHED_LISTED:

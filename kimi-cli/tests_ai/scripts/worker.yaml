@@ -24,5 +24,5 @@ agent:
     - "kimi_cli.tools.file:Glob"
     - "kimi_cli.tools.file:Grep"
     # - "kimi_cli.tools.web:SearchWeb"
-    # - "kimi_cli.tools.web:FetchURL"
+    # - "kimi_cli.tools.web:fetch_url"
   subagents:

@@ -1,4 +1,4 @@
-"""End-to-end tests for ContextPrune through a KimiSoul-like setup."""
+"""End-to-end tests for context_prune through a KimiSoul-like setup."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from kimi_cli.soul.context import Context
 from kimi_cli.soul.context_pruning import ContextPruner
 from kimi_cli.soul.history_index import HistoryIndex
 from kimi_cli.soul.toolset import KimiToolset
-from kimi_cli.tools.context_prune import ContextPrune, Params
+from kimi_cli.tools.context_prune import context_prune, Params
 from kimi_cli.wire.types import TextPart
 
 
@@ -91,9 +91,9 @@ def _make_soul(tmp_path: Path) -> SimpleNamespace:
 
 
 def _context_prune_toolset(soul: SimpleNamespace) -> KimiToolset:
-    """Register ContextPrune on a KimiToolset and return it."""
+    """Register context_prune on a KimiToolset and return it."""
     toolset = KimiToolset()
-    toolset.add(ContextPrune(soul))
+    toolset.add(context_prune(soul))
     return toolset
 
 
@@ -114,7 +114,7 @@ async def test_context_prune_tool_reduces_tokens(tmp_path: Path, monkeypatch: An
 
     before = soul.context.token_count_with_pending
 
-    tool = toolset.find("ContextPrune")
+    tool = toolset.find("context_prune")
     assert tool is not None
     result = await tool(
         Params(mode="prune", keep_recent_turns=1, target_token_count=1000)
@@ -145,7 +145,7 @@ async def test_context_prune_tool_elided_content_retrievable(
     await soul.context.append_message(_tool("elided_marker " + "x" * 4000))
     await soul.context.append_message(_user("tail"))
 
-    tool = toolset.find("ContextPrune")
+    tool = toolset.find("context_prune")
     assert tool is not None
     result = await tool(
         Params(mode="prune", keep_recent_turns=1, target_token_count=1000)
@@ -180,7 +180,7 @@ async def test_context_prune_tool_does_not_break_provider_conversion(
     await soul.context.append_message(_tool("x" * 2000, tool_call_id="call_1"))
     await soul.context.append_message(_user("tail"))
 
-    tool = toolset.find("ContextPrune")
+    tool = toolset.find("context_prune")
     assert tool is not None
     result = await tool(
         Params(mode="prune", keep_recent_turns=1, target_token_count=1000)

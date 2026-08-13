@@ -442,7 +442,7 @@ class Run(CallableTool2[RunParams]):
                         )
                     return ToolOk(
                         output="",
-                        message=(f"[rtk] Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output." if rtk_rewritten else f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output."),
+                        message=(f"[rtk] Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output." if rtk_rewritten else f"Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output."),
                         brief="Background task started",
                         display_block=ShellDisplayBlock(language="shell"),
                     )
@@ -468,7 +468,7 @@ class Run(CallableTool2[RunParams]):
                     output = await task.stream.pop_output() if task.stream else ""
                     output = await _maybe_export_output_async(output)
                     guidance = foreground_background_guidance(params.command)
-                    message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`"
+                    message = f"Running in background. task_id: `{task_id}`. use `job_output`"
                     if guidance:
                         message += f" {guidance}"
                     return ToolError(

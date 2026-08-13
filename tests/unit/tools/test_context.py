@@ -1,9 +1,9 @@
-"""Tests for Defects 14.1-14.3: ContextUsage / Compact improvements."""
+"""Tests for Defects 14.1-14.3: context_usage / compact improvements."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from kimix.tools.context import ContextUsage, ContextUsageParams
+from kimix.tools.context import context_usage, ContextUsageParams
 
 
 class TestContextUsageExtras:
@@ -13,7 +13,7 @@ class TestContextUsageExtras:
             mock_soul.status.context_usage = 0.425
             mock_soul.status.context_tokens = 128000
             mock_soul.status.max_context_tokens = 300000
-            cu = ContextUsage()
+            cu = context_usage()
             result = await cu(ContextUsageParams())
             assert result.extras is not None
             assert result.extras["context_usage_pct"] == 42.5
@@ -26,7 +26,7 @@ class TestContextUsageExtras:
             mock_soul.status.context_usage = 0.5
             mock_soul.status.context_tokens = 50000
             mock_soul.status.max_context_tokens = 100000
-            cu = ContextUsage()
+            cu = context_usage()
             result = await cu(ContextUsageParams())
             assert "%" in result.output
             assert "tokens" in result.output.lower()

@@ -607,11 +607,11 @@ async def test_read_tail_max_lines(read_file_tool: ReadFile, temp_work_dir: Kaos
     # Use -MAX_LINES (the maximum allowed negative offset).
     # Use a large max_char so the output is not sliced after reading.
     result = await read_file_tool(
-        Params(path=str(large_file), line_offset=-MAX_LINES, max_char=10_000_000)
+        Params(path=str(large_file), line_offset=-MAX_LINES, n_lines=MAX_LINES, max_char=10_000_000)
     )
     assert not result.is_error
     assert f"Total lines in file: {total}." in result.message
-    # tail_buf captures the last MAX_LINES lines; n_lines defaults to MAX_LINES so all are output
+    # tail_buf captures the last MAX_LINES lines; n_lines is explicit so all are output
     assert isinstance(result.output, str)
     output_lines = [line for line in result.output.split("\n") if line.strip()]
     assert len(output_lines) == MAX_LINES

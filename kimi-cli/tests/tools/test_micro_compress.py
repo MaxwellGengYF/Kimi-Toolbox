@@ -54,8 +54,8 @@ def test_infer_content_kind_by_extension(path: str, expected: str):
 
 def test_infer_content_kind_by_tool():
     assert infer_content_kind(tool="bash") == "log"
-    assert infer_content_kind(tool="Python") == "log"
-    assert infer_content_kind(tool="FetchURL") == "prose"
+    assert infer_content_kind(tool="python") == "log"
+    assert infer_content_kind(tool="fetch_url") == "prose"
 
 
 def test_infer_content_kind_extension_overrides_tool():

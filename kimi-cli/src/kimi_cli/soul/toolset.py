@@ -83,16 +83,16 @@ _TOOL_OUTPUT_REMAINING_FRACTION = 0.9  # must stay strictly below remaining cont
 _TOOL_OUTPUT_ABS_MAX_BYTES = 1 << 20  # 1 MiB hard ceiling
 
 _READ_ONLY_BLOCKED_TOOLS: frozenset[str] = frozenset({
-    "Bash",
-    "Powershell",
+    "bash",
+    "pwsh",
     "Run",
-    "Python",
-    "EditFile",
-    "WriteFile",
-    "Agent",
-    "AgentClose",
-    "AgentSwarm",
-    "TaskOutput",
+    "python",
+    "edit",
+    "write",
+    "subagent",
+    "interrupt_agent",
+    "workflow",
+    "job_output",
 })
 """Tools that are forbidden when read_only=True."""
 
@@ -281,54 +281,73 @@ def _build_platform_redirects() -> dict[str, str]:
     """Build the platform-aware normalized redirect map."""
     _redirects = dict(TOOL_NAME_REDIRECTS)
 
-    # TodoList stack/tree tools: common LLM variants for TodoPush/TodoPop/
-    # TodoSub and tree-reading names for TodoList.
+    # TodoList stack/tree tools: common LLM variants for todo_push/todo_pop/
+    # todo_sub and tree-reading names for todo_write.
     _redirects.update({
-        "PushTodo": "TodoPush",
-        "TodoParent": "TodoPush",
-        "TodoDown": "TodoPush",
-        "PopTodo": "TodoPop",
-        "TodoUp": "TodoPop",
-        "TodoClose": "TodoPop",
-        "TodoFinish": "TodoPop",
-        "SubTodo": "TodoSub",
-        "TodoChild": "TodoSub",
-        "TodoAdd": "TodoSub",
-        "AddSubTodo": "TodoSub",
-        "TodoDetail": "TodoSub",
-        "TodoUpdate": "TodoSub",
-        "TodoEdit": "TodoSub",
-        "TodoTree": "TodoList",
-        "TodoStack": "TodoList",
-        "TodoHierarchy": "TodoList",
-        "TodoListPush": "TodoPush",
-        "TodoListPop": "TodoPop",
-        "TodoListSub": "TodoSub",
+        "PushTodo": "todo_push",
+        "TodoParent": "todo_push",
+        "TodoDown": "todo_push",
+        "PopTodo": "todo_pop",
+        "TodoUp": "todo_pop",
+        "TodoClose": "todo_pop",
+        "TodoFinish": "todo_pop",
+        "SubTodo": "todo_sub",
+        "TodoChild": "todo_sub",
+        "TodoAdd": "todo_sub",
+        "AddSubTodo": "todo_sub",
+        "TodoDetail": "todo_sub",
+        "TodoUpdate": "todo_sub",
+        "TodoEdit": "todo_sub",
+        "TodoTree": "todo_write",
+        "TodoStack": "todo_write",
+        "TodoHierarchy": "todo_write",
+        "TodoListPush": "todo_push",
+        "TodoListPop": "todo_pop",
+        "TodoListSub": "todo_sub",
+        # Legacy tool-name redirects (old names -> report canonical names).
+        "ReadFile": "read",
+        "WriteFile": "write",
+        "EditFile": "edit",
+        "Glob": "glob",
+        "Grep": "grep",
+        "ReadMediaFile": "read_image",
+        "SearchWeb": "web_search",
+        "Agent": "subagent",
+        "AskAgent": "send_message",
+        "AgentList": "list_agents",
+        "AgentClose": "interrupt_agent",
+        "TaskOutput": "job_output",
+        "TodoList": "todo_write",
+        "AgentSwarm": "workflow",
     })
 
     if sys.platform == "win32":
-        # Windows: redirect all shell names to Powershell.
+        # Windows: redirect all shell names to pwsh.
         _redirects.update({
-            "Bash": "Powershell",
-            "Shell": "Powershell",
-            "Terminal": "Powershell",
-            "Cmd": "Powershell",
-            "Command": "Powershell",
-            "Execute": "Powershell",
-            "Exec": "Powershell",
-            "RunCommand": "Powershell",
-            "Sh": "Powershell",
-            "Zsh": "Powershell",
-            "ShellCommand": "Powershell",
-            "BashCommand": "Powershell",
+            "bash": "pwsh",
+            "Shell": "pwsh",
+            "Terminal": "pwsh",
+            "Cmd": "pwsh",
+            "Command": "pwsh",
+            "Execute": "pwsh",
+            "Exec": "pwsh",
+            "RunCommand": "pwsh",
+            "Sh": "pwsh",
+            "Zsh": "pwsh",
+            "ShellCommand": "pwsh",
+            "BashCommand": "pwsh",
+            "Powershell": "pwsh",
+            "PowerShell": "pwsh",
+            "Pwsh": "pwsh",
+            "PS": "pwsh",
         })
     else:
-        # POSIX (Linux/macOS): PowerShell references → Bash
+        # POSIX (Linux/macOS): PowerShell references → bash
         _redirects.update({
-            "Powershell": "Bash",
-            "PowerShell": "Bash",
-            "Pwsh": "Bash",
-            "PS": "Bash",
+            "Powershell": "bash",
+            "PowerShell": "bash",
+            "Pwsh": "bash",
+            "PS": "bash",
         })
 
     return {
@@ -1156,6 +1175,12 @@ class KimiToolset:
             )
             return None
         tool_cls = getattr(module, class_name, None)
+        if not isinstance(tool_cls, type):
+            # `getattr` may return a submodule (e.g. `kimi_cli.tools.file.read` for the
+            # `read` submodule) or nothing; fall back to resolving by tool name string
+            # (e.g. `kimi_cli.tools.file:read` for the ReadFile tool), so agent
+            # manifests can list tools by their name.
+            tool_cls = KimiToolset._find_tool_class_by_name(module, class_name)
         if tool_cls is None:
             logger.warning(
                 "Tool class not found: {class_name} in {module_name}",
@@ -1188,6 +1213,24 @@ class KimiToolset:
                     raise ValueError(f"Tool dependency not found: {param.annotation}")
                 args.append(dependencies[annotation])
         return tool_cls(*args)
+
+    @staticmethod
+    def _find_tool_class_by_name(module: Any, tool_name: str) -> type[ToolType] | None:
+        """Return the tool class in *module* whose ``name`` matches *tool_name*.
+
+        Used as a fallback when an agent manifest references a tool by its tool
+        name string (e.g. ``read``) instead of the Python class name (``ReadFile``).
+        """
+        for attr_name in dir(module):
+            if attr_name.startswith("_"):
+                continue
+            candidate = getattr(module, attr_name, None)
+            if not isinstance(candidate, type) or not issubclass(candidate, (CallableTool, CallableTool2)):
+                continue
+            declared_name = getattr(candidate, "name", None)
+            if isinstance(declared_name, str) and declared_name == tool_name:
+                return candidate
+        return None
 
     async def load_mcp_tools(
         self, mcp_configs: list[MCPConfig], runtime: Runtime, in_background: bool = True

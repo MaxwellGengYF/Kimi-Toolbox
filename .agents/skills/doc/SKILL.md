@@ -51,10 +51,10 @@ Reference for the Kimix documentation layout and how to modify or extend it safe
 
 ### Append to an existing document
 
-Use `WriteFile` with `mode: append`:
+Use `write` with `mode: append`:
 
 ```python
-WriteFile(
+write(
     path="ChangeLog.md",
     content="\n## 0.2.0\n\n- Added feature X.\n",
     mode="append"
@@ -68,10 +68,10 @@ Guidelines:
 
 ### Insert at a specific location
 
-Use `EditFile` when the new content belongs in the middle of a file (e.g., adding a row to an index table):
+Use `edit` when the new content belongs in the middle of a file (e.g., adding a row to an index table):
 
 ```python
-EditFile(
+edit(
     path="README.md",
     edit={
         "old": "| [`docs/tutorials/5_server_en.md`](docs/tutorials/5_server_en.md) | HTTP server tutorial. |\n",
@@ -97,8 +97,8 @@ EditFile(
 
 ## Editing Rules
 
-1. **Read first**: use `ReadFile` or `Grep` to confirm the target location before editing.
-2. **Prefer `EditFile`**: use it for index tables, single sections, and small insertions.
-3. **Use `WriteFile` append mode** only for end-of-file additions (changelogs, new sections).
+1. **Read first**: use `read` or `grep` to confirm the target location before editing.
+2. **Prefer `edit`**: use it for index tables, single sections, and small insertions.
+3. **Use `write` append mode** only for end-of-file additions (changelogs, new sections).
 4. **Keep both languages in sync**: when one language file changes, update its counterpart if it exists.
 5. **Do not create README/CHANGELOG inside skills**: applies only to skill folders, not project docs.

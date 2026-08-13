@@ -87,11 +87,11 @@ Prompts exceeding **65536 chars** are exported to a temp file and replaced with 
 
 ### TODO Reminder
 
-After each main prompt execution, the system checks whether there are unfinished `todos` in the current session. If so, a `<system-reminder>` is automatically appended reminding the Agent to complete all pending / in_progress todos before finishing. This works with the `TodoList` tool to ensure intermediate steps are not missed in long tasks.
+After each main prompt execution, the system checks whether there are unfinished `todos` in the current session. If so, a `<system-reminder>` is automatically appended reminding the Agent to complete all pending / in_progress todos before finishing. This works with the `todo_write` tool to ensure intermediate steps are not missed in long tasks.
 
 ---
 
-## `TodoList`
+## `todo_write`
 
 Progress tracking tool, auto-invoked during execution.
 

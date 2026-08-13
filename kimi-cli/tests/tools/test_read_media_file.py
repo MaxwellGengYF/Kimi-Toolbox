@@ -448,7 +448,7 @@ async def test_read_text_file(read_media_file_tool: ReadMediaFile, temp_work_dir
 
     assert result.is_error
     assert result.message == snapshot(
-        f"`{text_file}` is a text file. Use ReadFile to read text files."
+        f"`{text_file}` is a text file. Use read to read text files."
     )
     assert result.brief == snapshot("Unsupported file type")
 

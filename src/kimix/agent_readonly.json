@@ -2,15 +2,15 @@
   "agent": {
     "extend": "default",
     "tools": [
-      "kimi_cli.tools.file:ReadFile",
-      "kimi_cli.tools.file:ReadMediaFile",
-      "kimi_cli.tools.file:Glob",
-      "kimi_cli.tools.file:Grep",
-      "kimix.tools.web.fetch_url:FetchURL",
-      "kimi_cli.tools.web:SearchWeb",
-      "kimi_cli.tools.memory:Retrieve",
-      "kimix.tools.context:ContextUsage",
-      "kimix.tools.context:Compact"
+      "kimi_cli.tools.file:read",
+      "kimi_cli.tools.file:read_image",
+      "kimi_cli.tools.file:glob",
+      "kimi_cli.tools.file:grep",
+      "kimix.tools.web.fetch_url:fetch_url",
+      "kimi_cli.tools.web:web_search",
+      "kimi_cli.tools.memory:retrieve",
+      "kimix.tools.context:context_usage",
+      "kimix.tools.context:compact"
     ]
   }
 }

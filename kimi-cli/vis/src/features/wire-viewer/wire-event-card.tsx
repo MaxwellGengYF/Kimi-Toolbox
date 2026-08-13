@@ -188,7 +188,7 @@ function getSummary(event: WireEvent): string {
         } else if (name === "Agent") {
           detail = ` ${truncate(String(args.description ?? ""), 60)}`;
           if (args.subagent_type) detail += ` [${args.subagent_type}]`;
-        } else if (name === "SearchWeb" || name === "FetchURL") {
+        } else if (name === "SearchWeb" || name === "fetch_url") {
           detail = ` ${truncate(String(args.query ?? args.url ?? ""), 80)}`;
         } else if (name === "TodoList") {
           const items = args.items as Array<Record<string, unknown>> | undefined;

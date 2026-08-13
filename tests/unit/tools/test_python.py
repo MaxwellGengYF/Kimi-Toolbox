@@ -1,4 +1,4 @@
-"""Tests for the Python tool interpreter resolution, env building and hints."""
+"""Tests for the python tool interpreter resolution, env building and hints."""
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,7 @@ import pytest
 
 from kimi_agent_sdk import ToolError, ToolOk
 from kimix.tools.py import Params as PythonParams
-from kimix.tools.py import Python
+from kimix.tools.py import python
 
 
 def _long_output() -> str:
@@ -24,7 +24,7 @@ def _long_output() -> str:
 
 
 @pytest.fixture
-def tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Python:
+def tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> python:
     session = MagicMock()
     session.custom_data = {}
     # Deterministic config: empty config_json so `python.*` gates read defaults.
@@ -35,16 +35,16 @@ def tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Python:
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     # Isolate cwd from any real project .venv on this machine.
     monkeypatch.chdir(tmp_path)
-    t = Python(session=session)
+    t = python(session=session)
     yield t  # type: ignore[misc]
 
 
-class TestResolvePython:
-    def test_fallback_to_sys_executable(self, tool: Python) -> None:
+class TestResolvepython:
+    def test_fallback_to_sys_executable(self, tool: python) -> None:
         assert tool._resolve_python(PythonParams(mode="interactive")) == sys.executable
 
     def test_env_override(
-        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = tmp_path / "fakepython.exe"
         fake.touch()
@@ -52,12 +52,12 @@ class TestResolvePython:
         assert tool._resolve_python(PythonParams(mode="interactive")) == str(fake)
 
     def test_env_override_nonexistent_ignored(
-        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KIMIX_PYTHON_EXECUTABLE", str(tmp_path / "missing.exe"))
         assert tool._resolve_python(PythonParams(mode="interactive")) == sys.executable
 
-    def test_project_venv_discovery(self, tool: Python, tmp_path: Path) -> None:
+    def test_project_venv_discovery(self, tool: python, tmp_path: Path) -> None:
         venv_py = tmp_path / ".venv" / "Scripts" / "python.exe"
         venv_py.parent.mkdir(parents=True)
         venv_py.touch()
@@ -65,7 +65,7 @@ class TestResolvePython:
         assert tool._resolve_python(PythonParams(mode="interactive")) == str(venv_py)
 
     def test_virtual_env_fallback(
-        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # session dir is NOT under the venv root so only VIRTUAL_ENV matches
         venv_root = tmp_path / "elsewhere" / "myenv"
@@ -76,7 +76,7 @@ class TestResolvePython:
         assert tool._resolve_python(PythonParams(mode="interactive")) == str(venv_py)
 
     def test_priority_order(
-        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         venv_py = tmp_path / ".venv" / "Scripts" / "python.exe"
         venv_py.parent.mkdir(parents=True)
@@ -94,7 +94,7 @@ class TestResolvePython:
         tool._resolved_python = None  # bypass cache
         assert tool._resolve_python(PythonParams(mode="interactive")) == str(override)
 
-    def test_cache_revalidated_when_deleted(self, tool: Python, tmp_path: Path) -> None:
+    def test_cache_revalidated_when_deleted(self, tool: python, tmp_path: Path) -> None:
         venv_py = tmp_path / ".venv" / "Scripts" / "python.exe"
         venv_py.parent.mkdir(parents=True)
         venv_py.touch()
@@ -121,7 +121,7 @@ class TestBuildEnv:
             "PATH", os.pathsep.join(["/usr/bin", "/bin", str(fake_share_dir / "bin")])
         )
         non_venv_python = str(fake_share_dir.parent / "python.exe")
-        env = Python._build_env(non_venv_python)
+        env = python._build_env(non_venv_python)
         assert env is not None
         assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
         assert env.get("VIRTUAL_ENV") is None
@@ -132,7 +132,7 @@ class TestBuildEnv:
         exe = fake_share_dir.parent / "python.exe"
         exe.touch()
         monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
-        env = Python._build_env(str(exe))
+        env = python._build_env(str(exe))
         assert env is not None
         assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
         assert env.get("VIRTUAL_ENV") is None
@@ -147,7 +147,7 @@ class TestBuildEnv:
         exe.touch()
         (venv / "pyvenv.cfg").touch()
         monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
-        env = Python._build_env(str(exe))
+        env = python._build_env(str(exe))
         assert env is not None
         path_entries = env["PATH"].split(os.pathsep)
         assert path_entries[0] == str(fake_share_dir / "bin")
@@ -162,7 +162,7 @@ class TestBuildEnv:
         exe = scripts / "python.exe"
         exe.touch()
         monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
-        env = Python._build_env(str(exe))
+        env = python._build_env(str(exe))
         assert env is not None
         assert env["PATH"].split(os.pathsep)[0] == str(fake_share_dir / "bin")
         assert env.get("VIRTUAL_ENV") is None
@@ -177,7 +177,7 @@ class TestBuildEnv:
         )
         # Use a non-venv interpreter path so we exercise the non-venv branch.
         non_venv_python = str(fake_share_dir.parent / "python.exe")
-        env = Python._build_env(non_venv_python)
+        env = python._build_env(non_venv_python)
         assert env is not None
         path_entries = env["PATH"].split(os.pathsep)
         assert path_entries[0] == str(fake_share_dir / "bin")
@@ -187,16 +187,16 @@ class TestBuildEnv:
 class TestModuleNotFoundHint:
     def test_hint_present(self) -> None:
         output = "Traceback ...\nModuleNotFoundError: No module named 'foo'\n"
-        hint = Python._module_not_found_hint(output, r"C:\proj\.venv\Scripts\python.exe")
+        hint = python._module_not_found_hint(output, r"C:\proj\.venv\Scripts\python.exe")
         assert r"C:\proj\.venv\Scripts\python.exe" in hint
         assert "-m pip install foo" in hint
 
     def test_no_hint_for_other_errors(self) -> None:
-        assert Python._module_not_found_hint("ValueError: bad", "python") == ""
+        assert python._module_not_found_hint("ValueError: bad", "python") == ""
 
 
 @pytest.mark.asyncio
-async def test_failed_run_includes_hint(tool: Python) -> None:
+async def test_failed_run_includes_hint(tool: python) -> None:
     """End-to-end: a ModuleNotFoundError failure surfaces the pip hint."""
     result = await tool(PythonParams(code="import definitely_missing_pkg_xyz", timeout=30))
     message = str(result.message)
@@ -244,9 +244,9 @@ def _fake_process_task(monkeypatch: pytest.MonkeyPatch, output: str = "fake outp
 class TestProcessTaskWiring:
     @pytest.mark.asyncio
     async def test_process_task_runs_without_cwd(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The Python tool no longer forwards a working directory."""
+        """The python tool no longer forwards a working directory."""
         mock_cls = _fake_process_task(monkeypatch)
         result = await tool(PythonParams(code="print('x')"))
         assert isinstance(result, ToolOk)
@@ -256,7 +256,7 @@ class TestProcessTaskWiring:
 
     @pytest.mark.asyncio
     async def test_defaults_forward_scrub_env_and_redact(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mock_cls = _fake_process_task(monkeypatch)
         await tool(PythonParams(code="print('x')"))
@@ -266,7 +266,7 @@ class TestProcessTaskWiring:
 
     @pytest.mark.asyncio
     async def test_config_disables_scrub_and_redact(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool._session.custom_config = {
             "config_json": {"python": {"scrub_env": False, "redact_secrets": False}}
@@ -279,7 +279,7 @@ class TestProcessTaskWiring:
 
     @pytest.mark.asyncio
     async def test_env_passthrough_disables_scrub_only(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool._session.custom_config = {
             "config_json": {"python": {"env_passthrough": True}}
@@ -292,7 +292,7 @@ class TestProcessTaskWiring:
 
     @pytest.mark.asyncio
     async def test_undict_config_json_falls_back_to_defaults(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool._session.custom_config = {"config_json": "not-a-dict"}
         mock_cls = _fake_process_task(monkeypatch)
@@ -305,7 +305,7 @@ class TestProcessTaskWiring:
 class TestOriginalSavedSuffix:
     @pytest.mark.asyncio
     async def test_message_includes_original_path_after_dedup(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repeated = "ERROR\n" * 10
         _fake_process_task(monkeypatch, output=repeated)
@@ -315,7 +315,7 @@ class TestOriginalSavedSuffix:
 
     @pytest.mark.asyncio
     async def test_message_includes_original_path_after_truncate(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         long_output = "\n".join(f"line_{i}" for i in range(500))
         _fake_process_task(monkeypatch, output=long_output)
@@ -325,7 +325,7 @@ class TestOriginalSavedSuffix:
 
     @pytest.mark.asyncio
     async def test_message_no_suffix_when_filter_unchanged(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Dedup is always on, but output with no repeats is left unchanged,
         so no original temp file is created and no suffix is appended."""
@@ -336,7 +336,7 @@ class TestOriginalSavedSuffix:
 
     @pytest.mark.asyncio
     async def test_message_includes_original_path_after_summarize(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A >64KB output that survives the (always-on) token filter unchanged
         is still preserved before summarization replaces it with a summary."""
@@ -363,7 +363,7 @@ class TestOriginalSavedSuffix:
 class TestSyntaxPrecheck:
     @pytest.mark.asyncio
     async def test_broken_inline_code_fails_without_spawn(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         constructed: list[tuple] = []
 
@@ -381,7 +381,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_null_bytes_fail_without_spawn(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         constructed: list[tuple] = []
 
@@ -398,7 +398,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_broken_file_mode_fails_without_spawn(
-        self, tool: Python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         py_file = tmp_path / "broken.py"
         py_file.write_text("def broken(:", encoding="utf-8")
@@ -416,7 +416,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_valid_code_unaffected(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mock_cls = _fake_process_task(monkeypatch, output="hello_ok")
         result = await tool(PythonParams(code="print('hello_ok')"))
@@ -426,7 +426,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_check_syntax_false_skips_precheck(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool._session.custom_config = {
             "config_json": {"python": {"check_syntax": False}}
@@ -440,7 +440,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_interactive_with_broken_code_fails_without_spawn(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         constructed: list[tuple] = []
 
@@ -456,7 +456,7 @@ class TestSyntaxPrecheck:
 
     @pytest.mark.asyncio
     async def test_pure_repl_no_initial_code_not_checked(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mock_cls = _fake_process_task(monkeypatch)
         result = await tool(PythonParams(code="", mode="interactive"))
@@ -472,7 +472,7 @@ class TestSyntaxPrecheck:
 class TestSummarizeGate:
     @pytest.mark.asyncio
     async def test_summarize_disabled_skips_summarizer(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple] = []
 
@@ -496,7 +496,7 @@ class TestSummarizeGate:
 
     @pytest.mark.asyncio
     async def test_summarize_enabled_by_default_calls_summarizer(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple] = []
 
@@ -528,7 +528,7 @@ class TestEnvScrubbing:
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA1234567890ABCD")
         monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t")
         monkeypatch.setenv("SAFE_HOME", "/home/u")
-        env = Python._build_env(sys.executable, scrub_env=True)
+        env = python._build_env(sys.executable, scrub_env=True)
         assert env is not None
         assert "AWS_ACCESS_KEY_ID" not in env
         assert "VERIFY_SCRUB_TOKEN" not in env
@@ -544,13 +544,13 @@ class TestEnvScrubbing:
         monkeypatch.setattr("kimix.tools.py.get_share_dir", lambda: share)
         monkeypatch.setenv("PATH", "/usr/bin")
         monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t")
-        env = Python._build_env(sys.executable, scrub_env=False)
+        env = python._build_env(sys.executable, scrub_env=False)
         assert env is not None
         assert env.get("VERIFY_SCRUB_TOKEN") == "s3cr3t"
 
     @pytest.mark.asyncio
     async def test_scrub_end_to_end_child_does_not_see_secret(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("VERIFY_SCRUB_TOKEN", "s3cr3t-value")
         result = await tool(
@@ -570,7 +570,7 @@ class TestEnvScrubbing:
 # ---------------------------------------------------------------------------
 class TestScriptTempFolder:
     def test_inline_code_written_to_temp_folder_not_session_dir(
-        self, tool: Python
+        self, tool: python
     ) -> None:
         from kimix.tools import common as common_mod
 
@@ -587,7 +587,7 @@ class TestScriptTempFolder:
         assert temp_root in p.resolve().parents
         assert not list(Path(tool._session.dir).glob("*.py"))
 
-    def test_display_path_is_short_relative(self, tool: Python) -> None:
+    def test_display_path_is_short_relative(self, tool: python) -> None:
         from kimix.tools import common as common_mod
 
         script_path, _ = tool._resolve_script_source(PythonParams(code="x = 42"))
@@ -598,7 +598,7 @@ class TestScriptTempFolder:
 
     @pytest.mark.asyncio
     async def test_execute_message_uses_relative_temp_path(
-        self, tool: Python, monkeypatch: pytest.MonkeyPatch
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_process_task(monkeypatch, output="ok")
         result = await tool(PythonParams(code="print('ok')"))

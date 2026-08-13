@@ -4,7 +4,7 @@ import asyncio
 
 import regex as re
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Literal
 from kimi_cli.session import Session
 
@@ -15,37 +15,48 @@ from kimi_cli.tools.display import BackgroundTaskDisplayBlock
 
 
 class TaskOutputParams(BaseModel):
-    """Parameters for TaskOutput."""
+    """Parameters for job_output (TaskOutput)."""
     model_config = {"populate_by_name": True}
 
-    task_id: str | None = Field(
+    job_id: str | None = Field(
         default=None,
-        description="Task ID to get output from. When None, lists all tasks."
+        validation_alias=AliasChoices("job_id", "task_id"),
+        description=(
+            "Job id returned by the tool that started the background work. "
+            "When None, lists all tasks. "
+            + accepts_alias_text("job_id", "task_id", word=False)
+        ),
     )
     action: Literal["get", "list", "kill"] = Field(
         default="get",
         description=(
-            "'get': Return output from the task specified by `task_id` (default). "
-            "'list': List all tasks (when task_id is empty). "
-            "'kill': Force-stop the task specified by `task_id` and return its final output."
+            "'get': Return output from the job specified by `job_id` (default). "
+            "'list': List all jobs (when job_id is empty). "
+            "'kill': Force-stop the job specified by `job_id` and return its final output."
         ),
     )
     wait: bool = Field(
-        default=True,
-        alias="block",  # backward compat
+        default=False,
+        validation_alias=AliasChoices("wait", "block"),
         description=(
-            "When True (default), wait for the task to finish (up to `timeout` seconds) "
-            "and return accumulated output. " + accepts_alias_text("wait", "block", word=False) + " "
-            "When False, return immediately with whatever output is available so far."
+            "Block until the job reaches a terminal status or the timeout expires. "
+            "A timed-out wait returns [status: running] and leaves the job alive. "
+            + accepts_alias_text("wait", "block", word=False)
+            + " When False (default), return immediately with whatever output is "
+            "available so far."
         ),
     )
-    timeout: int = Field(
-        default=60,
+    timeout_ms: int = Field(
+        default=60000,
+        validation_alias=AliasChoices("timeout_ms", "timeout"),
         ge=1,
-        le=7200,
-        description="Maximum seconds to wait. Used for both wait=True and kill actions. "
-                    "When waiting, if no stdout/stderr output is received for longer than "
-                    "min(900, timeout) seconds, the current output is returned immediately."
+        le=7200000,
+        description=(
+            "Max wait in milliseconds (only meaningful with wait: true). "
+            "Defaults to the configured wait timeout; capped by the configured "
+            "maximum. "
+            + accepts_alias_text("timeout_ms", "timeout", word=False)
+        ),
     )
     output_path: str | None = Field(
         default=None,
@@ -57,6 +68,11 @@ class TaskOutputParams(BaseModel):
         description="[Deprecated] Use action='kill' instead.",
     )
 
+    @property
+    def timeout(self) -> int:
+        """Legacy accessor: timeout in seconds (converted from ``timeout_ms``)."""
+        return max(1, self.timeout_ms // 1000)
+
     @model_validator(mode="after")
     def _normalize_kill(self) -> "TaskOutputParams":
         """Convert deprecated kill=True to action='kill'."""
@@ -66,9 +82,14 @@ class TaskOutputParams(BaseModel):
 
 
 class TaskOutput(CallableTool2):
-    """Get output from a background task, or list all tasks if no task_id is provided."""
-    name: str = "TaskOutput"
-    description: str = "Get background task output or list tasks."
+    """Get output from a background task, or list all tasks if no job_id is provided."""
+    name: str = "job_output"
+    description: str = (
+        "Read a background job. Stream jobs return only output since the "
+        "previous read; final-output jobs return their result after settlement. "
+        "Every response ends with `[status: ...]`. Reads are non-blocking "
+        "unless `wait: true`, which waits up to the configured cap."
+    )
     params: type[BaseModel] = TaskOutputParams
 
     def __del__(self):
@@ -95,12 +116,12 @@ class TaskOutput(CallableTool2):
             tasks = get_all_tasks(self._session)
 
             # Action: list all tasks (when action='list' OR task_id is None AND action is default)
-            if params.action == "list" or (params.task_id is None and params.action == "get"):
+            if params.action == "list" or (params.job_id is None and params.action == "get"):
                 return await self._list_tasks(tasks)
 
             # Action: kill a specific task
             if params.action == "kill":
-                if not params.task_id:
+                if not params.job_id:
                     return ToolError(
                         message="task_id is required for action='kill'.",
                         output="",
@@ -147,7 +168,7 @@ class TaskOutput(CallableTool2):
 
     async def _kill_task(self, tasks: dict, params: TaskOutputParams) -> ToolReturnValue:
         """Kill a specific task and return its final output."""
-        stream: BackgroundStream | None = tasks.get(params.task_id.strip())
+        stream: BackgroundStream | None = tasks.get(params.job_id.strip())
         if stream is None:
             started = [tid for tid, s in tasks.items() if await s.is_started()]
             if not started:
@@ -158,14 +179,14 @@ class TaskOutput(CallableTool2):
                 )
             task_list = ", ".join(started)
             return ToolError(
-                message=f"Task '{params.task_id}' not found. Available tasks: [{task_list}]",
+                message=f"Task '{params.job_id}' not found. Available tasks: [{task_list}]",
                 output="",
-                brief=f"Task '{params.task_id}' not found"
+                brief=f"Task '{params.job_id}' not found"
             )
 
         await stream.stop()
         output = await stream.pop_output()
-        remove_task_id(self._session, params.task_id.strip())
+        remove_task_id(self._session, params.job_id.strip())
 
         success = await stream.success()
         if not success:
@@ -176,17 +197,17 @@ class TaskOutput(CallableTool2):
             return ToolError(
                 message=msg,
                 output=output if output else "",
-                brief=f"Task '{params.task_id}' killed (non-zero exit)"
+                brief=f"Task '{params.job_id}' killed (non-zero exit)"
             )
 
         return ToolOk(
             output=output if output else "(no output)",
-            brief=f"Task '{params.task_id}' killed",
+            brief=f"Task '{params.job_id}' killed",
         )
 
     async def _get_output(self, tasks: dict, params: TaskOutputParams) -> ToolReturnValue:
         """Get output from a specific task."""
-        stream: BackgroundStream | None = tasks.get(params.task_id.strip())
+        stream: BackgroundStream | None = tasks.get(params.job_id.strip())
         if stream is None:
             started = [tid for tid, s in tasks.items() if await s.is_started()]
             if not started:
@@ -197,9 +218,9 @@ class TaskOutput(CallableTool2):
                 )
             task_list = ", ".join(started)
             return ToolError(
-                message=f"Task '{params.task_id}' not found. Available tasks: [{task_list}]",
+                message=f"Task '{params.job_id}' not found. Available tasks: [{task_list}]",
                 output="",
-                brief=f"Task '{params.task_id}' not found"
+                brief=f"Task '{params.job_id}' not found"
             )
 
         timeout = params.timeout
@@ -237,7 +258,7 @@ class TaskOutput(CallableTool2):
             # Use pop_output to ensure each call returns only new data
             output = await stream.pop_output()
         if not task_alive:
-            remove_task_id(self._session, params.task_id.strip())
+            remove_task_id(self._session, params.job_id.strip())
             if not await stream.success():
                 elapsed = stream.process_elapsed
                 msg = output if output else "Task process failed (non-zero exit)"
@@ -246,7 +267,7 @@ class TaskOutput(CallableTool2):
                 return ToolError(
                     message=msg,
                     output=output if output else "",
-                    brief=f"Task '{params.task_id}' failed"
+                    brief=f"Task '{params.job_id}' failed"
                 )
 
         # If rtk folded the output, preserve the full stream for later paging.
@@ -261,11 +282,11 @@ class TaskOutput(CallableTool2):
             async with await anyio.open_file(path, 'w', encoding='utf-8') as f:
                 await f.write(output)
             display_path = str(path).replace("\\", "/")
-            output = f"{f'`{params.task_id}` is still running, call `TaskOutput` again, ' if task_alive else ''}output exported to file `{display_path}`"
+            output = f"{f'`{params.job_id}` is still running, call `job_output` again, ' if task_alive else ''}output exported to file `{display_path}`"
         else:
             output = await _maybe_export_output_async(output)
 
-        kind = params.task_id.split("_")[0] if params.task_id else "task"
+        kind = params.job_id.split("_")[0] if params.job_id else "task"
         status = "running" if task_alive else "completed"
         output_text = output if output else "(no output)"
         if rtk_original_path:
@@ -284,7 +305,7 @@ class TaskOutput(CallableTool2):
             message=message,
             brief="Task output retrieved",
             display_block=BackgroundTaskDisplayBlock(
-                task_id=params.task_id,
+                task_id=params.job_id,
                 kind=kind,
                 status=status,
                 description=output_text[:200] if output_text else "(no output)",

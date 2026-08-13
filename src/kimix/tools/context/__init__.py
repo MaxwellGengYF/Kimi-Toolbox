@@ -14,11 +14,11 @@ class ContextUsageParams(BaseModel):
     pass
 
 
-class ContextUsage(CallableTool2):
-    name = "ContextUsage"
+class context_usage(CallableTool2):
+    name = "context_usage"
     description = (
         "Report the current conversation context usage: percentage, used tokens, "
-        "and maximum context size. Use this to decide whether to call Compact."
+        "and maximum context size. Use this to decide whether to call compact."
     )
     params = ContextUsageParams
 
@@ -86,15 +86,15 @@ class CompactParams(BaseModel):
         return self
 
 
-class Compact(CallableTool2):
-    name = "Compact"
+class compact(CallableTool2):
+    name = "compact"
     description = (
         "Compact / summarize the conversation context to reduce token usage. "
-        "Call this when ContextUsage shows usage is high and you want to free up context. "
+        "Call this when context_usage shows usage is high and you want to free up context. "
         "Optionally pass an instruction and a compaction mode (balanced, aggressive, "
         "retentive, technical, auto) to control the summary style. "
-        "[IMPORTANT] Do NOT call Compact more than once every 5 steps, "
-        "and only call it when ContextUsage exceeds 70%."
+        "[IMPORTANT] Do NOT call compact more than once every 5 steps, "
+        "and only call it when context_usage exceeds 70%."
     )
     params = CompactParams
 
@@ -149,6 +149,6 @@ class Compact(CallableTool2):
             output="Compaction completed.",
             message=(
                 "Compaction completed. "
-                "[IMPORTANT] Do not call Compact again until context usage exceeds 70%."
+                "[IMPORTANT] Do not call compact again until context usage exceeds 70%."
             ),
         )

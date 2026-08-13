@@ -160,7 +160,7 @@ prompt(
     cancel_callable=None,              # Optional: callable that returns True to cancel
     close_session_after_prompt=False,  # Optional: close session after prompt completes
     merge_wire_messages=None,          # Optional: merge wire messages for output_function (defaults to True when output_function is set)
-    ensure_todo_finished=True,         # Optional: run TodoList reminder rounds after the prompt
+    ensure_todo_finished=True,         # Optional: run todo_write reminder rounds after the prompt
     export_todo_list_path=None,        # Optional: Path ending in .json — export the session's todos there after the prompt
     format_output=False,               # Optional: render text chunks as formatted markdown (used by prompt_plan)
     timeout=None,                      # Optional: max seconds for the whole prompt incl. retries; raises TimeoutError when reached
@@ -180,7 +180,7 @@ session = await _create_default_session_async(resume=True)
 - When `output_function` is provided, `merge_wire_messages` defaults to `True`.
 - **Retries:** non-API exceptions are retried up to 3 times with a 1s sleep (`APIStatusError` and timeouts are raised immediately). HTTP API errors are also retried with exponential backoff at the underlying chat-provider/soul layer.
 - **Timeout:** when `timeout` is set, `asyncio.wait_for` guards each prompt attempt and `TimeoutError` propagates immediately (not retried); the session is cancelled.
-- **Todo reminders (`ensure_todo_finished=True`):** after a successful prompt, unfinished `TodoList` items are collected and sent back as system reminders — up to `cli_closing_reminder_rounds` rounds (default 1; later rounds use a `strong=True` message).
+- **Todo reminders (`ensure_todo_finished=True`):** after a successful prompt, unfinished `todo_write` items are collected and sent back as system reminders — up to `cli_closing_reminder_rounds` rounds (default 1; later rounds use a `strong=True` message).
 - **Cleanup:** on finish the session's todos are cleared (`_clear_session_todos`, persisted to `SessionState` or the subagent `state.json`), optionally exported to `export_todo_list_path` (must end in `.json`), and the session is closed when `close_session_after_prompt=True`.
 
 ### Cancel Prompt
@@ -271,7 +271,7 @@ SystemPromptType.Thinker          # Thinker agent (thinks in <thinking> tags, se
 SystemPromptType.TrivialSubAgent  # Read-only sub-agent (rejects write/edit tasks)
 SystemPromptType.Supervisor       # Supervisor agent (outlines, decomposes, dispatches, tracks, verifies)
 SystemPromptType.Reader           # Read-only agent for retrieval/analysis tasks
-SystemPromptType.SwarmLeader      # Swarm orchestrator (parallelizes a request via the AgentSwarm tool)
+SystemPromptType.SwarmLeader      # Swarm orchestrator (parallelizes a request via the workflow tool)
 
 # Role-prompt rules per type (built into get_system_prompt):
 # - TodoMaker: "Plan only. Do not implement." — records plans via WritePlan/EditPlan, cannot write files or run commands
@@ -279,7 +279,7 @@ SystemPromptType.SwarmLeader      # Swarm orchestrator (parallelizes a request v
 # - TrivialSubAgent: calls the `ask_parent` tool for clarification, then stops
 # - Reader:    reports a concise summary only — no commands, edits, or questions
 # - Supervisor: outline → decompose → dispatch → track → accept/inquire/correct → verify
-# - SwarmLeader: splits a request into homogeneous sub-tasks and dispatches via `AgentSwarm` with
+# - SwarmLeader: splits a request into homogeneous sub-tasks and dispatches via `workflow` with
 #                subagent_type (coder/explore/plan), a prompt_template containing {{item}}, and items
 
 # Build a custom system prompt callback
@@ -977,13 +977,13 @@ for c in result.comments:
 
 All tools are `CallableTool2` subclasses. They are organized in subpackages under `kimix.tools` (the package `__init__.py` does not re-export them); import from the relevant submodule, e.g. `from kimix.tools.agent import Agent, AgentList, AgentClose, AskAgent`. Key ones:
 
-- `Agent` — launch sub-agent; params: `prompt`, `session_id`, `close_session=True`, `return_history=False`, `response` (from `kimix.tools.agent`)
-- `AskAgent` — send a message to another agent via the steer mechanism; params: `question`, `id` (optional for the main agent, ignored for sub-agents which always message their parent) (from `kimix.tools.agent`)
-- `AgentList` — list active sub-agent sessions (from `kimix.tools.agent`)
-- `AgentClose` — close sub-agent session; params: `session_id` (from `kimix.tools.agent`)
-- `TaskOutput` — get background task output; params: `task_id`, `block=True`, `timeout=60`, `output_path`, `kill=False`
+- `subagent` — launch sub-agent (class `Agent`); params: `description`, `prompt`, `run_in_background=True`, `session_id`, `close_session=True`, `return_history=False`, `response` (from `kimix.tools.agent`)
+- `send_message` — send a message to a subagent (class `AskAgent`); params: `message`, `subagent_id` (optional for the main agent, ignored for sub-agents which always message their parent) (from `kimix.tools.agent`)
+- `list_agents` — list active sub-agent sessions (class `AgentList`); params: `scope` (from `kimix.tools.agent`)
+- `interrupt_agent` — close/interrupt a sub-agent session (class `AgentClose`); params: `agent_id` (from `kimix.tools.agent`)
+- `job_output` — get background job output (class `TaskOutput`); params: `job_id`, `wait=False`, `timeout_ms`, `output_path`, `kill=False`
 - `BackgroundStream` — `start(function, stop_function, input_function=None)`, `wait(timeout=None)`, `stop()`, `get_output()`, `pop_output()`, `input(data)`, `success()`
-- `Bash` / `Powershell` — shell execution; params: `cmd`, `timeout=10` (from `kimix.tools.file.bash.bash_tool`)
+- `Bash` / `pwsh` — shell execution; params: `command`/`cmd`, `timeoutMs`, `workdir`, `run_in_background` (class `Powershell` in `kimix.tools.file.bash.pwsh_tool`)
 - `Run` — run external executable; params: `command`, `timeout=10`, `output_path`, `cwd`, `env`, `run_in_background=False`
 - `FindStr` — search text in files; params: `content`, `path`, `case_sensitive=False`
 - `Mkdir` / `Rm` — create/remove directories
@@ -998,7 +998,7 @@ All tools are `CallableTool2` subclasses. They are organized in subpackages unde
 - `ParserTool` — parse/extract/strip comments; params: `language`, `source_code|file_path`, `mode="extract"`, `encoding="utf-8"`
 - `WritePlan` / `ReadPlan` / `EditPlan` — plan file tools
 - `StoreSession` / `LoadSession` / `LsSession` — key-value session persistence
-- `FetchURL` — fetch web page as Markdown; params: `url`, `output_path`
+- `fetch_url` — fetch web page as Markdown; params: `url`, `output_path`
 - `fetch_to_markdown(url, wait_until="networkidle")` — Playwright-based fetcher
 - `Zip` / `Unzip` — 7z archive tools; params: `source`, `destination`, `password`
 
@@ -1252,10 +1252,10 @@ Defaults enforce: `prune_target_ratio < prune_trigger_ratio < compaction_trigger
 
 ### Retrieval of Elided Content
 
-Tier B elided content stays reachable via `Retrieve`:
+Tier B elided content stays reachable via `retrieve`:
 - Tool results are now indexed in `HistoryIndex` (previously only user/assistant turns)
 - `HistoryIndex.get_by_id(ref)` resolves the stub's reference deterministically
-- `Retrieve` accepts an optional `id` parameter for direct retrieval
+- `retrieve` accepts an optional `id` parameter for direct retrieval
 - Auto-retrieval (`_maybe_auto_retrieve_history`) resurfaces relevant elided turns automatically
 
 ### Slash Command

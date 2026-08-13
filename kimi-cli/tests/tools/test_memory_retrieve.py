@@ -11,7 +11,7 @@ import pytest
 from kosong.message import Message
 
 from kimi_cli.soul.history_index import HistoryIndex
-from kimi_cli.tools.memory import Params, Retrieve
+from kimi_cli.tools.memory import Params, retrieve
 from kimi_cli.wire.types import TextPart
 
 
@@ -23,7 +23,7 @@ from kimi_cli.wire.types import TextPart
 @pytest.fixture
 def memory_tool() -> Retrieve:
     """Retrieve with NO history index attached."""
-    return Retrieve()
+    return retrieve()
 
 
 @pytest.fixture
@@ -106,7 +106,7 @@ class TestRetrieveSearch:
             Message(role="user", content=[TextPart(text="café concept and naïve approach")]),
             Message(role="user", content=[TextPart(text="the rest of the plan uses unicode correctly")]),
         ])
-        tool = Retrieve()
+        tool = retrieve()
         tool.attach_history_index(idx)
         result = await tool(Params(query="café", k=5))
         assert "café" in result.output

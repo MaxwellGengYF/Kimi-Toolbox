@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Literal, override
 import pybase64
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools import SkipThisTool
@@ -160,10 +160,12 @@ class Region(BaseModel):
 
 
 class Params(BaseModel):
-    path: str = Field(
-        description="Path to an image or video file. Relative paths resolve against the "
-        "working directory; a path outside the working directory must be absolute. "
-        "Directories and text files are not supported."
+    file_path: str = Field(
+        validation_alias=AliasChoices("file_path", "path"),
+        description="Path to the image file, resolved by the filesystem backend. "
+        "Relative paths resolve against the working directory; a path outside "
+        "the working directory must be absolute. Directories and text files "
+        "are not supported.",
     )
     region: Region | None = Field(
         default=None,
@@ -318,7 +320,7 @@ def _build_media_note(
 
 
 class ReadMediaFile(CallableTool2[Params]):
-    name: str = "ReadMediaFile"
+    name: str = "read_image"
     params: type[Params] = Params
 
     def __init__(self, runtime: Runtime) -> None:
@@ -449,7 +451,7 @@ class ReadMediaFile(CallableTool2[Params]):
                 )
                 if not outcome.ok:
                     return ToolError(
-                        message=f"Cannot read region from `{params.path}`: {outcome.error}",
+                        message=f"Cannot read region from `{params.file_path}`: {outcome.error}",
                         brief="Cannot read region",
                     )
                 part = ImageURLPart(
@@ -478,7 +480,7 @@ class ReadMediaFile(CallableTool2[Params]):
                 # explicitly rather than degrade.
                 if len(data) > IMAGE_BYTE_BUDGET:
                     return ToolError(
-                        message=_build_full_resolution_limit_error(params.path, len(data)),
+                        message=_build_full_resolution_limit_error(params.file_path, len(data)),
                         brief="Image too large",
                     )
                 part = ImageURLPart(
@@ -591,26 +593,26 @@ class ReadMediaFile(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        if not params.path:
+        if not params.file_path:
             return ToolError(
                 message="File path cannot be empty.",
                 brief="Empty file path",
             )
 
         try:
-            p = kaos_path_from_tool_input(params.path, self._work_dir)
-            if err := await self._validate_path(p, params.path):
+            p = kaos_path_from_tool_input(params.file_path, self._work_dir)
+            if err := await self._validate_path(p, params.file_path):
                 return err
             p = p.canonical()
 
             if not await p.exists():
                 return ToolError(
-                    message=f"`{params.path}` does not exist.",
+                    message=f"`{params.file_path}` does not exist.",
                     brief="File not found",
                 )
             if not await p.is_file():
                 return ToolError(
-                    message=f"`{params.path}` is not a file.",
+                    message=f"`{params.file_path}` is not a file.",
                     brief="Invalid path",
                 )
 
@@ -621,13 +623,13 @@ class ReadMediaFile(CallableTool2[Params]):
             file_type = detect_file_type(str(p), header=header)
             if file_type.kind == "text":
                 return ToolError(
-                    message=f"`{params.path}` is a text file. Use ReadFile to read text files.",
+                    message=f"`{params.file_path}` is a text file. Use read to read text files.",
                     brief="Unsupported file type",
                 )
             if file_type.kind == "unknown":
                 return ToolError(
                     message=(
-                        f"`{params.path}` seems not readable as an image or video file. "
+                        f"`{params.file_path}` seems not readable as an image or video file. "
                         "You may need to read it with proper shell commands, Python tools "
                         "or MCP tools if available. "
                         "If you read/operate it with Python, you MUST ensure that any "
@@ -673,16 +675,16 @@ class ReadMediaFile(CallableTool2[Params]):
                         file_type.kind = "image"
                     except Exception as conv_e:
                         return ToolError(
-                            message=f"Failed to convert `{params.path}` to PNG: {conv_e}. "
+                            message=f"Failed to convert `{params.file_path}` to PNG: {conv_e}. "
                             + build_image_conversion_guidance(
-                                params.path, file_type.mime_type, self._os_kind()
+                                params.file_path, file_type.mime_type, self._os_kind()
                             ),
                             brief="Conversion failed",
                         )
                 else:
                     return ToolError(
                         message=build_image_conversion_guidance(
-                            params.path, file_type.mime_type, self._os_kind()
+                            params.file_path, file_type.mime_type, self._os_kind()
                         ),
                         brief="Unsupported image format",
                     )
@@ -699,13 +701,13 @@ class ReadMediaFile(CallableTool2[Params]):
             size = stat.st_size
             if size == 0:
                 return ToolError(
-                    message=f"`{params.path}` is empty.",
+                    message=f"`{params.file_path}` is empty.",
                     brief="Empty file",
                 )
             if size > (MAX_MEDIA_MEGABYTES << 20):
                 return ToolError(
                     message=(
-                        f"`{params.path}` is {size} bytes, which exceeds the max "
+                        f"`{params.file_path}` is {size} bytes, which exceeds the max "
                         f"{MAX_MEDIA_MEGABYTES}MB bytes for media files."
                     ),
                     brief="File too large",
@@ -736,14 +738,14 @@ class ReadMediaFile(CallableTool2[Params]):
                 and size > IMAGE_BYTE_BUDGET
             ):
                 return ToolError(
-                    message=_build_full_resolution_limit_error(params.path, size),
+                    message=_build_full_resolution_limit_error(params.file_path, size),
                     brief="Image too large",
                 )
 
             return await self._read_media(p, file_type, params, size)
         except Exception as e:
-            logger.warning("ReadMediaFile failed: {path}: {error}", path=params.path, error=e)
+            logger.warning("ReadMediaFile failed: {path}: {error}", path=params.file_path, error=e)
             return ToolError(
-                message=f"Failed to read {params.path}. Error: {e}",
+                message=f"Failed to read {params.file_path}. Error: {e}",
                 brief="Failed to read file",
             )

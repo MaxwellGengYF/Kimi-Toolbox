@@ -1,6 +1,6 @@
-"""ContextPrune tool — manual session-content removal.
+"""context_prune tool — manual session-content removal.
 
-Provides ``ContextPrune``, an agent tool that safely removes stale content
+Provides ``context_prune``, an agent tool that safely removes stale content
 from the conversation history.  It supports three modes:
 
 * ``prune`` — policy-driven ephemeral/substantive elision via
@@ -78,8 +78,8 @@ class Params(BaseModel):
     )
 
 
-class ContextPrune(CallableTool2[Params]):
-    name: str = "ContextPrune"
+class context_prune(CallableTool2[Params]):
+    name: str = "context_prune"
     description: str = (
         "Prune old session content (reasoning, tool results, stale messages) to save tokens. "
         "Recent turns and tool-call pairs are always preserved. "
@@ -96,7 +96,7 @@ class ContextPrune(CallableTool2[Params]):
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
         logger.info(
-            "ContextPrune invoked: mode={mode}, keep_recent_turns={keep}, "
+            "context_prune invoked: mode={mode}, keep_recent_turns={keep}, "
             "target_token_count={target}, dry_run={dry_run}",
             mode=params.mode,
             keep=params.keep_recent_turns,
@@ -117,7 +117,7 @@ class ContextPrune(CallableTool2[Params]):
             if loop_control is not None and not loop_control.prune_subagents:
                 return ToolError(
                     message=(
-                        "ContextPrune is not enabled for subagents. "
+                        "context_prune is not enabled for subagents. "
                         "Enable loop_control.prune_subagents or run from the root session."
                     ),
                     brief="Subagent pruning disabled",
@@ -165,7 +165,7 @@ class ContextPrune(CallableTool2[Params]):
 
         if result.earliest_removed_index is None:
             return ToolOk(
-                output=f"ContextPrune ({params.mode}): no removable content found.",
+                output=f"context_prune ({params.mode}): no removable content found.",
                 message="Nothing to prune",
             )
 
@@ -177,7 +177,7 @@ class ContextPrune(CallableTool2[Params]):
         )
 
         if params.dry_run:
-            logger.info("ContextPrune dry-run: {summary}", summary=summary)
+            logger.info("context_prune dry-run: {summary}", summary=summary)
             return ToolOk(
                 output=f"**Dry run** — session unchanged.\n\n{summary}",
                 message="Dry run complete",
@@ -211,7 +211,7 @@ class ContextPrune(CallableTool2[Params]):
             )
 
         logger.info(
-            "ContextPrune applied: mode={mode}, freed={freed}, earliest={idx}, "
+            "context_prune applied: mode={mode}, freed={freed}, earliest={idx}, "
             "elided={elided}",
             mode=params.mode,
             freed=result.freed_tokens,
@@ -220,7 +220,7 @@ class ContextPrune(CallableTool2[Params]):
         )
 
         return ToolOk(
-            output=f"ContextPrune ({params.mode}) applied.\n\n{summary}",
+            output=f"context_prune ({params.mode}) applied.\n\n{summary}",
             message="Context pruned",
         )
 

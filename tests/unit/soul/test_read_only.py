@@ -132,7 +132,7 @@ class TestKimiToolsetReadOnlyBlocking:
                 ts.add(_make_dummy_tool(name))
 
             # Also register some allowed tools
-            for name in ("ReadFile", "Glob", "Grep", "FetchURL"):
+            for name in ("read", "glob", "grep", "fetch_url"):
                 ts.add(_make_dummy_tool(name))
 
             return ts
@@ -158,8 +158,8 @@ class TestKimiToolsetReadOnlyBlocking:
     ) -> None:
         """Allowed tools still execute when read_only=True."""
         ts = toolset_factory(read_only=True, tools=[])
-        # ReadFile is registered by toolset_factory automatically
-        call = _make_tool_call("ReadFile")
+        # read is registered by toolset_factory automatically
+        call = _make_tool_call("read")
         # The handle returns a Task for known tools
         result = ts.handle(call)
         if hasattr(result, "__await__"):

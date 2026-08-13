@@ -240,7 +240,7 @@ The `kimix.tools/background/` module provides tools for managing background task
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `TaskOutput` | Get accumulated output from a background task | `task_id: str` |
+| `job_output` | Get accumulated output from a background job | `job_id: str` |
 
 ### Utility Classes and Functions
 
@@ -248,8 +248,8 @@ The `kimix.tools/background/` module provides tools for managing background task
 A wrapper for background thread execution with a thread-safe queue:
 - `start(function)` - Start the background thread with a given function that accepts a `queue.Queue[str]`
 - `wait()` - Wait for the background thread to complete
-- `pop_output()` - Retrieve and clear all output from the queue
-- `get_output()` - Retrieve all output from the queue without clearing
+- `pop_output()` - retrieve and clear all output from the queue
+- `get_output()` - retrieve all output from the queue without clearing
 - `get_queue()` - Get the thread-safe queue for retrieving messages
 - `is_started()` - Check if the stream has been started
 
@@ -276,9 +276,9 @@ add_task(task_id, stream)
 
 ## Reusing Subprocess Tools for Interactive Sessions
 
-The `Bash`, `Powershell`, and `Run` tools support dual-mode interaction:
+The `Bash`, `pwsh`, and `Run` tools support dual-mode interaction:
 
-1. **Start a session** — call the tool with `interactive=True` (Bash/Powershell) or
+1. **Start a session** — call the tool with `interactive=True` (Bash/pwsh) or
    `run_in_background=True` (Run). The response includes a `task_id`.
 2. **Continue the session** — call the *same* tool again with `task_id=<id>` and
    `cmd`/`command` set to the input text. The tool sends the input to the process
@@ -288,7 +288,7 @@ The `Bash`, `Powershell`, and `Run` tools support dual-mode interaction:
    until the pattern appears in the accumulated output.
 
 This replaces the older two-tool workflow for most interactive use cases.
-`TaskOutput` remains available as a fallback for listing, reading, exporting, or
+`job_output` remains available as a fallback for listing, reading, exporting, or
 killing tasks without sending input.
 
 ## YAML Agent Registration
@@ -317,8 +317,8 @@ At startup, `KimiToolset.load_tools()` (in `kimi-cli/src/kimi_cli/soul/toolset.p
 | File | Purpose |
 |------|---------|
 | `agent_worker.json` | Default worker agent (default agent file) |
-| `agent_boss.json` | Boss agent with ReadFile/Glob/Grep/FetchURL/Note |
-| `agent_subagent.json` | Sub-agent with Run/TaskOutput/TodoList/WriteFile/ReadFile/Glob/Grep/EditFile/FetchURL |
+| `agent_boss.json` | Boss agent with ReadFile/Glob/Grep/fetch_url/Note |
+| `agent_subagent.json` | Sub-agent with Run/TaskOutput/TodoList/WriteFile/ReadFile/Glob/Grep/EditFile/fetch_url |
 
 **kimi-cli base agents** (in `kimi-cli/src/kimi_cli/agents/default/`):
 
@@ -360,6 +360,6 @@ All kimix agent YAML files use `extend: default`, which resolves to `kimi-cli/sr
 | Prefix | Source |
 |--------|--------|
 | `kimi_cli.tools.*` | Built-in kimi-cli tools (Shell, ReadFile, Grep, etc.) |
-| `kimix.tools.*` | Kimix-extended tools (Run, FetchURL, Agent, Note, etc.) |
+| `kimix.tools.*` | Kimix-extended tools (Run, fetch_url, Agent, Note, etc.) |
 
 Use `kimix.tools.*` for new tools created under `src/kimix/tools/`.

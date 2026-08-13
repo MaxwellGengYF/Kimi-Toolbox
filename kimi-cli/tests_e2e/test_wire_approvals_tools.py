@@ -1158,7 +1158,7 @@ def test_custom_agent_exclude_tool(tmp_path) -> None:
                 "agent:",
                 "  extend: default",
                 "  exclude_tools:",
-                '    - "kimi_cli.tools.web:FetchURL"',
+                '    - "kimi_cli.tools.web:fetch_url"',
             ]
         ),
         encoding="utf-8",

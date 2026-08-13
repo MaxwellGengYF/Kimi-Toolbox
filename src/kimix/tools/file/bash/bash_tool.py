@@ -592,10 +592,10 @@ class BashParams(BaseModel):
 class Bash(CallableTool2[BashParams]):
     """Execute a bash command via the system bash, with background task support."""
 
-    name: str = "Bash"
+    name: str = "bash"
     description: str = (
         "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
-        "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
+        "Prefer `glob`/`grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
         + _interactive_scope_text(is_shell=True)
     )
     params: type[BashParams] = BashParams
@@ -758,7 +758,7 @@ class Bash(CallableTool2[BashParams]):
                 output="",
                 message=(
                     f"Interactive Bash started. task_id: `{task_id}`. "
-                    "Use task_id to send commands and TaskOutput to read results. "
+                    "Use task_id to send commands and job_output to read results. "
                     "Send 'exit' to close the session."
                 ),
                 brief="Interactive Bash started",
@@ -820,7 +820,7 @@ class Bash(CallableTool2[BashParams]):
             output = await process_task.stream.pop_output() if process_task.stream else ""
             output = await _maybe_export_output_async(output)
             guidance = foreground_background_guidance(params.cmd)
-            message = f"Running in background. task_id: `{task_id}`. use `TaskOutput`"
+            message = f"Running in background. task_id: `{task_id}`. use `job_output`"
             if guidance:
                 message += f" {guidance}"
             return ToolError(
@@ -864,7 +864,7 @@ class Bash(CallableTool2[BashParams]):
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             # Long failing commands are preserved as a re-runnable `.sh` script
             # in the shared temp folder so the exact source is never lost.
-            cmd_suffix = _command_saved_message(params.cmd, ".sh", "Bash")
+            cmd_suffix = _command_saved_message(params.cmd, ".sh", "bash")
             if cmd_suffix:
                 msg = f"{msg} {cmd_suffix}"
             if suffix:
@@ -978,7 +978,7 @@ class Bash(CallableTool2[BashParams]):
         task_id = await process_task.start(self._session, "bash")
 
         return ToolOk(
-            output=f"Running in background. task_id: `{task_id}`. Use `TaskOutput` tool to retrieve output.",
+            output=f"Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output.",
             message=f"Command started in background. task_id: `{task_id}`",
             brief="Background task started",
         )

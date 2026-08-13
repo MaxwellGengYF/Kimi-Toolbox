@@ -39,7 +39,7 @@ from kimi_cli.tools.file.read_media import ReadMediaFile
 from kimi_cli.tools.file.replace import EditFile
 from kimi_cli.tools.file.write import WriteFile
 from kimi_cli.tools.todo import TodoList
-from kimi_cli.tools.web.fetch import FetchURL
+from kimi_cli.tools.web.fetch import fetch_url
 from kimi_cli.tools.web.search import SearchWeb
 from kimi_cli.utils.environment import Environment
 from kimi_cli.wire.file import WireFile
@@ -303,9 +303,9 @@ def search_web_tool(config: Config, runtime: Runtime) -> SearchWeb:
 
 
 @pytest.fixture
-def fetch_url_tool(config: Config, runtime: Runtime) -> FetchURL:
-    """Create a FetchURL tool instance."""
-    return FetchURL(config, runtime)
+def fetch_url_tool(config: Config, runtime: Runtime) -> fetch_url:
+    """Create a fetch_url tool instance."""
+    return fetch_url(config, runtime)
 
 
 # misc fixtures

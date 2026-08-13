@@ -33,8 +33,8 @@ class Params(BaseModel):
     )
 
 
-class Retrieve(CallableTool2[Params]):
-    name: str = "Retrieve"
+class retrieve(CallableTool2[Params]):
+    name: str = "retrieve"
     description: str = (
         "Retrieve past conversation history, including compacted/archived turns. "
         "Use `query` to search (natural language, relevance-ranked with a recency "
@@ -56,7 +56,7 @@ class Retrieve(CallableTool2[Params]):
         if self._history_index is None:
             return ToolOk(
                 output=(
-                    "No history index attached. The `Retrieve` tool needs the "
+                    "No history index attached. The `retrieve` tool needs the "
                     "session's `HistoryIndex` to search past conversation turns."
                 ),
                 message="No history index",

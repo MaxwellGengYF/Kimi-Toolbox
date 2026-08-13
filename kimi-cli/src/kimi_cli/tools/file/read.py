@@ -16,7 +16,7 @@ from kosong.tooling import (
     ToolReturnValue,
     alias_note,
 )
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from rapidfuzz import fuzz
 
 from kimi_cli.session import Session
@@ -64,29 +64,36 @@ _SIMILARITY_CUTOFF = 65
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    path: str | list[str] = Field(
-        alias="file_path",  # common LLM variant
+    file_path: str | list[str] = Field(
+        validation_alias=AliasChoices("file_path", "path"),
         description=(
-            "File path, or a list of file paths. " + alias_note("path", "file_path", word=False) + " "
+            "Path to read, resolved by the filesystem backend. "
+            + alias_note("file_path", "path", word=False)
+            + " May be a single file path or a list of file paths. "
             "When `glob=True`, the final path component may contain wildcards "
             "(`*`, `?`, `[...]`); recursive patterns like `src/**/*.ts` are "
             "supported, only unsafe all-wildcard patterns (e.g. `**`, `**/*`) "
             "are rejected."
         ),
     )
-    line_offset: int | list[int] = Field(
+    offset: int | list[int] = Field(
         default=1,
+        validation_alias=AliasChoices("offset", "line_offset"),
         description=(
-            "Start line, 1-based. Negative reads from end. "
+            "1-based first line to return. Defaults to 1. "
+            + alias_note("offset", "line_offset", word=False)
+            + " Negative reads from end. "
             f"Max abs {MAX_LINES}. May be a scalar applied to all files, "
             "or a list with one value per file path."
         ),
     )
-    n_lines: int | list[int] = Field(
-        default=MAX_LINES,
+    limit: int | list[int] = Field(
+        default=2000,
+        validation_alias=AliasChoices("limit", "n_lines"),
         description=(
-            f"Lines to read, max {MAX_LINES}. "
-            "May be a scalar applied to all files, "
+            "Maximum number of lines to return. Defaults to 2000. "
+            + alias_note("limit", "n_lines", word=False)
+            + f" Max {MAX_LINES}. May be a scalar applied to all files, "
             "or a list with one value per file path."
         ),
     )
@@ -125,12 +132,12 @@ class Params(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> Params:
-        n = len(self.path) if isinstance(self.path, list) else 1
+        n = len(self.file_path) if isinstance(self.file_path, list) else 1
 
         if n > MAX_FILES:
             raise ValueError(f"Cannot read more than {MAX_FILES} files in one call.")
 
-        for name in ("line_offset", "n_lines", "max_char", "char_offset"):
+        for name in ("offset", "limit", "max_char", "char_offset"):
             value = getattr(self, name)
             if isinstance(value, list):
                 if len(value) != n:
@@ -147,7 +154,7 @@ class Params(BaseModel):
 
     @staticmethod
     def _validate_value(name: str, value: int) -> None:
-        if name == "line_offset":
+        if name == "offset":
             if value == 0:
                 raise ValueError(
                     f"{name} cannot be 0; use 1 for the first line or -1 for the last line"
@@ -155,11 +162,11 @@ class Params(BaseModel):
             if value < -MAX_LINES:
                 raise ValueError(
                     f"{name} cannot be less than -{MAX_LINES}. "
-                    "Use a positive line_offset with the total line count "
+                    "Use a positive offset with the total line count "
                     "to read from a specific position."
                 )
             return
-        min_value = {"n_lines": 1, "max_char": 0, "char_offset": 0}[name]
+        min_value = {"limit": 1, "max_char": 0, "char_offset": 0}[name]
         if value < min_value:
             raise ValueError(f"{name} must be >= {min_value}.")
 
@@ -252,12 +259,13 @@ def _similar_names(
 
 
 class ReadFile(CallableTool2[Params]):
-    name: str = "ReadFile"
+    name: str = "read"
     params: type[Params] = Params
     field_aliases = {
         **_COMMON_FIELD_ALIASES,
-        "files": "path",
-        "paths": "path",
+        "files": "file_path",
+        "paths": "file_path",
+        "path": "file_path",
     }
 
     def __init__(
@@ -438,7 +446,9 @@ class ReadFile(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        raw_paths: list[str] = [params.path] if isinstance(params.path, str) else params.path
+        raw_paths: list[str] = (
+            [params.file_path] if isinstance(params.file_path, str) else params.file_path
+        )
 
         if not raw_paths:
             return ToolError(
@@ -453,8 +463,8 @@ class ReadFile(CallableTool2[Params]):
 
         # Per-entry options: scalars broadcast, lists apply per file path.
         n_raw = len(raw_paths)
-        line_offsets = _broadcast_option(params.line_offset, n_raw)
-        n_lines_values = _broadcast_option(params.n_lines, n_raw)
+        line_offsets = _broadcast_option(params.offset, n_raw)
+        n_lines_values = _broadcast_option(params.limit, n_raw)
         max_char_values = _broadcast_option(params.max_char, n_raw)
         char_offset_values = _broadcast_option(params.char_offset, n_raw)
 

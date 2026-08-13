@@ -245,7 +245,7 @@ class AgentTool(CallableTool2[Params]):
                 "automatic_notification: true",
                 "next_step: You will be automatically notified when it completes.",
                 (
-                    "next_step: Use TaskOutput with this task_id for a non-blocking status/output "
+                    "next_step: Use job_output with this task_id for a non-blocking status/output "
                     "snapshot. Only set block=true when you intentionally want to wait."
                 ),
                 f'resume_hint: Use Agent(resume="{agent_id}", prompt="...") to continue this '

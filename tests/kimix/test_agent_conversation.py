@@ -924,9 +924,9 @@ async def test_ask_agent_target_not_steerable_queues(mock_session: MagicMock) ->
         _drain_pending_messages("target-1")
 
 
-def test_ask_agent_tool_name_is_pascal_case() -> None:
-    """The tool registers under the canonical ``AskAgent`` name."""
-    assert AskAgent.name == "AskAgent"
+def test_ask_agent_tool_name_is_report_canonical() -> None:
+    """The tool registers under the report-canonical ``send_message`` name."""
+    assert AskAgent.name == "send_message"
 
 
 async def test_format_pending_messages() -> None:

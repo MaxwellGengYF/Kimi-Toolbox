@@ -7,7 +7,7 @@ from typing import Any, Literal, override
 import json_repair
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolReturnValue, alias_note
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from rapidfuzz import fuzz, process
 
 from kimi_cli.session import Session
@@ -33,7 +33,7 @@ from kimi_cli.vfs import VFS
 
 from .utils import resolve_vfs
 
-_BASE_DESCRIPTION = "Replace strings in text files."
+_BASE_DESCRIPTION = "Edit an existing UTF-8 text file by replacing literal text."
 
 
 class Edit(BaseModel):
@@ -67,15 +67,74 @@ class Edit(BaseModel):
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    path: str = Field(
-        alias="file_path",  # common LLM variant
-        description="File path. "
-        + alias_note("path", "file_path", word=False),
+    file_path: str = Field(
+        validation_alias=AliasChoices("file_path", "path"),
+        description="Path to edit, resolved by the filesystem backend. "
+        + alias_note("file_path", "path", word=False),
     )
     edit: Edit | list[Edit] = Field(
         alias="edits",  # common LLM variant (plural)
-        description="One or more edits to apply, in order. " + alias_note("edit", "edits", word=False),
+        description=(
+            "One or more edits to apply, in order. "
+            + alias_note("edit", "edits", word=False)
+            + " Each item: `old_string` (literal text to replace), "
+            "`new_string` (replacement text; empty string deletes the match), "
+            "`replace_all` (default false; when false, old_string must appear "
+            "exactly once), plus optional `max_replacements` and `match_mode`."
+        ),
     )
+    old_string: str | None = Field(
+        default=None,
+        description="Literal text to replace. Must match exactly. "
+        "Single-edit shorthand for `edit` — mutually exclusive with it.",
+    )
+    new_string: str | None = Field(
+        default=None,
+        description="Literal replacement text. Use an empty string to delete the match. "
+        "Single-edit shorthand for `edit` — mutually exclusive with it.",
+    )
+    replace_all: bool = Field(
+        default=False,
+        description=(
+            "Replace all matches. Defaults to false; when false, old_string "
+            "must appear exactly once."
+        ),
+    )
+    sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
+        default=None,
+        description=(
+            "The wider sandbox mode this file operation needs "
+            "(`workspace-write` or `danger-full-access`). Only valid as a "
+            "one-shot retry of an operation the sandbox just denied; requires "
+            "justification and user approval."
+        ),
+    )
+    justification: str | None = Field(
+        default=None,
+        description=(
+            "Required with sandbox_permissions: one sentence for the user "
+            "explaining why this exact file operation needs the wider access."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_single_edit(cls, data: Any) -> Any:
+        """Build the `edit` list from top-level old_string/new_string shorthand.
+
+        A bare ``{file_path, old_string, new_string, replace_all}`` call (the
+        report's canonical shape) is normalized into the single-edit path so
+        the existing ``params.edit`` execution flow is shared.
+        """
+        if isinstance(data, dict) and "edit" not in data and "edits" not in data:
+            if data.get("old_string") is not None or data.get("new_string") is not None:
+                edit = {
+                    "old_string": data.get("old_string", ""),
+                    "new_string": data.get("new_string", ""),
+                    "replace_all": data.get("replace_all", False),
+                }
+                data = {**data, "edit": [edit]}
+        return data
 
     @field_validator("edit", mode="before")
     @classmethod
@@ -88,7 +147,7 @@ class Params(BaseModel):
         return v
 
 class EditFile(CallableTool2[Params]):
-    name: str = "EditFile"
+    name: str = "edit"
     description: str = _BASE_DESCRIPTION
     params: type[Params] = Params
 
@@ -345,25 +404,25 @@ class EditFile(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
-        display_path = params.path.replace("\\", "/")
-        if not params.path:
+        display_path = params.file_path.replace("\\", "/")
+        if not params.file_path:
             return ToolError(
                 message="File path cannot be empty.",
                 brief="Empty file path",
             )
 
         try:
-            p = kaos_path_from_tool_input(params.path, self._work_dir)
+            p = kaos_path_from_tool_input(params.file_path, self._work_dir)
             logical_path = p
             display_logical_path = str(logical_path).replace("\\", "/")
             _outside = not is_within_directory(logical_path.canonical(), self._work_dir)
-            err, _ = await self._validate_path(p, params.path)
+            err, _ = await self._validate_path(p, params.file_path)
             if err:
                 if _outside:
                     err.message = f"[out of work-dir] {err.message}"
                 return err
 
-            p = await resolve_vfs(params.path, self._vfs, for_write=True, work_dir=self._work_dir)
+            p = await resolve_vfs(params.file_path, self._vfs, for_write=True, work_dir=self._work_dir)
 
             try:
                 st = await p.stat()
@@ -428,7 +487,8 @@ class EditFile(CallableTool2[Params]):
             result = await self._approval.request(
                 self.name,
                 action,
-                f"Edit file `{display_logical_path}`",
+                f"Edit file `{display_logical_path}`"
+                + (f" — {params.justification}" if params.justification else ""),
                 display=diff_blocks,
             )
             if not result:
@@ -483,11 +543,11 @@ class EditFile(CallableTool2[Params]):
             )
 
         except (OSError, ValueError, RuntimeError) as e:
-            logger.warning("EditFile failed: {path}: {error}", path=params.path, error=e)
+            logger.warning("EditFile failed: {path}: {error}", path=params.file_path, error=e)
             _outside_ex = False
             with contextlib.suppress(Exception):
                 _outside_ex = not is_within_directory(
-                    kaos_path_from_tool_input(params.path, self._work_dir).canonical(),
+                    kaos_path_from_tool_input(params.file_path, self._work_dir).canonical(),
                     self._work_dir,
                 )
             return ToolError(

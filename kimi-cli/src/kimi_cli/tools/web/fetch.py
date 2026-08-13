@@ -44,8 +44,8 @@ class Params(BaseModel):
     )
 
 
-class FetchURL(CallableTool2[Params]):
-    name: str = "FetchURL"
+class fetch_url(CallableTool2[Params]):
+    name: str = "fetch_url"
     description: str = "Fetch a URL and extract main text."
     params: type[Params] = Params
 
@@ -112,7 +112,7 @@ class FetchURL(CallableTool2[Params]):
                 async with req as response:
                     if response.status >= 400:
                         logger.warning(
-                            "FetchURL HTTP error: status={status}, url={url}",
+                            "fetch_url HTTP error: status={status}, url={url}",
                             status=response.status,
                             url=params.url,
                         )
@@ -131,13 +131,13 @@ class FetchURL(CallableTool2[Params]):
                         builder.write(resp_text)
                         return builder.ok("The returned content is the full content of the page.")
         except TimeoutError:
-            logger.warning("FetchURL timed out: url={url}", url=params.url)
+            logger.warning("fetch_url timed out: url={url}", url=params.url)
             return builder.error(
                 "Failed to fetch URL: request timed out. The server may be slow or unreachable.",
                 brief="Request timed out",
             )
         except aiohttp.ClientError as e:
-            logger.warning("FetchURL network error: {error}, url={url}", error=e, url=params.url)
+            logger.warning("fetch_url network error: {error}, url={url}", error=e, url=params.url)
             return builder.error(
                 (
                     f"Failed to fetch URL due to network error: {e}. "
@@ -213,7 +213,7 @@ class FetchURL(CallableTool2[Params]):
             ):
                 if response.status != 200:
                     logger.warning(
-                        "FetchURL service HTTP error: status={status}, url={url}",
+                        "fetch_url service HTTP error: status={status}, url={url}",
                         status=response.status,
                         url=params.url,
                     )
@@ -228,14 +228,14 @@ class FetchURL(CallableTool2[Params]):
                     "The returned content is the main content extracted from the page."
                 )
         except TimeoutError:
-            logger.warning("FetchURL service timed out: url={url}", url=params.url)
+            logger.warning("fetch_url service timed out: url={url}", url=params.url)
             return builder.error(
                 "Failed to fetch URL via service: request timed out.",
                 brief="Service request timed out",
             )
         except aiohttp.ClientError as e:
             logger.warning(
-                "FetchURL service network error: {error}, url={url}", error=e, url=params.url
+                "fetch_url service network error: {error}, url={url}", error=e, url=params.url
             )
             return builder.error(
                 (

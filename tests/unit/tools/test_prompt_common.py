@@ -50,21 +50,21 @@ def _build_tools() -> dict[str, Any]:
     from kimix.tools.file.bash.pwsh_tool import Powershell
     from kimix.tools.file import run as rt
     from kimix.tools.file.run import Run
-    from kimix.tools.py import Python
+    from kimix.tools.py import python
 
     session = _FakeSession()
     tools: dict[str, Any] = {}
     with mock.patch.object(bt.sys, "platform", "win32"), mock.patch.object(
         bt, "_should_enable_bash", return_value=True
     ), mock.patch.object(bt, "find_bash", return_value=r"C:\Git\bin\bash.exe"):
-        tools["Bash"] = Bash(session)
+        tools["bash"] = Bash(session)
     with mock.patch.object(pt.sys, "platform", "win32"), mock.patch.object(
         pt._bash_tool, "_should_enable_powershell", return_value=True
     ), mock.patch.object(pt, "find_pwsh", return_value=r"C:\pwsh\pwsh.exe"), mock.patch.object(
         pt, "load_desc", return_value="<PWSH_MD>"
     ):
-        tools["Powershell"] = Powershell(session)
-    tools["Python"] = Python(session)
+        tools["pwsh"] = Powershell(session)
+    tools["python"] = python(session)
     with mock.patch.object(rt, "USE_SYSTEM_SHELL", True), mock.patch.object(
         rt, "USE_SYSTEM_PWSH_ON_WINDOWS", False
     ), mock.patch.object(rt, "find_bash", return_value=None):
@@ -84,18 +84,26 @@ def test_shared_fragments_identical() -> None:
     def desc(model: type, field: str) -> str:
         return model.model_fields[field].description  # type: ignore[attr-defined]
 
-    # timeout / wait_for_pattern / max_lines are byte-identical in all four.
-    for field in ("timeout", "wait_for_pattern", "max_lines"):
+    # wait_for_pattern / max_lines are byte-identical in all four.
+    for field in ("wait_for_pattern", "max_lines"):
         values = {
             name: desc(model, field)
             for name, model in (
-                ("Bash", BashParams),
-                ("Powershell", PowershellParams),
+                ("bash", BashParams),
+                ("pwsh", PowershellParams),
                 ("Python", PyParams),
                 ("Run", RunParams),
             )
         }
         assert len(set(values.values())) == 1, f"{field} descs diverged: {values}"
+
+    # timeout: Bash/Python/Run keep the shared seconds field; pwsh exposes the
+    # report-canonical `timeoutMs` (legacy `timeout` alias) with ms wording.
+    for model in (BashParams, PyParams, RunParams):
+        assert desc(model, "timeout") == "Timeout in seconds."
+    assert "Timeout in milliseconds" in desc(PowershellParams, "timeoutMs")
+    assert "timeout" not in PowershellParams.model_json_schema()["properties"]
+    assert "timeoutMs" in PowershellParams.model_json_schema()["properties"]
 
     # task_id: Bash == Powershell (payload 'cmd'); Python uses 'code' + tail.
     assert desc(BashParams, "task_id") == desc(PowershellParams, "task_id")
@@ -154,27 +162,27 @@ def test_descriptions_unchanged() -> None:
     """
     tools = _build_tools()
 
-    assert tools["Bash"].description == (
+    assert tools["bash"].description == (
         "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
-        "Prefer `Glob`/`Grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
+        "Prefer `glob`/`grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
         "Start a persistent session with interactive=True, then reuse the same tool with "
         "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. "
+        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
         "Send 'exit' to close the session. "
         "On Windows, unquoted backslash paths are auto-converted to forward slashes "
         "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
     )
 
-    assert tools["Powershell"].description == (
+    assert tools["pwsh"].description == (
         "<PWSH_MD> "
         "Start a persistent session with interactive=True, then reuse the same tool with "
         "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks. "
+        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
         "Send 'exit' to close the session. "
         "Windows paths must use backslashes (`\\`) instead of forward slashes (`/`)."
     )
 
-    assert tools["Python"].description == (
+    assert tools["python"].description == (
         "Execute Python code or run a .py file directly. "
         "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
         "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
@@ -184,14 +192,14 @@ def test_descriptions_unchanged() -> None:
         "By default the child env is scrubbed of secret-looking vars. "
         "Start a background session with run_in_background=True, then reuse the same tool with "
         "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks."
+        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks."
     )
 
     assert tools["Run"].description == (
         "Run an executable or bash command. "
         "Start a background session with run_in_background=True, then reuse the same tool with "
         "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. TaskOutput remains available as a fallback for listing/monitoring tasks."
+        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks."
     )
 
 
@@ -208,7 +216,8 @@ def test_generic_conventions_removed_from_tool_text() -> None:
         assert "Accepts `command` or `cmd` parameter" not in desc
         # per-tool param schemas keep only the minimal, tool-specific text
         schema = tool.params.model_json_schema()
-        assert schema["properties"]["timeout"]["description"] == "Timeout in seconds."
+        timeout_prop = "timeoutMs" if "timeoutMs" in schema["properties"] else "timeout"
+        assert schema["properties"][timeout_prop]["description"]
         assert schema["properties"]["max_lines"]["description"] == "Max lines to return. None = unlimited."
         assert schema["properties"]["wait_for_pattern"]["description"] == "Pattern to wait for in the tool output."
 
@@ -259,10 +268,10 @@ def test_shell_cmd_required_validator_shared() -> None:
     from kimix.tools.file.bash.bash_tool import BashParams
     from kimix.tools.file.bash.pwsh_tool import PowershellParams
 
-    for model in (BashParams, PowershellParams):
-        with pytest.raises(ValidationError, match="cmd cannot be empty when mode='execute'"):
+    for model, field in ((BashParams, "cmd"), (PowershellParams, "command")):
+        with pytest.raises(ValidationError, match=rf"{field} cannot be empty when mode='execute'"):
             model.model_validate({"mode": "execute"})
-        with pytest.raises(ValidationError, match="cmd cannot be empty when continuing"):
+        with pytest.raises(ValidationError, match=rf"{field} cannot be empty when continuing"):
             model.model_validate({"mode": "send", "task_id": "abc"})
         ok = model.model_validate({"mode": "send", "task_id": "abc", "cmd": "echo hi"})
         assert ok.task_id == "abc"

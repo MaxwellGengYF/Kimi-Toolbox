@@ -85,14 +85,12 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         return None
 
     try:
-        todo_tool = toolset.find("TodoList")
+        todo_tool = toolset.find("todo_write")
     except Exception:
         return None
     if todo_tool is None:
         return None
-
     runtime = getattr(cli, "_runtime", None)
-
     # Mirror the persistence split in ``kimi_cli.tools.todo.TodoList``:
     # root sessions store todos in ``SessionState`` and subagent sessions store
     # them in a separate ``state.json`` under the subagent instance directory.
@@ -144,11 +142,11 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         lines.append("")
     if strong:
         lines.append(
-            "CRITICAL: Unfinished `TodoList` tasks remain. Mark every remaining item `done` with `TodoList` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[done]`."
+            "CRITICAL: Unfinished `todo_write` tasks remain. Mark every remaining item `done` with `todo_write` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[done]`."
         )
     else:
         lines.append(
-            "You have unfinished `TodoList` tasks. Update statuses below and complete all pending/in-progress items before finishing."
+            "You have unfinished `todo_write` tasks. Update statuses below and complete all pending/in-progress items before finishing."
         )
     for todo in todos:
         title = getattr(todo, "title", "")
@@ -247,7 +245,7 @@ async def _export_session_todos(session: Session, path: Path) -> None:
         return
 
     try:
-        todo_tool = toolset.find("TodoList")
+        todo_tool = toolset.find("todo_write")
     except Exception:
         return
     if todo_tool is None:
@@ -989,10 +987,10 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
         plan_size = len(plan_content.encode("utf-8"))
         regular_session = await _create_default_session_async()
         if plan_size > 100 * 1024:
-            impl_prompt = f"Read this plan `{plan_file}`, carefully research, read all related files first, call TodoList to record, then implement the plan step-by-step."
+            impl_prompt = f"Read this plan `{plan_file}`, carefully research, read all related files first, call todo_write to record, then implement the plan step-by-step."
             review_reminder = f"Review the plan in `{plan_file}` and ensure all tasks are completed."
         else:
-            impl_prompt = f"Read this plan:\n\n{plan_content}\n\ncarefully research, read all related files first, call TodoList to record, then implement the plan step-by-step:"
+            impl_prompt = f"Read this plan:\n\n{plan_content}\n\ncarefully research, read all related files first, call todo_write to record, then implement the plan step-by-step:"
             review_reminder = f"Review this plan and ensure all tasks are completed:\n\n{plan_content}"
         await prompt_async(
             impl_prompt,

@@ -44,7 +44,7 @@ Kimi-CLI-X 在原版 Kimi-CLI 基础上，围绕**提示词效率**、**工具�
 | **Python 脚本执行** | 允许 Agent 直接执行 Python 脚本。 |
 | **错误记录** | 记录工具调用错误，供模型回溯与改进。 |
 | **脚本系统** | 将提示词与 Python 逻辑结合，编排复杂任务。 |
-| **增强网页抓取 (FetchURL)** | 基于无头浏览器输出 Markdown（而非纯文本），支持 `output_path` 直接落盘与超长内容自动截断；零外部服务依赖，更稳更轻。 |
+| **增强网页抓取 (fetch_url)** | 基于无头浏览器输出 Markdown（而非纯文本），支持 `output_path` 直接落盘与超长内容自动截断；零外部服务依赖，更稳更轻。 |
 | **Best-of-N 采样（`AgentSwarm` `parallel_sample` 模式）** | 将同一任务在隔离工作区（git worktree / 临时拷贝）中并行跑 N 次，通过 `self_eval` 或 `majority` 策略选出最佳结果，应用胜出 diff 并执行验证——绝不静默接受失败。 |
 
 
@@ -93,7 +93,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 #### 3. 自动历史检索 + 按需召回
 
 - **自动检索**（`_maybe_auto_retrieve_history`）：每轮第一步，若用户输入 ≥10 字符，自动在 HistoryIndex 中 BM25 搜索匹配的已压缩轮次，得分超过 `auto_retrieve_history_threshold` 时以 `[Auto-retrieved from past conversation]` 形式注入上下文。
-- **`Retrieve` 工具**：Agent 可主动调用，按自然语言查询搜索全部归档历史（含已压缩轮次），返回原文摘录及相关性得分（或按 `id` 取回指定轮次）。
+- **`retrieve` 工具**：Agent 可主动调用，按自然语言查询搜索全部归档历史（含已压缩轮次），返回原文摘录及相关性得分（或按 `id` 取回指定轮次）。
 
 ```
 ┌──────────────┐    append     ┌──────────────┐    overflow    ┌──────────────────┐
@@ -118,7 +118,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 - **Todo 提醒**：定期将未完成的 todo 重新注入上下文尾部，目标不会因对话变长而“丢失”。
 - **压缩提醒**：上下文将满（约 70%）时，提示 Agent 主动压缩，避免被动触发自动压缩丢失信息。
 - **预算提醒**（可选开启）：回合步数/时间预算将尽时分级提醒收尾，让 Agent 体面收尾而非被强行中断。
-- **上下文计量**：上下文用量明显变化时，提醒 Agent 用 `Retrieve` 工具回溯历史。
+- **上下文计量**：上下文用量明显变化时，提醒 Agent 用 `retrieve` 工具回溯历史。
 - **决策感知压缩**：压缩摘要保留 `Decisions & Conclusions` 与 `Verification Status` 两节，早期决策与已验证的工作不丢失。
 - **上下文剪枝**：自动清理过期工具输出、thinking 块与近似重复内容，回收上下文空间。
 
@@ -127,7 +127,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 ### TodoList
 `TodoList` 工具用于跟踪多步计划：
 - 支持增量更新（append/overwrite 模式）、标题模糊匹配与逐项备注。
-- 通过 `TodoPush`/`TodoSub`/`TodoPop` 支持嵌套子任务，并以 `Stack:` 面包屑展示当前层级。
+- 通过 `todo_push`/`todo_sub`/`todo_pop` 支持嵌套子任务，并以 `Stack:` 面包屑展示当前层级。
 
 ### Best-of-N 采样
 

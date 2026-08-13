@@ -1,1 +1,1 @@
-Search the web for current information: news, docs, release notes, blogs, papers, and more. Use `FetchURL` to read a specific URL found here.
+Search the web for current information. Returns an optional summary answer and a list of source URLs. Use `fetch_url` to read a specific URL found here.

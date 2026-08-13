@@ -68,6 +68,7 @@ class TestTaskOutputWaitForPattern:
         stream.wait_for_output = AsyncMock(return_value=("output text", matched, 0.1))
         stream.thread_is_alive = AsyncMock(return_value=True)
         stream.success = AsyncMock(return_value=True)
+        stream.pop_output = AsyncMock(return_value="output text")
         stream.process_elapsed = None
         return stream
 
@@ -83,7 +84,7 @@ class TestTaskOutputWaitForPattern:
         stream = self._stream(matched=True)
         self._register(mock_session, stream)
 
-        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="ready"))
+        result = await to(TaskOutputParams(job_id="bash_1", wait=True, wait_for_pattern="ready"))
 
         assert not result.is_error
         assert "output text" in result.output
@@ -95,7 +96,7 @@ class TestTaskOutputWaitForPattern:
         stream = self._stream(matched=False)
         self._register(mock_session, stream)
 
-        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="never"))
+        result = await to(TaskOutputParams(job_id="bash_1", wait=True, wait_for_pattern="never"))
 
         assert not result.is_error
         assert "wait_matched: false" in result.output
@@ -104,7 +105,7 @@ class TestTaskOutputWaitForPattern:
         to = TaskOutput(session=mock_session)
         self._register(mock_session, self._stream(matched=True))
 
-        result = await to(TaskOutputParams(task_id="bash_1", wait_for_pattern="["))
+        result = await to(TaskOutputParams(job_id="bash_1", wait=True, wait_for_pattern="["))
 
         assert result.is_error
         assert "Invalid wait_for_pattern" in result.message

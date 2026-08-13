@@ -1,4 +1,4 @@
-"""Provider-specific invariant tests for ContextPrune output.
+"""Provider-specific invariant tests for context_prune output.
 
 These tests exercise the low-level provider conversion code to confirm that
 a pruned history still satisfies each backend's structural rules:
@@ -54,7 +54,7 @@ async def test_kimi_thinking_mode_requires_reasoning_backpass() -> None:
         converted = _kimi_convert_message(msg)
         assert converted.get("reasoning_content") == "deep reasoning"
 
-        # After ContextPrune strips reasoning in thinking mode, an empty
+        # After context_prune strips reasoning in thinking mode, an empty
         # reasoning_content placeholder is preserved so the API still receives
         # the required field.
         stripped = Message(role="assistant", content=[ThinkPart(think="")])

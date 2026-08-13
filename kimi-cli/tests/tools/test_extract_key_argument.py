@@ -19,20 +19,20 @@ class TestExtractKeyArgument:
 
     def test_fetchurl(self):
         result = extract_key_argument(
-            '{"url": "https://example.com/a/b/c"}', "FetchURL", self.work_dir
+            '{"url": "https://example.com/a/b/c"}', "fetch_url", self.work_dir
         )
         assert result is not None
         assert "example.com" in result
 
     def test_readfile(self):
         result = extract_key_argument(
-            '{"path": "foo/bar.py"}', "ReadFile", self.work_dir
+            '{"path": "foo/bar.py"}', "read", self.work_dir
         )
         assert result is not None
         assert "foo/bar.py" in result
 
     def test_grep(self):
-        result = extract_key_argument('{"pattern": "hello"}', "Grep", self.work_dir)
+        result = extract_key_argument('{"pattern": "hello"}', "grep", self.work_dir)
         assert result == "hello"
 
     def test_invalid_json(self):
@@ -46,7 +46,7 @@ class TestExtractKeyArgument:
     def test_long_content_truncated(self):
         long_url = "https://example.com/" + "a" * 200
         result = extract_key_argument(
-            f'{{"url": "{long_url}"}}', "FetchURL", self.work_dir
+            f'{{"url": "{long_url}"}}', "fetch_url", self.work_dir
         )
         assert result is not None
         # shorten_middle(text, width=50) -> text[:25] + "..." + text[-25:]  => length 53
@@ -61,7 +61,7 @@ class TestExtractKeyArgument:
         """Absolute paths under work_dir should be shortened to relative."""
         absolute = str(Path(str(self.work_dir)) / "foo" / "bar.py").replace("\\", "/")
         result = extract_key_argument(
-            f'{{"path": "{absolute}"}}', "ReadFile", self.work_dir
+            f'{{"path": "{absolute}"}}', "read", self.work_dir
         )
         assert result is not None
         assert "foo/bar.py" in result.replace("\\", "/")
@@ -74,5 +74,5 @@ class TestExtractKeyArgument:
             "kosong.utils.jsonx.loads_relaxed",
             side_effect=json.JSONDecodeError("Extra data", "doc", 0),
         ):
-            result = extract_key_argument('{"url": "https://example.com"}', "FetchURL", self.work_dir)
+            result = extract_key_argument('{"url": "https://example.com"}', "fetch_url", self.work_dir)
         assert result is None

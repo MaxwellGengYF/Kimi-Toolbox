@@ -182,7 +182,7 @@ class TestPowershellArgumentBuilding:
             assert isinstance(result, ToolOk)
             assert "task-123" in result.message
             assert "task_id" in result.message
-            assert "TaskOutput" in result.message
+            assert "job_output" in result.message
             mock_instance.wait.assert_not_called()
 
 
@@ -513,10 +513,13 @@ class TestPowershellSafetyWiring:
             return Powershell(session=mock_session)
 
     def test_cwd_and_workdir_params_removed(self) -> None:
-        """Powershell no longer exposes ``cwd``/``workdir``/``deduplicate_output``."""
+        """Powershell no longer exposes ``cwd``/``deduplicate_output``; the
+        report-canonical ``workdir`` param is accepted (fresh process per call,
+        applied via Set-Location instead of persisting cwd state)."""
         props = PowershellParams.model_json_schema()["properties"]
-        for gone in ("cwd", "workdir", "deduplicate_output", "token_kill"):
+        for gone in ("cwd", "deduplicate_output", "token_kill"):
             assert gone not in props, f"{gone} must be removed from PowershellParams"
+        assert "workdir" in props
 
     async def test_process_task_runs_without_cwd(self, pwsh_instance: Powershell) -> None:
         """No working directory is passed to the subprocess anymore."""

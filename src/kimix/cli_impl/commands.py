@@ -793,31 +793,31 @@ def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path, kimi_cli_tool
             return p.resolve().as_posix()
 
     tools: list[tuple[str, Path]] = [
-        ('Bash', kimix_tools_dir / 'file' / 'bash' / 'bash_tool.py'),
-        ('Powershell', kimix_tools_dir / 'file' / 'bash' / 'pwsh_tool.py'),
+        ('bash', kimix_tools_dir / 'file' / 'bash' / 'bash_tool.py'),
+        ('pwsh', kimix_tools_dir / 'file' / 'bash' / 'pwsh_tool.py'),
         ('Run', kimix_tools_dir / 'file' / 'run.py'),
-        ('Python', kimix_tools_dir / 'py' / '__init__.py'),
-        ('TaskOutput', kimix_tools_dir / 'background' / '__init__.py'),
-        ('TodoList', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('TodoPush', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('TodoPop', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('TodoSub', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('Retrieve', kimi_cli_tools_dir / 'memory' / '__init__.py'),
-        ('ReadFile', kimi_cli_tools_dir / 'file' / 'read.py'),
-        ('ReadMediaFile', kimi_cli_tools_dir / 'file' / 'read_media.py'),
-        ('EditFile', kimi_cli_tools_dir / 'file' / 'replace.py'),
-        ('WriteFile', kimi_cli_tools_dir / 'file' / 'write.py'),
-        ('Agent', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('AskAgent', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('AgentList', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('AgentClose', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('AgentSwarm', kimix_tools_dir / 'swarm' / '__init__.py'),
-        ('Glob', kimi_cli_tools_dir / 'file' / 'glob.py'),
-        ('Grep', kimi_cli_tools_dir / 'file' / 'grep_local.py'),
-        ('FetchURL', kimix_tools_dir / 'web' / 'fetch_url.py'),
-        ('SearchWeb', kimi_cli_tools_dir / 'web' / 'search.py'),
-        ('ContextUsage', kimix_tools_dir / 'context' / '__init__.py'),
-        ('Compact', kimix_tools_dir / 'context' / '__init__.py'),
+        ('python', kimix_tools_dir / 'py' / '__init__.py'),
+        ('job_output', kimix_tools_dir / 'background' / '__init__.py'),
+        ('todo_write', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('todo_push', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('todo_pop', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('todo_sub', kimi_cli_tools_dir / 'todo' / '__init__.py'),
+        ('retrieve', kimi_cli_tools_dir / 'memory' / '__init__.py'),
+        ('read', kimi_cli_tools_dir / 'file' / 'read.py'),
+        ('read_image', kimi_cli_tools_dir / 'file' / 'read_media.py'),
+        ('edit', kimi_cli_tools_dir / 'file' / 'replace.py'),
+        ('write', kimi_cli_tools_dir / 'file' / 'write.py'),
+        ('subagent', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('send_message', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('list_agents', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('interrupt_agent', kimix_tools_dir / 'agent' / '__init__.py'),
+        ('workflow', kimix_tools_dir / 'swarm' / '__init__.py'),
+        ('glob', kimi_cli_tools_dir / 'file' / 'glob.py'),
+        ('grep', kimi_cli_tools_dir / 'file' / 'grep_local.py'),
+        ('fetch_url', kimix_tools_dir / 'web' / 'fetch_url.py'),
+        ('web_search', kimi_cli_tools_dir / 'web' / 'search.py'),
+        ('context_usage', kimix_tools_dir / 'context' / '__init__.py'),
+        ('compact', kimix_tools_dir / 'context' / '__init__.py'),
     ]
     return '\n'.join(f'- `{name}` — `{rel(path)}`' for name, path in tools)
 
@@ -865,9 +865,9 @@ Every builtin tool and the exact file where its implementation lives:
   `get_system_prompt()` returns a per-runtime builder, picks the active shell, enforces
   `max_system_prompt_tokens`.
 - Worker tool manifest: `{worker_agent_json}` — the exact tool list for the worker agent
-  (`agent.extend=default`): Bash, Powershell, Run, Python, TaskOutput, TodoList, Retrieve,
-  ReadFile, ReadMediaFile, EditFile, WriteFile, Agent, AskAgent, AgentList, AgentClose,
-  AgentSwarm, Glob, Grep, FetchURL, SearchWeb, ContextUsage, Compact (from `kimix.tools.*`
+  (`agent.extend=default`): Bash, pwsh, Run, python, job_output, todo_write, retrieve,
+  read, read_image, edit, write, subagent, send_message, list_agents, interrupt_agent,
+  workflow, glob, grep, fetch_url, web_search, context_usage, compact (from `kimix.tools.*`
   and `kimi_cli.tools.*`).
 - Soul runtime: `{soul_dir}`
   - agent.py — Runtime + BuiltinSystemPromptArgs; loads AGENTS.md, skills, additional dirs
@@ -884,10 +884,10 @@ Every builtin tool and the exact file where its implementation lives:
   - denwarenji.py — D-Mail; history_index.py — BM25 history index; llm_request_recorder.py — request tracing
 - Dynamic injectors (reminders): `{dynamic_injections_dir}`
   - budget_reminder.py — budget warnings as step/wall-clock usage crosses ratios (default 0.7/0.9)
-  - compact_reminder.py — suggests `Compact` when usage exceeds threshold (default 0.70)
-  - context_meter.py — nudges `Retrieve` when context usage materially changes
+  - compact_reminder.py — suggests `compact` when usage exceeds threshold (default 0.70)
+  - context_meter.py — nudges `retrieve` when context usage materially changes
   - target_churn.py — anti-loop: repeated edits to same file / repeated identical errors
-  - todo_reminder.py — re-injects unfinished TodoList items at the context tail
+  - todo_reminder.py — re-injects unfinished todo_write items at the context tail
 - Config: `{config_path}` — pydantic `Config` (model/provider, loop_control, background,
   notifications, services, mcp, hooks, skills); `LoopControl` drives loop/compaction/prune/
   reminder thresholds and toggles.

@@ -46,7 +46,7 @@ def _tool_error(text: str) -> Message:
     )
 
 
-def _edit(path: str, tool: str = "EditFile") -> Message:
+def _edit(path: str, tool: str = "edit") -> Message:
     return _assistant_call(tool, {"path": path, "content": "x"})
 
 
@@ -93,18 +93,18 @@ async def test_strong_alert_at_higher_threshold() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Cross-tool counting (WriteFile -> EditFile -> shell redirects/sed)
+# 2. Cross-tool counting (write -> edit -> shell redirects/sed)
 # ---------------------------------------------------------------------------
 
 
 async def test_cross_tool_counting() -> None:
     provider = TargetChurnProvider(file_warn=5, file_strong=8, error_warn=3, cooldown_steps=6)
     history = [
-        _edit("src/x.py", "WriteFile"),
-        _edit("src/x.py", "EditFile"),
-        _assistant_call("Powershell", {"command": "sed -i 's/a/b/' src/x.py"}),
-        _assistant_call("Bash", {"command": "echo line >> src/x.py"}),
-        _assistant_call("Powershell", {"command": "echo y > src/x.py"}),
+        _edit("src/x.py", "write"),
+        _edit("src/x.py", "edit"),
+        _assistant_call("pwsh", {"command": "sed -i 's/a/b/' src/x.py"}),
+        _assistant_call("bash", {"command": "echo line >> src/x.py"}),
+        _assistant_call("pwsh", {"command": "echo y > src/x.py"}),
     ]
     alerts = await _collect_alerts(provider, history, steps=[1, 2, 3, 4, 5])
     assert len(alerts) == 1
@@ -235,7 +235,7 @@ async def test_malformed_arguments_ignored() -> None:
         tool_calls=[
             ToolCall(
                 id="c1",
-                function=ToolCall.FunctionBody(name="EditFile", arguments="{not json"),
+                function=ToolCall.FunctionBody(name="edit", arguments="{not json"),
             )
         ],
     )

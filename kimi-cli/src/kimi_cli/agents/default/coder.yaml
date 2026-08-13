@@ -7,7 +7,7 @@ agent:
   when_to_use: |
     Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.
   allowed_tools:
-    - "kimi_cli.tools.memory:Retrieve"
+    - "kimi_cli.tools.memory:retrieve"
     - "kimi_cli.tools.file:ReadFile"
     - "kimi_cli.tools.file:ReadMediaFile"
     - "kimi_cli.tools.file:Glob"
@@ -15,7 +15,7 @@ agent:
     - "kimi_cli.tools.file:WriteFile"
     - "kimi_cli.tools.file:EditFile"
     - "kimi_cli.tools.web:SearchWeb"
-    - "kimi_cli.tools.web:FetchURL"
+    - "kimi_cli.tools.web:fetch_url"
   exclude_tools:
     - "kimi_cli.tools.agent:Agent"
     - "kimi_cli.tools.ask_user:AskUserQuestion"

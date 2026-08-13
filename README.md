@@ -45,7 +45,7 @@ Kimi-CLI-X is a deep optimization of the original Kimi-CLI, focusing on **prompt
 | **Python script execution** | Agent can run Python scripts directly. |
 | **Error logging** | Records tool-call errors for model backtracking and improvement. |
 | **Script system** | Combines prompts with Python logic to orchestrate complex tasks. |
-| **Enhanced web fetch (FetchURL)** | Headless-browser-based Markdown output (not plain text), supports `output_path` and auto-truncation for超长 content; zero external service dependency. |
+| **Enhanced web fetch (fetch_url)** | Headless-browser-based Markdown output (not plain text), supports `output_path` and auto-truncation for超长 content; zero external service dependency. |
 | **Best-of-N sampling (`AgentSwarm` `parallel_sample`)** | Run the SAME task N times in isolated workspaces (git worktree / temp copy), pick the winner via `self_eval` or `majority` selection, then apply and verify the winning diff — never a silent accept. |
 
 ### Scriptable Workflows (Core Advantage)
@@ -90,7 +90,7 @@ Triggered when context token ratio hits `compaction_trigger_ratio` or free space
 #### 3. Auto History Retrieval + On-Demand Recall
 
 - **Auto retrieval** (`_maybe_auto_retrieve_history`): Each round, if user input ≥10 chars, BM25-searches HistoryIndex for matching compacted rounds; injects matches above `auto_retrieve_history_threshold` as `[Auto-retrieved from past conversation]`.
-- **`Retrieve` tool**: the agent can actively search all archived history (including compacted rounds) by natural-language query, returning verbatim excerpts with relevance scores (or fetch a turn by `id`).
+- **`retrieve` tool**: the agent can actively search all archived history (including compacted rounds) by natural-language query, returning verbatim excerpts with relevance scores (or fetch a turn by `id`).
 
 ```
 ┌──────────────┐    append     ┌──────────────┐    overflow    ┌──────────────────┐
@@ -122,7 +122,7 @@ The `KimiSoul` core loop actively keeps long runs on track — no manual babysit
 ### TodoList
 The `TodoList` tool tracks multi-step plans:
 - Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
-- Nested sub-todos via `TodoPush`/`TodoSub`/`TodoPop` with a `Stack:` breadcrumb.
+- Nested sub-todos via `todo_push`/`todo_sub`/`todo_pop` with a `Stack:` breadcrumb.
 
 ### Best-of-N Sampling
 

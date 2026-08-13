@@ -46,9 +46,9 @@ def _shell_tool_name() -> str:
     )
 
     if _should_enable_powershell():
-        return 'Powershell'
+        return 'pwsh'
     if _should_enable_bash():
-        return 'Bash'
+        return 'bash'
     return 'Run'
 
 
@@ -87,7 +87,7 @@ Applies to every tool that exposes the corresponding parameters:
 - **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `todos`/`items`); common misspellings are repaired automatically.
 - **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
 - **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
-- **Working directory**: Only the `Run` tool accepts `cwd`/`workdir` (for direct process execution). For `Bash`/`Powershell`, change directory inside the command itself: `cd <dir> && <cmd>` (bash) or `cd <dir>; <cmd>` (powershell). The `Python` tool runs in the process working directory.
+- **Working directory**: Only the `Run` tool accepts `cwd`/`workdir` (for direct process execution). For `Bash`/`pwsh`, change directory inside the command itself: `cd <dir> && <cmd>` (bash) or `cd <dir>; <cmd>` (powershell). The `python` tool runs in the process working directory.
 '''.strip() + '\n'
             nonlocal role_doc, use_agent_md, use_skills
             use_agent_md = True
@@ -97,16 +97,16 @@ Applies to every tool that exposes the corresponding parameters:
             items.append('Persist: finish all requirements, keep trying until done.')
             items.append('One action per turn: exactly one tool call, edit, or verification.')
             shell_tool = _shell_tool_name()
-            items.append(f'For long commands, use `Python` instead of `{shell_tool}`.')
+            items.append(f'For long commands, use `python` instead of `{shell_tool}`.')
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
-            items.append('After each independent task, milestone, or schedule part, call `Compact` before the next step.')
-            items.append('Multi-step: track with `TodoList`; push parent scopes with `TodoPush`, add sub-todos with `TodoSub`, close the scope with `TodoPop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
+            items.append('After each independent task, milestone, or schedule part, call `compact` before the next step.')
+            items.append('Multi-step: track with `todo_write`; push parent scopes with `todo_push`, add sub-todos with `todo_sub`, close the scope with `todo_pop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.')
 
-                items.append("Use `Retrieve` whenever unsure about past conversation history.")
+                items.append("Use `retrieve` whenever unsure about past conversation history.")
             else:
                 items.append('Sub-Agent: only report results. If any option, output the question and stop.')
         if extra_system_prompt and extra_system_prompt.role_callback:
@@ -130,7 +130,7 @@ Applies to every tool that exposes the corresponding parameters:
                 items.append('Self-verify: catch errors and bad assumptions.')
             case SystemPromptType.TrivialSubAgent:
                 worker_logic('persistent autonomous sub-agent', True)
-                items.append('If you need clarification from the parent agent, call the `AskAgent` tool with your question, then stop.')
+                items.append('If you need clarification from the parent agent, call the `send_message` tool with your question, then stop.')
             case SystemPromptType.Reader:
                 role_doc = 'You are a reader'
                 items.append('Read the given content and report a concise summary: key results, errors, warnings, and next steps.')
@@ -143,9 +143,9 @@ Applies to every tool that exposes the corresponding parameters:
                 # Supervisor: outline → decompose → dispatch → track → accept/inquire/correct → verify.
                 items.append('Outline goals, constraints, unknowns, acceptance criteria before delegating.')
                 items.append('Decompose into non-overlapping tasks (Explorer/Worker/Reviewer/Verifier). Serial if same output.')
-                items.append('Dispatch via `Agent` with role, goal, scope, non-goal, inputs, acceptance criteria.')
+                items.append('Dispatch via `subagent` with role, goal, scope, non-goal, inputs, acceptance criteria.')
                 items.append('Never do sub-agent work yourself. Route failures through inquiry, then narrow correction.')
-                items.append('Track with `TodoList`. Accept or inquire/reject each result against criteria.')
+                items.append('Track with `todo_write`. Accept or inquire/reject each result against criteria.')
                 items.append('After all accepted and merged, run one overall verification suited to task type.')
                 items.append('Final: report tasks, deliverables, verification result, unresolved work, merged conclusion.')
             case SystemPromptType.SwarmLeader:
@@ -154,7 +154,7 @@ Applies to every tool that exposes the corresponding parameters:
                 role_doc = 'You are a swarm orchestrator'
                 items.append('The user wants to parallelize a request across multiple homogeneous sub-agents.')
                 items.append('Analyze the request and decide how to split it into independent, homogeneous sub-tasks.')
-                items.append('Call the `AgentSwarm` tool with: a clear description, subagent_type (coder/explore/plan), a prompt_template containing the placeholder {{item}}, and a list of items.')
+                items.append('Call the `workflow` tool with: a clear description, subagent_type (coder/explore/plan), a prompt_template containing the placeholder {{item}}, and a list of items.')
                 items.append('Do not implement the tasks yourself; only dispatch and summarize the aggregated result.')
                 items.append('If the request cannot be parallelized, explain why and stop.')
 

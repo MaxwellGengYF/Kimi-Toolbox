@@ -878,18 +878,18 @@ async def test_oversized_content_part_output_is_truncated():
 
 
 def test_platform_redirects_win32_includes_powershell():
-    """On Windows, the platform redirect map includes Bash→Powershell."""
+    """On Windows, the platform redirect map includes bash→pwsh."""
     redirects = _build_platform_redirects()
-    # The normalized key for "Bash" should map to "Powershell"
+    # The normalized key for "bash" should map to "pwsh"
     from kosong.tooling import normalize_tool_name
 
     bash_norm = normalize_tool_name("Bash")
     pwsh_norm = normalize_tool_name("Powershell")
-    # On win32, Bash → Powershell; on POSIX, Powershell → Bash
+    # On win32, bash → pwsh; on POSIX, Powershell → bash
     if sys.platform == "win32":
-        assert redirects.get(bash_norm) == "Powershell"
+        assert redirects.get(bash_norm) == "pwsh"
     else:
-        assert redirects.get(pwsh_norm) == "Bash"
+        assert redirects.get(pwsh_norm) == "bash"
 
 
 def test_platform_redirects_has_keys():

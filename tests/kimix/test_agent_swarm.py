@@ -75,7 +75,7 @@ def test_agent_swarm_skipped_when_not_swarm_session(mock_session: MagicMock):
 
 def test_agent_swarm_available_in_swarm_session(mock_session: MagicMock):
     tool = AgentSwarm(mock_session)
-    assert tool.name == "AgentSwarm"
+    assert tool.name == "workflow"
 
 
 # ---------------------------------------------------------------------------

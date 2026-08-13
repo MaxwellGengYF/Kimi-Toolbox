@@ -8,10 +8,10 @@ agent:
     - "kimi_cli.tools.agent:Agent"
     - "kimi_cli.tools.ask_user:AskUserQuestion"
     - "kimi_cli.tools.todo:TodoList"
-    - "kimi_cli.tools.todo:TodoPush"
-    - "kimi_cli.tools.todo:TodoPop"
-    - "kimi_cli.tools.todo:TodoSub"
-    - "kimi_cli.tools.memory:Retrieve"
+    - "kimi_cli.tools.todo:todo_push"
+    - "kimi_cli.tools.todo:todo_pop"
+    - "kimi_cli.tools.todo:todo_sub"
+    - "kimi_cli.tools.memory:retrieve"
     - "kimi_cli.tools.file:ReadFile"
     - "kimi_cli.tools.file:ReadMediaFile"
     - "kimi_cli.tools.file:Glob"
@@ -19,7 +19,7 @@ agent:
     - "kimi_cli.tools.file:WriteFile"
     - "kimi_cli.tools.file:EditFile"
     - "kimi_cli.tools.web:SearchWeb"
-    - "kimi_cli.tools.web:FetchURL"
+    - "kimi_cli.tools.web:fetch_url"
   subagents:
     coder:
       path: ./coder.yaml

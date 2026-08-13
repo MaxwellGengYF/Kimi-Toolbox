@@ -33,51 +33,41 @@ def extract_key_argument(
         return None
     if not curr_args:
         return None
-    key_argument: str = ""
     match tool_name:
-        case "Agent":
+        case "subagent":
             if not isinstance(curr_args, dict) or not curr_args.get("description"):
                 return None
             key_argument = str(curr_args["description"])
-        case "TodoList":
+        case "todo_write":
             return None
-        case "ReadFile":
-            if not isinstance(curr_args, dict) or not curr_args.get("path"):
+        case "read":
+            if not isinstance(curr_args, dict) or not (
+                curr_args.get("file_path") or curr_args.get("path")
+            ):
                 return None
+            raw_read_path = curr_args.get("file_path") or curr_args.get("path")
             if work_dir is None:
                 return None
-            key_argument = _normalize_path(str(curr_args["path"]), work_dir)
-        case "ReadMediaFile":
-            if not isinstance(curr_args, dict) or not curr_args.get("path"):
-                return None
-            if work_dir is None:
-                return None
-            key_argument = _normalize_path(str(curr_args["path"]), work_dir)
-        case "Glob":
+            key_argument = _normalize_path(str(raw_read_path), work_dir)
+        case "read_image":
+            pass
+        case "glob":
             if not isinstance(curr_args, dict) or not curr_args.get("pattern"):
                 return None
             key_argument = str(curr_args["pattern"])
-        case "Grep":
+        case "grep":
             if not isinstance(curr_args, dict) or not curr_args.get("pattern"):
                 return None
             key_argument = str(curr_args["pattern"])
-        case "WriteFile":
-            if not isinstance(curr_args, dict) or not curr_args.get("path"):
-                return None
-            if work_dir is None:
-                return None
-            key_argument = _normalize_path(str(curr_args["path"]), work_dir)
-        case "EditFile":
-            if not isinstance(curr_args, dict) or not curr_args.get("path"):
-                return None
-            if work_dir is None:
-                return None
-            key_argument = _normalize_path(str(curr_args["path"]), work_dir)
-        case "SearchWeb":
+        case "write":
+            pass
+        case "edit":
+            pass
+        case "web_search":
             if not isinstance(curr_args, dict) or not curr_args.get("query"):
                 return None
             key_argument = str(curr_args["query"])
-        case "FetchURL":
+        case "fetch_url":
             if not isinstance(curr_args, dict) or not curr_args.get("url"):
                 return None
             key_argument = str(curr_args["url"])

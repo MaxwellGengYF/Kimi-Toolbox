@@ -15,7 +15,7 @@ from kimi_cli.tools.file.read_media import ReadMediaFile
 from kimi_cli.tools.file.replace import EditFile
 from kimi_cli.tools.file.write import WriteFile
 from kimi_cli.tools.todo import TodoList
-from kimi_cli.tools.web.fetch import FetchURL
+from kimi_cli.tools.web.fetch import fetch_url
 from kimi_cli.tools.web.search import SearchWeb
 
 
@@ -27,7 +27,12 @@ def test_glob_description(runtime):
 
     assert windows_path_hint not in glob_tool.base.description
     assert glob_tool.base.description == snapshot(
-        "Find files by glob pattern. Use `ReadFile` to read the paths found.\n"
+        """\
+Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden and ignored files (VCS metadata directories are excluded). Up to 100 paths come back in modification-time order; a larger result returns the first 100 paths in modification-time order, says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.
+
+Use `read` to read the paths found (up to 1000 matches are collected; results are head+tail folded with the omitted count reported in `message`).
+
+"""
     )
 
 
@@ -35,6 +40,6 @@ def test_glob_description_on_windows(runtime):
     """Test the Windows-specific description of Glob tool."""
     runtime.environment = replace(runtime.environment, os_kind="Windows")
     glob_tool = Glob(runtime)
-    windows_path_hint = "Windows: `directory` accepts native (`C:\\Users\\foo`) and POSIX-style (`/c/Users/foo`) paths. Results use backslashes — convert to forward slashes for shell commands."
+    windows_path_hint = "Windows: `path` accepts native (`C:\\Users\\foo`) and POSIX-style (`/c/Users/foo`) paths. Results use backslashes — convert to forward slashes for shell commands."
 
     assert windows_path_hint in glob_tool.base.description

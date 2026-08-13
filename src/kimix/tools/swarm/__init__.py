@@ -180,11 +180,16 @@ class _RateLimiter:
 
 
 class AgentSwarm(CallableTool2):
-    name: str = "AgentSwarm"
+    name: str = "workflow"
     description: str = (
-        "Dispatch a swarm of homogeneous sub-agents to execute tasks in parallel. "
-        "Split a large request into small, independent items, provide a prompt "
-        "template containing {{item}}, and receive an aggregated XML result."
+        "Run a JavaScript workflow script that orchestrates subagents at scale. "
+        "Use this for work that fans out across many independent pieces — an "
+        "audit over many files, a migration, multi-angle research, adversarial "
+        "verification of findings — where you write the orchestration as a "
+        "script instead of delegating turn by turn. "
+        "(This implementation dispatches a homogeneous swarm of sub-agents: "
+        "split a large request into small, independent items, provide a prompt "
+        "template containing {{item}}, and receive an aggregated XML result.)"
     )
     params: type[BaseModel] = AgentSwarmParams
 
@@ -200,15 +205,15 @@ class AgentSwarm(CallableTool2):
             return ToolError(
                 output="",
                 message="Recursive sub-agent swarm call detected.",
-                brief="sub-agent recursively called AgentSwarm",
+                brief="sub-agent recursively called workflow",
             )
 
         # Enforce a single AgentSwarm call per response.
         if self._session.custom_data.get("agent_swarm_in_flight"):
             return ToolError(
                 output="",
-                message="Another AgentSwarm call is already in progress.",
-                brief="concurrent AgentSwarm call rejected",
+                message="Another workflow call is already in progress.",
+                brief="concurrent workflow call rejected",
             )
 
         self._session.custom_data["agent_swarm_in_flight"] = True

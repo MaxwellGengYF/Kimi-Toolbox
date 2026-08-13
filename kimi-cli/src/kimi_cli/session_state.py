@@ -182,7 +182,7 @@ class SessionState(BaseModel):
     todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     archived_todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     # Todo stack: breadcrumb of ancestor titles from root to current focus
-    # parent (used by TodoPush/TodoPop/TodoSub). Persisted with state.json.
+    # parent (used by todo_push/todo_pop/todo_sub). Persisted with state.json.
     todo_stack: list[str] = Field(default_factory=list)
 
 

@@ -30,8 +30,9 @@ from kosong.tooling import (
     CallableTool2,
     ToolError,
     ToolReturnValue,
+    alias_note,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from kimi_cli._ripgrep_common import (
     RG_VERSION,
@@ -121,13 +122,23 @@ def _multiline_pattern(pattern: str) -> str:
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 
-    pattern: str = Field(description="Regex pattern.")
+    pattern: str = Field(
+        description="Regular expression to search for (ripgrep syntax)."
+    )
     path: str = Field(
-        description="Search target directory or file.",
+        description=(
+            "File or directory to search. Defaults to the session workspace; "
+            "a relative path resolves against it."
+        ),
         default=".",
     )
-    glob: str | None = Field(
-        description="Glob filter.",
+    include: str | None = Field(
+        validation_alias=AliasChoices("include", "glob"),
+        description=(
+            "One glob filter for which files to search (e.g. `*.ts`, "
+            "`*.{js,jsx}`). Not a list; negation is not supported. "
+            + alias_note("include", "glob", word=False)
+        ),
         default=None,
     )
     output_mode: Literal["files_with_matches", "count_matches", "content"] = Field(
@@ -412,8 +423,8 @@ def _build_rg_args(
             args.extend(["--max-count", str(max_count)])
 
     # File filtering options
-    if params.glob:
-        args.extend(["--glob", params.glob])
+    if params.include:
+        args.extend(["--glob", params.include])
     if params.type:
         args.extend(["--type", params.type])
 
@@ -726,9 +737,13 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 class Grep(CallableTool2[Params]):
-    name: str = "Grep"
+    name: str = "grep"
     description: str = (
-        "Search files using ripgrep. "
+        "Search file contents with a ripgrep regular expression. "
+        "Returns matching lines with line numbers, grouped by file. "
+        "Returns the first 250 matches inline; a capped result reports where "
+        "the complete match list was saved. "
+        "Use read on a matched file for surrounding context. "
         "Multiline patterns match across line boundaries."
     )
     params: type[Params] = Params
@@ -736,6 +751,9 @@ class Grep(CallableTool2[Params]):
         **FIELD_ALIASES_GENERAL,
         **FIELD_ALIASES_FILE,
         **FIELD_ALIASES_WEB,
+        "glob": "include",
+        "filter": "include",
+        "file_pattern": "include",
         "-B": "before_context",
         "-A": "after_context",
         "-C": "context",
@@ -1441,7 +1459,7 @@ class Grep(CallableTool2[Params]):
                 return False
         except OSError:
             return False
-        if not _matches_glob(file_path, params.glob):
+        if not _matches_glob(file_path, params.include):
             return False
         return _matches_type(file_path, params.type)
 

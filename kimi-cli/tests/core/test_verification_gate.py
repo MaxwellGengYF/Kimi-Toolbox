@@ -96,9 +96,9 @@ async def test_edits_without_verification_block() -> None:
     gate = VerificationGate(max_nudges=2)
     history = [
         _user("implement the feature"),
-        _assistant_call("WriteFile", {"path": "a.py", "content": "x"}),
+        _assistant_call("write", {"path": "a.py", "content": "x"}),
         _reminder("some injected reminder"),
-        _assistant_call("EditFile", {"path": "a.py", "old_string": "x", "new_string": "y"}),
+        _assistant_call("edit", {"path": "a.py", "old_string": "x", "new_string": "y"}),
     ]
     soul = _make_soul(history=history)
     msg = await gate.check(soul)
@@ -110,8 +110,8 @@ async def test_edits_with_test_run_no_block() -> None:
     gate = VerificationGate(max_nudges=2)
     history = [
         _user("implement the feature"),
-        _assistant_call("WriteFile", {"path": "a.py", "content": "x"}),
-        _assistant_call("Powershell", {"command": "pytest tests/ -q"}),
+        _assistant_call("write", {"path": "a.py", "content": "x"}),
+        _assistant_call("pwsh", {"command": "pytest tests/ -q"}),
     ]
     soul = _make_soul(history=history)
     assert await gate.check(soul) is None
@@ -121,8 +121,8 @@ async def test_edits_with_todolist_done_no_block() -> None:
     gate = VerificationGate(max_nudges=2)
     history = [
         _user("implement the feature"),
-        _assistant_call("WriteFile", {"path": "a.py", "content": "x"}),
-        _assistant_call("TodoList", {"todos": [{"title": "impl", "status": "done"}]}),
+        _assistant_call("write", {"path": "a.py", "content": "x"}),
+        _assistant_call("todo_write", {"todos": [{"title": "impl", "status": "done"}]}),
     ]
     soul = _make_soul(history=history)
     assert await gate.check(soul) is None
@@ -132,7 +132,7 @@ async def test_previous_turn_edits_do_not_block_current_turn() -> None:
     gate = VerificationGate(max_nudges=2)
     history = [
         _user("old turn"),
-        _assistant_call("WriteFile", {"path": "a.py", "content": "x"}),
+        _assistant_call("write", {"path": "a.py", "content": "x"}),
         _user("new turn: just chat"),
         Message(role="assistant", content=[TextPart(text="sure, here is the answer")]),
     ]

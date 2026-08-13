@@ -10,7 +10,7 @@ from typing import Any, Literal
 import orjson
 from kaos.path import KaosPath
 from kimi_cli.session import Session
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 import kimix.base as base
 import kimix.utils as utils
@@ -162,9 +162,27 @@ def _format_pending_messages(messages: list[str]) -> str:
 class SubAgentParams(BaseModel):
     model_config = {"populate_by_name": True}
 
+    description: str | None = Field(
+        default=None,
+        description=(
+            "A short (3-5 word) description of the delegated task, for display."
+        ),
+    )
     prompt: str = Field(
-        alias="task",  # common LLM variant
-        description="Task instructions for the sub-agent. " + accepts_alias_text("prompt", "task", word=False),
+        validation_alias=AliasChoices("prompt", "task"),
+        description=(
+            "The complete, self-contained task for the subagent. It does not "
+            "share this conversation's context, so include everything it needs. "
+            + accepts_alias_text("prompt", "task", word=False)
+        ),
+    )
+    run_in_background: bool = Field(
+        default=True,
+        description=(
+            "Whether to run in the background and return a durable subagent id "
+            "immediately. Defaults to true. Set false to wait for the result "
+            "when your next action depends on it."
+        ),
     )
     session_id: str | None = Field(
         default=None,
@@ -309,30 +327,35 @@ class _AgentConversationCollector:
 
 
 class AskAgentParams(BaseModel):
-    question: str = Field(
+    message: str = Field(
+        validation_alias=AliasChoices("message", "question"),
         description=(
-            "Message to send. Delivered immediately if the target is running; "
-            "otherwise queued and listed at its next prompt."
-        )
+            "The message to deliver to the subagent. "
+            "Delivered immediately if the target is running; otherwise queued "
+            "and listed at its next prompt."
+        ),
     )
-    id: str | None = Field(
+    subagent_id: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("subagent_id", "id"),
         description=(
-            "Target agent id (session id). Optional: omit to message the most "
-            "recently active sub-agent. Ignored for sub-agents, which always "
-            "message their parent."
+            "The subagent id returned when the background subagent was started. "
+            "Optional: omit to message the most recently active sub-agent. "
+            "Ignored for sub-agents, which always message their parent."
         ),
     )
 
 
 class AskAgent(CallableTool2):
-    name: str = "AskAgent"
+    name: str = "send_message"
     description: str = (
-        "Send a message to another agent. Works for both a running session loop "
-        "(delivered immediately, even mid-turn) and an idle/closed session "
-        "(queued and listed at the next prompt). Sub-agents always message their "
-        "parent (id ignored); the main agent targets via 'id' or the most "
-        "recently active sub-agent."
+        "Send a message to a background subagent by its subagent id, continuing "
+        "the same conversation. It becomes the subagent's next turn: if it is "
+        "still working, the message waits until its current turn finishes, so it "
+        "cannot redirect work already underway. This call returns no answer from "
+        "the subagent — only confirmation that the message was delivered — so "
+        "use it to give it more work. A failure means the message was NOT "
+        "delivered."
     )
     params: type[BaseModel] = AskAgentParams
 
@@ -350,7 +373,7 @@ class AskAgent(CallableTool2):
                 brief="Self message rejected",
             )
 
-        message = params.question
+        message = params.message
         if caller_id:
             message = f"Message from agent '{caller_id}':\n{message}"
 
@@ -427,8 +450,8 @@ class AskAgent(CallableTool2):
 
         # Main agent: target by id, or default to the most recently active
         # sub-agent in this session's store.
-        if params.id:
-            target_id = str(params.id)
+        if params.subagent_id:
+            target_id = str(params.subagent_id)
             session = _get_agent_session(target_id) or _sdk_session_by_id(target_id)
             if session is None:
                 return target_id, None, f"agent '{target_id}' is not registered"
@@ -443,9 +466,20 @@ class AskAgent(CallableTool2):
 
 
 class Agent(CallableTool2):
-    name: str = "Agent"
+    name: str = "subagent"
     description: str = (
-        "Launch a sub-agent for a task. "
+        "Delegate a self-contained task to a subagent (a separate agent that "
+        "works in its own context) to offload focused, independent work — "
+        "research, a scoped implementation, an analysis — so it does not "
+        "consume this conversation's context. The subagent returns its result, "
+        "not its intermediate steps. Give it a complete, standalone prompt: it "
+        "does not see this conversation. This tool runs in the background by "
+        "default, immediately returns a durable subagent id, and keeps the "
+        "child conversation available for later turns. When that run settles, "
+        "the runtime sends the parent a notice containing its outcome and any "
+        "final assistant message; send_message starts a later turn in the same "
+        "child conversation. Set run_in_background: false only when your next "
+        "action depends on receiving the result. "
         "Use AgentRespond to answer a sub-agent's pending question."
     )
     params: type[SubAgentParams] = SubAgentParams
@@ -898,12 +932,31 @@ class AgentRespond(CallableTool2):
 
 
 class AgentListParams(BaseModel):
-    pass
+    scope: str = Field(
+        default="children",
+        description=(
+            "`children` (default) lists direct children only; `descendants` "
+            "walks the complete tree below you."
+        ),
+    )
 
 
 class AgentList(CallableTool2):
-    name: str = "AgentList"
-    description: str = "List all active subagent sessions."
+    name: str = "list_agents"
+    description: str = (
+        "List your continuable background subagents by durable id and label. "
+        "Use it to recall which ones you started, not to poll for completion — "
+        "you are told when one finishes. Status comes from the live registry: "
+        "running means the agent is working right now, idle means it is loaded "
+        "but between turns, and ready means it exists only in storage — "
+        "resumable, not terminal, and not a result waiting to be collected; a "
+        "send_message starts a new turn on the same conversation, and a direct "
+        "child remains a send_message candidate in every status. Scope "
+        "`descendants` walks the whole tree below you in stable pre-order, "
+        "annotating each entry with its durable direct-parent session id and "
+        "depth. You may use send_message only for depth-1 entries; deeper "
+        "entries are candidates for interrupt_agent only."
+    )
     params: type[BaseModel] = AgentListParams
 
     def __init__(self, session: Session):
@@ -920,15 +973,27 @@ class AgentList(CallableTool2):
 class AgentCloseParams(BaseModel):
     model_config = {"populate_by_name": True}
 
-    session_id: str = Field(
-        alias="session",  # common LLM variant
-        description="Subagent session ID to close. " + accepts_alias_text("session_id", "session", word=False),
+    agent_id: str = Field(
+        validation_alias=AliasChoices("agent_id", "session", "session_id"),
+        description=(
+            "The agent id of the running agent to interrupt. "
+            + accepts_alias_text("agent_id", "session", "session_id", word=False)
+        ),
     )
 
 
 class AgentClose(CallableTool2):
-    name: str = "AgentClose"
-    description: str = "Close an active subagent session and free its resources."
+    name: str = "interrupt_agent"
+    description: str = (
+        "Request cancellation of a background agent's current turn by its agent "
+        "id. The target may be your direct child or a deeper agent created "
+        "under you. Only the current turn stops: messages already queued for "
+        "the agent stay parked until a later send_message, agents it started "
+        "keep running, and the agent itself stays available for follow-ups. "
+        "This call returns as soon as the stop request is accepted, so the "
+        "target may keep running briefly; interrupting an agent that already "
+        "finished is an accepted no-op."
+    )
     params: type[BaseModel] = AgentCloseParams
 
     def __init__(self, session: Session):
@@ -937,7 +1002,7 @@ class AgentClose(CallableTool2):
 
     async def __call__(self, params: AgentCloseParams) -> ToolReturnValue:
         store = _get_store(self._session)
-        entry = store.get(params.session_id)
+        entry = store.get(params.agent_id)
         if entry is None:
             return ToolError(
                 output="",
@@ -945,9 +1010,9 @@ class AgentClose(CallableTool2):
                 brief="Session not found",
             )
         await close_session_async(entry.session)
-        store.close(params.session_id)
-        _unregister_agent_session(params.session_id)
+        store.close(params.agent_id)
+        _unregister_agent_session(params.agent_id)
         return ToolOk(
-            output=f"Session {params.session_id} closed.",
+            output=f"Session {params.agent_id} closed.",
             brief="Session closed",
         )

@@ -10,8 +10,8 @@ from __future__ import annotations
 # Tools whose primary effect is modifying a file's content.
 EDIT_TOOLS: frozenset[str] = frozenset(
     {
-        "WriteFile",
-        "EditFile",
+        "write",
+        "edit",
         "HashEdit",
         "WritePlan",
         "EditPlan",
@@ -24,12 +24,12 @@ EDIT_TOOLS: frozenset[str] = frozenset(
 )
 
 # Tools that execute arbitrary shell commands.
-SHELL_TOOLS: frozenset[str] = frozenset({"Bash", "Powershell", "Run"})
+SHELL_TOOLS: frozenset[str] = frozenset({"bash", "pwsh", "Run"})
 
 # Tools that can act as verification signals for the P2 gate:
 # marking a todo `done` signals completion; shell tools can run the
 # project's own test/check commands.
-VERIFICATION_TOOL_HINTS: frozenset[str] = frozenset({"TodoList"}) | SHELL_TOOLS
+VERIFICATION_TOOL_HINTS: frozenset[str] = frozenset({"todo_write"}) | SHELL_TOOLS
 
 # Argument keys that carry the target file path for edit tools.
 PATH_PARAM_KEYS: tuple[str, ...] = ("path", "file_path", "filename")

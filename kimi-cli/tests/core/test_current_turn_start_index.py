@@ -1,7 +1,7 @@
 """Tests for the current-turn start index helpers (cache-02 call-site wiring).
 
 ``KimiSoul._current_turn_start_index`` (used by ``_step``) and the
-``ContextPrune`` tool helper must both find the current turn's first *real*
+``context_prune`` tool helper must both find the current turn's first *real*
 user message, skipping injected ``<system-reminder>`` user messages.
 """
 
