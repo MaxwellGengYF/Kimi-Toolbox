@@ -137,22 +137,22 @@ def should_auto_compact(
     - Ratio-based: token_count >= max_context_size * trigger_ratio
     - Reserved-based: token_count + effective_reserved >= max_context_size
 
-    ``effective_reserved`` is computed from the full output budget:
+    ``effective_reserved`` follows the context budget formula:
 
-        max(reserved_context_size,
-            max_tokens + tool_call_buffer_tokens + safety_margin_tokens)
+        Reserved Token = Max Output Token + Tool Call Buffer + Safety Margin
 
-    and then capped so it never leaves fewer than ``reserved_context_size``
-    tokens available for input. This prevents a large configured output budget
-    (e.g. the 384k default paired with a small test model) from leaving no room
-    for input context. When ``max_tokens`` is ``None`` it is treated as 0.
+    i.e. ``max_tokens + tool_call_buffer_tokens + safety_margin_tokens``. The
+    result is capped at ``max_context_size - reserved_context_size`` so the
+    configuration remains usable even when the configured output budget is
+    pathologically large for the model. ``reserved_context_size`` therefore acts
+    as a guaranteed minimum amount of input context. When ``max_tokens`` is
+    ``None`` it is treated as 0.
     """
     output_budget = (max_tokens or 0) + tool_call_buffer_tokens + safety_margin_tokens
     # Cap the output budget so the configuration is always usable: at least
-    # ``reserved_context_size`` tokens must remain for input. Without this cap,
-    # a model whose max_tokens exceeds its context window would never accept input.
-    feasible_output_budget = min(output_budget, max_context_size - reserved_context_size)
-    effective_reserved = max(reserved_context_size, feasible_output_budget)
+    # ``reserved_context_size`` tokens must remain available for input.
+    min_input_room = max(0, max_context_size - reserved_context_size)
+    effective_reserved = min(output_budget, min_input_room)
     return (
         token_count >= max_context_size * trigger_ratio
         or token_count + effective_reserved >= max_context_size

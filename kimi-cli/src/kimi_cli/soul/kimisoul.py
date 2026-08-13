@@ -1248,9 +1248,9 @@ class KimiSoul:
                     # pruning brings the *full* next-request input back below the
                     # auto-compaction thresholds (in particular below the
                     # reserved-output boundary ``max_context_size -
-                    # max(reserved_context_size,
-                    # max_tokens + tool_call_buffer_tokens + safety_margin_tokens)``:
-                    # the point at which ``input_token_size >= context_token_size -
+                    # min(max_tokens + tool_call_buffer_tokens + safety_margin_tokens,
+                    # max_context_size - reserved_context_size)``: the point at
+                    # which ``input_token_size >= context_token_size -
                     # max_output_token_size`` would hold and input + output would
                     # no longer fit in the context window). Comparing against the
                     # ratio threshold alone could skip compaction while the input

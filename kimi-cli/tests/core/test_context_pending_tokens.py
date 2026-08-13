@@ -357,20 +357,29 @@ async def test_reserved_threshold_with_pending(tmp_path: Path) -> None:
     (tmp_path / "ctx.jsonl").touch()
 
     max_context = 200_000
+    max_tokens = 50_000
 
-    # token_count alone: 140K + 50K reserved = 190K < 200K → no trigger
+    # token_count alone: 140K + 50K + 4K = 194K < 200K → no trigger
     await ctx.update_token_count(140_000)
     assert not should_auto_compact(
-        ctx.token_count, max_context, trigger_ratio=0.85, reserved_context_size=50_000
+        ctx.token_count,
+        max_context,
+        trigger_ratio=0.85,
+        reserved_context_size=50_000,
+        max_tokens=max_tokens,
     )
 
     # Append 10K+ estimated tokens of tool output → pushes past reserved threshold
     tool_msg = _msg("tool", "y" * 44_000)  # ~11K estimated tokens
     await ctx.append_message(tool_msg)
 
-    # 140K + 11K + 50K = 201K ≥ 200K → triggers
+    # 140K + 11K + 50K + 4K = 205K ≥ 200K → triggers
     assert should_auto_compact(
-        ctx.token_count_with_pending, max_context, trigger_ratio=0.85, reserved_context_size=50_000
+        ctx.token_count_with_pending,
+        max_context,
+        trigger_ratio=0.85,
+        reserved_context_size=50_000,
+        max_tokens=max_tokens,
     )
 
 
