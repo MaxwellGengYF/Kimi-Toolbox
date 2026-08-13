@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import orjson
+from kaos.path import KaosPath
 from kimi_cli.session import Session
 from pydantic import BaseModel, Field
 
 import kimix.base as base
 import kimix.utils as utils
-from kaos.path import KaosPath
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from kimi_agent_sdk import Session as SdkSession
 from kimix.tools.prompt_common import accepts_alias_text
@@ -201,6 +201,19 @@ class SubAgentParams(BaseModel):
     context_data: dict[str, Any] | None = Field(
         default=None,
         description="Structured JSON data to pass as context to the sub-agent."
+    )
+    inherit_context: bool = Field(
+        default=False,
+        description=(
+            "When True, a NEW sub-agent session is initialized by copying the "
+            "parent agent's current session context (its conversation history "
+            "so far), mirroring the CLI `/store` + `/load` session-copy logic "
+            "in `src/kimix/cli_impl/commands.py`: the parent session directory "
+            "is copied to the new sub-agent session id via "
+            "`kimi_cli.session.Session.copy` and the sub-agent resumes from "
+            "that copy. Ignored when `session_id` resolves to an active "
+            "sub-agent session (which is reused as-is)."
+        ),
     )
 
 
@@ -551,8 +564,9 @@ class Agent(CallableTool2):
                 if not output_text:
                     output_text = "(no text output)"
 
+                output_prefix = f"Session ID: {session_id}\n\n"
+
                 if err_msg:
-                    output_prefix = f"Session ID: {session_id}\n\n"
                     # The prompt is intentionally not echoed in the brief: it is
                     # streamed live (formatted and colored) by the CLI printer
                     # while the tool call is generated (see kimix.base), so
@@ -562,15 +576,9 @@ class Agent(CallableTool2):
                         message=err_msg,
                         brief="sub-agent task failed",
                     )
-                    result.extras = {
-                        "session_id": session_id,
-                        "status": "closed",
-                        "turn_count": len(collector.turns),
-                    }
-                    if params.return_history:
-                        result.extras["conversation_history"] = self._format_history(
-                            collector.turns, params.history_format
-                        )
+                    result.extras = self._build_extras(
+                        params, session_id, collector.turns, "closed"
+                    )
                     await close_session_async(session)
                     store.close(session_id)
                     _unregister_entry(session_id)
@@ -584,37 +592,28 @@ class Agent(CallableTool2):
                     current_entry.total_turns = len(collector.turns)
                     current_entry.last_accessed = time.time()
                     _register_entry(session_id, current_entry)
-                    extras: dict[str, Any] = {
-                        "session_id": session_id,
-                        "status": "awaiting_response",
-                        "turn_count": len(collector.turns),
-                        "question": current_entry.pending_question,
-                    }
-                    if params.return_history:
-                        extras["conversation_history"] = self._format_history(
-                            collector.turns, params.history_format
-                        )
-                    output_prefix = f"Session ID: {session_id}\n\n"
                     result = ToolOk(
                         output=output_prefix + output_text,
                         brief="Sub-agent is awaiting a response",
                     )
-                    result.extras = extras
+                    result.extras = self._build_extras(
+                        params,
+                        session_id,
+                        collector.turns,
+                        "awaiting_response",
+                        question=current_entry.pending_question,
+                    )
                     return result
 
-                extras: dict[str, Any] = {
-                    "session_id": session_id,
-                    "status": "closed" if params.close_session else "continued",
-                    "turn_count": len(collector.turns),
-                }
-                if params.return_history:
-                    extras["conversation_history"] = self._format_history(
-                        collector.turns, params.history_format
-                    )
+                extras = self._build_extras(
+                    params,
+                    session_id,
+                    collector.turns,
+                    "closed" if params.close_session else "continued",
+                )
 
                 await self._update_store(params, session, session_id, is_reused, collector.turns)
 
-                output_prefix = f"Session ID: {session_id}\n\n"
                 result = ToolOk(
                     output=output_prefix + output_text,
                     brief="Sub-agent task completed",
@@ -628,6 +627,33 @@ class Agent(CallableTool2):
                     message=str(exc),
                     brief="Failed to create sub-agent session",
                 )
+
+    def _build_extras(
+        self,
+        params: SubAgentParams,
+        session_id: str,
+        turns: list[ConversationTurn],
+        status: str,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Build the shared extras dict for ``Agent`` result branches.
+
+        Every branch includes ``session_id``, ``status`` and ``turn_count``;
+        ``conversation_history`` is added when ``params.return_history`` is
+        set. Branch-specific keys are passed as keyword extras (e.g.
+        ``question`` for the awaiting-response branch).
+        """
+        extras: dict[str, Any] = {
+            "session_id": session_id,
+            "status": status,
+            "turn_count": len(turns),
+            **extra,
+        }
+        if params.return_history:
+            extras["conversation_history"] = self._format_history(
+                turns, params.history_format
+            )
+        return extras
 
     def _format_history(self, turns: list[ConversationTurn], format: str) -> list[dict[str, Any]] | str:
         """Format conversation turns according to history_format."""
@@ -668,6 +694,16 @@ class Agent(CallableTool2):
                 return entry.session, params.session_id, True
 
         session_id = params.session_id or str(uuid.uuid4())
+
+        # Inherit the parent agent's context: copy the parent session
+        # directory into the new sub-agent session id (mirrors the CLI
+        # `/store` + `/load` logic in src/kimix/cli_impl/commands.py) so the
+        # resumed sub-agent starts from the parent's conversation so far.
+        inherited = False
+        if params.inherit_context:
+            await self._inherit_parent_context(session_id)
+            inherited = True
+
         custom_config = self._session.custom_config
         chat_provider = custom_config.get("chat_provider")
         default_sub_provider = (
@@ -696,9 +732,73 @@ class Agent(CallableTool2):
             if parent_id:
                 sub_custom_config['parent_session_id'] = parent_id
 
+        if inherited:
+            await self._reset_inherited_system_prompt(session)
+
         self._register_agent_sessions(session, session_id)
 
         return session, session_id, False
+
+    async def _inherit_parent_context(self, target_session_id: str) -> None:
+        """Copy the parent session's context into *target_session_id*.
+
+        Mirrors the CLI ``/store`` / ``/load`` commands
+        (``src/kimix/cli_impl/commands.py``): the parent session directory is
+        copied to the new sub-agent session id with
+        ``kimi_cli.session.Session.copy`` — the same primitive ``/store`` uses
+        to save a snapshot under a name and ``/load`` uses to load a snapshot
+        into a fresh session — and the sub-agent session is then resumed from
+        that copy.
+
+        Unlike the CLI commands, the parent session is *not* released before
+        copying: the parent agent's loop is still running (this tool call is
+        part of its current turn), so its resources must stay intact. The
+        parent's context database is in WAL mode and commits after every
+        append, and no writes happen while this tool call executes, so the
+        directory copy captures a consistent snapshot (SQLite replays the
+        copied WAL on open).
+
+        Raises:
+            ValueError: If the parent session cannot be copied (no session id
+                / work dir, or a session with the target id already exists).
+        """
+        parent_id = _cli_session_id(self._session)
+        work_dir = _session_work_dir(self._session)
+        if not parent_id:
+            raise ValueError(
+                'Cannot inherit parent context: parent session has no id'
+            )
+        if work_dir is None:
+            raise ValueError(
+                'Cannot inherit parent context: parent session has no work dir'
+            )
+        await Session.copy(work_dir, parent_id, target_session_id)
+
+    async def _reset_inherited_system_prompt(self, session: Any) -> None:
+        """Replace the inherited parent system prompt with the sub-agent's.
+
+        The copied session directory carries the parent's persisted system
+        prompt, which the soul adopts on resume
+        (``agent.system_prompt_cached``). Reset it so the sub-agent runs with
+        its own (TrivialSubAgent) system prompt instead of the parent's, which
+        would describe the parent's toolset and role.
+
+        Best-effort: silently skips when the soul internals are unavailable or
+        rendering the prompt fails.
+        """
+        cli = getattr(session, '_cli', None)
+        soul = getattr(cli, 'soul', None)
+        agent = getattr(soul, 'agent', None)
+        context = getattr(soul, 'context', None)
+        if agent is None or context is None:
+            return
+        try:
+            agent.system_prompt_cached = None
+            prompt = agent.get_system_prompt()
+            if prompt:
+                await context.write_system_prompt(prompt)
+        except Exception:
+            return
 
     def _register_agent_sessions(
         self, child_session: Any, child_session_id: str

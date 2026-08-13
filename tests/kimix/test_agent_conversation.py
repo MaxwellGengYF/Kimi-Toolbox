@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kaos.path import KaosPath
 
 from kimix.base import MessageType
 from kimix.tools.agent import (
@@ -393,6 +394,247 @@ async def test_agent_lru_eviction(
 
     assert len(store.entries) == 2
     mock_close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# inherit_context tests (mirrors CLI /store + /load session-copy logic)
+# ---------------------------------------------------------------------------
+async def test_agent_inherit_context_copies_parent_session(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """inherit_context=True copies the parent session dir into the new sub id."""
+    mock_session.custom_config = {"chat_provider": None}
+    mock_session.id = "parent-1"
+    mock_session.work_dir = KaosPath(".")
+
+    with patch(
+        "kimix.tools.agent.Session.copy", new_callable=AsyncMock
+    ) as mock_copy:
+        with patch(
+            "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_sub_session
+            with patch(
+                "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+            ):
+                with patch(
+                    "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+                ):
+                    agent = Agent(mock_session)
+                    result = await agent(
+                        SubAgentParams(prompt="do X", inherit_context=True)
+                    )
+
+    assert not result.is_error
+    sub_id = result.extras["session_id"]
+    mock_copy.assert_awaited_once()
+    copied_work_dir, copied_parent, copied_target = mock_copy.await_args.args
+    assert copied_work_dir == KaosPath(".")
+    assert copied_parent == "parent-1"
+    assert copied_target == sub_id
+    # The sub-agent session resumes from the copied session id (like /load).
+    assert mock_create.await_args.kwargs["session_id"] == sub_id
+    assert mock_create.await_args.kwargs["resume"] is True
+
+
+async def test_agent_inherit_context_with_explicit_session_id(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """The parent context is copied into the explicitly requested session id."""
+    mock_session.custom_config = {"chat_provider": None}
+    mock_session.id = "parent-1"
+    mock_session.work_dir = KaosPath(".")
+
+    with patch(
+        "kimix.tools.agent.Session.copy", new_callable=AsyncMock
+    ) as mock_copy:
+        with patch(
+            "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_sub_session
+            with patch(
+                "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+            ):
+                with patch(
+                    "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+                ):
+                    agent = Agent(mock_session)
+                    result = await agent(
+                        SubAgentParams(
+                            prompt="do X",
+                            session_id="fresh-sub",
+                            inherit_context=True,
+                        )
+                    )
+
+    assert not result.is_error
+    assert result.extras["session_id"] == "fresh-sub"
+    mock_copy.assert_awaited_once_with(
+        KaosPath("."), "parent-1", "fresh-sub"
+    )
+    assert mock_create.await_args.kwargs["session_id"] == "fresh-sub"
+
+
+async def test_agent_inherit_context_ignored_on_reuse(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """Reusing an active sub-agent session skips the context copy."""
+    mock_session.custom_config = {"chat_provider": None}
+    store = _get_store(mock_session)
+    store.put(
+        AgentSessionEntry(
+            session=mock_sub_session,
+            session_id="reuse-id",
+            created_at=time.time(),
+            last_accessed=time.time(),
+            conversation_history=[],
+            total_turns=0,
+        )
+    )
+
+    with patch(
+        "kimix.tools.agent.Session.copy", new_callable=AsyncMock
+    ) as mock_copy:
+        with patch(
+            "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+        ) as mock_create:
+            with patch(
+                "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                result = await agent(
+                    SubAgentParams(
+                        prompt="follow up",
+                        session_id="reuse-id",
+                        inherit_context=True,
+                        close_session=False,
+                    )
+                )
+
+    assert not result.is_error
+    assert result.extras["session_id"] == "reuse-id"
+    mock_copy.assert_not_awaited()
+    mock_create.assert_not_awaited()
+
+
+async def test_agent_inherit_context_without_parent_id_errors(
+    mock_session: MagicMock,
+) -> None:
+    """A parent with no resolvable session id cannot donate its context."""
+    mock_session.custom_config = {"chat_provider": None}
+    mock_session.id = ""
+    mock_session._cli = None
+
+    with patch(
+        "kimix.tools.agent.Session.copy", new_callable=AsyncMock
+    ) as mock_copy:
+        agent = Agent(mock_session)
+        result = await agent(SubAgentParams(prompt="do X", inherit_context=True))
+
+    assert result.is_error
+    assert "Cannot inherit parent context" in result.message
+    mock_copy.assert_not_awaited()
+
+
+async def test_agent_inherit_context_resets_system_prompt(
+    mock_session: MagicMock,
+) -> None:
+    """The inherited parent system prompt is replaced with the sub-agent's."""
+    agent = Agent(mock_session)
+
+    sub_agent = MagicMock()
+    sub_agent.get_system_prompt.return_value = "sub-agent prompt"
+    sub_agent.system_prompt_cached = "parent prompt"
+    context = MagicMock()
+    context.write_system_prompt = AsyncMock()
+    soul = MagicMock()
+    soul.agent = sub_agent
+    soul.context = context
+    cli = MagicMock()
+    cli.soul = soul
+    sub_session = MagicMock()
+    sub_session._cli = cli
+
+    await agent._reset_inherited_system_prompt(sub_session)
+
+    assert sub_agent.system_prompt_cached is None
+    context.write_system_prompt.assert_awaited_once_with("sub-agent prompt")
+
+
+async def test_agent_inherit_context_reset_skips_when_soul_missing(
+    mock_session: MagicMock,
+) -> None:
+    """System prompt reset is best-effort: skips without soul internals."""
+    agent = Agent(mock_session)
+    sub_session = MagicMock()
+    sub_session._cli = None
+    await agent._reset_inherited_system_prompt(sub_session)
+
+
+async def test_agent_inherit_context_copies_real_session_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Integration: the parent session dir is really copied (Session.copy)."""
+    from kimi_cli.metadata import Metadata, save_metadata
+    from kimi_cli.session import Session as CliSession
+    from kimi_cli.soul.context_db import ContextDB
+    from kosong.message import Message
+
+    share_dir = tmp_path / "share"
+    share_dir.mkdir()
+    monkeypatch.setattr("kimi_cli.share.get_share_dir", lambda: share_dir)
+    monkeypatch.setattr("kimi_cli.metadata.get_share_dir", lambda: share_dir)
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    work = KaosPath(str(work_dir)).canonical()
+
+    metadata = Metadata()
+    wd_meta = metadata.new_work_dir_meta(work)
+    save_metadata(metadata)
+
+    parent_id = "parent-1"
+    parent_dir = wd_meta.sessions_dir / parent_id
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    db = ContextDB(parent_dir / "context.db")
+    await db.initialize()
+    await db.append_messages(
+        [
+            Message(role="user", content="hello parent"),
+            Message(role="assistant", content="hi there"),
+        ]
+    )
+    await db.close()
+
+    parent = MagicMock()
+    parent.id = parent_id
+    parent.work_dir = work
+    agent = Agent(parent)
+
+    target_id = "sub-copy"
+    await agent._inherit_parent_context(target_id)
+
+    copied = await CliSession.find(work, target_id)
+    assert copied is not None
+
+    copied_db = ContextDB(parent_dir.parent / target_id / "context.db")
+    await copied_db.initialize()
+    try:
+        messages = await copied_db.get_messages()
+    finally:
+        await copied_db.close()
+    texts: list[str] = []
+    for m in messages:
+        if isinstance(m.content, str):
+            texts.append(m.content)
+        else:
+            texts.extend(
+                part.text for part in m.content
+                if getattr(part, "type", None) == "text"
+            )
+    assert texts == ["hello parent", "hi there"]
+
 
 
 # ---------------------------------------------------------------------------
