@@ -4879,3 +4879,151 @@ class TestPowershellOriginalSavedSuffix:
         import anyio
         async with await anyio.open_file(original_path, "r") as f:
             assert await f.read() == long_output
+
+
+# ============================================================================
+# Failed command saved to a temp script file (.sh / .ps1)
+# ============================================================================
+
+
+class TestBashFailedCommandSaved:
+    """Long failing bash commands are preserved as `.sh` temp files whose path
+    is returned in the tool message; short commands are not saved."""
+
+    @pytest.fixture
+    def bash_instance(self, mock_session: MagicMock) -> Bash:
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            return Bash(session=mock_session)
+
+    @staticmethod
+    def _failed_process_task(output: str = "boom") -> MagicMock:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-cmd-saved-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value=output)
+        process_task.stream.success = AsyncMock(return_value=False)
+        process_task.stream.exit_code = 1
+        process_task.stream.process_elapsed = None
+        return process_task
+
+    async def test_long_failed_command_is_saved_to_sh_file(
+        self, bash_instance: Bash
+    ) -> None:
+        long_cmd = "echo start && " + "true && " * 30 + "false"
+        assert len(long_cmd) > 50
+        process_task = self._failed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd=long_cmd))
+        assert isinstance(result, ToolError)
+        assert "[command saved to .kimix_cache/tmp_" in result.message
+        assert result.message.rstrip("]").endswith(".sh")
+        saved = result.message.split("[command saved to ", 1)[1].rstrip("]")
+        assert Path(saved).read_text(encoding="utf-8") == long_cmd
+
+    async def test_short_failed_command_not_saved(self, bash_instance: Bash) -> None:
+        process_task = self._failed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd="false"))
+        assert isinstance(result, ToolError)
+        assert "[command saved to" not in result.message
+
+    async def test_long_successful_command_not_saved(self, bash_instance: Bash) -> None:
+        long_cmd = "echo start && " + "true && " * 30 + "true"
+        assert len(long_cmd) > 50
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="bash-cmd-ok-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value="")
+        process_task.stream.success = AsyncMock(return_value=True)
+        process_task.stream.exit_code = 0
+        process_task.stream.process_elapsed = None
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ):
+            result = await bash_instance(BashParams(cmd=long_cmd))
+        assert isinstance(result, ToolOk)
+        assert "[command saved to" not in result.message
+
+
+class TestPowershellFailedCommandSaved:
+    """Long failing PowerShell commands are preserved as `.ps1` temp files whose
+    path is returned in the tool message; short commands are not saved."""
+
+    @pytest.fixture
+    def pwsh_instance(self, mock_session: MagicMock) -> Powershell:
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool._bash_tool._should_enable_powershell",
+            return_value=True,
+        ):
+            return Powershell(session=mock_session)
+
+    @staticmethod
+    def _failed_process_task(output: str = "boom") -> MagicMock:
+        process_task = MagicMock()
+        process_task.start = AsyncMock(return_value="pwsh-cmd-saved-id")
+        process_task.wait_with_monitor = AsyncMock(return_value=(False, 0.0, False))
+        process_task.thread_is_alive = AsyncMock(return_value=False)
+        process_task.stream = MagicMock()
+        process_task.stream.pop_output = AsyncMock(return_value=output)
+        process_task.stream.success = AsyncMock(return_value=False)
+        process_task.stream.exit_code = 1
+        process_task.stream.process_elapsed = None
+        return process_task
+
+    async def test_long_failed_command_is_saved_to_ps1_file(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        long_cmd = "Write-Output 'start'; " + "Write-Host 'x'; " * 20 + "exit 1"
+        assert len(long_cmd) > 50
+        process_task = self._failed_process_task()
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.ProcessTask", return_value=process_task
+        ):
+            result = await pwsh_instance(PowershellParams(cmd=long_cmd))
+        assert isinstance(result, ToolError)
+        assert "[command saved to .kimix_cache/tmp_" in result.message
+        assert result.message.rstrip("]").endswith(".ps1")
+        saved = result.message.split("[command saved to ", 1)[1].rstrip("]")
+        assert Path(saved).read_text(encoding="utf-8") == long_cmd
+
+    async def test_short_failed_command_not_saved(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        process_task = self._failed_process_task()
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.ProcessTask", return_value=process_task
+        ):
+            result = await pwsh_instance(PowershellParams(cmd="exit 1"))
+        assert isinstance(result, ToolError)
+        assert "[command saved to" not in result.message
+
+
+# ============================================================================
+# cmd / command accepts a script file (description mention)
+# ============================================================================
+
+
+class TestCommandParamAcceptsScriptFile:
+    def test_bash_cmd_description_mentions_sh_script(self) -> None:
+        desc = BashParams.model_json_schema()["properties"]["command"]["description"]
+        assert "`.sh` script file" in desc
+        assert "executed via bash" in desc
+
+    def test_pwsh_cmd_description_mentions_ps1_script(self) -> None:
+        desc = PowershellParams.model_json_schema()["properties"]["command"]["description"]
+        assert "`.ps1` script file" in desc
+        assert "executed via PowerShell" in desc

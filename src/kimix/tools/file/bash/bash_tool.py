@@ -32,6 +32,7 @@ from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from kimix.tools.common import (
     ProcessTask,
     _build_session_output_block,
+    _command_saved_message,
     _env_with_rg_bin_path,
     _extract_export_path,
     _interactive_scope_text,
@@ -562,7 +563,12 @@ class BashParams(BaseModel):
     cmd: str = Field(
         default="",
         alias="command",  # LLM can use "command" instead of "cmd"
-        description="Bash command or input text for an existing session. " + accepts_alias_text("cmd", "command", word=False)
+        description=(
+            "Bash command or input text for an existing session. "
+            + accepts_alias_text("cmd", "command", word=False)
+            + " The value may also be a path to an existing `.sh` script file, "
+            "which is executed via bash (e.g. `scripts/deploy.sh`)."
+        ),
     )
     mode: Literal["execute", "send", "interactive"] = mode_field(
         execute_desc="Run `cmd` as a shell command.",
@@ -856,6 +862,11 @@ class Bash(CallableTool2[BashParams]):
         suffix = _original_saved_message(original_path)
         if not success:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
+            # Long failing commands are preserved as a re-runnable `.sh` script
+            # in the shared temp folder so the exact source is never lost.
+            cmd_suffix = _command_saved_message(params.cmd, ".sh")
+            if cmd_suffix:
+                msg = f"{msg} {cmd_suffix}"
             if suffix:
                 msg = f"{msg} {suffix}"
             return ToolError(output=block, message=msg, brief="Command execution failed")

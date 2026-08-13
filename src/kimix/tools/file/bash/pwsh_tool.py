@@ -23,6 +23,7 @@ from kimix.tools.file.bash.process_pwsh import pwsh_transform
 from kimix.tools.file.bash.pwsh_fix import fix_pwsh_command
 from kimix.tools.common import (
     _build_session_output_block,
+    _command_saved_message,
     _env_with_rg_bin_path,
     _extract_export_path,
     _interactive_scope_text,
@@ -211,7 +212,12 @@ class PowershellParams(BaseModel):
     cmd: str = Field(
         default="",
         alias="command",  # LLM can use "command" instead of "cmd"
-        description="PowerShell command or input text for an existing session. " + accepts_alias_text("cmd", "command", word=False)
+        description=(
+            "PowerShell command or input text for an existing session. "
+            + accepts_alias_text("cmd", "command", word=False)
+            + " The value may also be a path to an existing `.ps1` script file, "
+            "which is executed via PowerShell (e.g. `scripts/deploy.ps1`)."
+        ),
     )
     mode: Literal["execute", "send", "interactive"] = mode_field(
         execute_desc="Run the PowerShell command.",
@@ -569,6 +575,11 @@ class Powershell(CallableTool2[PowershellParams]):
         if not success:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             msg += transform_warning
+            # Long failing commands are preserved as a re-runnable `.ps1` script
+            # in the shared temp folder so the exact source is never lost.
+            cmd_suffix = _command_saved_message(params.cmd, ".ps1")
+            if cmd_suffix:
+                msg = f"{msg} {cmd_suffix}"
             if suffix:
                 msg = f"{msg} {suffix}"
             return ToolError(output=block, message=msg, brief="Command execution failed")
