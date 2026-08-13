@@ -1227,7 +1227,16 @@ class KimiSoul:
                     reserved_context_size=self._loop_control.reserved_context_size,
                 )
                 if _should_compact and self._loop_control.context_pruning_enabled:
-                    # Estimate tokens after pruning — if still over trigger, compact
+                    # Estimate tokens after pruning — skip compaction only when
+                    # pruning brings the *full* next-request input back below the
+                    # auto-compaction thresholds (in particular below the
+                    # reserved-output boundary ``max_context_size -
+                    # reserved_context_size``: the point at which
+                    # ``input_token_size >= context_token_size -
+                    # max_output_token_size`` would hold and input + output would
+                    # no longer fit in the context window). Comparing against the
+                    # ratio threshold alone could skip compaction while the input
+                    # is still at/over the boundary and overflow the window.
                     llm = self._runtime.llm
                     model_name = llm.chat_provider.model_name if llm else None
                     estimated = self._pruner.estimate_after_prune(
@@ -1239,12 +1248,29 @@ class KimiSoul:
                         min_cache_prefix_depth=self._cache_depth_floor(len(self._context.history)),
                         model=model_name,
                     )
-                    if estimated < self._runtime.llm.max_context_size * self._loop_control.compaction_trigger_ratio:
+                    # ``estimate_after_prune`` counts message content only, while
+                    # ``token_count_with_pending`` (used by the trigger above)
+                    # also carries the system prompt and tool schemas. Add that
+                    # non-history overhead back so the comparison uses the same
+                    # basis as the trigger check.
+                    current_history_tokens = count_message_tokens(
+                        self._context.history, model=model_name
+                    )
+                    overhead = max(
+                        0, self._context.token_count_with_pending - current_history_tokens
+                    )
+                    if not should_auto_compact(
+                        estimated + overhead,
+                        self._runtime.llm.max_context_size,
+                        trigger_ratio=self._loop_control.compaction_trigger_ratio,
+                        reserved_context_size=self._loop_control.reserved_context_size,
+                    ):
                         # Pruning will free enough space — skip compaction
                         _should_compact = False
                         logger.debug(
-                            "Pruning estimated to free enough space ({est} tokens), skipping compaction",
+                            "Pruning estimated to free enough space ({est} tokens, overhead={overhead}), skipping compaction",
                             est=estimated,
+                            overhead=overhead,
                         )
                 if _should_compact:
                     logger.info("Context too long, compacting...")

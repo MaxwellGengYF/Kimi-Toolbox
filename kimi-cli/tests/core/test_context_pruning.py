@@ -508,6 +508,41 @@ class TestContextPruner:
         actual_tokens = count_message_tokens(result1.messages)
         assert estimated == actual_tokens
 
+    def test_estimate_after_prune_is_dry_run(self):
+        """estimate_after_prune must not consume cooldown/ref-counter state.
+
+        The auto-compaction skip check calls ``estimate_after_prune`` and, when
+        it decides pruning frees enough space, relies on the *real* prune at
+        the same step still applying to the LLM-visible history. If the dry run
+        advanced the hysteresis (cooldown) state, the real prune would be
+        blocked and the LLM would see the unpruned (over-limit) history.
+        """
+        pruner = ContextPruner(
+            trigger_ratio=0.0,
+            target_ratio=0.0,
+            stable_prefix_messages=0,
+            recent_messages_protected=0,
+            min_free_tokens=0,
+            cooldown_steps=4,
+        )
+        history = [_notification("test"), _user("hello")]
+
+        estimated = pruner.estimate_after_prune(
+            history, context_usage=0.8, max_context_size=100000, current_step=5
+        )
+        # Dry run must leave hysteresis / ref-counter state untouched
+        assert pruner._last_prune_step == -1
+        assert pruner._last_prune_usage == 0.0
+        assert pruner._ref_counter == 0
+
+        # A real prune at the same step must still apply
+        result = pruner.prune(
+            history, context_usage=0.8, max_context_size=100000, current_step=5
+        )
+        assert result.earliest_removed_index is not None
+        assert result.freed_tokens > 0
+        assert pruner._last_prune_step == 5
+
     def test_elided_record_created(self):
         """Tier B elisions produce ElidedRecord entries."""
         pruner = ContextPruner(

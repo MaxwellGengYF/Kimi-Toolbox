@@ -219,6 +219,38 @@ class TestShouldAutoCompact:
         """Empty context should never trigger compaction."""
         assert not should_auto_compact(0, 200_000, trigger_ratio=0.85, reserved_context_size=50_000)
 
+    def test_compaction_never_skippable_above_reserved_boundary(self):
+        """The pruning-skip decision must keep the reserved-output boundary.
+
+        Compaction may be skipped only when pruning brings the input strictly
+        below ``max_context_size - reserved_context_size``. Whenever the
+        (post-prune) input reaches the boundary — even below the ratio
+        threshold — ``should_auto_compact`` must still fire so the context is
+        compacted before ``input_token_size >= context_token_size -
+        max_output_token_size`` holds (input + output must fit in the window).
+        """
+        max_context = 200_000
+        trigger_ratio = 0.8
+        reserved = 75_000
+        boundary = max_context - reserved  # 125_000
+
+        # At/over the boundary (125K) but below the ratio threshold (160K)
+        # -> must still fire, otherwise compaction would be skipped too late.
+        assert should_auto_compact(
+            boundary, max_context, trigger_ratio=trigger_ratio, reserved_context_size=reserved
+        )
+        assert should_auto_compact(
+            boundary + 1, max_context, trigger_ratio=trigger_ratio, reserved_context_size=reserved
+        )
+        assert should_auto_compact(
+            150_000, max_context, trigger_ratio=trigger_ratio, reserved_context_size=reserved
+        )
+
+        # Only strictly below the boundary is skipping compaction safe.
+        assert not should_auto_compact(
+            boundary - 1, max_context, trigger_ratio=trigger_ratio, reserved_context_size=reserved
+        )
+
 
 def test_prepare_only_keeps_text_parts_in_compaction():
     """Compaction input should only contain TextPart (whitelist approach).

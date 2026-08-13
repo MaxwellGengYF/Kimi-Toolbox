@@ -1133,17 +1133,31 @@ class ContextPruner:
     ) -> int:
         """Estimate token count after a prune pass without actually pruning.
 
+        This is a pure dry run: the pruner's hysteresis state (cooldown step /
+        usage) and ref counter are left untouched, so a real :meth:`prune` at
+        the same step still applies afterwards. Callers may safely base a
+        decision on the estimate (e.g. skipping context compaction) knowing the
+        LLM-visible history will actually be pruned to that size.
+
         Returns the estimated token count of the pruned history.
         """
-        result = self.prune(
-            history,
-            current_step=current_step,
-            context_usage=context_usage,
-            max_context_size=max_context_size,
-            current_turn_index=current_turn_index,
-            min_cache_prefix_depth=min_cache_prefix_depth,
-            model=model,
-        )
+        saved_step = self._last_prune_step
+        saved_usage = self._last_prune_usage
+        saved_ref_counter = self._ref_counter
+        try:
+            result = self.prune(
+                history,
+                current_step=current_step,
+                context_usage=context_usage,
+                max_context_size=max_context_size,
+                current_turn_index=current_turn_index,
+                min_cache_prefix_depth=min_cache_prefix_depth,
+                model=model,
+            )
+        finally:
+            self._last_prune_step = saved_step
+            self._last_prune_usage = saved_usage
+            self._ref_counter = saved_ref_counter
         if result.earliest_removed_index is None:
             return count_message_tokens(history, model=model)
         return count_message_tokens(result.messages, model=model)
