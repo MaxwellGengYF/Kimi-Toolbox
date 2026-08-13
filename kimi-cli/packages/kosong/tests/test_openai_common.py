@@ -1,18 +1,20 @@
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import openai
 import pytest
+from openai.types.chat import ChatCompletionChunk
 
 from kosong.chat_provider import (
+    DEFAULT_MAX_RETRIES,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     ChatProviderError,
-    DEFAULT_MAX_RETRIES,
     openai_common,
 )
 from kosong.chat_provider.openai_common import (
@@ -501,3 +503,166 @@ async def test_openai_compatible_provider_aclose_swallows_cancelled_error() -> N
 
     # Should not raise.
     await provider.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tolerant SSE streaming: empty/invalid data events must not kill the stream
+# ---------------------------------------------------------------------------
+# Regression for: ``json.decoder.JSONDecodeError: Expecting value: line 1
+# column 1 (char 0)`` raised inside ``openai._streaming.AsyncStream.__stream__``
+# (``sse.json()``) when a backend (Moonshot/Kimi during long compaction
+# requests) emits a keep-alive SSE event whose ``data:`` payload is empty.
+
+
+def _sse_chunk(*, content: str | None = None, role: str | None = None) -> str:
+    """Build a chat.completion.chunk JSON payload for one SSE event."""
+    delta: dict[str, Any] = {}
+    if role is not None:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    return json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+        }
+    )
+
+
+class _ChunkedResponse(httpx.Response):
+    """httpx.Response that streams its body in the given byte chunks."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        super().__init__(200, request=_DUMMY_REQUEST)
+        self._chunks = chunks
+        self.closed = False
+
+    async def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _build_message(chunks: list[bytes]) -> Any:
+    """Build a KimiStreamedMessage backed by a chunked SSE response."""
+    from kosong.chat_provider.kimi import KimiStreamedMessage
+
+    client = openai.AsyncOpenAI(api_key="test-key", base_url="https://api.test")
+    response = _ChunkedResponse(chunks)
+    stream = openai.AsyncStream(
+        cast_to=ChatCompletionChunk,
+        response=response,
+        client=client,
+    )
+    return KimiStreamedMessage(stream), response
+
+
+async def _collect_texts(message: Any) -> list[str]:
+    from kosong.message import TextPart
+
+    parts = [part async for part in message]
+    return [p.text for p in parts if isinstance(p, TextPart)]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_skips_empty_data_events() -> None:
+    """Keep-alive ``data:`` lines with no payload must be skipped."""
+    body = (
+        f"data: {_sse_chunk(role='assistant')}\n\n"
+        "data:\n\n"  # <-- empty data event (the reported bug)
+        "data: \n\n"  # <-- whitespace-only data event
+        f"data: {_sse_chunk(content='Hello')}\n\n"
+        "data: [DONE]\n\n"
+    )
+    # Split mid-line so events span arbitrary network chunk boundaries.
+    mid = len(body) // 2
+    message, _ = _build_message([body[:mid].encode(), body[mid:].encode()])
+    assert await _collect_texts(message) == ["Hello"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_skips_invalid_json_data() -> None:
+    body = (
+        f"data: {_sse_chunk(content='a')}\n\n"
+        "data: this is not json\n\n"
+        f"data: {_sse_chunk(content='b')}\n\n"
+        "data: [DONE]\n\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_skips_non_object_payload() -> None:
+    body = (
+        f"data: {_sse_chunk(content='a')}\n\n"
+        "data: [1, 2, 3]\n\n"
+        f"data: {_sse_chunk(content='b')}\n\n"
+        "data: [DONE]\n\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_stops_at_done() -> None:
+    body = (
+        f"data: {_sse_chunk(content='only')}\n\n"
+        "data: [DONE]\n\n"
+        f"data: {_sse_chunk(content='ignored')}\n\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["only"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_raises_on_error_payload() -> None:
+    """SSE error payloads must surface as ChatProviderError (via convert_error),
+    not as a raw JSONDecodeError."""
+    body = (
+        f"data: {_sse_chunk(content='a')}\n\n"
+        'data: {"error": {"message": "boom", "type": "server_error"}}\n\n'
+    )
+    message, _ = _build_message([body.encode()])
+    with pytest.raises(ChatProviderError, match="boom"):
+        async for _ in message:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_closes_response() -> None:
+    body = f"data: {_sse_chunk(content='x')}\n\n" "data: [DONE]\n\n"
+    message, response = _build_message([body.encode()])
+    async for _ in message:
+        pass
+    assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_handles_crlf_and_multiple_events_per_chunk() -> None:
+    body = (
+        f"data: {_sse_chunk(content='x')}\r\n\r\n"
+        f"data: {_sse_chunk(content='y')}\r\n\r\n"
+        "data: [DONE]\r\n\r\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["x", "y"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_streamed_message_survives_empty_sse_event() -> None:
+    """End-to-end regression: an empty ``data:`` keep-alive event must not turn
+    a valid compaction stream into a JSONDecodeError."""
+    body = (
+        f"data: {_sse_chunk(role='assistant')}\n\n"
+        "data:\n\n"
+        f"data: {_sse_chunk(content='Compaction summary')}\n\n"
+        "data: [DONE]\n\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["Compaction summary"]

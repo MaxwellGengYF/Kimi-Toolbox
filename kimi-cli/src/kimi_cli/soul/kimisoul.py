@@ -55,6 +55,7 @@ from kimi_cli.soul import (
 from kimi_cli.session_state import TodoItemState
 from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.compaction import (
+    SAFETY_MARGIN_TOKENS,
     CompactionOptions,
     CompactionResult,
     CompactMode,
@@ -457,6 +458,19 @@ class KimiSoul:
             self._compact_cache_dir,
             self._context.file_backend,
             self._anonymous,
+        )
+
+    def _tool_call_buffer_tokens(self) -> int:
+        """Return the dynamic per-tool output budget in tokens.
+
+        Used to reserve enough headroom for a tool result before the next
+        compaction decision.
+        """
+        if not isinstance(self._agent.toolset, KimiToolset) or self._runtime.llm is None:
+            return 0
+        return self._agent.toolset.estimate_tool_output_token_budget(
+            self._runtime.llm.max_context_size,
+            self._context.token_count_with_pending,
         )
 
     @property
@@ -1225,14 +1239,18 @@ class KimiSoul:
                     self._runtime.llm.max_context_size,
                     trigger_ratio=self._loop_control.compaction_trigger_ratio,
                     reserved_context_size=self._loop_control.reserved_context_size,
+                    max_tokens=self._runtime.config.max_tokens,
+                    tool_call_buffer_tokens=self._tool_call_buffer_tokens(),
+                    safety_margin_tokens=SAFETY_MARGIN_TOKENS,
                 )
                 if _should_compact and self._loop_control.context_pruning_enabled:
                     # Estimate tokens after pruning — skip compaction only when
                     # pruning brings the *full* next-request input back below the
                     # auto-compaction thresholds (in particular below the
                     # reserved-output boundary ``max_context_size -
-                    # reserved_context_size``: the point at which
-                    # ``input_token_size >= context_token_size -
+                    # max(reserved_context_size,
+                    # max_tokens + tool_call_buffer_tokens + safety_margin_tokens)``:
+                    # the point at which ``input_token_size >= context_token_size -
                     # max_output_token_size`` would hold and input + output would
                     # no longer fit in the context window). Comparing against the
                     # ratio threshold alone could skip compaction while the input
@@ -1264,6 +1282,9 @@ class KimiSoul:
                         self._runtime.llm.max_context_size,
                         trigger_ratio=self._loop_control.compaction_trigger_ratio,
                         reserved_context_size=self._loop_control.reserved_context_size,
+                        max_tokens=self._runtime.config.max_tokens,
+                        tool_call_buffer_tokens=self._tool_call_buffer_tokens(),
+                        safety_margin_tokens=SAFETY_MARGIN_TOKENS,
                     ):
                         # Pruning will free enough space — skip compaction
                         _should_compact = False

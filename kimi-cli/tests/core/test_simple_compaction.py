@@ -223,10 +223,11 @@ class TestShouldAutoCompact:
         """The pruning-skip decision must keep the reserved-output boundary.
 
         Compaction may be skipped only when pruning brings the input strictly
-        below ``max_context_size - reserved_context_size``. Whenever the
-        (post-prune) input reaches the boundary — even below the ratio
-        threshold — ``should_auto_compact`` must still fire so the context is
-        compacted before ``input_token_size >= context_token_size -
+        below ``max_context_size - effective_reserved``, where ``effective_reserved``
+        accounts for ``max_tokens``, ``tool_call_buffer_tokens`` and the safety
+        margin. Whenever the (post-prune) input reaches the boundary — even below
+        the ratio threshold — ``should_auto_compact`` must still fire so the
+        context is compacted before ``input_token_size >= context_token_size -
         max_output_token_size`` holds (input + output must fit in the window).
         """
         max_context = 200_000
@@ -249,6 +250,169 @@ class TestShouldAutoCompact:
         # Only strictly below the boundary is skipping compaction safe.
         assert not should_auto_compact(
             boundary - 1, max_context, trigger_ratio=trigger_ratio, reserved_context_size=reserved
+        )
+
+    def test_large_max_tokens_expands_reserved_boundary(self):
+        """A large max_tokens budget must reserve enough input headroom.
+
+        Regression: when max_tokens (384k) plus the 4096 token safety margin is
+        larger than reserved_context_size (75k), compaction must trigger at
+        ``max_context_size - max_tokens - safety_margin``, not at
+        ``max_context_size - reserved_context_size``.
+        """
+        max_context = 1_048_576
+        reserved = 75_000
+        max_tokens = 384_000
+        safety_margin = 4096
+        boundary = max_context - max_tokens - safety_margin  # 660_480
+
+        # One token above the boundary -> must trigger.
+        assert should_auto_compact(
+            boundary + 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            safety_margin_tokens=safety_margin,
+        )
+        # Exactly at the boundary -> must trigger.
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            safety_margin_tokens=safety_margin,
+        )
+        # Just below the boundary -> must not trigger.
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            safety_margin_tokens=safety_margin,
+        )
+
+    def test_tool_call_buffer_expands_reserved_boundary(self):
+        """A dynamic tool-call output buffer also expands the reserved boundary."""
+        max_context = 200_000
+        reserved = 75_000
+        max_tokens = 50_000
+        tool_buffer = 30_000
+        safety_margin = 4096
+        output_budget = max_tokens + tool_buffer + safety_margin  # 84_096
+        boundary = max_context - output_budget  # 115_904
+
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+
+    def test_safety_margin_expands_reserved_boundary(self):
+        """The 4096 token safety margin expands the reserved boundary."""
+        max_context = 200_000
+        reserved = 3_000
+        safety_margin = 4096
+        boundary = max_context - safety_margin  # 195_904
+
+        # Use a high ratio so the reserved boundary is the only trigger.
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.99,
+            reserved_context_size=reserved,
+            safety_margin_tokens=safety_margin,
+        )
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.99,
+            reserved_context_size=reserved,
+            safety_margin_tokens=safety_margin,
+        )
+
+    def test_output_budget_capped_at_context_minus_reserved(self):
+        """If the full output budget would leave no input room, it is capped."""
+        max_context = 100_000
+        reserved = 75_000
+        # Unbounded output budget would be 384k + 50k + 4096 = 438_096,
+        # which is far larger than the context. It must be capped at
+        # max_context - reserved = 25_000.
+        assert should_auto_compact(
+            25_000,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=384_000,
+            tool_call_buffer_tokens=50_000,
+            safety_margin_tokens=4096,
+        )
+        assert not should_auto_compact(
+            24_999,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=384_000,
+            tool_call_buffer_tokens=50_000,
+            safety_margin_tokens=4096,
+        )
+
+    def test_max_tokens_below_reserved_uses_reserved(self):
+        """When max_tokens is smaller than reserved_context_size, the latter wins."""
+        max_context = 200_000
+        reserved = 75_000
+        max_tokens = 50_000
+        boundary = max_context - reserved  # 125_000
+
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+        )
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+        )
+
+    def test_none_max_tokens_uses_reserved(self):
+        """When max_tokens is None, reserved_context_size is used unchanged."""
+        max_context = 200_000
+        reserved = 75_000
+        boundary = max_context - reserved  # 125_000
+
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=None,
+        )
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=None,
         )
 
 

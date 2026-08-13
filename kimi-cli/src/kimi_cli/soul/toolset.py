@@ -548,12 +548,46 @@ class KimiToolset:
         """Set a callback that returns the current context token count."""
         self._context_token_provider = provider
 
-    def _get_max_output_bytes(self) -> int:
-        """Return the per-tool output byte budget.
+    def _estimate_tool_output_byte_budget(
+        self,
+        max_context_size: int,
+        current_tokens: int,
+    ) -> int:
+        """Estimate the per-tool output budget in bytes.
 
         The budget is the more restrictive of:
           - a fraction of the model's total context size, and
           - a fraction of the currently remaining context tokens.
+        """
+        total_budget_bytes = int(
+            max_context_size * _TOOL_OUTPUT_BYTES_PER_TOKEN * _TOOL_OUTPUT_CONTEXT_FRACTION
+        )
+        remaining_tokens = max(0, max_context_size - current_tokens)
+        remaining_budget_bytes = int(
+            remaining_tokens * _TOOL_OUTPUT_BYTES_PER_TOKEN * _TOOL_OUTPUT_REMAINING_FRACTION
+        )
+        return max(
+            0,
+            min(total_budget_bytes, remaining_budget_bytes, _TOOL_OUTPUT_ABS_MAX_BYTES),
+        )
+
+    def estimate_tool_output_token_budget(
+        self,
+        max_context_size: int,
+        current_tokens: int,
+    ) -> int:
+        """Estimate the per-tool output budget in tokens.
+
+        This value is used both for truncating individual tool results and for
+        reserving headroom in the context window.
+        """
+        return (
+            self._estimate_tool_output_byte_budget(max_context_size, current_tokens)
+            // _TOOL_OUTPUT_BYTES_PER_TOKEN
+        )
+
+    def _get_max_output_bytes(self) -> int:
+        """Return the per-tool output byte budget.
 
         Falls back to `_DEFAULT_TOOL_OUTPUT_MAX_BYTES` when no runtime/LLM is available.
         """
@@ -562,23 +596,11 @@ class KimiToolset:
         if not isinstance(max_context, int) or max_context <= 0:
             return _DEFAULT_TOOL_OUTPUT_MAX_BYTES
 
-        # Budget derived from total context size
-        total_budget = int(
-            max_context * _TOOL_OUTPUT_BYTES_PER_TOKEN * _TOOL_OUTPUT_CONTEXT_FRACTION
-        )
-
-        # Budget derived from remaining context (safety constraint)
         current_tokens = 0
         if self._context_token_provider is not None:
             current_tokens = self._context_token_provider()
-        remaining_tokens = max(0, max_context - current_tokens)
-        remaining_budget = int(
-            remaining_tokens * _TOOL_OUTPUT_BYTES_PER_TOKEN * _TOOL_OUTPUT_REMAINING_FRACTION
-        )
 
-        # Enforce: max_bytes is less than remaining context usage
-        max_bytes = min(total_budget, remaining_budget)
-        return max(0, min(max_bytes, _TOOL_OUTPUT_ABS_MAX_BYTES))
+        return self._estimate_tool_output_byte_budget(max_context, current_tokens)
 
     def add(self, tool: ToolType) -> None:
         self._tool_dict[tool.name] = tool

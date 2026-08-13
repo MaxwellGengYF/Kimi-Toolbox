@@ -117,22 +117,45 @@ def _detect_cascade_depth(messages: Sequence[Message]) -> int:
     return depth
 
 
+SAFETY_MARGIN_TOKENS: int = 4096
+"""Extra tokens reserved for unforeseen growth (tool metadata, formatting, etc.)."""
+
+
 def should_auto_compact(
     token_count: int,
     max_context_size: int,
     *,
     trigger_ratio: float,
     reserved_context_size: int,
+    max_tokens: int | None = None,
+    tool_call_buffer_tokens: int = 0,
+    safety_margin_tokens: int = SAFETY_MARGIN_TOKENS,
 ) -> bool:
     """Determine whether auto-compaction should be triggered.
 
     Returns True when either condition is met (whichever fires first):
     - Ratio-based: token_count >= max_context_size * trigger_ratio
-    - Reserved-based: token_count + reserved_context_size >= max_context_size
+    - Reserved-based: token_count + effective_reserved >= max_context_size
+
+    ``effective_reserved`` is computed from the full output budget:
+
+        max(reserved_context_size,
+            max_tokens + tool_call_buffer_tokens + safety_margin_tokens)
+
+    and then capped so it never leaves fewer than ``reserved_context_size``
+    tokens available for input. This prevents a large configured output budget
+    (e.g. the 384k default paired with a small test model) from leaving no room
+    for input context. When ``max_tokens`` is ``None`` it is treated as 0.
     """
+    output_budget = (max_tokens or 0) + tool_call_buffer_tokens + safety_margin_tokens
+    # Cap the output budget so the configuration is always usable: at least
+    # ``reserved_context_size`` tokens must remain for input. Without this cap,
+    # a model whose max_tokens exceeds its context window would never accept input.
+    feasible_output_budget = min(output_budget, max_context_size - reserved_context_size)
+    effective_reserved = max(reserved_context_size, feasible_output_budget)
     return (
         token_count >= max_context_size * trigger_ratio
-        or token_count + reserved_context_size >= max_context_size
+        or token_count + effective_reserved >= max_context_size
     )
 
 

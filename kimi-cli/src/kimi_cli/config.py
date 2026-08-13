@@ -137,12 +137,18 @@ Default is 3."""
     """Extra iterations after the first turn in Ralph mode. Use -1 for unlimited."""
     reserved_context_size: int = Field(default=75_000, ge=1000)
     """Reserved token count for LLM response generation. Auto-compaction triggers when
-    either context_tokens + reserved_context_size >= max_context_size or
-    context_tokens >= max_context_size * compaction_trigger_ratio. Default is 50000."""
+    either context_tokens >= max_context_size * compaction_trigger_ratio or
+    context_tokens + max(reserved_context_size,
+                          max_tokens + tool_call_buffer_tokens + safety_margin_tokens)
+    >= max_context_size.
+    ``tool_call_buffer_tokens`` is the dynamic per-tool output budget and
+    ``safety_margin_tokens`` is 4096. Default is 75000."""
     compaction_trigger_ratio: float = Field(default=0.8, ge=0.5, le=0.99)
-    """Context usage ratio threshold for auto-compaction. Default is 0.85 (85%).
+    """Context usage ratio threshold for auto-compaction. Default is 0.8 (80%).
     Auto-compaction triggers when context_tokens >= max_context_size * compaction_trigger_ratio
-    or when context_tokens + reserved_context_size >= max_context_size."""
+    or when context_tokens + max(reserved_context_size,
+                                max_tokens + tool_call_buffer_tokens + safety_margin_tokens)
+    >= max_context_size."""
     max_system_prompt_tokens: int = Field(default=4_000, ge=1_000)
     """Maximum token count for the system prompt. If the constructed prompt exceeds
     this budget, step memory and changed-files lists are truncated progressively.

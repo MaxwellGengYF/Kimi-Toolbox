@@ -6,9 +6,9 @@ import regex as re
 import ssl
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeGuard, cast
 
 import certifi
 import httpx
@@ -272,6 +272,125 @@ def maybe_log_reasoning_content_error(
 
 _NETWORK_RE = re.compile(r"network|connection|connect|disconnect", re.IGNORECASE)
 _TIMEOUT_RE = re.compile(r"timed?\s*out|timeout|deadline", re.IGNORECASE)
+
+
+class _TolerantSSEDecoder:
+    """Minimal SSE decoder for OpenAI-compatible chat streams.
+
+    The openai SDK's ``SSEDecoder`` / ``ServerSentEvent.json()`` aborts the
+    entire stream on the first event whose ``data:`` payload is empty or not
+    valid JSON.  Some backends (observed with Moonshot/Kimi during long
+    compaction requests) emit such keep-alive events mid-stream, which turns a
+    healthy response into a ``json.JSONDecodeError``.  This decoder only
+    extracts ``event`` / ``data`` fields and leaves payload interpretation to
+    the caller, so unparsable events can be skipped instead of killing the
+    response.
+    """
+
+    __slots__ = ("_data", "_event")
+
+    def __init__(self) -> None:
+        self._data: list[str] = []
+        self._event: str | None = None
+
+    def feed_block(self, block: bytes) -> Iterator[tuple[str | None, str]]:
+        """Decode one blank-line-terminated SSE block into ``(event, data)`` pairs."""
+        for raw_line in block.splitlines():
+            line = raw_line.decode("utf-8")
+            if not line:
+                # Blank line: flush the accumulated event (if any).
+                if not self._data and self._event is None:
+                    continue
+                event = self._event
+                payload = "\n".join(self._data)
+                self._data = []
+                self._event = None
+                yield event, payload
+                continue
+            if line.startswith(":"):
+                # SSE comments (e.g. keep-alives) carry no payload.
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "data":
+                self._data.append(value)
+            elif field == "event":
+                self._event = value
+            # ``id`` / ``retry`` are not needed for chat completions; ignored.
+
+
+async def _iter_sse_events(
+    response: httpx.Response,
+) -> AsyncIterator[tuple[str | None, str]]:
+    """Iterate SSE ``(event, data)`` pairs from an httpx streaming response.
+
+    Handles events split across arbitrary network chunks and multiple events
+    per chunk, mirroring the openai SDK's ``SSEDecoder`` behavior without ever
+    raising on empty/whitespace ``data:`` payloads.
+    """
+    decoder = _TolerantSSEDecoder()
+    buffer = b""
+    async for chunk in response.aiter_bytes():
+        for line in chunk.splitlines(keepends=True):
+            buffer += line
+            if buffer.endswith((b"\r\r", b"\n\n", b"\r\n\r\n")):
+                for event in decoder.feed_block(buffer):
+                    yield event
+                buffer = b""
+    if buffer:
+        for event in decoder.feed_block(buffer):
+            yield event
+
+
+def _is_object_mapping(data: object) -> TypeGuard[Mapping[str, object]]:
+    """Return True if *data* is a JSON object (dict with object values)."""
+    return isinstance(data, dict)
+
+
+async def _iter_tolerant_chunks(
+    stream: AsyncStream[Any],
+) -> AsyncIterator[ChatCompletionChunk]:
+    """Iterate an OpenAI ``AsyncStream``, skipping SSE events with invalid JSON.
+
+    Some OpenAI-compatible backends (observed with Moonshot/Kimi during long
+    compaction requests) emit keep-alive SSE events whose ``data:`` payload is
+    empty or otherwise not valid JSON.  The openai SDK's own
+    ``AsyncStream.__stream__`` calls ``json.loads`` on every such event and
+    raises ``json.JSONDecodeError``, aborting the whole response.  This
+    re-implements the same chunk-processing loop (including ``[DONE]`` and
+    error-payload handling) over the underlying httpx response with a tolerant
+    JSON step, so malformed keep-alive events are skipped instead of killing
+    the stream.
+    """
+    response = stream.response
+    try:
+        async for _event, data in _iter_sse_events(response):
+            if data.startswith("[DONE]"):
+                break
+            try:
+                payload: object = json.loads(data)
+            except json.JSONDecodeError:
+                # Keep-alive / empty data event — nothing to parse, skip it.
+                continue
+            if not _is_object_mapping(payload):
+                # Malformed payload — skip rather than abort the whole stream.
+                continue
+            if payload.get("error"):
+                error = payload.get("error")
+                message: object | None = None
+                if _is_object_mapping(error):
+                    message = error.get("message")
+                if not isinstance(message, str):
+                    message = "An error occurred during streaming"
+                raise openai.APIError(
+                    message=message,
+                    request=response.request,
+                    body=payload["error"],
+                )
+            yield ChatCompletionChunk.model_validate(payload)
+    finally:
+        await response.aclose()
 
 
 def _classify_base_api_error(message: str) -> ChatProviderError:
@@ -652,7 +771,15 @@ class OpenAICompatibleStreamedMessage(BaseStreamedMessage):
     ) -> AsyncIterator[StreamedMessagePart]:
         buffered_tool_calls: dict[int, BufferedChatCompletionToolCall] = {}
         try:
-            async for chunk in response:
+            if isinstance(response, AsyncStream):
+                # The openai SDK's AsyncStream aborts the whole response on the
+                # first SSE event with an empty/invalid ``data:`` payload (some
+                # backends emit such keep-alive events during long requests);
+                # iterate through the tolerant wrapper instead.
+                chunk_iter: AsyncIterator[ChatCompletionChunk] = _iter_tolerant_chunks(response)
+            else:
+                chunk_iter = response
+            async for chunk in chunk_iter:
                 if chunk.id:
                     self._id = chunk.id
                 if usage := extract_usage_from_chunk(chunk):

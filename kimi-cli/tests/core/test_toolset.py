@@ -772,6 +772,25 @@ def test_set_context_token_provider_overrides_provider():
     assert ts._get_max_output_bytes() == 3_859
 
 
+def test_estimate_tool_output_token_budget_matches_byte_budget():
+    """The token-budget helper mirrors the existing byte-budget logic."""
+    ts = KimiToolset(runtime=_MockRuntime(131_072))
+
+    # Empty context: dominated by remaining-context term.
+    # remaining_budget_bytes = int(131072 * 4 * 0.9) = 471859 -> tokens = 471859 // 4 = 117964
+    assert ts.estimate_tool_output_token_budget(131_072, 0) == 117_964
+
+    # Partial context.
+    # remaining_budget_bytes = int((131072 - 65536) * 4 * 0.9) = 235929 -> tokens = 58982
+    assert ts.estimate_tool_output_token_budget(131_072, 65_536) == 58_982
+
+    # Near-full context.
+    assert ts.estimate_tool_output_token_budget(131_072, 130_000) == 964
+
+    # Absolute 1 MiB ceiling.
+    assert ts.estimate_tool_output_token_budget(1_048_576, 0) == 262_144
+
+
 async def test_oversized_string_output_is_truncated():
     """A string tool output above the dynamic limit is truncated and returned as an error."""
     ts = KimiToolset()  # fallback 128 KiB budget
