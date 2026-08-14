@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -95,13 +96,59 @@ def _validate_supported_efforts(v: set[ThinkingEffort]) -> set[ThinkingEffort]:
     return v
 
 
+#: (keywords, max_context_size, max_output). All keywords must be present in the
+#: lowercased model name; more specific entries must appear first.
+_MODEL_DEFAULTS: list[tuple[tuple[str, ...], int, int | None]] = [
+    # OpenAI GPT
+    (("gpt-5.6", "sol"), 1_050_000, 128_000),
+    (("gpt-5.5",), 1_050_000, 128_000),
+    (("gpt-5.4", "mini"), 1_000_000, 65_536),
+    (("gpt-5.4",), 1_000_000, 128_000),
+    # Anthropic Claude
+    (("claude", "opus", "5"), 1_000_000, 128_000),
+    (("claude", "opus", "4.8"), 1_000_000, 128_000),
+    (("claude", "sonnet", "5"), 1_000_000, 128_000),
+    (("claude", "sonnet", "4.6"), 1_000_000, 64_000),
+    (("claude", "haiku", "4.5"), 200_000, 64_000),
+    # Google Gemini
+    (("gemini", "3.6"), 1_048_576, 65_536),
+    (("gemini", "3.5", "flash"), 1_048_576, 65_536),
+    (("gemini", "3.1", "pro"), 1_048_576, 65_536),
+    # Amazon Nova
+    (("amazon", "nova", "2", "lite"), 1_000_000, 64_000),
+    # DeepSeek
+    (("deepseek", "v4", "pro"), 1_000_000, 384_000),
+    (("deepseek", "v4", "flash"), 1_000_000, 384_000),
+    # xAI Grok
+    (("supergrok", "heavy"), 2_000_000, None),
+    (("grok",), 2_000_000, None),
+]
+
+
+def _resolve_model_defaults(model_name: str) -> tuple[int, int | None] | None:
+    """Return default ``(max_context_size, max_tokens)`` for a model name.
+
+    Returns ``None`` when the model name does not match any known keyword set.
+    """
+    lower = model_name.lower()
+    for keywords, context_size, max_output in _MODEL_DEFAULTS:
+        if all(keyword in lower for keyword in keywords):
+            return context_size, max_output
+    return None
+
+
 class LLMModel(BaseModel):
     """LLM model configuration."""
 
     model: str
     """Model name"""
-    max_context_size: int
-    """Maximum context size (unit: tokens)"""
+    max_context_size: int | None = Field(default=None)
+    """Maximum context size (unit: tokens). When unset, derived from the model name."""
+    max_tokens: int | None = Field(default=None)
+    """Maximum output tokens.
+
+    When unset, derived from the model name or from ``max_context_size // 4``.
+    """
     capabilities: set[ModelCapability] | None = None
     """Model capabilities"""
     display_name: str | None = None
@@ -117,6 +164,37 @@ class LLMModel(BaseModel):
             "The special value ``\"off\"`` is not an effort rank and must not be included."
         ),
     )
+
+    @model_validator(mode="after")
+    def _derive_defaults(self) -> Self:
+        """Derive ``max_context_size`` and ``max_tokens`` from the model name when unset.
+
+        If ``max_context_size`` is explicitly provided but ``max_tokens`` is not,
+        ``max_tokens`` is set to ``max_context_size // 4``.
+        If the model name does not match any known keyword set, print an error and exit.
+        """
+        if not self.model:
+            return self
+
+        max_tokens_explicit = "max_tokens" in self.model_fields_set
+
+        if self.max_context_size is None:
+            resolved = _resolve_model_defaults(self.model)
+            if resolved is None:
+                print(
+                    f"Error: Unknown model '{self.model}'. Cannot determine "
+                    "max_context_size and max_tokens from the model name.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            default_context, default_output = resolved
+            self.max_context_size = default_context
+            if not max_tokens_explicit and self.max_tokens is None:
+                self.max_tokens = default_output
+        elif not max_tokens_explicit and self.max_tokens is None:
+            self.max_tokens = self.max_context_size // 4
+
+        return self
 
 class LoopControl(BaseModel):
     """Agent loop control configuration."""
