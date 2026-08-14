@@ -281,8 +281,8 @@ def _build_platform_redirects() -> dict[str, str]:
     """Build the platform-aware normalized redirect map."""
     _redirects = dict(TOOL_NAME_REDIRECTS)
 
-    # TodoList stack/tree tools: common LLM variants for todo_push/todo_pop/
-    # todo_sub and tree-reading names for todo_write.
+# TodoList stack/tree tools: common LLM variants for todo_push/todo_pop/
+# todo_update and tree-reading names for todo_write.
     _redirects.update({
         "PushTodo": "todo_push",
         "TodoParent": "todo_push",
@@ -302,17 +302,16 @@ def _build_platform_redirects() -> dict[str, str]:
         "PopTask": "todo_pop",
         "EndTask": "todo_pop",
         "FinishTask": "todo_pop",
-        "SubTodo": "todo_sub",
-        "TodoChild": "todo_sub",
-        "TodoAdd": "todo_sub",
-        "AddSubTodo": "todo_sub",
-        "TodoDetail": "todo_sub",
-        "TodoUpdate": "todo_sub",
-        "TodoEdit": "todo_sub",
-        "SubTask": "todo_sub",
-        "AddTask": "todo_sub",
-        "TaskDetail": "todo_sub",
-        "TaskSub": "todo_sub",
+    "SubTodo": "todo_update",
+    "TodoChild": "todo_update",
+    "TodoAdd": "todo_update",
+    "AddSubTodo": "todo_update",
+    "TodoDetail": "todo_update",
+    "TodoEdit": "todo_update",
+    "SubTask": "todo_update",
+    "AddTask": "todo_update",
+    "TaskDetail": "todo_update",
+    "TaskSub": "todo_update",
         "TodoTree": "todo_write",
         "TodoStack": "todo_write",
         "TodoHierarchy": "todo_write",
@@ -322,7 +321,7 @@ def _build_platform_redirects() -> dict[str, str]:
         "SetTodo": "todo_write",
         "TodoListPush": "todo_push",
         "TodoListPop": "todo_pop",
-        "TodoListSub": "todo_sub",
+        "TodoListSub": "todo_update",
         # Legacy tool-name redirects (old names -> report canonical names).
         "ReadFile": "read",
         "OpenFile": "read",

@@ -812,7 +812,6 @@ def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path, kimi_cli_tool
         ('todo_write', kimi_cli_tools_dir / 'todo' / '__init__.py'),
         ('todo_push', kimi_cli_tools_dir / 'todo' / '__init__.py'),
         ('todo_pop', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('todo_sub', kimi_cli_tools_dir / 'todo' / '__init__.py'),
         ('retrieve', kimi_cli_tools_dir / 'memory' / '__init__.py'),
         ('read', kimi_cli_tools_dir / 'file' / 'read.py'),
         ('read_image', kimi_cli_tools_dir / 'file' / 'read_media.py'),

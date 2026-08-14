@@ -101,7 +101,7 @@ Applies to every tool that exposes the corresponding parameters:
             items.append('Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.')
             items.append('Verification gate: run all tests/checks and confirm they pass before finishing.')
             items.append('After each independent task, milestone, or schedule part, call `compact` before the next step.')
-            items.append('Multi-step: track with `todo_write`; push parent scopes with `todo_push`, add sub-todos with `todo_sub`, close the scope with `todo_pop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
+            items.append('Multi-step: track with `todo_write`; push parent scopes with `todo_push`, add sub-todos with `todo_update(parent=...)`, close the scope with `todo_pop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.')
             if not is_sub_agent:
                 if yolo:
                     items.append('Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.')

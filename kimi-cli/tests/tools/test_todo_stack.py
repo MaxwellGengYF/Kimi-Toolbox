@@ -1,9 +1,9 @@
-"""Tests for todo_write Stack & Tree Structure (todo_push / todo_pop / todo_sub).
+"""Tests for todo_write Stack & Tree Structure (todo_push / todo_pop / todo_update).
 
 Phase 10 of the "todo_write Stack & Tree Structure" plan:
 
 - todo_push: push a parent onto the stack scope (breadcrumb), depth limits.
-- todo_sub: add / update / rename children under the current scope.
+- todo_update(parent=...): add / update / rename children under an explicit parent.
 - todo_pop: pop the focus subtree (errors when unfinished unless complete=True).
 - Stack persistence (root + subagent), auto-heal of broken stacks.
 - format_todo_injection stack breadcrumb + tree indentation.
@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import orjson
 import pytest
+from kosong.tooling import ToolReturnValue
 
 from kimi_cli.session_state import (
     TODO_INJECTION_HEADER,
@@ -40,9 +41,30 @@ from kimi_cli.tools.todo import (
     TodoPopParams,
     todo_push,
     TodoPushParams,
-    todo_sub,
-    TodoSubParams,
+    todo_update,
+    TodoUpdateParams,
 )
+
+
+# Compatibility wrapper: the removed todo_sub tool is emulated by todo_update
+# with the current stack top as the explicit parent.
+class TodoSubParams(TodoUpdateParams):
+    pass
+
+
+class todo_sub:
+    def __init__(self, runtime: Runtime) -> None:
+        self._update = todo_update(runtime)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._update, name)
+
+    async def __call__(self, params: TodoSubParams) -> ToolReturnValue:
+        stack = self._update._load_stack()
+        parent = stack[-1] if stack else ""
+        data = params.model_dump(by_alias=True)
+        data["parent"] = parent
+        return await self._update(TodoUpdateParams(**data))
 
 
 def _read_root_todo(tool: TodoList, title: str) -> Todo:
@@ -65,7 +87,7 @@ class Testtodo_pushRootAndDepth:
         assert not res.is_error
         assert 'Pushed "Parent A" (depth 1/4).' in res.output
         assert "Stack: Parent A" in res.output
-        assert "Next: todo_sub" in res.output
+        assert "todo_update(parent=" in res.output
         assert res.message == 'Pushed "Parent A".'
 
         # Breadcrumb persisted and reloadable.
@@ -103,7 +125,7 @@ class Testtodo_pushRootAndDepth:
         res = await tool(TodoPushParams(title="B"))
         assert res.is_error
         assert 'Error: Duplicate todo title "B" in this scope.' in res.output
-        assert 'Use todo_sub "B" to update the existing item.' in res.brief
+        assert 'Use todo_update(parent=..., title="B") to update the existing item.' in res.brief
 
     async def test_push_duplicate_title_checks_scope_not_whole_tree(
         self, runtime: Runtime
@@ -129,7 +151,7 @@ class Testtodo_pushRootAndDepth:
 # ---------------------------------------------------------------------------
 
 
-class Testtodo_subChildren:
+class TestTodoUpdateChildren:
     async def test_sub_adds_children_under_scope(self, runtime: Runtime) -> None:
         push = todo_push(runtime)
         sub = todo_sub(runtime)
@@ -137,10 +159,10 @@ class Testtodo_subChildren:
 
         r1 = await sub(TodoSubParams(title="child one"))
         assert not r1.is_error
-        assert 'Sub-todo "child one" added under "Parent".' in r1.output
+        assert 'Created "child one" under "Parent".' in r1.output
         assert "  - [pending] child one" in r1.output
-        assert "Next: todo_sub" in r1.output and "todo_pop" in r1.output
-        assert r1.message == 'Sub-todo "child one" added.'
+        assert "todo_update(parent=" in r1.output and "todo_pop" in r1.output
+        assert r1.message == 'Created "child one" under "Parent".'
 
         r2 = await sub(TodoSubParams(title="child two"))
         assert not r2.is_error
@@ -157,7 +179,7 @@ class Testtodo_subChildren:
         sub = todo_sub(runtime)
         res = await sub(TodoSubParams(title="root item"))
         assert not res.is_error
-        assert 'Sub-todo "root item" added under "root".' in res.output
+        assert 'Created "root item" under "root".' in res.output
         todos = sub._load_todos()
         assert len(todos) == 1
         assert todos[0].content == "root item"
@@ -170,9 +192,9 @@ class Testtodo_subChildren:
         await push(TodoPushParams(title="Parent"))
         await sub(TodoSubParams(title="child", notes="keep me"))
 
-        res = await sub(TodoSubParams(title="child", status="in_progress", notes=""))
+        res = await sub(TodoSubParams(title="child", status="in_progress"))
         assert not res.is_error
-        assert 'Sub-todo "child" updated under "Parent".' in res.output
+        assert 'Updated "child" (status=in_progress' in res.output
         child = _read_root_todo(sub, "Parent").children[0]
         assert child.status == "in_progress"
         assert child.notes == "keep me"
@@ -241,7 +263,7 @@ class Testtodo_subChildren:
         res = await sub(TodoSubParams(title="a", rename_to="b"))
         assert res.is_error
         assert 'Cannot rename "a" to "b"' in res.output
-        assert 'Use todo_sub "b" to update instead of renaming.' in res.brief
+        assert 'Use todo_update "b" to update the existing item instead of renaming.' in res.brief
         # Nothing changed.
         children = [c.content for c in _read_root_todo(sub, "Parent").children]
         assert children == ["a", "b"]
@@ -374,7 +396,7 @@ class TestMaxLayers:
         res = await push(TodoPushParams(title="L5"))
         assert res.is_error
         assert "Cannot push deeper than 4 layers" in res.output
-        assert "todo_sub" in res.brief
+        assert "todo_update(parent=" in res.brief
         assert res.message == "Cannot push deeper than 4 layers."
         # Stack is unchanged after the failed push.
         assert push._load_stack() == ["L1", "L2", "L3", "L4"]
@@ -398,7 +420,7 @@ class TestMaxLayers:
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
         assert "Hint:" in res.output
-        assert "Use todo_sub to add sub-todos at this level instead of pushing deeper." in res.output
+        assert "Use todo_update(parent=...) to add sub-todos at this level instead of pushing deeper." in res.output
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +834,7 @@ class TestCrossToolHints:
         res = await tool(Params(todos=[Todo(content="A", status="pending")]))
         assert not res.is_error
         assert res.output.endswith(
-            "Next: todo_push to start a parent todo, or todo_write to read the tree."
+            "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree."
         )
         # Hint is output-only, never in message.
         assert "Next:" not in res.message
@@ -822,7 +844,7 @@ class TestCrossToolHints:
         await tool(Params(todos=[Todo(content="A", status="pending")]))
         res = await tool(Params(todos=None))
         assert not res.is_error
-        assert "Next: todo_push to start a parent todo, or todo_write to read the tree." in res.output
+        assert "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree." in res.output
         assert res.message == "Current todo list displayed."
 
     async def test_todolist_zero_total_write_suppresses_hint(self, runtime: Runtime) -> None:
@@ -837,7 +859,7 @@ class TestCrossToolHints:
         push = todo_push(runtime)
         res = await push(TodoPushParams(title="A"))
         assert not res.is_error
-        assert "Next: todo_sub" in res.output
+        assert "todo_update(parent=" in res.output
         assert "todo_pop" in res.output
 
     async def test_sub_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
@@ -846,7 +868,7 @@ class TestCrossToolHints:
         await push(TodoPushParams(title="P"))
         res = await sub(TodoSubParams(title="c"))
         assert not res.is_error
-        assert "Next: todo_sub" in res.output
+        assert "todo_update(parent=" in res.output
         assert "todo_pop" in res.output
 
     async def test_pop_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
@@ -865,23 +887,23 @@ class TestCrossToolHints:
         assert "todo_write" in res.brief
         assert "todo_push" in res.output and "todo_write" in res.output
 
-    async def test_max_layer_error_names_todo_sub(self, runtime: Runtime) -> None:
+    async def test_max_layer_error_names_todo_update(self, runtime: Runtime) -> None:
         runtime.config.loop_control.todo_max_layers = 1
         push = todo_push(runtime)
         await push(TodoPushParams(title="A"))
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
-        assert "todo_sub" in res.brief
-        assert "todo_sub" in res.output
+        assert "todo_update(parent=" in res.brief
+        assert "todo_update(parent=" in res.output
 
-    async def test_duplicate_push_error_names_todo_sub(self, runtime: Runtime) -> None:
+    async def test_duplicate_push_error_names_todo_update(self, runtime: Runtime) -> None:
         push = todo_push(runtime)
         sub = todo_sub(runtime)
         await push(TodoPushParams(title="A"))
         await sub(TodoSubParams(title="B"))
         res = await push(TodoPushParams(title="B"))
         assert res.is_error
-        assert 'Use todo_sub "B" to update the existing item.' in res.brief
+        assert 'Use todo_update(parent=..., title="B") to update the existing item.' in res.brief
 
     async def test_rename_collision_error_names_update_path(self, runtime: Runtime) -> None:
         push = todo_push(runtime)
@@ -891,7 +913,7 @@ class TestCrossToolHints:
         await sub(TodoSubParams(title="b"))
         res = await sub(TodoSubParams(title="a", rename_to="b"))
         assert res.is_error
-        assert 'Use todo_sub "b" to update instead of renaming.' in res.brief
+        assert 'Use todo_update "b" to update the existing item instead of renaming.' in res.brief
 
     async def test_broken_stack_error_names_todolist_and_push(self, runtime: Runtime) -> None:
         push = todo_push(runtime)
@@ -945,7 +967,7 @@ class TestTodoListReadTreeRendering:
 class TestTodoListErrorHints:
     """todo_write error paths carry corrective sibling-tool hints."""
 
-    async def test_duplicate_error_names_todo_sub(self, runtime: Runtime) -> None:
+    async def test_duplicate_error_names_todo_update(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         res = await lst(
             Params(
@@ -958,7 +980,7 @@ class TestTodoListErrorHints:
         assert res.is_error
         assert "Duplicate todo titles found" in res.output
         assert "Hint: " in res.output
-        assert "todo_sub" in res.output
+        assert "todo_update(parent=" in res.output
 
     async def test_clear_error_names_todolist_and_push(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
@@ -975,4 +997,4 @@ class TestTodoListErrorHints:
         res = await lst(Params(todos=None))
         assert not res.is_error
         assert "Todo list is empty." in res.output
-        assert "Next: todo_push to start a parent todo, or todo_write to read the tree." in res.output
+        assert "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree." in res.output

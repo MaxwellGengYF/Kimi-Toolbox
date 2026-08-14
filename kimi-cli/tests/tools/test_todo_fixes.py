@@ -2,8 +2,7 @@
 
 Covers the fixes applied to kimi_cli.tools.todo:
 
-1. todo_sub bare same-title calls preserve status (no fake "read" that resets
-   items to pending); done items need force=True to regress.
+1. todo_update(parent=...) child creation and bare same-title calls preserve status; done items need force=True to regress.
 2. mode='clear' is explicit; an empty todos=[] in append mode is a no-op.
 3. todo_write writes merge root-level titles only, and warn (non-blocking) when
    a new root title already exists deeper in the tree.
@@ -28,9 +27,30 @@ from kimi_cli.tools.todo import (
     TodoPopParams,
     todo_push,
     TodoPushParams,
-    todo_sub,
-    TodoSubParams,
+    todo_update,
+    TodoUpdateParams,
 )
+
+
+# Compatibility wrapper: the removed todo_sub tool is emulated by todo_update
+# with the current stack top as the explicit parent.
+class TodoSubParams(TodoUpdateParams):
+    pass
+
+
+class todo_sub:
+    def __init__(self, runtime: Runtime) -> None:
+        self._update = todo_update(runtime)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._update, name)
+
+    async def __call__(self, params: TodoSubParams) -> Any:
+        stack = self._update._load_stack()
+        parent = stack[-1] if stack else ""
+        data = params.model_dump(by_alias=True)
+        data["parent"] = parent
+        return await self._update(TodoUpdateParams(**data))
 
 
 def _read_root_todo(tool: TodoList, title: str) -> Todo:
@@ -46,7 +66,7 @@ def _read_root_todo(tool: TodoList, title: str) -> Todo:
 # ---------------------------------------------------------------------------
 
 
-class Testtodo_subStatusPreservationAndRegression:
+class TestTodoUpdateStatusPreservationAndRegression:
     """Bare todo_sub calls must not reset status; done items need force=True."""
 
     async def test_bare_same_title_call_preserves_status(self, runtime: Runtime) -> None:
@@ -299,7 +319,7 @@ class TestTodoListScopeDuplicateWarning:
 class TestTodoListDepthCap:
     async def test_default_max_depth_5_allowed(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
-        # depth 5 = max_layers(4) + one todo_sub level under the deepest push.
+        # depth 5 = max_layers(4) + one todo_update(parent=...) level under the deepest push.
         deep = Todo(
                           content="L1",
             status="pending",
@@ -420,7 +440,7 @@ class TestTodoListDepthCap:
         assert "maximum nesting depth" in res.output
 
 
-class Testtodo_subDepthGuard:
+class TestTodoUpdateDepthGuard:
     """Defensive depth guard: todo_sub cannot add below max_layers + 1."""
 
     async def test_sub_depth_guard_with_limited_layers(self, runtime: Runtime) -> None:
@@ -432,7 +452,7 @@ class Testtodo_subDepthGuard:
         runtime.config.loop_control.todo_max_layers = 0
         res = await sub(TodoSubParams(title="child"))
         assert res.is_error
-        assert "Cannot add sub-todos deeper than 1 layers" in res.output
+        assert "Cannot add children deeper than 1 layers" in res.output
 
     async def test_sub_depth_guard_allows_at_limit(self, runtime: Runtime) -> None:
         push = todo_push(runtime)
@@ -442,7 +462,7 @@ class Testtodo_subDepthGuard:
         await push(TodoPushParams(title="B"))
         await push(TodoPushParams(title="C"))
         await push(TodoPushParams(title="D"))  # deepest pushed level (4/4)
-        # todo_sub may still add one level under the deepest pushable parent.
+        # todo_update(parent=...) may still add one level under the deepest pushable parent.
         res = await sub(TodoSubParams(title="leaf"))
         assert not res.is_error
         node = _read_root_todo(lst, "A").children[0].children[0].children[0]

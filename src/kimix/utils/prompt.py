@@ -142,11 +142,11 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         lines.append("")
     if strong:
         lines.append(
-            "CRITICAL: Unfinished `todo_write` tasks remain. Mark every remaining item `completed` with `todo_write` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[completed]`."
+            "CRITICAL: Unfinished `todo_write` tasks remain. Mark every remaining item `completed` with `todo_update` (or `todo_write` for bulk edits) before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[completed]`."
         )
     else:
         lines.append(
-            "You have unfinished `todo_write` tasks. Update statuses below and mark every pending/in-progress item `completed` before finishing."
+            "You have unfinished `todo_write` tasks. Update statuses below with `todo_update` and mark every pending/in-progress item `completed` before finishing."
         )
 
     def _render_todo(item: Any, indent: int = 0) -> None:

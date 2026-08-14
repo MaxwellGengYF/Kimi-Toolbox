@@ -2,7 +2,7 @@
 
 作为 coding agent，核心能力不仅体现在对代码逻辑的理解与生成上，更体现在与外部环境的高效交互之中。本教程将系统性地介绍当前默认 agent worker（`src/kimix/agent_worker.json`）所拥有的全部**内置工具（Built-in Tools）**，并深入讲解如何在提示词（Prompt）中精准地引导 agent 调用这些工具，以完成从文件操作、代码执行、信息检索到复杂任务编排的各类工作。
 
-> **注意**：`agent_worker.json` 通过 `extend: default` 继承基础配置，但由于显式重写了 `tools` 字段，最终可用的工具集**仅包含** `agent_worker.json` 中列出的 21 个工具。以下列表即为实际可用的完整配置。
+> **注意**：`agent_worker.json` 通过 `extend: default` 继承基础配置，但由于显式重写了 `tools` 字段，最终可用的工具集**仅包含** `agent_worker.json` 中列出的 26 个工具。以下列表即为实际可用的完整配置。
 
 ---
 
@@ -47,7 +47,7 @@
 | **代码执行** | `Run`, `Python`, `Bash`, `pwsh` | 执行可执行文件、bash / powershell 命令或 Python 代码 |
 | **进程管理** | `job_output` | 读取、列出、导出或终止后台任务 |
 | **搜索与信息** | `fetch_url`, `web_search` | 获取网页内容、执行网络搜索 |
-| **状态、记忆与上下文** | `todo_write`, `retrieve`, `context_usage`, `compact` | 追踪任务进度、回溯历史、监控与压缩上下文 |
+| **状态、记忆与上下文** | `todo_write`, `todo_update`, `retrieve`, `context_usage`, `compact` | 追踪任务进度、回溯历史、监控与压缩上下文 |
 | **子代理与并行** | `subagent`, `list_agents`, `interrupt_agent`, `workflow` | 创建/列出/关闭子代理，并行分发同质任务 |
 
 ---
@@ -157,8 +157,13 @@
 
 #### `todo_write`
 - **功能**：追踪复杂/多步骤任务的进度。支持 `pending`（待办）、`in_progress`（进行中）、`done`（完成）三种状态，每条待办还可携带 `notes`（备注）。
-- **要点**：仅在复杂任务中使用，且每次更新必须传入**完整的任务列表**（也接受单个待办或别名（`todos`，兼容 `items`））；通过 `todo_push`/`todo_sub`/`todo_pop` 支持嵌套子任务。
+- **要点**：仅在复杂任务中使用，且每次更新必须传入**完整的任务列表**（也接受单个待办或别名（`todos`，兼容 `items`））；通过 `todo_push`/`todo_pop` 与 `todo_update(parent=...)` 支持嵌套子任务。对于单个条目的轻量修改，应优先使用 `todo_update`。
 - **示例场景**：重构一个大型模块时，将任务拆分为"调研依赖 → 修改接口 → 更新测试 → 验证编译"并持续更新进度。
+
+#### `todo_update`
+- **功能**：通过标题定位并修改单个待办，无需重写整个列表。支持修改状态、备注和重命名。
+- **要点**：优先用于轻量编辑（如标记完成、改备注、改标题）；默认启用模糊匹配以兼容标题微小差异，也支持 `force=True` 处理状态回退等边界情况。
+- **示例场景**：完成某一步骤后，用 `todo_update` 将其状态改为 `done`；或在执行过程中给当前任务补充备注。
 
 #### `retrieve`
 - **功能**：仅检索历史消息（BM25 相似度 + 时间衰减，含已压缩轮次）；或按 `id`（如 `prune_0`）取回指定轮次；无持久化写入能力。

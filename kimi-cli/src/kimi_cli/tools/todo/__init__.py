@@ -27,33 +27,16 @@ from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
 
 _TODOLIST_DESCRIPTION = (
-    "Record and update a structured task list for the current work. Send the "
-    "ENTIRE list every call — it REPLACES the previous list (there are no "
-    "partial updates, no per-item edits). Use it to plan multi-step work and "
-    "show progress: add one todo per concrete step before you start. Mark "
-    "every todo being actively worked on `in_progress` — several at once when "
-    "work genuinely runs in parallel (e.g. concurrent subagents or background "
-    "commands), one for sequential work; while work remains, at least one "
-    "task should be `in_progress`. Mark a todo `completed` the moment it is "
-    "done (do not batch completions), and allow no `in_progress` item only "
-    "once all work is complete. Skip the list for trivial single-step tasks. "
-    "Statuses: `pending` (not started), `in_progress` (being worked on now), "
-    "`completed` (finished).\n"
-    "\n"
-    "Project notes: mode='append' (default) merges by exact content at the "
-    "ROOT level: root items are updated, new items are appended.\n"
-    "NOTE: todo_write writes only match root-level items. Items inside the "
-    "active stack scope (children) are NOT updated by this tool — use todo_sub "
-    "to add or edit items under the current parent. "
-    "Passing todos=[] is a no-op (list unchanged); use mode='clear' to empty the list.\n"
-    "mode='replace' replaces the list only when every existing todo is done (errors otherwise); "
-    "set force=True to replace unconditionally; "
-    "mode='clear' empties the list (errors unless every old todo is done, or force=True).\n"
-    "Keep exactly one item in_progress at a time and mark items done immediately after finishing them. "
-    "If you send several in_progress items with auto_fix enabled (default), the LAST one is "
-    "treated as the current focus and kept; the earlier ones are auto-completed.\n"
-    "When a todo stack is active (a parent was pushed), the tree is shown with a `Stack:` breadcrumb — "
-    "use todo_sub to add or edit items under the current parent and todo_pop to finish it."
+    "Bulk read/replace/clear of the whole todo tree. "
+    "For single-item edits use todo_update; for hierarchical work use todo_push and todo_pop.\n\n"
+    "Write modes:\n"
+    "- append (default): merges root-level todos by exact title; new titles are appended.\n"
+    "- replace: replaces the whole list; only allowed when all existing todos are done (use force=True to override).\n"
+    "- clear: empties the list; only allowed when all todos are done (use force=True to override).\n\n"
+    "Notes:\n"
+    "- Send the complete list each write; there are no partial edits.\n"
+    "- Keep exactly one item in_progress at a time; auto_fix=True resolves conflicts by keeping the last listed item.\n"
+    "- Statuses: pending, in_progress, done (or completed)."
 )
 
 def _truncate_prompt(text: str, max_len: int = 200) -> str:
@@ -93,7 +76,7 @@ def _hint_error(text: str) -> str:
     return "\nHint: " + text
 
 _TODOLIST_SUCCESS_HINT = (
-    "todo_push to start a parent todo, or todo_write to read the tree."
+    "todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree."
 )
 
 # Mode map — only canonical values accepted
@@ -429,7 +412,7 @@ class TodoList(CallableTool2[Params]):
                 return self._error(
                     f"Error: Duplicate todo titles found: {duplicates}",
                     f"Duplicate todo titles found: {duplicates}",
-                    hint='todo_sub to update an existing todo, or todo_write to read the tree.',
+                    hint='todo_update(parent=...) to target a specific duplicate, or todo_write to read the tree.',
                 )
 
             if self._count_all(new_todos) > _MAX_TODOS:
@@ -483,14 +466,14 @@ class TodoList(CallableTool2[Params]):
             warnings.extend(result.warnings)
 
         # 3b. Enforce maximum tree nesting depth (all modes) so created trees
-        # stay reachable via todo_push/todo_sub stack navigation: the deepest
-        # pushable level is max_layers, plus one todo_sub level under it.
+# stay reachable via todo_push/todo_update stack navigation: the deepest
+# pushable level is max_layers, plus one todo_update level under it.
         max_layers = self._max_layers()
         max_depth = max_layers + 1
         if self._max_tree_depth(final_todos) > max_depth:
             return self._error(
                 f"Error: Todo tree exceeds maximum nesting depth of {max_depth} levels "
-                f"(todo_max_layers={max_layers}). Flatten the tree, or build it with todo_push/todo_sub.",
+                f"(todo_max_layers={max_layers}). Flatten the tree, or build it with todo_push/todo_update(parent=...).",
                 f"Todo tree exceeds maximum nesting depth of {max_depth} levels.",
                 display=[self._build_display_block(final_todos)],
             )
@@ -565,7 +548,7 @@ class TodoList(CallableTool2[Params]):
         model's tool inventory stays consistent after a failure.
         """
         if hint is None:
-            hint = "todo_write to read the tree, or todo_push to start a parent todo."
+            hint = "todo_write to read the tree, todo_update to edit one, or todo_push to start a parent."
         return ToolReturnValue(
             is_error=True,
             output=output + _hint_error(hint),
@@ -710,7 +693,7 @@ class TodoList(CallableTool2[Params]):
         only inside a stack scope (a child/grandchild) would be appended as a
         brand-new root item instead of updating the nested one. The warning is
         non-blocking because identical titles in different scopes are otherwise
-        legal; it names the nested parent so the caller can switch to todo_sub.
+        legal; it names the nested parent so the caller can switch to todo_update(parent=...).
         """
         if not old_todos or not new_todos:
             return []
@@ -732,7 +715,7 @@ class TodoList(CallableTool2[Params]):
             if parent:
                 warnings.append(
                     f'"{t.content}" already exists in the tree (under "{parent}"); '
-                    "todo_write merges root-level titles only — use todo_sub to update it."
+                    "todo_write merges root-level titles only — use todo_update(parent=\"{parent}\", title=\"{t.content}\") to update it."
                 )
         return warnings
 
@@ -1368,7 +1351,7 @@ class TodoList(CallableTool2[Params]):
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(data, path)
 
-# ── Stack/tree tools: todo_push / todo_pop / todo_sub ───────────────────────────
+# ── Stack/tree tools: todo_push / todo_pop ──────────────────────────────────────
 # These operate on the same persisted todo tree as todo_write but navigate a
 # ``todo_stack`` breadcrumb (root → current focus parent) instead of replacing
 # the whole list. See plan: todo_write Stack & Tree Structure.
@@ -1397,7 +1380,7 @@ class todo_push(TodoList):
     name: str = "todo_push"
     description: str = (
         "Push a new parent todo onto the current stack scope, making it the focus "
-        "parent. Add sub-todos under it with todo_sub and finish it with todo_pop. "
+        "parent. Add sub-todos under it with todo_update(parent=...) and finish it with todo_pop. "
         "Pushing deeper than the configured max layers errors."
     )
     params: type[TodoPushParams] = TodoPushParams
@@ -1432,7 +1415,7 @@ class todo_push(TodoList):
 
         max_layers = self._max_layers()
         if depth >= max_layers:
-            hint = "Use todo_sub to add sub-todos at this level instead of pushing deeper."
+            hint = "Use todo_update(parent=...) to add sub-todos at this level instead of pushing deeper."
             breadcrumb = f"Stack: {' > '.join(healed_stack)}" if healed_stack else "Stack: (root)"
             return ToolError(
                 message=f"Cannot push deeper than {max_layers} layers.",
@@ -1446,7 +1429,7 @@ class todo_push(TodoList):
 
         scope = node.children if node is not None else todos
         if any(t.content == title for t in scope):
-            hint = f'Use todo_sub "{title}" to update the existing item.'
+            hint = f'Use todo_update(parent=..., title="{title}") to update the existing item.'
             return ToolError(
                 message=f'Duplicate todo title "{title}" in this scope.',
                 brief=hint,
@@ -1481,7 +1464,7 @@ class todo_push(TodoList):
             + "\n"
             + f'Pushed "{title}" (depth {depth + 1}/{max_layers}).'
             + _hint_next(
-                f'todo_sub "<sub>" to add sub-todos under "{title}"; todo_pop to finish it.'
+                f'todo_update(parent="{title}", title="<sub>") to add sub-todos under "{title}"; todo_pop to finish it.'
             )
         )
         if warnings:
@@ -1556,7 +1539,7 @@ class todo_pop(TodoList):
         if unfinished and not params.complete:
             hint = (
                 f'"{popped_title}" has {unfinished} unfinished item(s). '
-                "Finish them with todo_sub, or call todo_pop with complete=True "
+                "Finish them with todo_update, or call todo_pop with complete=True "
                 "to mark them done and pop."
             )
             return ToolError(
@@ -1602,7 +1585,7 @@ class todo_pop(TodoList):
         if unfinished:
             output += (
                 f'\nNote: "{popped_title}" had {unfinished} unfinished item(s) — '
-                "all marked done. Use todo_sub with force=True or todo_write "
+                "all marked done. Use todo_update with force=True or todo_write "
                 "mode='replace' with force=True to reopen if that was a mistake."
             )
         output += _hint_next("todo_push to start the next parent, or todo_write to read the tree.")
@@ -1615,29 +1598,47 @@ class todo_pop(TodoList):
             display=[self._build_display_block(todos)],
         )
 
-class TodoSubParams(BaseModel):
+
+
+class TodoUpdateParams(BaseModel):
+    """Parameters for todo_update: lightweight single-todo edits without rewriting the tree."""
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    title: str = Field(description="Title", min_length=1, max_length=65536)
+    title: str = Field(
+        description="Title of the todo to update or create. Exact match is tried first; fuzzy match is used when enabled and exact match fails.",
+        min_length=1,
+        max_length=65536,
+    )
     status: TodoStatus | None = Field(
         default=None,
-        description=(
-            "Status. One of: pending, in_progress, done. "
-            "Omit to keep the existing status (new items default to pending)."
-        ),
+        description="New status. One of: pending, in_progress, done. Omit to keep the current status (new items default to pending).",
     )
     notes: str | None = Field(
         default=None,
-        description="Notes. MUST write, be comprehensively, detailed.",
+        description="New notes. Omit to keep current notes; pass an empty string to clear notes.",
         max_length=65536,
     )
     rename_to: str | None = Field(
         default=None,
-        description="Rename the matched sub-todo to this title.",
+        description="Rename the matched todo to this title.",
+    )
+    parent: str | None = Field(
+        default=None,
+        description=(
+            "Parent todo title that scopes the lookup and creation. "
+            "When provided, the title is searched only under that parent. "
+            "If the title does not exist there, a new child is created. "
+            "Use an empty string for the root scope (creation allowed); omit to search globally and update only."
+        ),
+    )
+    fuzzy: bool = Field(
+        default=True,
+        description="When True and the exact title is not found, use fuzzy matching to find the nearest title.",
     )
     force: bool = Field(
         default=False,
-        description="Allow regressing a 'done' item back to pending/in_progress.",
+        description="Allow regressing a 'done' item back to pending/in_progress, or allow renaming that would collide with a done item.",
     )
 
     @field_validator("status", mode="before")
@@ -1647,13 +1648,12 @@ class TodoSubParams(BaseModel):
             return None
         return _canonical_status(v)
 
-    @field_validator("title")
+    @field_validator("title", "parent")
     @classmethod
-    def _validate_title(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("Title cannot be empty or contain only whitespace")
-        return stripped
+    def _validate_title(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip()
 
     @field_validator("rename_to")
     @classmethod
@@ -1663,140 +1663,420 @@ class TodoSubParams(BaseModel):
         stripped = v.strip()
         return stripped if stripped else None
 
-class todo_sub(TodoList):
-    name: str = "todo_sub"
+
+class todo_update(TodoList):
+    """Lightweight single-todo edit or child creation by title; no need to resend the whole tree."""
+
+    name: str = "todo_update"
     description: str = (
-        "Create/update a sub-todo under the current parent scope. Same-title "
-        "calls update status/notes (status is preserved when omitted); new titles "
-        "append a child. Set force=True to reopen a 'done' item."
+        "Update a single existing todo by title, or create a child under an explicit parent. "
+        "Use this for lightweight edits such as marking an item done, setting it in_progress, "
+        "editing notes, renaming, or adding a sub-todo via parent=... . "
+        "Searches the whole tree unless parent is provided; exact match is tried first, "
+        "then fuzzy matching if enabled."
     )
-    params: type[TodoSubParams] = TodoSubParams
+    params: type[TodoUpdateParams] = TodoUpdateParams
 
     def __init__(self, runtime: Runtime) -> None:
-        # See todo_push.__init__: subclass todo_write for shared helpers, bypass
-        # TodoList.__init__ and use this class's own name/description/params.
+        # Subclass todo_write for shared persistence/helpers, but use our own metadata.
         CallableTool2.__init__(self)
         self._runtime = runtime
 
     @override
-    async def __call__(self, params: TodoSubParams) -> ToolReturnValue:
+    async def __call__(self, params: TodoUpdateParams) -> ToolReturnValue:
         todos = self._load_todos()
-        stack = self._load_stack()
-        node, _depth, healed_stack, warnings = self._resolve_scope(todos)
-        if stack and node is None:
-            hint = "Use todo_write to read the tree and todo_push to re-enter a parent."
+        warnings: list[str] = []
+        parent_raw = params.parent.strip() if params.parent is not None else None
+
+        if not todos and not (parent_raw is not None and parent_raw == ""):
+            hint = "Use todo_push or todo_write to create todos first."
             return ToolError(
-                message="Todo stack is broken.",
+                message="No todos to update.",
                 brief=hint,
-                output=(
-                    "Error: Todo stack is broken; cannot resolve the current scope."
-                    + _hint_error(hint)
-                ),
+                output="Error: No todos exist." + _hint_error(hint),
             )
 
-        # Defensive depth guard: children of the deepest pushable node sit at
-        # max_layers + 1; anything deeper is unreachable via stack navigation.
-        max_layers = self._max_layers()
-        if len(healed_stack) + 1 > max_layers + 1:
-            hint = "Use todo_write to read the tree and flatten it, then todo_push/todo_sub to rebuild."
-            return ToolError(
-                message=f"Cannot add sub-todos deeper than {max_layers + 1} layers.",
-                brief=hint,
-                output=(
-                    f"Error: Cannot add sub-todos deeper than {max_layers + 1} layers "
-                    f"(todo_max_layers={max_layers})."
-                    + _hint_error(hint)
-                ),
-            )
+        if parent_raw is not None:
+            return await self._update_or_create_under_parent(todos, parent_raw, params, warnings)
 
-        scope = node.children if node is not None else todos
-        parent_title = node.content if node is not None else "root"
-        title = params.title
-        existing = next((t for t in scope if t.content == title), None)
+        return await self._update_global(todos, params, warnings)
 
-        if existing is None:
-            # New title → append child (same-title would have matched above).
-            scope.append(
-                Todo(
-                    content=title,
-                    status=params.status if params.status is not None else "pending",
-                    notes=params.notes,
-                )
-            )
-            verb = "added"
-            final_title = title
-        else:
-            # Same title → write: rename, then update status/notes.
-            # Regression guard (mirrors todo_write): done → pending/in_progress
-            # is blocked unless force=True. Status is preserved when omitted,
-            # so a bare same-title call never resets an item to pending.
-            new_status = params.status if params.status is not None else existing.status
-            if existing.status == "done" and new_status != "done" and not params.force:
-                hint = (
-                    f'Use todo_sub "{title}" with force=True to reopen a done item, '
-                    "or todo_write with mode='replace' and force=True to restart the whole list."
-                )
+    async def _update_global(
+        self, todos: list[Todo], params: TodoUpdateParams, warnings: list[str]
+    ) -> ToolReturnValue:
+        target_title = params.title
+        path = self._find_path(todos, target_title)
+        matched_title = target_title
+
+        if path is None:
+            if not params.fuzzy:
+                hint = 'Use todo_write to read the tree, or set fuzzy=True to search by similarity.'
                 return ToolError(
-                    message=f'Cannot regress completed todo "{title}" back to {new_status}.',
+                    message=f'Todo "{target_title}" not found.',
                     brief=hint,
-                    output=(
-                        f'Error: Cannot regress completed todo "{title}" back to {new_status}.'
-                        + _hint_error(hint)
-                    ),
+                    output=f'Error: No todo titled "{target_title}" found.' + _hint_error(hint),
                 )
-            if params.rename_to and params.rename_to != title:
-                if any(t.content == params.rename_to for t in scope if t is not existing):
-                    hint = f'Use todo_sub "{params.rename_to}" to update instead of renaming.'
+            nearest = self._find_nearest_titles(
+                [target_title],
+                self._collect_titles(todos),
+                top_k=1,
+                score_cutoff=TodoList._FUZZY_TITLE_CUTOFF,
+                processor=str.lower,
+            )
+            hits = nearest.get(target_title, [])
+            if not hits:
+                hint = "Use todo_write to read the tree."
+                return ToolError(
+                    message=f'No todo matching "{target_title}" found.',
+                    brief=hint,
+                    output=f'Error: No todo matching "{target_title}" found.' + _hint_error(hint),
+                )
+            matched_title = hits[0].choice
+            path = self._find_path(todos, matched_title)
+            warnings.append(f'Fuzzy matched "{target_title}" to "{matched_title}".')
+
+        assert path is not None
+        return self._apply_update(todos, path, matched_title, params, warnings)
+
+    async def _update_or_create_under_parent(
+        self, todos: list[Todo], parent_title: str, params: TodoUpdateParams, warnings: list[str]
+    ) -> ToolReturnValue:
+        if parent_title == "":
+            parent_path: list[int] | None = []
+            parent_node = None
+            resolved_parent_title = "root"
+        else:
+            parent_path = self._find_path(todos, parent_title)
+            if parent_path is None:
+                stack = self._load_stack()
+                # Auto-heal when the missing parent is the current stack top.
+                if stack and stack[-1] == parent_title:
+                    _node, _depth, healed_stack, heal_warnings = self._resolve_scope(todos)
+                    warnings.extend(heal_warnings)
+                    if healed_stack != stack:
+                        stack_error = self._save_stack(healed_stack)
+                        if stack_error:
+                            hint = "Use todo_write to read the tree and retry todo_update."
+                            return ToolError(
+                                message="Failed to save todo stack.",
+                                brief=hint,
+                                output=stack_error + _hint_error(hint),
+                            )
+                    if healed_stack:
+                        parent_title = healed_stack[-1]
+                        parent_path = self._find_path(todos, parent_title)
+                        assert parent_path is not None
+                        parent_node = self._node_at_path(todos, parent_path)
+                        resolved_parent_title = parent_node.content
+                    else:
+                        parent_path = []
+                        parent_node = None
+                        resolved_parent_title = "root"
+                elif not params.fuzzy:
+                    hint = 'Use todo_write to read the tree, or set fuzzy=True to search by similarity.'
                     return ToolError(
-                        message=f'Cannot rename "{title}" to "{params.rename_to}": title already exists.',
+                        message=f'Parent todo "{parent_title}" not found.',
                         brief=hint,
-                        output=(
-                            f'Error: Cannot rename "{title}" to "{params.rename_to}": '
-                            "title already exists in this scope."
-                            + _hint_error(hint)
-                        ),
+                        output=f'Error: No parent todo titled "{parent_title}" found.' + _hint_error(hint),
                     )
-                old_title = existing.content
-                existing.content = params.rename_to
-                # If the renamed child IS the stack top, update the breadcrumb.
-                if healed_stack and healed_stack[-1] == old_title:
-                    healed_stack[-1] = params.rename_to
-                title = params.rename_to
+                else:
+                    nearest = self._find_nearest_titles(
+                        [parent_title],
+                        self._collect_titles(todos),
+                        top_k=1,
+                        score_cutoff=TodoList._FUZZY_TITLE_CUTOFF,
+                        processor=str.lower,
+                    )
+                    hits = nearest.get(parent_title, [])
+                    if not hits:
+                        hint = "Use todo_write to read the tree."
+                        return ToolError(
+                            message=f'No parent todo matching "{parent_title}" found.',
+                            brief=hint,
+                            output=f'Error: No parent todo matching "{parent_title}" found.' + _hint_error(hint),
+                        )
+                    resolved_parent_title = hits[0].choice
+                    parent_path = self._find_path(todos, resolved_parent_title)
+                    warnings.append(f'Fuzzy matched parent "{parent_title}" to "{resolved_parent_title}".')
+                    assert parent_path is not None
+                    parent_node = self._node_at_path(todos, parent_path)
+            else:
+                parent_node = self._node_at_path(todos, parent_path)
+                resolved_parent_title = parent_node.content
 
-            # None/empty keeps old values, mirroring TodoList._merge_one.
-            if params.notes is not None and params.notes.strip():
-                existing.notes = params.notes
-            existing.status = new_status
-            verb = "updated"
-            final_title = title
+        scope = parent_node.children if parent_node is not None else todos
+        target_title = params.title
+        child_index = next((i for i, t in enumerate(scope) if t.content == target_title), None)
 
-        save_error = self._save_todos(todos, self._load_archived_todos())
+        if child_index is not None:
+            path = [*parent_path, child_index] if parent_path is not None else [child_index]
+            return self._apply_update(todos, path, target_title, params, warnings)
+
+        # New child creation under the resolved parent.
+        if params.rename_to is not None:
+            hint = f'Cannot rename a new child; use title="{params.rename_to}" to create it.'
+            return ToolError(
+                message=f'Cannot rename non-existent todo "{target_title}".',
+                brief=hint,
+                output=f'Error: "{target_title}" does not exist under "{resolved_parent_title}".' + _hint_error(hint),
+            )
+
+        parent_depth = len(parent_path) if parent_path is not None else 0
+        max_layers = self._max_layers()
+        if parent_depth > max_layers:
+            hint = f"Cannot add children deeper than {max_layers + 1} layers."
+            return ToolError(
+                message=f'Cannot add a child under "{resolved_parent_title}": too deep.',
+                brief=hint,
+                output=(
+                    f'Error: "{resolved_parent_title}" is at depth {parent_depth}; '
+                    f"children would exceed the maximum depth ({max_layers + 1})."
+                    + _hint_error(hint)
+                ),
+            )
+
+        new_child = Todo(
+            content=target_title,
+            status=params.status if params.status is not None else "pending",
+            notes=params.notes,
+        )
+        final_todos = self._insert_child_at_path(todos, parent_path, new_child)
+
+        if new_child.status == "in_progress":
+            conflicts = self._enforce_single_in_progress(final_todos)
+            if conflicts:
+                final_todos = self._auto_fix_in_progress(final_todos, warnings)
+
+        archived = self._load_archived_todos()
+        save_error = self._save_todos(final_todos, archived)
         if save_error:
-            hint = "Use todo_write to read the tree and retry todo_sub."
+            hint = "Use todo_write to read the tree and retry todo_update."
             return ToolError(
                 message="Failed to save todos.",
                 brief=hint,
                 output=save_error + _hint_error(hint),
             )
-        stack_error = self._save_stack(healed_stack)
+
+        stack = self._load_stack()
+        stack_error = self._save_stack(stack)
         if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_sub."
+            hint = "Use todo_write to read the tree and retry todo_update."
             return ToolError(
                 message="Failed to save todo stack.",
                 brief=hint,
                 output=stack_error + _hint_error(hint),
             )
 
-        render = self._render_scope(todos, healed_stack)
-        output = render + "\n" + f'Sub-todo "{final_title}" {verb} under "{parent_title}".'
+        output_lines: list[str] = ["Current todo list:"]
+        if stack:
+            output_lines.append(f"Stack: {' > '.join(stack)}")
+        tree = self._render_read_tree(final_todos, max_lines=_MAX_READ_ITEMS)
+        if tree:
+            output_lines.append(tree)
+
+        output = (
+            "\n".join(output_lines)
+            + "\n"
+            + f'Created "{target_title}" under "{resolved_parent_title}".'
+        )
+        next_hint = (
+            'todo_update to edit another item, todo_update(parent=...) to add a child, '
+            'todo_pop to finish the parent, or todo_write to read the tree.'
+            if stack
+            else 'todo_update to edit another item, todo_update(parent=...) to add a child, or todo_write to read the tree.'
+        )
+        output += _hint_next(next_hint)
+        if warnings:
+            output += "\n" + "\n".join(warnings)
+        return ToolReturnValue(
+            is_error=False,
+            output=output,
+            message=f'Created "{target_title}" under "{resolved_parent_title}".',
+            display=[self._build_display_block(final_todos)],
+        )
+
+    def _apply_update(
+        self,
+        todos: list[Todo],
+        path: list[int],
+        matched_title: str,
+        params: TodoUpdateParams,
+        warnings: list[str],
+    ) -> ToolReturnValue:
+        old_node = self._node_at_path(todos, path)
+        new_status = params.status if params.status is not None else old_node.status
+
+        # Regression guard: done -> pending/in_progress is blocked unless force=True.
+        if not params.force and old_node.status == "done" and new_status != "done":
+            hint = (
+                f'Use todo_update "{matched_title}" with force=True to reopen a done item, '
+                "or todo_write with mode='replace' and force=True to restart the whole list."
+            )
+            return ToolError(
+                message=f'Cannot regress completed todo "{matched_title}" back to {new_status}.',
+                brief=hint,
+                output=(
+                    f'Error: Cannot regress completed todo "{matched_title}" back to {new_status}.'
+                    + _hint_error(hint)
+                ),
+            )
+
+        # Rename collision guard within the matched scope.
+        final_title = matched_title
+        if params.rename_to is not None and params.rename_to != matched_title:
+            new_title = params.rename_to
+            parent_path = path[:-1]
+            siblings = (
+                self._node_at_path(todos, parent_path).children
+                if parent_path
+                else todos
+            )
+            if any(t.content == new_title for i, t in enumerate(siblings) if i != path[-1]):
+                hint = f'Use todo_update "{new_title}" to update the existing item instead of renaming.'
+                return ToolError(
+                    message=f'Cannot rename "{matched_title}" to "{new_title}": title already exists.',
+                    brief=hint,
+                    output=(
+                        f'Error: Cannot rename "{matched_title}" to "{new_title}": '
+                        "title already exists in this scope."
+                        + _hint_error(hint)
+                    ),
+                )
+            final_title = new_title
+
+        # Notes: None means keep existing; empty string clears notes.
+        final_notes = old_node.notes if params.notes is None else (params.notes.strip() or None)
+
+        final_todos = self._update_at_path(
+            todos,
+            path,
+            {
+                "content": final_title,
+                "status": new_status,
+                "notes": final_notes,
+            },
+        )
+
+        # Enforce single in_progress across the whole tree.
+        conflicts = self._enforce_single_in_progress(final_todos)
+        if conflicts:
+            final_todos = self._auto_fix_in_progress(final_todos, warnings)
+
+        archived = self._load_archived_todos()
+        save_error = self._save_todos(final_todos, archived)
+        if save_error:
+            hint = "Use todo_write to read the tree and retry todo_update."
+            return ToolError(
+                message="Failed to save todos.",
+                brief=hint,
+                output=save_error + _hint_error(hint),
+            )
+
+        # Heal the stack if the renamed title is part of the breadcrumb.
+        stack = self._load_stack()
+        updated_stack = stack
+        if params.rename_to is not None and matched_title in stack:
+            updated_stack = [final_title if t == matched_title else t for t in stack]
+        stack_error = self._save_stack(updated_stack)
+        if stack_error:
+            hint = "Use todo_write to read the tree and retry todo_update."
+            return ToolError(
+                message="Failed to save todo stack.",
+                brief=hint,
+                output=stack_error + _hint_error(hint),
+            )
+
+        output_lines: list[str] = ["Current todo list:"]
+        if updated_stack:
+            output_lines.append(f"Stack: {' > '.join(updated_stack)}")
+        tree = self._render_read_tree(final_todos, max_lines=_MAX_READ_ITEMS)
+        if tree:
+            output_lines.append(tree)
+
+        change_parts: list[str] = []
+        if params.status is not None:
+            change_parts.append(f"status={new_status}")
+        if params.notes is not None:
+            change_parts.append("notes updated")
+        if params.rename_to is not None:
+            change_parts.append(f'renamed to "{final_title}"')
+        change_summary = ", ".join(change_parts) if change_parts else "no changes"
+
+        output = "\n".join(output_lines) + "\n" + f'Updated "{matched_title}" ({change_summary}).'
         output += _hint_next(
-            f'todo_sub "<next>" for more sub-todos, or todo_pop to finish "{parent_title}".'
+            'todo_update to edit another item, todo_update(parent=...) to add a child, or todo_write to read the tree.'
         )
         if warnings:
             output += "\n" + "\n".join(warnings)
         return ToolReturnValue(
             is_error=False,
             output=output,
-            message=f'Sub-todo "{final_title}" {verb}.',
-            display=[self._build_display_block(todos)],
+            message=f'Updated "{matched_title}".',
+            display=[self._build_display_block(final_todos)],
         )
+
+    @staticmethod
+    def _insert_child_at_path(
+        items: list[Todo], parent_path: list[int] | None, child: Todo
+    ) -> list[Todo]:
+        """Return a new tree with ``child`` appended to the children of the node at ``parent_path``.
+
+        ``parent_path`` of ``None`` or ``[]`` appends to the root list.
+        """
+        if not parent_path:
+            return [*items, child]
+        new_items = list(items)
+        if len(parent_path) == 1:
+            parent = items[parent_path[0]]
+            new_items[parent_path[0]] = parent.model_copy(update={"children": [*parent.children, child]})
+        else:
+            child_updates = todo_update._insert_child_at_path(
+                items[parent_path[0]].children, parent_path[1:], child
+            )
+            new_items[parent_path[0]] = items[parent_path[0]].model_copy(
+                update={"children": child_updates}
+            )
+        return new_items
+
+    @staticmethod
+    def _collect_titles(items: list[Todo]) -> list[str]:
+        """Return every title in the tree, depth-first."""
+        titles: list[str] = []
+        for t in items:
+            titles.append(t.content)
+            titles.extend(todo_update._collect_titles(t.children))
+        return titles
+
+    @staticmethod
+    def _find_path(items: list[Todo], title: str, path: list[int] | None = None) -> list[int] | None:
+        """Return the index path to the first todo with the given title, or None."""
+        if path is None:
+            path = []
+        for i, t in enumerate(items):
+            if t.content == title:
+                return [*path, i]
+            child_path = todo_update._find_path(t.children, title, [*path, i])
+            if child_path is not None:
+                return child_path
+        return None
+
+    @staticmethod
+    def _node_at_path(items: list[Todo], path: list[int]) -> Todo:
+        """Return the node at the given index path."""
+        node = items[path[0]]
+        for idx in path[1:]:
+            node = node.children[idx]
+        return node
+
+    @staticmethod
+    def _update_at_path(items: list[Todo], path: list[int], updates: dict[str, Any]) -> list[Todo]:
+        """Return a new tree with the node at ``path`` updated via ``updates``."""
+        new_items = list(items)
+        if len(path) == 1:
+            new_items[path[0]] = items[path[0]].model_copy(update=updates)
+        else:
+            child_updates = todo_update._update_at_path(
+                items[path[0]].children, path[1:], updates
+            )
+            new_items[path[0]] = items[path[0]].model_copy(update={"children": child_updates})
+        return new_items

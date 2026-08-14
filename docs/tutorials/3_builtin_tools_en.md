@@ -1,8 +1,8 @@
 # Built-in Tools Guide
 
-A coding agent's power comes from efficient interaction with the environment. This guide covers all 17 built-in tools in `agent_worker.json` and how to prompt the agent to use them effectively.
+A coding agent's power comes from efficient interaction with the environment. This guide covers all 26 built-in tools in `agent_worker.json` and how to prompt the agent to use them effectively.
 
-> **Note:** `agent_worker.json` overrides the `tools` field via `extend: default`, so only the 18 tools listed there are available.
+> **Note:** `agent_worker.json` overrides the `tools` field via `extend: default`, so only the 26 tools listed there are available.
 
 ---
 
@@ -14,7 +14,7 @@ A coding agent's power comes from efficient interaction with the environment. Th
 | **Code Execution** | `Run`, `Python`, `Bash`, `pwsh` | Execute executables, bash / powershell commands, or Python code |
 | **Process Management** | `job_output` | Read, list, export, or kill background tasks |
 | **Search & Info** | `fetch_url` | Fetch web content |
-| **State & Tracking** | `todo_write` | Track progress |
+| **State & Tracking** | `todo_write`, `todo_update` | Track progress |
 | **Sub-agent & Session Management** | `subagent`, `list_agents`, `interrupt_agent` | Create, list, and close sub-agent sessions |
 
 ---
@@ -85,7 +85,10 @@ Fetch web content as Markdown via headless browser. Use for docs, API references
 ## State & Tracking
 
 #### `todo_write`
-Track multi-step task progress. States: `pending`, `in_progress`, `done`. Always pass the **complete list** on update.
+Track multi-step task progress. States: `pending`, `in_progress`, `done`. Always pass the **complete list** on update. For lightweight single-item edits, prefer `todo_update`.
+
+#### `todo_update`
+Update a single existing todo by title without rewriting the whole list. Supports status changes, notes edits, and renaming. Fuzzy matching is enabled by default.
 
 
 ---

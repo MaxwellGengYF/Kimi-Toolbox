@@ -231,7 +231,7 @@ def _detect_cascade_depth(messages: Sequence[Message]) -> int:
     return depth
 
 
-SAFETY_MARGIN_TOKENS: int = 4096
+SAFETY_MARGIN_TOKENS: int = 1024
 """Extra tokens reserved for unforeseen growth (tool metadata, formatting, etc.)."""
 
 

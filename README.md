@@ -122,7 +122,7 @@ The `KimiSoul` core loop actively keeps long runs on track — no manual babysit
 ### TodoList
 The `TodoList` tool tracks multi-step plans:
 - Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
-- Nested sub-todos via `todo_push`/`todo_sub`/`todo_pop` with a `Stack:` breadcrumb.
+- Nested sub-todos via `todo_push`/`todo_pop` with `todo_update(parent=...)`, showing a `Stack:` breadcrumb.
 
 ### Best-of-N Sampling
 
