@@ -180,11 +180,16 @@ class TestShouldAutoCompact:
     """Test the auto-compaction trigger logic across different model context sizes."""
 
     def test_200k_model_triggers_by_reserved(self):
-        """200K model: with no extra output budget only the 4096 safety margin is reserved."""
+        """200K model: with no output budget, reserved_context_size (50K) is the reservation."""
         # ratio check = 150K >= 170K (False)
-        # reserved check = 150K + 4096 >= 200K (False)
-        assert not should_auto_compact(
+        # reserved check = 150K + 50K >= 200K (True)
+        assert should_auto_compact(
             150_000, 200_000, trigger_ratio=0.85, reserved_context_size=50_000
+        )
+        # One token below the reserved boundary -> no trigger.
+        # reserved check = 149_999 + 50K = 199_999 < 200K (False)
+        assert not should_auto_compact(
+            149_999, 200_000, trigger_ratio=0.85, reserved_context_size=50_000
         )
         # ratio check = 170K >= 170K (True)
         assert should_auto_compact(
@@ -227,19 +232,20 @@ class TestShouldAutoCompact:
     def test_compaction_never_skippable_above_reserved_boundary(self):
         """The pruning-skip decision must keep the reserved-output boundary.
 
-        With only the safety margin reserved, compaction may be skipped only when
-        pruning brings the input strictly below ``max_context_size - safety_margin``.
-        Whenever the (post-prune) input reaches the boundary — even below the ratio
-        threshold — ``should_auto_compact`` must still fire so the context is
-        compacted before ``input_token_size >= context_token_size -
-        max_output_token_size`` holds (input + output must fit in the window).
+        With only the safety margin reserved (smaller than reserved_context_size),
+        compaction may be skipped only when pruning brings the input strictly below
+        ``max_context_size - reserved_context_size``. Whenever the (post-prune)
+        input reaches the boundary — even below the ratio threshold —
+        ``should_auto_compact`` must still fire so the context is compacted before
+        ``input_token_size >= context_token_size - max_output_token_size`` holds
+        (input + output must fit in the window).
         """
         max_context = 200_000
         # Use a high ratio so the reserved boundary is the only trigger.
         trigger_ratio = 0.99
         reserved = 75_000
         safety_margin = 4096
-        boundary = max_context - safety_margin  # 195_904
+        boundary = max_context - reserved  # 125_000 (reserved dominates the 4096 safety margin)
 
         # At/over the boundary -> must still fire.
         assert should_auto_compact(
@@ -308,15 +314,16 @@ class TestShouldAutoCompact:
             safety_margin_tokens=safety_margin,
         )
 
-    def test_tool_call_buffer_expands_reserved_boundary(self):
-        """A dynamic tool-call output buffer also expands the reserved boundary."""
+    def test_tool_call_buffer_dominates_reserved_boundary(self):
+        """A dynamic tool-call output buffer expands the boundary when it is the
+        largest single reservation."""
         max_context = 200_000
         reserved = 75_000
         max_tokens = 50_000
-        tool_buffer = 30_000
+        tool_buffer = 100_000
         safety_margin = 4096
-        output_budget = max_tokens + tool_buffer + safety_margin  # 84_096
-        boundary = max_context - output_budget  # 115_904
+        output_size = max_tokens + safety_margin  # 54_096
+        boundary = max_context - max(tool_buffer, reserved, output_size)  # 100_000
 
         assert should_auto_compact(
             boundary,
@@ -338,7 +345,8 @@ class TestShouldAutoCompact:
         )
 
     def test_safety_margin_expands_reserved_boundary(self):
-        """The 4096 token safety margin expands the reserved boundary."""
+        """The 4096 token safety margin expands the boundary when it exceeds a tiny
+        reserved_context_size (safety is bundled into the output reservation)."""
         max_context = 200_000
         reserved = 3_000
         safety_margin = 4096
@@ -387,13 +395,14 @@ class TestShouldAutoCompact:
             safety_margin_tokens=4096,
         )
 
-    def test_small_max_tokens_adds_only_safety_margin(self):
-        """When max_tokens is small, the reserved space is max_tokens + safety_margin."""
+    def test_small_max_tokens_reserved_context_dominates(self):
+        """When max_tokens + safety margin is smaller than reserved_context_size,
+        reserved_context_size is the reservation."""
         max_context = 200_000
         reserved = 75_000
         max_tokens = 50_000
         safety_margin = 4096
-        boundary = max_context - max_tokens - safety_margin  # 145_904
+        boundary = max_context - reserved  # 125_000
 
         assert should_auto_compact(
             boundary,
@@ -412,12 +421,13 @@ class TestShouldAutoCompact:
             safety_margin_tokens=safety_margin,
         )
 
-    def test_none_max_tokens_reserves_only_safety_margin(self):
-        """When max_tokens is None, only the safety margin is reserved."""
+    def test_none_max_tokens_reserved_context_dominates(self):
+        """When max_tokens is None, reserved_context_size is the reservation
+        (the 4096 safety margin alone is smaller)."""
         max_context = 200_000
         reserved = 75_000
         safety_margin = 4096
-        boundary = max_context - safety_margin  # 195_904
+        boundary = max_context - reserved  # 125_000
 
         # Use a high ratio so the reserved boundary is the only trigger.
         assert should_auto_compact(
@@ -434,6 +444,41 @@ class TestShouldAutoCompact:
             trigger_ratio=0.99,
             reserved_context_size=reserved,
             max_tokens=None,
+            safety_margin_tokens=safety_margin,
+        )
+
+    def test_large_tool_buffer_does_not_shrink_output_boundary(self):
+        """Regression: a large tool buffer must not shrink the boundary below the
+        output reservation.
+
+        With a 1M context, 384K max output and the tool buffer at its 1 MiB
+        ceiling (262_144 tokens), the boundary stays at
+        ``max_context - (max_tokens + safety_margin)`` = 660_480 (~63%), NOT at
+        398_336 (~38%) as it would if the reservations were summed.
+        """
+        max_context = 1_048_576
+        reserved = 75_000
+        max_tokens = 384_000
+        tool_buffer = 262_144
+        safety_margin = 4096
+        boundary = max_context - max(tool_buffer, reserved, max_tokens + safety_margin)  # 660_480
+
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+        assert not should_auto_compact(
+            boundary - 1,
+            max_context,
+            trigger_ratio=0.85,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
             safety_margin_tokens=safety_margin,
         )
 

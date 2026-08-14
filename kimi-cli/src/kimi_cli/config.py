@@ -136,21 +136,25 @@ Default is 3."""
     max_ralph_iterations: int = Field(default=0, ge=-1)
     """Extra iterations after the first turn in Ralph mode. Use -1 for unlimited."""
     reserved_context_size: int = Field(default=75_000, ge=1000)
-    """Minimum tokens guaranteed for input context.
+    """Reserved token count for the compaction trigger, also the input floor.
 
-    The actual reserved space follows ``max_tokens + tool_call_buffer_tokens +
-    safety_margin_tokens`` (Safety Margin is 4096). This value only acts as a
-    cap: if the computed output budget would leave less than
-    ``reserved_context_size`` tokens for input, the reserved space is capped at
+    The reserved space follows the context budget formula
+    ``max(tool_call_buffer_tokens, reserved_context_size, max_tokens +
+    safety_margin_tokens)`` (Safety Margin is 4096) — only the *largest* single
+    reservation counts, so a large per-tool output buffer does not shrink the
+    usable input window. ``reserved_context_size`` therefore acts both as the
+    default reservation when no output budget / tool buffer is configured, and
+    as a cap: if the computed reservation would leave less than
+    ``reserved_context_size`` tokens for input, it is capped at
     ``max_context_size - reserved_context_size``. Default is 75000."""
     compaction_trigger_ratio: float = Field(default=0.8, ge=0.5, le=0.99)
     """Context usage ratio threshold for auto-compaction. Default is 0.8 (80%).
 
     Auto-compaction triggers when ``context_tokens >= max_context_size *
     compaction_trigger_ratio`` or when ``context_tokens + reserved_output_budget
-    >= max_context_size``, where ``reserved_output_budget = min(max_tokens +
-    tool_call_buffer_tokens + safety_margin_tokens, max_context_size -
-    reserved_context_size)``."""
+    >= max_context_size``, where ``reserved_output_budget = min(max(
+    tool_call_buffer_tokens, reserved_context_size, max_tokens +
+    safety_margin_tokens), max_context_size - reserved_context_size)``."""
     max_system_prompt_tokens: int = Field(default=4_000, ge=1_000)
     """Maximum token count for the system prompt. If the constructed prompt exceeds
     this budget, step memory and changed-files lists are truncated progressively.
