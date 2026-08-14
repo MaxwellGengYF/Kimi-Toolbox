@@ -155,6 +155,26 @@ Default is 3."""
     >= max_context_size``, where ``reserved_output_budget = min(max(
     tool_call_buffer_tokens, reserved_context_size, max_tokens +
     safety_margin_tokens), max_context_size - reserved_context_size)``."""
+
+    # ── Context-overflow recovery (DSH port) ──────────────────────────────
+    context_overflow_retries: int = Field(default=1, ge=0, le=5)
+    """Max number of force-compact-and-retry cycles after a provider-confirmed
+    context-window-exceeded error, per step. 0 disables recovery.
+    Default is 1."""
+    context_overflow_preserve_depth: int = Field(default=1, ge=0, le=4)
+    """Preserve depth used for the forced overflow compaction (bypasses the
+    normal adaptive depth). Lower = more aggressive reduction.
+    Default is 1."""
+    context_overflow_force_threshold: bool = Field(default=True)
+    """When true, overflow compaction bypasses ``should_auto_compact`` entirely
+    (DSH context-overflow semantics: force one useful balanced reduction).
+    Default is true."""
+
+    # ── Durable compaction transaction ────────────────────────────────────
+    compaction_ledger_enabled: bool = Field(default=True)
+    """Persist compaction transactions (compaction_id, shadowed ranges/tokens)
+    to the session ledger file. Default is true."""
+
     max_system_prompt_tokens: int = Field(default=4_000, ge=1_000)
     """Maximum token count for the system prompt. If the constructed prompt exceeds
     this budget, step memory and changed-files lists are truncated progressively.

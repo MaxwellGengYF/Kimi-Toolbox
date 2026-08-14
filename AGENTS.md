@@ -5,6 +5,7 @@
 - Fix all errors reported by the syntax checker before proceeding.
 - use `uv run tools/git_diff.py <file> [<file> ...]` to check file diff.
 - use `uv sync --extra=all` after update any `pyproject.toml` to verify the changes.
+- The compaction pipeline (`kimi_cli/soul/compaction.py`) includes the durable transaction ledger (`compaction_ledger.py`), balanced tool-pairing cuts (`tool_pairing.py`), and the context-overflow force-compact-and-retry loop (`context_overflow.py`). When changing compaction behavior, keep the ledger failure-isolated (it must never break compaction) and preserve balanced-cut boundaries (never split an assistant tool call from its result).
 - **Performance rule**: Always use the following third-party libraries instead of their builtin counterparts. These are already declared as dependencies:
 
 | Third-party | Replaces | Usage |

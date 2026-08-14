@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+import pytest
 from inline_snapshot import snapshot
 from kosong.chat_provider import TokenUsage
-from kosong.message import AudioURLPart, ImageURLPart, Message, VideoURLPart
+from kosong.message import AudioURLPart, ImageURLPart, Message, ToolCall, VideoURLPart
+from kosong.tooling import Tool
 
 import kimi_cli.prompts as prompts
+from kimi_cli.llm import LLM
 from kimi_cli.soul.compaction import (
+    CompactionOptions,
     CompactionResult,
+    CompactionShrinkError,
     SimpleCompaction,
+    SummarizationInput,
+    SurfaceChangedError,
     should_auto_compact,
 )
 from kimi_cli.soul.compaction import CompactMode, _MODE_GUIDANCE
+from kimi_cli.soul.compaction_ledger import CompactionLedger
+from kimi_cli.soul.tool_pairing import balanced_cut_indices
+from kimi_cli.utils.tokens import count_message_tokens
 from kimi_cli.wire.types import TextPart, ThinkPart
 
 
@@ -722,3 +734,538 @@ def test_prepare_omits_decision_sections_by_default():
     prompt_text = result.compact_message.extract_text(" ")
     assert "## Decisions & Conclusions" not in prompt_text
     assert "## Verification Status" not in prompt_text
+
+
+# --- preserve_depth_override (Phase 4 prerequisite) -----------------------
+
+
+def test_compaction_options_preserve_depth_override_defaults_none():
+    assert CompactionOptions().preserve_depth_override is None
+
+
+def test_prepare_respects_preserve_depth_override():
+    """preserve_depth_override bypasses the configured preserve depth entirely."""
+    messages = [
+        Message(role="user", content=[TextPart(text="Q1")]),
+        Message(role="assistant", content=[TextPart(text="A1")]),
+        Message(role="user", content=[TextPart(text="Q2")]),
+        Message(role="assistant", content=[TextPart(text="A2")]),
+        Message(role="user", content=[TextPart(text="Q3")]),
+        Message(role="assistant", content=[TextPart(text="A3")]),
+    ]
+    result = SimpleCompaction(max_preserved_messages=1).prepare(
+        messages, options=CompactionOptions(preserve_depth_override=2)
+    )
+
+    assert result.compact_message is not None
+    texts = " ".join(
+        p.text for m in result.to_preserve for p in m.content if isinstance(p, TextPart)
+    )
+    # override=2 keeps the last 2 user/assistant messages (Q3, A3) plus the
+    # Phase-6 first message (Q1); the older pair is compacted
+    assert "Q3" in texts and "A3" in texts
+    assert "Q2" not in texts and "A2" not in texts
+    assert "A1" not in texts
+
+
+def test_prepare_without_override_uses_configured_depth():
+    messages = [
+        Message(role="user", content=[TextPart(text="Q1")]),
+        Message(role="assistant", content=[TextPart(text="A1")]),
+        Message(role="user", content=[TextPart(text="Q2")]),
+        Message(role="assistant", content=[TextPart(text="A2")]),
+        Message(role="user", content=[TextPart(text="Q3")]),
+        Message(role="assistant", content=[TextPart(text="A3")]),
+    ]
+    result = SimpleCompaction(max_preserved_messages=1).prepare(messages)
+
+    assert result.compact_message is not None
+    texts = " ".join(
+        p.text for m in result.to_preserve for p in m.content if isinstance(p, TextPart)
+    )
+    # configured depth=1 keeps only the last 1 user/assistant message (A3) plus
+    # the Phase-6 first message (Q1); Q3 is compacted
+    assert "A3" in texts
+    assert "Q3" not in texts
+    assert "Q2" not in texts and "A2" not in texts
+
+
+# --- balanced tool-pairing cuts in prepare --------------------------------
+
+
+def _tool_pair_history():
+    call1 = ToolCall(id="c1", function=ToolCall.FunctionBody(name="bash", arguments="{}"))
+    return [
+        Message(role="user", content=[TextPart(text="Q0")]),
+        Message(
+            role="assistant",
+            content=[TextPart(text="Thinking")],
+            tool_calls=[call1],
+        ),
+        Message(role="tool", content=[TextPart(text="R1")], tool_call_id="c1"),
+        Message(role="user", content=[TextPart(text="Q1")]),
+        Message(role="assistant", content=[TextPart(text="A1")]),
+    ]
+
+
+def test_prepare_balanced_cuts_do_not_split_tool_pairs():
+    """With balanced cuts on, the preserved tail never splits a call/result pair."""
+    messages = _tool_pair_history()
+    result = SimpleCompaction(max_preserved_messages=1).prepare(messages)
+
+    assert result.compact_message is not None
+    # the (call c1, R1) pair is compacted together
+    compact_text = result.compact_message.extract_text(" ")
+    assert "Thinking" in compact_text
+    assert "R1" in compact_text
+    # preserved tail = [Q0 (Phase 6), A1]
+    assert result.to_preserve == [messages[0], messages[4]]
+    assert len(result.to_preserve) == 2
+    # the final boundary is a balanced cut of the original history
+    assert len(messages) - len(result.to_preserve) in balanced_cut_indices(messages)
+
+
+def test_prepare_balanced_cuts_snaps_mid_pair_boundary():
+    """A history ending mid call/result pair: the preserved tail must not split it.
+
+    The raw boundary (index 2) falls between the assistant call and its result;
+    balanced cuts snap it left so the whole history is preserved instead.
+    """
+    call1 = ToolCall(id="c1", function=ToolCall.FunctionBody(name="bash", arguments="{}"))
+    messages = [
+        Message(role="user", content=[TextPart(text="Q0")]),
+        Message(role="assistant", content=[TextPart(text="C")], tool_calls=[call1]),
+        Message(role="user", content=[TextPart(text="M")]),
+        Message(role="tool", content=[TextPart(text="R1")], tool_call_id="c1"),
+        Message(role="user", content=[TextPart(text="Q1")]),
+        Message(role="assistant", content=[TextPart(text="A1")]),
+    ]
+    result = SimpleCompaction(max_preserved_messages=3).prepare(messages)
+
+    assert result.compact_message is None
+    assert result.to_preserve == messages
+
+
+def test_prepare_balanced_cuts_false_keeps_legacy_boundary():
+    """Opt-out (balanced_cuts=False) restores the legacy boundary exactly: the
+    call/result pair may be split."""
+    messages = _tool_pair_history()
+    balanced = SimpleCompaction(max_preserved_messages=1).prepare(messages)
+    legacy = SimpleCompaction(max_preserved_messages=1, balanced_cuts=False).prepare(messages)
+
+    # no tool messages in this history → identical legacy and balanced output
+    assert legacy == balanced
+
+
+def test_prepare_balanced_cuts_false_legacy_split_mid_pair():
+    """On a history where the legacy boundary splits a pair, balanced_cuts=False
+    keeps the split exactly as before."""
+    call1 = ToolCall(id="c1", function=ToolCall.FunctionBody(name="bash", arguments="{}"))
+    messages = [
+        Message(role="user", content=[TextPart(text="Q0")]),
+        Message(role="assistant", content=[TextPart(text="C")], tool_calls=[call1]),
+        Message(role="user", content=[TextPart(text="M")]),
+        Message(role="tool", content=[TextPart(text="R1")], tool_call_id="c1"),
+        Message(role="user", content=[TextPart(text="Q1")]),
+        Message(role="assistant", content=[TextPart(text="A1")]),
+    ]
+    result = SimpleCompaction(max_preserved_messages=3, balanced_cuts=False).prepare(messages)
+
+    assert result.compact_message is not None
+    # legacy: the call is compacted while its result is preserved (pair split)
+    assert messages[1] not in result.to_preserve
+    assert messages[3] in result.to_preserve
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: KV-cache-aligned summarization input + generate path
+# ---------------------------------------------------------------------------
+
+
+def _aligned_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="bash",
+            description="Run a shell command",
+            parameters={"type": "object", "properties": {}},
+        )
+    ]
+
+
+class StaticStreamedMessage:
+    """Minimal kosong ``StreamedMessage`` for fake providers."""
+
+    def __init__(self, parts: Sequence[object], usage: TokenUsage | None = None) -> None:
+        self._parts = list(parts)
+        self._usage = usage
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._parts:
+            raise StopAsyncIteration
+        return self._parts.pop(0)
+
+    @property
+    def id(self) -> str:
+        return "compaction-fake"
+
+    @property
+    def usage(self) -> TokenUsage | None:
+        return self._usage
+
+
+class RecordingProvider:
+    """Fake chat provider that records ``generate(...)`` arguments and returns
+    a static stream. ``on_generate`` (optional) runs inside ``generate`` and can
+    mutate state to simulate mid-flight conversation changes."""
+
+    name = "recording-compaction-provider"
+
+    def __init__(
+        self,
+        parts: Sequence[object],
+        usage: TokenUsage | None = None,
+        on_generate=None,
+    ) -> None:
+        self._parts = parts
+        self._usage = usage
+        self._on_generate = on_generate
+        self.calls: list[dict] = []
+
+    @property
+    def model_name(self) -> str:
+        return self.name
+
+    @property
+    def thinking_effort(self):
+        return None
+
+    async def generate(
+        self,
+        system_prompt: str,
+        tools: Sequence[Tool],
+        history: Sequence[Message],
+    ) -> StaticStreamedMessage:
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "tools": list(tools),
+                "history": list(history),
+            }
+        )
+        if self._on_generate is not None:
+            await self._on_generate(self, system_prompt, tools, history)
+        return StaticStreamedMessage(self._parts, usage=self._usage)
+
+    def with_thinking(self, effort):
+        return self
+
+
+def _fake_llm(provider) -> LLM:
+    return LLM(chat_provider=provider, max_context_size=200_000, capabilities=set())
+
+
+def test_prepare_builds_summarization_input_when_aligned_args_passed():
+    messages = _compaction_messages()
+    tools = _aligned_tools()
+
+    result = SimpleCompaction(max_preserved_messages=2).prepare(
+        messages, aligned_system_prompt="SYSTEM PROMPT", aligned_tools=tools
+    )
+
+    si = result.summarization_input
+    assert si is not None
+    assert isinstance(si, SummarizationInput)
+    assert si.system_prompt == "SYSTEM PROMPT"
+    assert list(si.tools) == tools
+    # region is the ORIGINAL to_compact messages (indices 1..4 of the input)
+    assert list(si.messages) == messages[1:5]
+    # instruction is a user message whose text is byte-identical to the legacy
+    # compact_message tail (same prompt-building code path)
+    assert si.instruction.role == "user"
+    assert si.instruction.content == [result.compact_message.content[-1]]
+    assert prompts.COMPACT in si.instruction.extract_text(" ")
+
+
+def test_prepare_summarization_input_none_without_aligned_args():
+    result = SimpleCompaction(max_preserved_messages=2).prepare(_compaction_messages())
+    assert result.summarization_input is None
+
+
+def test_prepare_summarization_input_none_when_region_empty():
+    """No aligned input when prepare decides nothing needs compaction."""
+    messages = [
+        Message(role="user", content=[TextPart(text="Latest question")]),
+        Message(role="assistant", content=[TextPart(text="Latest reply")]),
+    ]
+    result = SimpleCompaction(max_preserved_messages=2).prepare(
+        messages, aligned_system_prompt="SYSTEM", aligned_tools=_aligned_tools()
+    )
+    assert result.compact_message is None
+    assert result.summarization_input is None
+
+
+async def test_compact_kv_aligned_path_calls_generate_with_region_and_instruction():
+    messages = _compaction_messages()
+    tools = _aligned_tools()
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+    compactor = SimpleCompaction(max_preserved_messages=2)
+    prepared = compactor.prepare(
+        messages, aligned_system_prompt="SYSTEM PROMPT", aligned_tools=tools
+    )
+
+    result = await compactor.compact(
+        messages,
+        llm,
+        aligned_system_prompt="SYSTEM PROMPT",
+        aligned_tools=tools,
+    )
+
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["system_prompt"] == "SYSTEM PROMPT"
+    assert call["tools"] == tools
+    assert call["history"] == [
+        *prepared.summarization_input.messages,
+        prepared.summarization_input.instruction,
+    ]
+    instruction = call["history"][-1]
+    assert instruction.role == "user"
+    assert prompts.COMPACT in instruction.extract_text(" ")
+
+    # downstream handling identical to the legacy path
+    assert result.messages[0].role == "user"
+    assert result.messages[0].extract_text(" ").startswith(
+        "<system>Previous context has been compacted. Here is the compaction output:</system>"
+    )
+    assert result.messages[1:] == list(prepared.to_preserve)
+    assert result.usage is None
+
+
+async def test_compact_legacy_path_uses_flattened_message_and_empty_tools():
+    messages = _compaction_messages()
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(messages, llm)
+
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["system_prompt"] == (
+        "You are a helpful assistant that compacts conversation context."
+    )
+    assert call["tools"] == []
+    assert len(call["history"]) == 1
+    assert call["history"][0].role == "user"
+    assert prompts.COMPACT in call["history"][0].extract_text(" ")
+    # the envelope applies to the legacy path too
+    assert len(result.compaction_id) == 32
+    assert result.shadowed_tokens == count_message_tokens(messages[1:5])
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: transactional envelope — shrink / stability / ledger
+# ---------------------------------------------------------------------------
+
+
+async def test_compact_shrink_check_raises_when_usage_output_not_smaller():
+    messages = _compaction_messages()
+    # usage.output (1000) >= shadowed tokens of the compacted region
+    usage = TokenUsage(input_other=0, output=1000)
+    provider = RecordingProvider(parts=[TextPart(text="tiny")], usage=usage)
+    llm = _fake_llm(provider)
+
+    with pytest.raises(CompactionShrinkError, match="not smaller"):
+        await SimpleCompaction(max_preserved_messages=2).compact(
+            messages, llm, aligned_system_prompt="SYSTEM PROMPT", aligned_tools=[]
+        )
+
+
+async def test_compact_shrink_check_raises_for_long_summary_without_usage():
+    messages = _compaction_messages()
+    # no usage → summary tokens estimated from text; a 20k-char summary is
+    # far larger than the compacted region
+    provider = RecordingProvider(parts=[TextPart(text="x" * 20_000)])
+    llm = _fake_llm(provider)
+
+    with pytest.raises(CompactionShrinkError, match="not smaller"):
+        await SimpleCompaction(max_preserved_messages=2).compact(
+            messages, llm, aligned_system_prompt="SYSTEM PROMPT"
+        )
+
+
+async def test_compact_stability_check_raises_when_messages_mutated():
+    messages = _compaction_messages()
+
+    async def mutate(_provider, _system_prompt, _tools, _history):
+        messages.append(Message(role="user", content=[TextPart(text="intruder")]))
+
+    provider = RecordingProvider(
+        parts=[TextPart(text="short summary")], on_generate=mutate
+    )
+    llm = _fake_llm(provider)
+
+    with pytest.raises(SurfaceChangedError, match="conversation changed"):
+        await SimpleCompaction(max_preserved_messages=2).compact(
+            messages, llm, aligned_system_prompt="SYSTEM PROMPT", aligned_tools=[]
+        )
+
+
+def test_compaction_result_defaults_for_legacy_construction():
+    result = CompactionResult(messages=[], usage=None)
+    assert result.compaction_id == ""
+    assert result.shadowed_tokens == 0
+
+
+async def test_compact_result_propagates_compaction_id_and_shadowed_tokens():
+    messages = _compaction_messages()
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(
+        messages, llm, aligned_system_prompt="SYSTEM PROMPT", aligned_tools=[]
+    )
+
+    assert len(result.compaction_id) == 32
+    assert all(c in "0123456789abcdef" for c in result.compaction_id)
+    # shadowed region is the original messages compacted (indices 1..4)
+    assert result.shadowed_tokens == count_message_tokens(messages[1:5])
+
+
+async def test_compact_writes_ledger_record_on_success(tmp_path):
+    messages = _compaction_messages()
+    ledger = CompactionLedger(tmp_path / "ledger.jsonl")
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(
+        messages,
+        llm,
+        aligned_system_prompt="SYSTEM PROMPT",
+        aligned_tools=[],
+        ledger=ledger,
+    )
+
+    rec = ledger.latest()
+    assert rec is not None
+    assert rec.compaction_id == result.compaction_id
+    assert rec.error is None
+    assert rec.shrank is True
+    assert rec.shadowed_range == (0, 4)
+    assert rec.shadowed_tokens == result.shadowed_tokens
+    assert rec.summary_tokens == count_message_tokens(
+        [Message(role="user", content=[TextPart(text="short summary")])]
+    )
+
+
+async def test_compact_writes_ledger_error_on_failure(tmp_path):
+    messages = _compaction_messages()
+    ledger = CompactionLedger(tmp_path / "ledger.jsonl")
+    # huge usage.output → shrink check fails after the transaction started
+    usage = TokenUsage(input_other=0, output=999_999)
+    provider = RecordingProvider(parts=[TextPart(text="tiny")], usage=usage)
+    llm = _fake_llm(provider)
+
+    with pytest.raises(CompactionShrinkError):
+        await SimpleCompaction(max_preserved_messages=2).compact(
+            messages,
+            llm,
+            aligned_system_prompt="SYSTEM PROMPT",
+            aligned_tools=[],
+            ledger=ledger,
+        )
+
+    rec = ledger.latest()
+    assert rec is not None
+    assert rec.error is not None
+    assert "not smaller" in rec.error
+    assert rec.shrank is False
+
+
+async def test_compact_legacy_path_with_ledger_records_shadowed_tokens(tmp_path):
+    """The legacy path reconstructs to_compact exactly for ledger accounting."""
+    messages = _compaction_messages()
+    ledger = CompactionLedger(tmp_path / "ledger.jsonl")
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(
+        messages, llm, ledger=ledger
+    )
+
+    rec = ledger.latest()
+    assert rec is not None
+    assert rec.shrank is True
+    assert rec.shadowed_tokens == result.shadowed_tokens
+    assert rec.shadowed_tokens == count_message_tokens(messages[1:5])
+
+
+async def test_compact_with_ledger_never_raises_on_broken_ledger_path(tmp_path):
+    """Failure isolation: a ledger that cannot be written must not break compact."""
+    messages = _compaction_messages()
+    blocker = tmp_path / "blocker.txt"
+    blocker.write_text("file")
+    ledger = CompactionLedger(blocker / "ledger.jsonl")  # parent is a file
+    provider = RecordingProvider(parts=[TextPart(text="short summary")])
+    llm = _fake_llm(provider)
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(
+        messages,
+        llm,
+        aligned_system_prompt="SYSTEM PROMPT",
+        aligned_tools=[],
+        ledger=ledger,
+    )
+
+    assert len(result.compaction_id) == 32
+    assert result.messages[0].extract_text(" ") == (
+        "<system>Previous context has been compacted. Here is the compaction output:</system>"
+        " short summary"
+    )
+
+
+async def test_compact_error_ledger_failure_does_not_mask_real_exception(tmp_path):
+    """Even when the ledger record_end fails on the error path, the original
+    exception still propagates."""
+    messages = _compaction_messages()
+    blocker = tmp_path / "blocker.txt"
+    blocker.write_text("file")
+    ledger = CompactionLedger(blocker / "ledger.jsonl")  # broken path
+    usage = TokenUsage(input_other=0, output=999_999)
+    provider = RecordingProvider(parts=[TextPart(text="tiny")], usage=usage)
+    llm = _fake_llm(provider)
+
+    with pytest.raises(CompactionShrinkError):
+        await SimpleCompaction(max_preserved_messages=2).compact(
+            messages,
+            llm,
+            aligned_system_prompt="SYSTEM PROMPT",
+            aligned_tools=[],
+            ledger=ledger,
+        )
+
+
+def test_manual_compaction_error_codes_exist():
+    from kimi_cli.soul.compaction import ManualCompactionError
+
+    for code in ("busy", "cancelled", "changed", "summary", "commit", "persistence"):
+        exc = ManualCompactionError(code)  # type: ignore[arg-type]
+        assert exc.code == code
+    assert "summary" in str(ManualCompactionError("summary"))
+
+
+def test_surface_fingerprint_helper():
+    from kimi_cli.soul.compaction import _surface_fingerprint
+
+    messages = [
+        Message(role="user", content=[TextPart(text="hello")]),
+        Message(role="assistant", content=[TextPart(text="world")]),
+    ]
+    fp = _surface_fingerprint(messages)
+    assert fp.history_len == 2
+    assert fp.token_count == count_message_tokens(messages)
+    assert fp.last_message_text == "world"
+    assert _surface_fingerprint([]).last_message_text is None

@@ -8,6 +8,7 @@ import regex as re
 import shutil
 import signal
 import textwrap
+import time
 import uuid
 from enum import Enum
 from pathlib import Path
@@ -271,17 +272,161 @@ if TYPE_CHECKING:
     from kimix.tools.background.utils import BackgroundStream
 OUTPUT_LIMIT = 16384
 _temp_folder = Path('.kimix_cache') / f'tmp_{os.getpid()}'
+# Absolute form used for cleanup so removal does not depend on the process
+# cwd at exit time (tools may run subprocesses with different cwds).
+_temp_folder_abs = _temp_folder.resolve()
 _temp_folder.mkdir(parents=True, exist_ok=True)
 _temp_idx = 0
 _temp_set: dict[Path, int] = dict()
 
 
+# ── Temp folder lifecycle ──────────────────────────────────────────────────
+#
+# Every process that imports this module creates its own ``.kimix_cache/tmp_<pid>``
+# folder and registers ``cleanup_temp_folder`` with ``atexit``.  That hook only
+# runs on graceful interpreter exit, so a process that is killed (tool
+# subprocess killed by timeout/Ctrl+C, crash, taskkill, ...) orphans its
+# folder forever.  The stale sweep below removes folders whose owning process
+# is no longer alive whenever a new process starts (and at every graceful
+# exit), so leftovers from dead processes never accumulate.
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True when *pid* refers to a currently-running process."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        error_access_denied = 5
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.restype = ctypes.c_void_p  # HANDLE is pointer-sized
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        close_handle = kernel32.CloseHandle
+        close_handle.restype = ctypes.c_int
+        close_handle.argtypes = [ctypes.c_void_p]
+        handle = open_process(process_query_limited_information, False, pid)
+        if handle:
+            close_handle(handle)
+            return True
+        # Access denied means the process exists but is not queryable; treat
+        # it as alive so we never delete a live process's folder.
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _rmtree_retry(path: Path, attempts: int = 3, delay: float = 0.05) -> bool:
+    """Recursively remove *path*, retrying transient Windows file locks.
+
+    A subprocess that just exited may still hold a handle on a file inside
+    the folder for a moment; a single ``shutil.rmtree`` would then fail and
+    (with ``ignore_errors=True``) silently leave the folder behind.
+    """
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 >= attempts:
+                return False
+            time.sleep(delay)
+    return False
+
+
+# A folder whose newest file is older than this is treated as orphaned even
+# when its PID appears alive: Windows recycles PIDs, so an old untouched
+# ``tmp_<pid>`` folder whose PID is in use again belongs to a long-dead
+# process.  A live kimix process refreshes its folder whenever a tool writes
+# output, so a genuinely active process is never touched.
+_STALE_TEMP_FOLDER_MAX_AGE = 24 * 60 * 60  # 1 day in seconds
+
+
+def _folder_has_fresh_file(path: Path, max_age: float = _STALE_TEMP_FOLDER_MAX_AGE) -> bool:
+    """Return True when any file inside *path* was modified within *max_age*."""
+    try:
+        cutoff = time.time() - max_age
+        for f in path.rglob("*"):
+            try:
+                if f.is_file() and f.stat().st_mtime > cutoff:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        return True  # cannot inspect -> keep (conservative)
+    return False
+
+
 def _cleanup_temp_folder() -> None:
-    if _temp_folder.exists():
-        shutil.rmtree(_temp_folder, ignore_errors=True)
+    """Delete this process's own temp folder (best-effort, never raises)."""
+    try:
+        _rmtree_retry(_temp_folder_abs)
+    except Exception:
+        pass
 
 
-atexit.register(_cleanup_temp_folder)
+def _cleanup_stale_temp_folders() -> None:
+    """Remove ``.kimix_cache/tmp_<pid>`` folders left by dead processes.
+
+    A folder is removed when its embedded PID is no longer alive, or when the
+    PID is alive but the folder has been untouched for over a day (Windows
+    recycles PIDs, so an old folder whose PID happens to be in use again
+    belongs to a long-dead process).  Fresh folders of live processes
+    (including PID reuse by unrelated processes) are always kept.
+    Best-effort and never raises.
+    """
+    base_dir = _temp_folder_abs.parent
+    if not base_dir.is_dir():
+        return
+    own = _temp_folder_abs
+    try:
+        for entry in base_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if not (name.startswith("tmp_") and name[4:].isdigit()):
+                continue
+            if entry == own:
+                continue
+            try:
+                pid = int(name[4:])
+            except ValueError:
+                continue
+            if _pid_alive(pid) and _folder_has_fresh_file(entry):
+                continue
+            try:
+                _rmtree_retry(entry)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def cleanup_temp_folder() -> None:
+    """Public entry point: delete this process's temp folder and stale leftovers.
+
+    Idempotent and safe to call at any time — e.g. from the CLI ``/exit``
+    handler before printing the goodbye, or from the atexit hook.  Only
+    folders whose owning process is no longer alive are removed.
+    """
+    _cleanup_temp_folder()
+    _cleanup_stale_temp_folders()
+
+
+# Sweep leftovers from previously killed processes before creating our own
+# folder (the sweep skips it anyway) so dead-PID folders never survive a
+# later start, then register the graceful-exit cleanup.
+_cleanup_stale_temp_folders()
+atexit.register(cleanup_temp_folder)
 
 
 

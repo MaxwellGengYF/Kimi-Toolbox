@@ -98,6 +98,10 @@ def _make_compactable_soul() -> Any:
     fake_result = MagicMock()
     fake_result.messages = []
     fake_result.estimated_token_count = 2_000
+    # A real CompactionResult carries these fields (Phase 3); the wire
+    # CompactionEnd reads them, so the fake must expose them too.
+    fake_result.compaction_id = "test-compaction"
+    fake_result.shadowed_tokens = 0
     soul._run_with_connection_recovery = AsyncMock(return_value=fake_result)
 
     soul._injection_providers = []

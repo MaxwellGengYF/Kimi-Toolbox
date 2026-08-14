@@ -178,8 +178,13 @@ class ACPSession:
                     case StepRetry():
                         pass
                     case CompactionBegin():
+                        # Optional payload fields (compaction_id/trigger/
+                        # shadowed_tokens) are tolerated — structural match.
                         pass
                     case CompactionEnd():
+                        # Optional payload fields (compaction_id/trigger/
+                        # shadowed_tokens/estimated_token_count/error) are
+                        # tolerated — structural match.
                         pass
                     case MCPLoadingBegin():
                         pass
@@ -279,6 +284,8 @@ class ACPSession:
                     case StepBegin():
                         pass
                     case CompactionBegin() | CompactionEnd():
+                        # Structural match tolerates the new optional fields
+                        # (compaction_id/trigger/shadowed_tokens/…).
                         pass
                     case MCPLoadingBegin() | MCPLoadingEnd():
                         pass

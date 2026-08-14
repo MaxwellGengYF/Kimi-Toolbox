@@ -58,11 +58,19 @@ from kimi_cli.soul.compaction import (
     SAFETY_MARGIN_TOKENS,
     CompactionOptions,
     CompactionResult,
+    CompactionShrinkError,
     CompactMode,
+    ManualCompactionError,
     SimpleCompaction,
+    SurfaceChangedError,
     adaptive_preserve_depth,
     estimate_text_tokens,
     should_auto_compact,
+)
+from kimi_cli.soul.compaction_ledger import CompactionLedger
+from kimi_cli.soul.context_overflow import (
+    OverflowRecoveryState,
+    is_context_overflow_error,
 )
 from kimi_cli.soul.context_pruning import ContextPruner, is_pruned_stub
 from kimi_cli.soul.context import Context
@@ -184,14 +192,9 @@ def classify_api_error(e: Exception) -> tuple[str, int | None]:
         if status >= 500:
             return "5xx_server", status_code
         if 400 <= status < 500:
-            msg_lower = str(e).lower()
-            if (
-                "context length" in msg_lower
-                or "context_length" in msg_lower
-                or "max tokens" in msg_lower
-                or "maximum context" in msg_lower
-                or "too many tokens" in msg_lower
-            ):
+            # Delegate marker matching to context_overflow so the marker list
+            # lives in exactly one place (Phase 4 §6.1).
+            if is_context_overflow_error(e):
                 return "context_overflow", status_code
             return "4xx_client", status_code
         return "api", status_code
@@ -314,6 +317,26 @@ class KimiSoul:
             restored_prompt, agent.runtime.session.work_dir
         ):
             agent.system_prompt_cached = restored_prompt
+
+        # Phase 3/4: durable compaction transaction ledger. Failure-isolated —
+        # a broken session dir or ledger path must never break soul init.
+        # ``CompactionLedger.for_session`` already degrades to a no-op ledger on
+        # disabled config or I/O errors; this extra guard treats any other
+        # construction failure as ``None`` (compaction then simply skips the
+        # ledger) with a warning.
+        try:
+            self._compaction_ledger = CompactionLedger.for_session(
+                agent.runtime.session.dir,
+                enabled=self._loop_control.compaction_ledger_enabled,
+            )
+        except Exception as exc:  # noqa: BLE001 — ledger must never break soul init
+            logger.warning(
+                "Failed to initialize compaction ledger for session {sid}: {err}; "
+                "compaction transactions will not be persisted",
+                sid=agent.runtime.session.id,
+                err=exc,
+            )
+            self._compaction_ledger = None
 
         if self._loop_control.adaptive_preserve_enabled:
             self._compaction = SimpleCompaction(
@@ -1456,10 +1479,20 @@ class KimiSoul:
         tail_band = self._loop_control.prune_recent_messages_protected + 8
         return max(0, history_len - tail_band)
 
-    async def _step(self) -> StepOutcome | None:
+    async def _step(
+        self, _overflow_state: OverflowRecoveryState | None = None
+    ) -> StepOutcome | None:
         """Run a single step and return a stop outcome, or None to continue.
 
         This is the implementation of ``2e. Step Execution`` in ``_agent_loop``.
+
+        Args:
+            _overflow_state: Per-step overflow retry budget shared across the
+                re-entrant ``_step`` calls made by the context-overflow recovery
+                loop (Phase 4 §6.2). ``None`` (the ``_agent_loop`` call site)
+                creates a fresh budget for this top-level step; the overflow
+                branch re-enters with the same instance so the budget is
+                consumed across re-entries instead of being reset.
 
         Sub-lifecycle (2e.x):
             2e.1. Notification delivery  - push pending notifications (root only).
@@ -1476,6 +1509,14 @@ class KimiSoul:
         # already checked in `run`
         assert self._runtime.llm is not None
         chat_provider = self._runtime.llm.chat_provider
+
+        # Phase 4: overflow retry budget for this top-level step. A fresh state
+        # is created per top-level invocation (matching the plan's "reset on
+        # each step begin"); re-entrant overflow calls share the same state via
+        # ``_overflow_state`` so the budget is bounded across re-entries.
+        overflow_state = _overflow_state or OverflowRecoveryState(
+            self._loop_control.context_overflow_retries
+        )
 
         # ═══════════════════════════════════════════════════════════════════════
         # 2e.1. NOTIFICATION DELIVERY (root role only)
@@ -1673,6 +1714,11 @@ class KimiSoul:
         t0 = time.monotonic()
         try:
             result = await _kosong_step_with_retry()
+            # Phase 4: the step made progress — reset the overflow retry budget.
+            # A fresh state is created per top-level ``_step`` anyway, so this is
+            # belt-and-suspenders mirroring DSH resetting on agent/status idle
+            # and assistant/message.
+            overflow_state.reset()
         except APIEmptyResponseError:
             # All retries exhausted — the model keeps producing only thinking
             # content (output token budget exhausted during reasoning).
@@ -1691,7 +1737,64 @@ class KimiSoul:
             )
         except (APIStatusError, APIConnectionError, APITimeoutError) as e:
             # All retries exhausted for persistent API errors.
-            # Interrupt the session and restart with the same user input.
+            # Phase 4: context-overflow recovery loop (DSH port). A
+            # provider-confirmed context-window-exceeded error force-compacts the
+            # context and retries the step instead of immediately interrupting
+            # the session. ``overflow_state`` (shared across the re-entrant
+            # ``_step`` calls below) bounds the re-entries to
+            # ``context_overflow_retries`` per top-level step, so the loop
+            # cannot recurse unboundedly (``max_steps_per_turn`` is an
+            # additional outer guard).
+            #
+            # NOTE: the forced compaction bypasses ``should_auto_compact``
+            # entirely — ``compact_context`` is called directly — so
+            # ``context_overflow_force_threshold`` is effectively always True in
+            # this branch (its plan default). The flag is kept in config as the
+            # documented DSH "force one useful balanced reduction" switch; when
+            # it is False this branch still force-compacts (otherwise the
+            # recovery loop would be useless).
+            if (
+                is_context_overflow_error(e)
+                and self._loop_control.context_overflow_retries > 0
+                and overflow_state.can_retry()
+            ):
+                logger.warning(
+                    "Context window exceeded at step {step}; force-compacting and retrying",
+                    step=self._current_step_no,
+                )
+                try:
+                    await self.compact_context(
+                        manual=False,
+                        mode=CompactMode.AGGRESSIVE,
+                        options=CompactionOptions(
+                            preserve_depth_override=(
+                                self._loop_control.context_overflow_preserve_depth
+                            ),
+                        ),
+                        trigger_override="overflow",
+                    )
+                except Exception as compact_err:
+                    logger.error(
+                        "Overflow compaction failed: {err}; preserving original error",
+                        err=compact_err,
+                    )
+                    raise SessionRestartRequired(
+                        f"Step {self._current_step_no}: {type(e).__name__}"
+                        + (
+                            f" (status={e.status_code})"
+                            if isinstance(e, APIStatusError)
+                            else ""
+                        )
+                        + " — context overflow recovery compaction failed, "
+                        "restarting session",
+                        original_error=e,
+                    ) from e
+                overflow_state.consumed()
+                # Re-run the same step on the compacted context, sharing the
+                # retry budget so the recovery loop stays bounded.
+                return await self._step(_overflow_state=overflow_state)
+            # Existing generic handling: interrupt the session and restart with
+            # the same user input.
             recovery_exhausted = getattr(e, "_kimi_recovery_exhausted", False)
             raise SessionRestartRequired(
                 f"Step {self._current_step_no}: {type(e).__name__}"
@@ -1818,6 +1921,8 @@ class KimiSoul:
         custom_instruction: str = "",
         avoid_cascade: bool = False,
         mode: CompactMode = CompactMode.BALANCED,
+        options: CompactionOptions | None = None,
+        trigger_override: Literal["auto", "manual", "overflow"] | None = None,
     ) -> None:
         """
         Compact the context.
@@ -1831,27 +1936,62 @@ class KimiSoul:
                 prompt instead of the cascade prompt, regardless of compaction depth.
             mode: High-level compaction style / emphasis. Does not change preserve
                 depth or adaptive preserve behavior.
+            options: Base ``CompactionOptions`` for this compaction. When provided
+                it is used as the base (e.g. the overflow recovery branch passes
+                ``preserve_depth_override``); ``todos_max_items`` is filled from
+                loop control when not set.
+            trigger_override: Explicit wire/ledger trigger. When set, it wins over
+                the derived ``manual``/``auto`` classification (the overflow
+                recovery branch passes ``"overflow"``).
 
         Raises:
             LLMNotSet: When the LLM is not set.
             ChatProviderError: When the chat provider returns an error.
+            ManualCompactionError: For manual compactions, classified failures
+                (``changed``/``summary``) raised by the stability/shrink checks.
         """
 
         chat_provider = self._runtime.llm.chat_provider if self._runtime.llm is not None else None
+
+        # Phase 4: the wire/ledger trigger. ``trigger_override`` (used by the
+        # overflow recovery branch) wins; otherwise derive from ``manual``.
+        trigger: Literal["auto", "manual", "overflow"] = (
+            trigger_override if trigger_override is not None else ("manual" if manual else "auto")
+        )
+        # Merge the caller's options (Phase 4 overflow passes
+        # ``preserve_depth_override``) with the session defaults.
+        base_options = options if options is not None else CompactionOptions()
+        compaction_options = CompactionOptions(
+            avoid_cascade=base_options.avoid_cascade,
+            mode=base_options.mode,
+            todos_max_items=(
+                base_options.todos_max_items
+                if base_options.todos_max_items is not None
+                else self._loop_control.todo_compact_injection_max_items
+            ),
+            preserve_depth_override=base_options.preserve_depth_override,
+        )
 
         async def _run_compaction_once() -> CompactionResult:
             if self._runtime.llm is None:
                 raise LLMNotSet()
             await self._ensure_recorder_restored()
+            # Phase 2: KV-cache-aligned summarization input — replay the real
+            # system prompt + tools so the provider's cacheable prefix stays
+            # aligned. Only for KimiToolset souls; other toolsets (e.g.
+            # ``EmptyToolset``/``SimpleToolset``) fall back to the legacy
+            # flattened path.
+            aligned_kwargs: dict[str, Any] = {}
+            if isinstance(self._agent.toolset, KimiToolset):
+                aligned_kwargs = {
+                    "aligned_system_prompt": self._agent.get_system_prompt(),
+                    "aligned_tools": list(self._agent.toolset.tools),
+                }
             return await self._compaction.compact(
                 self._context.history,
                 self._runtime.llm,
                 custom_instruction=custom_instruction,
-                options=CompactionOptions(
-                    avoid_cascade=avoid_cascade,
-                    mode=mode,
-                    todos_max_items=self._loop_control.todo_compact_injection_max_items,
-                ),
+                options=compaction_options,
                 recorder=self._llm_request_recorder,
                 todos_loader=(
                     self._load_todo_states_for_reminder
@@ -1863,6 +2003,9 @@ class KimiSoul:
                     if self._loop_control.todo_compact_injection_enabled
                     else None
                 ),
+                ledger=self._compaction_ledger,
+                trigger=trigger,
+                **aligned_kwargs,
             )
 
         start_time = time.monotonic()
@@ -1908,99 +2051,162 @@ class KimiSoul:
         )
 
         # (Pre-compaction durable-state flush removed: Retrieve is history-only.)
-        wire_send(CompactionBegin())
-        try:
-            compaction_result = await _compact_with_retry()
-        except Exception as _compact_exc:
-
-            raise
-        # Mark all indexed turns as archived before clearing context
-        self._history_index.mark_compacted()
-        self._history_index.save()
-        
-        # --- Export pre-compaction context ---
-        # cache-05: deterministic per-session export slot (one snapshot per
-        # compaction, latest wins) instead of a random ``token_hex`` suffix —
-        # the export path is embedded in the compacting system prompt, so a
-        # random nonce would make every post-compaction prompt unique and
-        # block prefix-cache continuity across runs/compactions.
-        rotated_path = self._runtime.session.work_dir / ".kimix_cache" / "context_compacted.md"
-        self._compact_cache_dir.append(rotated_path)
-        if rotated_path is not None:
-            export_result = await perform_export(
-                history=list(self._context.history),
-                session_id=self._runtime.session.id,
-                work_dir=str(self._runtime.session.work_dir),
-                token_count=self._context.token_count,
-                args=str(rotated_path),
-                default_dir=self._runtime.session.dir,
+        # Phase 3 transaction envelope: the Begin/End wire pair carries the
+        # compaction_id (a provisional uuid generated before the LLM call;
+        # ``CompactionEnd`` prefers the authoritative id returned by the
+        # compaction, falling back to the provisional one for no-op compactions),
+        # the trigger, and best-effort token accounting. ``CompactionEnd`` is
+        # always emitted — on success with stats, on failure with the error — so
+        # the wire always sees a balanced Begin/End pair.
+        compaction_id = uuid.uuid4().hex
+        wire_send(
+            CompactionBegin(
+                compaction_id=compaction_id,
+                trigger=trigger,
+                shadowed_tokens=None,
             )
-            if isinstance(export_result, tuple):
-                compact_export_path = str(export_result[0])
-                logger.info("Pre-compaction context exported to: {path}", path=compact_export_path)
-            else:
-                logger.warning("Failed to export pre-compaction context: {error}", error=export_result)
-                compact_export_path = None
-        else:
-            compact_export_path = None
-
-        self._recently_retrieved_turn_ids.clear()
-        self._pruner.reset_cooldown()
-        await self._context.clear()
-        # cache-05: render the compacting prompt (deterministic — the same
-        # arguments always produce the same string) and promote it to the
-        # persistent cache slot ONLY here, after the export attempt, so the
-        # normal prompt slot is never silently overwritten by a compacting
-        # render.
-        system_prompt_text = self._agent.get_system_prompt(
-            is_compacting=True, compact_export_path=compact_export_path
         )
-        self._agent.system_prompt_cached = system_prompt_text
-        await self._context.write_system_prompt(system_prompt_text)
-        await self._checkpoint()
-        await self._context.append_message(compaction_result.messages)
 
-        if self.is_root:
-            active_task_snapshot = build_active_task_snapshot(self._runtime.background_tasks)
-            if active_task_snapshot is not None:
-                active_task_message = Message(
-                    role="user",
-                    content=[
-                        system(
-                            "The following background tasks are still active after compaction. "
-                            "Use TaskList if you need to re-enumerate them later."
-                        ),
-                        TextPart(text=active_task_snapshot),
-                    ],
+        async def _compact_with_stability_retry() -> CompactionResult:
+            """Phase 3 stability check: if the conversation surface changed while
+            the summary was generated, re-prepare and try once more before
+            failing. A second ``SurfaceChangedError`` is a classified manual
+            error (``changed``) for ``/compact``; auto compactions re-raise so
+            the caller decides."""
+            try:
+                return await _compact_with_retry()
+            except SurfaceChangedError:
+                logger.warning(
+                    "Conversation changed during compaction; re-preparing and retrying once"
                 )
-                await self._context.append_message(active_task_message)
+                try:
+                    return await _compact_with_retry()
+                except SurfaceChangedError as second_err:
+                    if manual:
+                        raise ManualCompactionError(
+                            "changed", str(second_err)
+                        ) from second_err
+                    raise
 
-        # (Post-compaction state-restore message removed: Retrieve is history-only.)
+        try:
+            try:
+                compaction_result = await _compact_with_stability_retry()
+            except CompactionShrinkError as shrink_err:
+                # Phase 3 shrink check: the summary must be smaller than the
+                # region it replaces. Manual compactions surface a classified
+                # error (``summary``); auto compactions re-raise as-is.
+                if manual:
+                    raise ManualCompactionError(
+                        "summary", str(shrink_err)
+                    ) from shrink_err
+                raise
 
-        # Recompute the token estimate from the rebuilt context so it reflects
-        # the checkpoint marker, preserved messages, compaction summary, and any
-        # active-task snapshot. Also account for the system prompt, because the
-        # pre-compaction usage snapshots that callers compare against also
-        # include the system prompt.
-        estimated_token_count = estimate_text_tokens(
-            self._context.history, model=self.model_name
-        )
-        if system_prompt_text:
-            estimated_token_count += count_tokens(
-                system_prompt_text, model=self.model_name
+            # Mark all indexed turns as archived before clearing context
+            self._history_index.mark_compacted()
+            self._history_index.save()
+
+            # --- Export pre-compaction context ---
+            # cache-05: deterministic per-session export slot (one snapshot per
+            # compaction, latest wins) instead of a random ``token_hex`` suffix —
+            # the export path is embedded in the compacting system prompt, so a
+            # random nonce would make every post-compaction prompt unique and
+            # block prefix-cache continuity across runs/compactions.
+            rotated_path = self._runtime.session.work_dir / ".kimix_cache" / "context_compacted.md"
+            self._compact_cache_dir.append(rotated_path)
+            if rotated_path is not None:
+                export_result = await perform_export(
+                    history=list(self._context.history),
+                    session_id=self._runtime.session.id,
+                    work_dir=str(self._runtime.session.work_dir),
+                    token_count=self._context.token_count,
+                    args=str(rotated_path),
+                    default_dir=self._runtime.session.dir,
+                )
+                if isinstance(export_result, tuple):
+                    compact_export_path = str(export_result[0])
+                    logger.info("Pre-compaction context exported to: {path}", path=compact_export_path)
+                else:
+                    logger.warning("Failed to export pre-compaction context: {error}", error=export_result)
+                    compact_export_path = None
+            else:
+                compact_export_path = None
+
+            self._recently_retrieved_turn_ids.clear()
+            self._pruner.reset_cooldown()
+            await self._context.clear()
+            # cache-05: render the compacting prompt (deterministic — the same
+            # arguments always produce the same string) and promote it to the
+            # persistent cache slot ONLY here, after the export attempt, so the
+            # normal prompt slot is never silently overwritten by a compacting
+            # render.
+            system_prompt_text = self._agent.get_system_prompt(
+                is_compacting=True, compact_export_path=compact_export_path
             )
+            self._agent.system_prompt_cached = system_prompt_text
+            await self._context.write_system_prompt(system_prompt_text)
+            await self._checkpoint()
+            await self._context.append_message(compaction_result.messages)
 
-        # Estimate token count so context_usage is not reported as 0%
-        await self._context.update_token_count(estimated_token_count)
+            if self.is_root:
+                active_task_snapshot = build_active_task_snapshot(self._runtime.background_tasks)
+                if active_task_snapshot is not None:
+                    active_task_message = Message(
+                        role="user",
+                        content=[
+                            system(
+                                "The following background tasks are still active after compaction. "
+                                "Use TaskList if you need to re-enumerate them later."
+                            ),
+                            TextPart(text=active_task_snapshot),
+                        ],
+                    )
+                    await self._context.append_message(active_task_message)
 
-        # Notify dynamic injection providers that history has been rebuilt so
-        # they can reset any one-shot throttling state. Failures are isolated
-        # per-provider so compaction completion (wire event) is not affected
-        # by a buggy provider.
-        await self._notify_injection_providers_compacted()
+            # (Post-compaction state-restore message removed: Retrieve is history-only.)
 
-        wire_send(CompactionEnd())
+            # Recompute the token estimate from the rebuilt context so it reflects
+            # the checkpoint marker, preserved messages, compaction summary, and any
+            # active-task snapshot. Also account for the system prompt, because the
+            # pre-compaction usage snapshots that callers compare against also
+            # include the system prompt.
+            estimated_token_count = estimate_text_tokens(
+                self._context.history, model=self.model_name
+            )
+            if system_prompt_text:
+                estimated_token_count += count_tokens(
+                    system_prompt_text, model=self.model_name
+                )
 
+            # Estimate token count so context_usage is not reported as 0%
+            await self._context.update_token_count(estimated_token_count)
+
+            # Notify dynamic injection providers that history has been rebuilt so
+            # they can reset any one-shot throttling state. Failures are isolated
+            # per-provider so compaction completion (wire event) is not affected
+            # by a buggy provider.
+            await self._notify_injection_providers_compacted()
+
+            wire_send(
+                CompactionEnd(
+                    compaction_id=compaction_result.compaction_id or compaction_id,
+                    trigger=trigger,
+                    shadowed_tokens=compaction_result.shadowed_tokens,
+                    estimated_token_count=estimated_token_count,
+                )
+            )
+        except Exception as exc:
+            # End-of-transaction on failure: the ledger already records the error
+            # inside ``SimpleCompaction.compact`` (Phase 3 §5.2); do not
+            # double-record here — just make sure the wire sees a paired
+            # ``CompactionEnd`` carrying the failure.
+            wire_send(
+                CompactionEnd(
+                    compaction_id=compaction_id,
+                    trigger=trigger,
+                    error=str(exc),
+                )
+            )
+            raise
 
         _hook_task = asyncio.create_task(
             self._hook_engine.trigger(

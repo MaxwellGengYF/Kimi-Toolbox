@@ -145,11 +145,31 @@ async def test_wire_message_serde():
     _test_serde(msg)
 
     msg = CompactionBegin()
-    assert serialize_wire_message(msg) == snapshot({"type": "CompactionBegin", "payload": {}})
+    assert serialize_wire_message(msg) == snapshot(
+        {
+            "type": "CompactionBegin",
+            "payload": {
+                "compaction_id": None,
+                "trigger": None,
+                "shadowed_tokens": None,
+            },
+        }
+    )
     _test_serde(msg)
 
     msg = CompactionEnd()
-    assert serialize_wire_message(msg) == snapshot({"type": "CompactionEnd", "payload": {}})
+    assert serialize_wire_message(msg) == snapshot(
+        {
+            "type": "CompactionEnd",
+            "payload": {
+                "compaction_id": None,
+                "trigger": None,
+                "shadowed_tokens": None,
+                "estimated_token_count": None,
+                "error": None,
+            },
+        }
+    )
     _test_serde(msg)
 
     msg = MCPLoadingBegin()

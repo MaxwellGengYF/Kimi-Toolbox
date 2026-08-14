@@ -406,6 +406,15 @@ def _cmd_exit(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
         close_session(session)
     _globals._default_session = None
     _globals._default_role = None
+    # The process is about to finish: remove the shared tool temp folder
+    # (``.kimix_cache/tmp_<pid>``) plus leftovers from previously killed
+    # processes before the user sees the goodbye, so anonymous CLI runs leave
+    # no trace behind.  Best-effort; never blocks the exit.
+    try:
+        from kimix.tools.common import cleanup_temp_folder
+        cleanup_temp_folder()
+    except Exception:
+        pass
     print_success('bye!')
     return None, True
 
@@ -643,6 +652,7 @@ def _cmd_todo(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
         prompt_str = (
             f'Implement the TODO in {file_path}:\n'
             f'{todo_items}'
+            'Remove TODO comment after done.'
         )
     else:
         format_todo = lambda i, todo: f'{i}. Line {todo.line}: {todo.content.strip()}'
@@ -652,6 +662,7 @@ def _cmd_todo(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
             f'Implement all TODOs in {file_path} at once:\n\n'
             f'{todo_items}\n\n'
             'Make sure to handle each TODO completely.'
+            'Remove TODO comment after done.'
         )
 
     try:

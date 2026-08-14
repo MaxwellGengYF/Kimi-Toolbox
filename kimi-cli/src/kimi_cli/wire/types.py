@@ -104,7 +104,13 @@ class CompactionBegin(BaseModel):
     this event.
     """
 
-    pass
+    compaction_id: str | None = None
+    """Unique ID for this compaction transaction, pairing Begin with End."""
+    trigger: Literal["auto", "manual", "overflow"] | None = None
+    """What triggered this compaction: 'auto' (ratio/reserved boundary),
+    'manual' (/compact), or 'overflow' (context-window-exceeded recovery)."""
+    shadowed_tokens: int | None = None
+    """Estimated tokens being replaced (best-effort)."""
 
 
 class CompactionEnd(BaseModel):
@@ -113,7 +119,16 @@ class CompactionEnd(BaseModel):
     This event must be sent directly after a `CompactionBegin` event.
     """
 
-    pass
+    compaction_id: str | None = None
+    """Unique ID for this compaction transaction, pairing End with Begin."""
+    trigger: Literal["auto", "manual", "overflow"] | None = None
+    """What triggered this compaction: 'auto', 'manual', or 'overflow'."""
+    shadowed_tokens: int | None = None
+    """Estimated tokens being replaced (best-effort)."""
+    estimated_token_count: int | None = None
+    """Post-compaction token-count estimate."""
+    error: str | None = None
+    """Set when compaction failed after Begin."""
 
 
 class HookTriggered(BaseModel):

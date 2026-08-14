@@ -13,6 +13,7 @@ import kimi_cli.prompts as prompts
 from kimi_cli import logger
 from kimi_cli.soul import wire_send
 from kimi_cli.soul.agent import load_agents_md
+from kimi_cli.soul.compaction import ManualCompactionError
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.message import system
 from kimi_cli.utils.export import is_sensitive_file
@@ -63,7 +64,21 @@ async def compact(soul: KimiSoul, args: str):
 
     logger.info("Running `/compact`")
     instruction = args.strip()
-    await soul.compact_context(manual=True, custom_instruction=instruction)
+    try:
+        await soul.compact_context(manual=True, custom_instruction=instruction)
+    except ManualCompactionError as e:
+        # Phase 3 (§5.3): map classified manual-compaction failures to
+        # user-facing messages instead of dumping a raw traceback.
+        messages = {
+            "busy": "Compaction already in progress.",
+            "cancelled": "Compaction cancelled.",
+            "changed": "History changed during compaction; try again.",
+            "summary": "Summary was not smaller than the compacted content.",
+            "commit": "Compaction did not commit cleanly.",
+            "persistence": "Compaction did not persist cleanly.",
+        }
+        wire_send(TextPart(text=f"/compact failed: {messages.get(e.code, str(e))}"))
+        return
     wire_send(TextPart(text="The context has been compacted."))
     snap = soul.status
     wire_send(
