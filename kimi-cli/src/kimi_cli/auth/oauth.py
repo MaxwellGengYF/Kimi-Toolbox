@@ -60,6 +60,15 @@ KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 KIMI_CODE_OAUTH_KEY = "oauth/kimi-code"
 DEFAULT_OAUTH_HOST = "https://auth.kimi.com"
 KEYRING_SERVICE = "kimi-code"
+
+XAI_OAUTH_KEY = "oauth/xai"
+XAI_OAUTH_ISSUER = "https://auth.x.ai"
+XAI_OAUTH_DISCOVERY_URL = f"{XAI_OAUTH_ISSUER}/.well-known/openid-configuration"
+XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
+XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
+XAI_OAUTH_DEFAULT_TOKEN_URL = f"{XAI_OAUTH_ISSUER}/oauth2/token"
+XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
 REFRESH_INTERVAL_SECONDS = 60
 MIN_REFRESH_THRESHOLD_SECONDS = 300
 REFRESH_THRESHOLD_RATIO = 0.5
@@ -582,6 +591,169 @@ async def refresh_token(refresh_token: str, *, max_retries: int = 3) -> OAuthTok
     raise OAuthError("Token refresh failed after retries.") from last_exc
 
 
+async def _xai_oauth_discovery(*, timeout: float = 15.0, max_retries: int = 3) -> dict[str, str]:
+    """Fetch and validate xAI OIDC discovery metadata."""
+    import aiohttp
+
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with (
+                new_client_session() as session,
+                session.get(
+                    XAI_OAUTH_DISCOVERY_URL,
+                    headers={"Accept": "application/json"},
+                    timeout=timeout,
+                ) as response,
+            ):
+                if response.status != 200:
+                    raise OAuthError(f"xAI OIDC discovery returned status {response.status}.")
+                data_any = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+                logger.warning(
+                    "xAI OIDC discovery attempt {attempt} failed, retrying: {error}",
+                    attempt=attempt + 1,
+                    error=exc,
+                )
+                continue
+            raise OAuthError(f"xAI OIDC discovery failed: {exc}") from exc
+    if not isinstance(data_any, dict):
+        raise OAuthError("xAI OIDC discovery response was not a JSON object.")
+    data = cast(dict[str, Any], data_any)
+    token_endpoint = str(data.get("token_endpoint", "") or "").strip()
+    if not token_endpoint:
+        raise OAuthError("xAI OIDC discovery response missing token_endpoint.")
+    return {"token_endpoint": token_endpoint}
+
+
+async def refresh_xai_token(
+    refresh_token: str,
+    *,
+    max_retries: int = 3,
+    token_endpoint: str | None = None,
+) -> OAuthToken:
+    """Refresh an xAI OAuth access token."""
+    import aiohttp
+
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    if token_endpoint is None:
+        discovery = await _xai_oauth_discovery()
+        token_endpoint = discovery["token_endpoint"]
+
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with (
+                new_client_session() as session,
+                session.post(
+                    token_endpoint,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": XAI_OAUTH_CLIENT_ID,
+                        "refresh_token": refresh_token,
+                    },
+                ) as response,
+            ):
+                status = response.status
+                data: dict[str, Any]
+                try:
+                    data = await response.json(content_type=None)
+                except (orjson.JSONDecodeError, aiohttp.ContentTypeError):
+                    data = {}
+            if status in (401, 403):
+                raise OAuthUnauthorized(
+                    data.get("error_description") or "xAI token refresh unauthorized."
+                )
+            if status == 400:
+                raise OAuthUnauthorized(
+                    data.get("error_description") or "xAI token refresh rejected (invalid_grant)."
+                )
+            if status != 200:
+                desc = data.get("error_description") or f"xAI token refresh failed (HTTP {status})."
+                if status in _RETRYABLE_REFRESH_STATUSES:
+                    raise _RetryableRefreshError(desc)
+                raise OAuthError(desc)
+            return OAuthToken.from_response(data)
+        except OAuthUnauthorized:
+            raise
+        except (aiohttp.ClientError, TimeoutError, OSError, _RetryableRefreshError) as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+                logger.warning(
+                    "xAI token refresh attempt {attempt} failed, retrying: {error}",
+                    attempt=attempt + 1,
+                    error=exc,
+                )
+    raise OAuthError("xAI token refresh failed after retries.") from last_exc
+
+
+async def request_xai_device_authorization() -> DeviceAuthorization:
+    """Request an xAI OAuth device code."""
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+
+    async with (
+        new_client_session() as session,
+        session.post(
+            XAI_OAUTH_DEVICE_CODE_URL,
+            data={
+                "client_id": XAI_OAUTH_CLIENT_ID,
+                "scope": XAI_OAUTH_SCOPE,
+            },
+        ) as response,
+    ):
+        data = await response.json(content_type=None)
+        status = response.status
+    if status != 200:
+        raise OAuthError(f"xAI device authorization failed: {data}")
+    return DeviceAuthorization(
+        user_code=str(data["user_code"]),
+        device_code=str(data["device_code"]),
+        verification_uri=str(data.get("verification_uri") or ""),
+        verification_uri_complete=str(data.get("verification_uri_complete") or ""),
+        expires_in=int(data.get("expires_in") or 0) or None,
+        interval=int(data.get("interval") or 5),
+    )
+
+
+async def _request_xai_device_token(auth: DeviceAuthorization) -> tuple[int, dict[str, Any]]:
+    """Poll the xAI token endpoint for a device authorization decision."""
+    import aiohttp
+
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    discovery = await _xai_oauth_discovery()
+    token_endpoint = discovery["token_endpoint"]
+
+    try:
+        async with (
+            new_client_session() as session,
+            session.post(
+                token_endpoint,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_id": XAI_OAUTH_CLIENT_ID,
+                    "device_code": auth.device_code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+            ) as response,
+        ):
+            data_any: Any = await response.json(content_type=None)
+            status = response.status
+    except aiohttp.ClientError as exc:
+        raise OAuthError("xAI token polling request failed.") from exc
+    if not isinstance(data_any, dict):
+        raise OAuthError("Unexpected xAI token polling response.")
+    data = cast(dict[str, Any], data_any)
+    if status >= 500:
+        raise OAuthError(f"xAI token polling server error: {status}.")
+    return status, data
+
+
 def _select_default_model_and_thinking(models: list[ModelInfo]) -> tuple[ModelInfo, bool] | None:
     if not models:
         return None
@@ -764,6 +936,149 @@ async def logout_kimi_code(config: Config) -> AsyncIterator[OAuthEvent]:
     return
 
 
+async def login_xai(
+    config: Config, *, open_browser: bool = True
+) -> AsyncIterator[OAuthEvent]:
+    """Perform xAI OAuth device-code login and update config for Grok access."""
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Login requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    auth: DeviceAuthorization
+    token: OAuthToken | None = None
+    while True:
+        try:
+            auth = await request_xai_device_authorization()
+        except Exception as exc:
+            yield OAuthEvent("error", f"xAI login failed: {exc}")
+            return
+
+        yield OAuthEvent("info", "Please visit the following URL to finish xAI authorization.")
+        verification_url = auth.verification_uri_complete or auth.verification_uri
+        yield OAuthEvent(
+            "verification_url",
+            f"Verification URL: {verification_url}",
+            data={
+                "verification_url": verification_url,
+                "user_code": auth.user_code,
+            },
+        )
+        if open_browser and auth.verification_uri_complete:
+            try:
+                webbrowser.open(auth.verification_uri_complete)
+            except Exception as exc:
+                logger.warning("Failed to open browser: {error}", error=exc)
+
+        interval = max(auth.interval, 1)
+        printed_wait = False
+        try:
+            while True:
+                status, data = await _request_xai_device_token(auth)
+                if status == 200 and "access_token" in data:
+                    token = OAuthToken.from_response(data)
+                    break
+                error_code = str(data.get("error") or "unknown_error")
+                if error_code == "expired_token":
+                    raise OAuthDeviceExpired("xAI device code expired.")
+                error_description = str(data.get("error_description") or "")
+                if not printed_wait:
+                    yield OAuthEvent(
+                        "waiting",
+                        f"Waiting for xAI authorization...: {error_description.strip()}",
+                        data={
+                            "error": error_code,
+                            "error_description": error_description,
+                        },
+                    )
+                    printed_wait = True
+                await asyncio.sleep(interval)
+        except OAuthDeviceExpired:
+            yield OAuthEvent("info", "xAI device code expired, restarting login...")
+            continue
+        except Exception as exc:
+            yield OAuthEvent("error", f"xAI login failed: {exc}")
+            return
+        break
+
+    assert token is not None
+
+    oauth_ref = OAuthRef(storage="file", key=XAI_OAUTH_KEY)
+    oauth_ref = save_tokens(oauth_ref, token)
+
+    # Use a sensible default model; model list fetching is best-effort.
+    default_model_name = "grok"
+    model_name = default_model_name
+    try:
+        models = await _list_xai_models(token.access_token)
+        if models:
+            model_name = models[0]
+    except Exception as exc:
+        logger.warning("Failed to list xAI models, falling back to {model}: {error}", model=default_model_name, error=exc)
+
+    from kimi_cli.config import _resolve_model_defaults
+
+    context_size, _ = _resolve_model_defaults(model_name) or (2_000_000, None)
+    config.provider = LLMProvider(
+        type="xai",
+        base_url=XAI_DEFAULT_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=oauth_ref,
+    )
+    config.model = LLMModel(
+        model=model_name,
+        max_context_size=context_size,
+    )
+
+    save_config(config)
+    yield OAuthEvent("success", "Logged in to xAI successfully.")
+    return
+
+
+async def _list_xai_models(access_token: str) -> list[str]:
+    """Best-effort fetch of available xAI model IDs."""
+    import aiohttp
+
+    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    async with (
+        new_client_session() as session,
+        session.get(
+            f"{XAI_DEFAULT_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {access_token}"},
+        ) as response,
+    ):
+        data = await response.json(content_type=None)
+    if response.status != 200 or not isinstance(data, dict):
+        return []
+    models = data.get("data", [])
+    if not isinstance(models, list):
+        return []
+    return [str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")]
+
+
+async def logout_xai(config: Config) -> AsyncIterator[OAuthEvent]:
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Logout requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    delete_tokens(OAuthRef(storage="keyring", key=XAI_OAUTH_KEY))
+    delete_tokens(OAuthRef(storage="file", key=XAI_OAUTH_KEY))
+
+    provider = config.provider
+    if provider is not None and provider.oauth is not None and provider.oauth.key == XAI_OAUTH_KEY:
+        config.provider = None
+        config.model = None
+
+    save_config(config)
+    yield OAuthEvent("success", "Logged out of xAI successfully.")
+    return
+
+
 class OAuthManager:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -899,17 +1214,17 @@ class OAuthManager:
             )
         return api_key.get_secret_value()
 
-    def _kimi_code_ref(self) -> OAuthRef | None:
-        provider = self._config.provider
-        if provider is not None and provider.oauth:
-            return provider.oauth
-        for service in (
-            self._config.services.search,
-            self._config.services.fetch,
-        ):
-            if service and service.oauth and service.oauth.key == KIMI_CODE_OAUTH_KEY:
-                return service.oauth
-        return None
+    _KNOWN_OAUTH_KEYS: set[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY})
+
+    def _iter_known_oauth_refs(self) -> list[OAuthRef]:
+        """Return configured OAuth refs for providers we know how to refresh."""
+        refs: list[OAuthRef] = []
+        seen: set[str] = set()
+        for ref in self._iter_oauth_refs():
+            if ref.key in self._KNOWN_OAUTH_KEYS and ref.key not in seen:
+                refs.append(ref)
+                seen.add(ref.key)
+        return refs
 
     async def ensure_fresh(self, runtime: Runtime | None = None, *, force: bool = False) -> None:
         """Load persisted tokens, cache them, and refresh if close to expiry.
@@ -921,15 +1236,18 @@ class OAuthManager:
             force: When True, skip the expiry-threshold check and always
                 attempt a refresh.  Used after receiving a 401 from the server.
         """
-        ref = self._kimi_code_ref()
-        if ref is None:
-            return
+        for ref in self._iter_known_oauth_refs():
+            await self._ensure_fresh_single_ref(ref, runtime, force=force)
+
+    async def _ensure_fresh_single_ref(
+        self, ref: OAuthRef, runtime: Runtime | None = None, *, force: bool = False
+    ) -> None:
         token = load_tokens(ref)
         if token is None:
             return
         if self._should_suppress_persisted_token(ref, token):
             self._access_tokens.pop(ref.key, None)
-            self._apply_access_token(runtime, "")
+            self._apply_access_token(ref, runtime, "")
             if not self._can_retry_rejected_refresh_token(ref, token.refresh_token):
                 if force:
                     raise OAuthUnauthorized("Refresh token was recently rejected.")
@@ -937,7 +1255,7 @@ class OAuthManager:
         else:
             self._cache_access_token(ref, token)
             if token.access_token:
-                self._apply_access_token(runtime, token.access_token)
+                self._apply_access_token(ref, runtime, token.access_token)
         await self._refresh_tokens(ref, token, runtime, force=force)
 
     @asynccontextmanager
@@ -1021,7 +1339,7 @@ class OAuthManager:
                 ref, current
             ) and not self._can_retry_rejected_refresh_token(ref, refresh_token_value):
                 self._access_tokens.pop(ref.key, None)
-                self._apply_access_token(runtime, "")
+                self._apply_access_token(ref, runtime, "")
                 if force:
                     raise OAuthUnauthorized("Refresh token was recently rejected.")
                 return
@@ -1038,7 +1356,7 @@ class OAuthManager:
                     if locked_token and locked_token.refresh_token != refresh_token_value:
                         self._clear_rejected_refresh_token(ref)
                         self._cache_access_token(ref, locked_token)
-                        self._apply_access_token(runtime, locked_token.access_token)
+                        self._apply_access_token(ref, runtime, locked_token.access_token)
                         return
                     if not force and locked_token:
                         remaining = locked_token.expires_at - time.time()
@@ -1047,13 +1365,16 @@ class OAuthManager:
                         ):
                             self._clear_rejected_refresh_token(ref)
                             self._cache_access_token(ref, locked_token)
-                            self._apply_access_token(runtime, locked_token.access_token)
+                            self._apply_access_token(ref, runtime, locked_token.access_token)
                             return
                 else:
                     logger.warning("Could not acquire cross-process lock for token refresh")
 
                 try:
-                    refreshed = await refresh_token(refresh_token_value)
+                    if ref.key == XAI_OAUTH_KEY:
+                        refreshed = await refresh_xai_token(refresh_token_value)
+                    else:
+                        refreshed = await refresh_token(refresh_token_value)
                 except OAuthUnauthorized as exc:
                     # Give a concurrent instance time to persist its rotated token.
                     await asyncio.sleep(1)
@@ -1061,7 +1382,7 @@ class OAuthManager:
                     if latest and latest.refresh_token != refresh_token_value:
                         self._clear_rejected_refresh_token(ref)
                         self._cache_access_token(ref, latest)
-                        self._apply_access_token(runtime, latest.access_token)
+                        self._apply_access_token(ref, runtime, latest.access_token)
                         return
                     # delete_tokens(ref) would remove whatever the ref points
                     # to on disk right now, not "the refresh_token that just
@@ -1077,7 +1398,7 @@ class OAuthManager:
                     # /login still atomically overwrites the file.
                     self._mark_refresh_token_rejected(ref, refresh_token_value)
                     self._access_tokens.pop(ref.key, None)
-                    self._apply_access_token(runtime, "")
+                    self._apply_access_token(ref, runtime, "")
                     if force:
                         raise
                     logger.warning(
@@ -1095,24 +1416,33 @@ class OAuthManager:
                 self._clear_rejected_refresh_token(ref)
                 save_tokens(ref, refreshed)
                 self._cache_access_token(ref, refreshed)
-                self._apply_access_token(runtime, refreshed.access_token)
+                self._apply_access_token(ref, runtime, refreshed.access_token)
 
             finally:
                 xlock.release()
 
-    def _apply_access_token(self, runtime: Runtime | None, access_token: str) -> None:
+    def _apply_access_token(
+        self, ref: OAuthRef, runtime: Runtime | None, access_token: str
+    ) -> None:
         if runtime is None:
             return
         if runtime.llm is None or runtime.llm.model_config is None:
             return
         provider = runtime.config.provider
-        if provider is None or provider.oauth is None or provider.oauth.key != KIMI_CODE_OAUTH_KEY:
+        if provider is None or provider.oauth is None or provider.oauth.key != ref.key:
             return
-        from kosong.chat_provider.kimi import Kimi
+        if ref.key == KIMI_CODE_OAUTH_KEY:
+            from kosong.chat_provider.kimi import Kimi
 
-        assert isinstance(runtime.llm.chat_provider, Kimi), "Expected Kimi chat provider"
-        fallback_api_key = provider.api_key.get_secret_value()
-        runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
+            assert isinstance(runtime.llm.chat_provider, Kimi), "Expected Kimi chat provider"
+            fallback_api_key = provider.api_key.get_secret_value()
+            runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
+        elif ref.key == XAI_OAUTH_KEY:
+            from kosong.chat_provider.xai import XAI
+
+            assert isinstance(runtime.llm.chat_provider, XAI), "Expected XAI chat provider"
+            fallback_api_key = provider.api_key.get_secret_value()
+            runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
 
 
 if __name__ == "__main__":

@@ -152,7 +152,7 @@ def test_reminder_injected_when_todos_unfinished(monkeypatch: Any) -> None:
 
     strong_reminder = session.prompts[2]
     assert "CRITICAL" in strong_reminder
-    assert "Mark every remaining item `done` with `todo_write`" in strong_reminder
+    assert "Mark every remaining item `completed` with `todo_write`" in strong_reminder
     assert "- [pending] Analyze requirement" in strong_reminder
     assert "- [in_progress] Implement helper" in strong_reminder
     # Done todos are excluded from strong reminder too
@@ -246,8 +246,8 @@ def test_no_reminder_when_ensure_todo_finished_false(monkeypatch: Any) -> None:
     assert session.prompts == ["hello"]
 
 
-def test_reminder_includes_sub_todos(monkeypatch: Any) -> None:
-    """Sub-todos appear indented in the reminder output."""
+def test_reminder_includes_children(monkeypatch: Any) -> None:
+    """Child todos appear indented in the reminder output."""
     _suppress_stream(monkeypatch)
     from types import SimpleNamespace
 
@@ -255,7 +255,7 @@ def test_reminder_includes_sub_todos(monkeypatch: Any) -> None:
         title="Parent task",
         status="in_progress",
         notes="",
-        sub_todos=[
+        children=[
             SimpleNamespace(title="Sub task A", status="pending", notes=""),
             SimpleNamespace(title="Sub task B", status="done", notes=""),
         ],
@@ -268,7 +268,7 @@ def test_reminder_includes_sub_todos(monkeypatch: Any) -> None:
     reminder = session.prompts[1]
     assert "- [in_progress] Parent task" in reminder
     assert "  - [pending] Sub task A" in reminder
-    # Done sub-todos are excluded from the reminder
+    # Done children are excluded from the reminder
     assert "Sub task B" not in reminder
 
 
@@ -419,6 +419,39 @@ def test_subagent_reminder_reads_from_state_file(tmp_path: Path) -> None:
     assert "- [pending] Subagent task" in reminder
 
 
+def test_subagent_reminder_reads_children_from_state_file(tmp_path: Path) -> None:
+    """Nested children in subagent state files are rendered indented."""
+    store = FakeSubagentStore(tmp_path / "subagents")
+    runtime = FakeRuntimeSubagent(store, "agent1")
+    state = FakeState(todos=[])
+    session = FakeSessionSubagentWithToolset(state, runtime)
+
+    state_file = store.instance_dir("agent1") / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "todos": [
+                    {
+                        "title": "Parent",
+                        "status": "in_progress",
+                        "children": [
+                            {"title": "Child", "status": "pending"},
+                            {"title": "Done child", "status": "done"},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+
+    reminder = asyncio.run(prompt_mod._maybe_build_todo_reminder(session))
+
+    assert reminder is not None
+    assert "- [in_progress] Parent" in reminder
+    assert "  - [pending] Child" in reminder
+    assert "Done child" not in reminder
+
+
 def test_export_todo_list_to_json(tmp_path: Path, monkeypatch: Any) -> None:
     _suppress_stream(monkeypatch)
     todos = [
@@ -491,6 +524,72 @@ def test_export_session_todos_for_subagent(tmp_path: Path) -> None:
     # Source todos must remain untouched.
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert data["todos"] == [{"title": "Subagent task", "status": "pending"}]
+
+
+def test_export_todo_list_includes_children(tmp_path: Path, monkeypatch: Any) -> None:
+    """Exported JSON preserves the `children` nesting field."""
+    _suppress_stream(monkeypatch)
+    from types import SimpleNamespace
+
+    todos = [
+        SimpleNamespace(
+            title="Parent",
+            status="in_progress",
+            children=[
+                SimpleNamespace(title="Child", status="pending"),
+            ],
+        )
+    ]
+    session = FakeSessionWithCLI(has_set_todo=True, todos=todos)
+    export_path = tmp_path / "todos.json"
+
+    asyncio.run(
+        prompt_mod.prompt_async(
+            "hello",
+            session=session,
+            info_print=False,
+            export_todo_list_path=export_path,
+        )
+    )
+
+    exported = json.loads(export_path.read_text(encoding="utf-8"))
+    assert exported == [
+        {
+            "title": "Parent",
+            "status": "in_progress",
+            "children": [{"title": "Child", "status": "pending"}],
+        }
+    ]
+
+
+def test_reminder_renders_nested_children(monkeypatch: Any) -> None:
+    """Multi-level children are rendered with increasing indentation."""
+    _suppress_stream(monkeypatch)
+    from types import SimpleNamespace
+
+    todo = SimpleNamespace(
+        title="Level 0",
+        status="in_progress",
+        notes="",
+        children=[
+            SimpleNamespace(
+                title="Level 1",
+                status="pending",
+                notes="",
+                children=[
+                    SimpleNamespace(title="Level 2", status="pending", notes=""),
+                ],
+            ),
+        ],
+    )
+    session = FakeSessionWithCLI(has_set_todo=True, todos=[todo])
+
+    asyncio.run(prompt_mod.prompt_async("hello", session=session, info_print=False))
+
+    reminder = session.prompts[1]
+    assert "- [in_progress] Level 0" in reminder
+    assert "  - [pending] Level 1" in reminder
+    assert "    - [pending] Level 2" in reminder
 
 
 class FakePlannerSessionForPlan:

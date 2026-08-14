@@ -4,6 +4,7 @@ import pytest
 from inline_snapshot import snapshot
 from kosong.chat_provider.echo import EchoChatProvider
 from kosong.chat_provider.kimi import Kimi
+from kosong.chat_provider.xai import XAI
 from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
 from pydantic import SecretStr
 
@@ -195,6 +196,68 @@ def test_create_llm_openai_responses_with_session_id():
     llm = create_llm(provider, model, session_id="sess-abc-123")
     assert llm is not None
     assert isinstance(llm.chat_provider, OpenAIResponses)
+    assert llm.chat_provider._generation_kwargs["user"] == "sess-abc-123"
+
+
+def test_augment_provider_with_env_vars_xai(monkeypatch):
+    provider = LLMProvider(
+        type="xai",
+        base_url="",
+        api_key=SecretStr(""),
+    )
+    model = LLMModel(
+        model="",
+        max_context_size=0,
+        capabilities=None,
+    )
+
+    monkeypatch.setenv("XAI_BASE_URL", "https://xai-env.test/v1")
+    monkeypatch.setenv("XAI_API_KEY", "xai-env-key")
+    monkeypatch.setenv("XAI_MODEL_NAME", "grok-env")
+    monkeypatch.setenv("XAI_MODEL_MAX_CONTEXT_SIZE", "131072")
+    monkeypatch.setenv("XAI_MODEL_CAPABILITIES", "Image_In,THINKING,unknown")
+
+    augment_provider_with_env_vars(provider, model)
+
+    assert provider.type == "xai"
+    assert provider.base_url == "https://xai-env.test/v1"
+    assert provider.api_key.get_secret_value() == "xai-env-key"
+    assert model.model == "grok-env"
+    assert model.max_context_size == 131072
+    assert model.capabilities == {"image_in", "thinking"}
+
+
+def test_create_llm_xai_model_parameters():
+    provider = LLMProvider(
+        type="xai",
+        base_url="https://api.x.ai/v1",
+        api_key=SecretStr("xai-test-key"),
+    )
+    model = LLMModel(
+        model="grok-3",
+        max_context_size=131072,
+    )
+
+    llm = create_llm(provider, model, max_tokens=2048)
+    assert llm is not None
+    assert isinstance(llm.chat_provider, XAI)
+    assert llm.chat_provider._generation_kwargs["max_output_tokens"] == 2048
+
+
+def test_create_llm_xai_with_session_id():
+    provider = LLMProvider(
+        type="xai",
+        base_url="https://api.x.ai/v1",
+        api_key=SecretStr("xai-test-key"),
+    )
+    model = LLMModel(
+        model="grok-3",
+        max_context_size=131072,
+    )
+
+    llm = create_llm(provider, model, session_id="sess-abc-123")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, XAI)
     assert llm.chat_provider._generation_kwargs["user"] == "sess-abc-123"
 
 

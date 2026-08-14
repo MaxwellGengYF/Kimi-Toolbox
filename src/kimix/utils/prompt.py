@@ -110,17 +110,17 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         raw_todos = data.get("todos", []) if isinstance(data.get("todos"), list) else []
         todos = []
         for t in raw_todos:
-            sub_todos_raw = t.get("sub_todos", None) or []
-            sub_todos_ns = [
+            children_raw = t.get("children", None) or []
+            children_ns = [
                 SimpleNamespace(title=st.get("title", ""), status=st.get("status", ""), notes=st.get("notes", None))
-                for st in sub_todos_raw
+                for st in children_raw
             ]
             todos.append(
                 SimpleNamespace(
                     title=t.get("title", ""),
                     status=t.get("status", ""),
                     notes=t.get("notes", None),
-                    sub_todos=sub_todos_ns,
+                    children=children_ns,
                 )
             )
 
@@ -142,35 +142,32 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
         lines.append("")
     if strong:
         lines.append(
-            "CRITICAL: Unfinished `todo_write` tasks remain. Mark every remaining item `done` with `todo_write` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[done]`."
+            "CRITICAL: Unfinished `todo_write` tasks remain. Mark every remaining item `completed` with `todo_write` before ending this session. Do not declare completion or run final verification until the todo list is empty or all entries show `[completed]`."
         )
     else:
         lines.append(
-            "You have unfinished `todo_write` tasks. Update statuses below and complete all pending/in-progress items before finishing."
+            "You have unfinished `todo_write` tasks. Update statuses below and mark every pending/in-progress item `completed` before finishing."
         )
-    for todo in todos:
-        title = getattr(todo, "title", "")
-        status = getattr(todo, "status", "")
+
+    def _render_todo(item: Any, indent: int = 0) -> None:
+        title = getattr(item, "title", "") if not isinstance(item, dict) else item.get("title", "")
+        status = getattr(item, "status", "") if not isinstance(item, dict) else item.get("status", "")
         # Skip todos already marked as done
         if status == "done":
-            continue
-        notes = getattr(todo, "notes", None)
+            return
+        notes = getattr(item, "notes", None) if not isinstance(item, dict) else item.get("notes", None)
+        prefix = "  " * indent
         if notes:
-            lines.append(f"- [{status}] {title}  Notes: {notes}")
+            lines.append(f"{prefix}- [{status}] {title}  Notes: {notes}")
         else:
-            lines.append(f"- [{status}] {title}")
-        # Render sub-todos if present (skip done sub-todos)
-        sub_todos = getattr(todo, "sub_todos", None) or []
-        for st in sub_todos:
-            st_title = getattr(st, "title", "") if not isinstance(st, dict) else st.get("title", "")
-            st_status = getattr(st, "status", "") if not isinstance(st, dict) else st.get("status", "")
-            if st_status == "done":
-                continue
-            st_notes = getattr(st, "notes", None) if not isinstance(st, dict) else st.get("notes", None)
-            if st_notes:
-                lines.append(f"  - [{st_status}] {st_title}  Notes: {st_notes}")
-            else:
-                lines.append(f"  - [{st_status}] {st_title}")
+            lines.append(f"{prefix}- [{status}] {title}")
+        # Render children recursively (skip done children)
+        children = getattr(item, "children", None) if not isinstance(item, dict) else item.get("children", None)
+        for child in children or []:
+            _render_todo(child, indent + 1)
+
+    for todo in todos:
+        _render_todo(todo)
     return "\n".join(lines)
 
 
@@ -275,11 +272,11 @@ async def _export_session_todos(session: Session, path: Path) -> None:
                 "title": todo.get("title", ""),
                 "status": todo.get("status", ""),
             }
-            sub_list_raw = todo.get("sub_todos", None)
-            if sub_list_raw:
-                exp_entry["sub_todos"] = [
+            children_raw = todo.get("children", None)
+            if children_raw:
+                exp_entry["children"] = [
                     {"title": st.get("title", ""), "status": st.get("status", "")}
-                    for st in sub_list_raw
+                    for st in children_raw
                 ]
             export_data.append(exp_entry)
         else:
@@ -287,11 +284,11 @@ async def _export_session_todos(session: Session, path: Path) -> None:
                 "title": getattr(todo, "title", ""),
                 "status": getattr(todo, "status", ""),
             }
-            sub_list_raw = getattr(todo, "sub_todos", None)
-            if sub_list_raw:
-                exp_entry["sub_todos"] = [
+            children_raw = getattr(todo, "children", None)
+            if children_raw:
+                exp_entry["children"] = [
                     {"title": getattr(st, "title", ""), "status": getattr(st, "status", "")}
-                    for st in sub_list_raw
+                    for st in children_raw
                 ]
             export_data.append(exp_entry)
     if not export_data:

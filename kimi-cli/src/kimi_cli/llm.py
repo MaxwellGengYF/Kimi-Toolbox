@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 type ProviderType = Literal[
     "kimi",
+    "xai",
     "openai_legacy",
     "openai_responses",
     "anthropic",
@@ -97,6 +98,27 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
                     if cap in get_args(ModelCapability.__value__)
                 )
                 applied["KIMI_MODEL_CAPABILITIES"] = capabilities
+        case "xai":
+            if not provider.base_url and (base_url := os.getenv("XAI_BASE_URL")):
+                provider.base_url = base_url
+                applied["XAI_BASE_URL"] = base_url
+            if not provider.api_key.get_secret_value() and (api_key := os.getenv("XAI_API_KEY")):
+                provider.api_key = SecretStr(api_key)
+                applied["XAI_API_KEY"] = "******"
+            if not model.model and (model_name := os.getenv("XAI_MODEL_NAME")):
+                model.model = model_name
+                applied["XAI_MODEL_NAME"] = model_name
+            if not model.max_context_size and (max_context_size := os.getenv("XAI_MODEL_MAX_CONTEXT_SIZE")):
+                model.max_context_size = int(max_context_size)
+                applied["XAI_MODEL_MAX_CONTEXT_SIZE"] = max_context_size
+            if not model.capabilities and (capabilities := os.getenv("XAI_MODEL_CAPABILITIES")):
+                caps_lower = (cap.strip().lower() for cap in capabilities.split(",") if cap.strip())
+                model.capabilities = set(
+                    cast(ModelCapability, cap)
+                    for cap in caps_lower
+                    if cap in get_args(ModelCapability.__value__)
+                )
+                applied["XAI_MODEL_CAPABILITIES"] = capabilities
         case "openai_legacy" | "openai_responses":
             if not provider.base_url and (base_url := os.getenv("OPENAI_BASE_URL")):
                 provider.base_url = base_url
@@ -294,6 +316,24 @@ def create_llm(
             if max_tokens is not None:
                 # Responses API uses `max_output_tokens`; `max_tokens` is a
                 # Chat Completions parameter and must not be sent here.
+                gen_kwargs["max_output_tokens"] = int(max_tokens)
+            if session_id:
+                gen_kwargs["user"] = session_id
+            if gen_kwargs:
+                chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
+        case "xai":
+            from kosong.chat_provider.xai import XAI
+
+            chat_provider = XAI(
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                default_headers=_kimi_default_headers(provider, oauth),
+                supported_efforts=model.supported_efforts,
+            ).with_parallel_tool_calls(enabled=True)
+
+            gen_kwargs: XAI.GenerationKwargs = {}
+            if max_tokens is not None:
                 gen_kwargs["max_output_tokens"] = int(max_tokens)
             if session_id:
                 gen_kwargs["user"] = session_id

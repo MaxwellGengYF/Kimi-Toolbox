@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -17,8 +18,11 @@ from kimi_cli.auth.oauth import (
     _refresh_threshold,
     _save_to_file,
     refresh_token,
+    refresh_xai_token,
+    XAI_OAUTH_KEY,
 )
 from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, Services
+from kimi_cli.llm import LLM
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -54,6 +58,21 @@ def _make_config() -> Config:
         oauth=OAuthRef(storage="file", key="oauth/kimi-code"),
     )
     model = LLMModel(model="test-model", max_context_size=100_000)
+    return Config(
+        provider=provider,
+        model=model,
+        services=Services(),
+    )
+
+
+def _make_xai_config() -> Config:
+    provider = LLMProvider(
+        type="xai",
+        base_url="https://api.x.ai/v1",
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=XAI_OAUTH_KEY),
+    )
+    model = LLMModel(model="grok-3", max_context_size=131_072)
     return Config(
         provider=provider,
         model=model,
@@ -569,3 +588,71 @@ def test_refresh_threshold_uses_minimum_when_small():
 def test_refresh_threshold_zero_expires_in():
     """When expires_in is 0, fall back to the minimum."""
     assert _refresh_threshold(0) == 300.0
+
+
+# ── multi-provider dispatch ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_dispatches_xai_refresh():
+    """When the configured OAuth ref is xai, ensure_fresh must call refresh_xai_token."""
+    token = _make_token(expires_in=100)
+    manager = OAuthManager(_make_xai_config())
+    refreshed = _make_token(access="xai-new-access", refresh="xai-new-refresh")
+
+    with (
+        patch("kimi_cli.auth.oauth.load_tokens", return_value=token),
+        patch("kimi_cli.auth.oauth.refresh_xai_token", AsyncMock(return_value=refreshed)) as mock_refresh,
+        patch("kimi_cli.auth.oauth.refresh_token") as mock_kimi_refresh,
+        patch("kimi_cli.auth.oauth.save_tokens"),
+    ):
+        await manager.ensure_fresh(force=True)
+
+    mock_refresh.assert_awaited_once_with(token.refresh_token)
+    mock_kimi_refresh.assert_not_called()
+    assert manager._access_tokens.get(XAI_OAUTH_KEY) == "xai-new-access"
+
+
+def test_apply_access_token_xai():
+    """_apply_access_token should update the XAI chat provider's api_key."""
+    from kosong.chat_provider.xai import XAI
+
+    config = _make_xai_config()
+    chat_provider = XAI(model="grok-3", api_key="xai-fallback-key")
+    llm = LLM(
+        chat_provider=chat_provider,
+        max_context_size=131_072,
+        capabilities=set(),
+        model_config=config.model,
+        provider_config=config.provider,
+    )
+    runtime = SimpleNamespace(config=config, llm=llm)
+    manager = OAuthManager(config)
+
+    ref = OAuthRef(storage="file", key=XAI_OAUTH_KEY)
+    manager._apply_access_token(ref, runtime, "xai-oauth-token")
+
+    assert chat_provider.client.api_key == "xai-oauth-token"
+
+
+def test_apply_access_token_xai_fallback_to_configured_key():
+    """When access_token is empty, _apply_access_token should fall back to the configured api_key."""
+    from kosong.chat_provider.xai import XAI
+
+    config = _make_xai_config()
+    config.provider.api_key = SecretStr("xai-configured-key")
+    chat_provider = XAI(model="grok-3", api_key="xai-original-key")
+    llm = LLM(
+        chat_provider=chat_provider,
+        max_context_size=131_072,
+        capabilities=set(),
+        model_config=config.model,
+        provider_config=config.provider,
+    )
+    runtime = SimpleNamespace(config=config, llm=llm)
+    manager = OAuthManager(config)
+
+    ref = OAuthRef(storage="file", key=XAI_OAUTH_KEY)
+    manager._apply_access_token(ref, runtime, "")
+
+    assert chat_provider.client.api_key == "xai-configured-key"

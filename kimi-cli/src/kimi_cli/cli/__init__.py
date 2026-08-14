@@ -610,25 +610,38 @@ def kimi(
 
 @cli.command()
 def login(
+    provider: Annotated[
+        str,
+        typer.Argument(
+            help="OAuth provider to log into (kimi or xai).",
+            case_sensitive=False,
+        ),
+    ] = "kimi",
     json: bool = typer.Option(
         False,
         "--json",
         help="Emit OAuth events as JSON lines.",
     ),
 ) -> None:
-    """Login to your Kimi account."""
+    """Login to an OAuth provider account (kimi or xai)."""
     import asyncio
 
     from rich.console import Console
     from rich.status import Status
 
-    from kimi_cli.auth.oauth import login_kimi_code
+    from kimi_cli.auth.oauth import login_kimi_code, login_xai
     from kimi_cli.config import load_config
+
+    provider = provider.lower()
+    login_fn = {"kimi": login_kimi_code, "xai": login_xai}.get(provider)
+    if login_fn is None:
+        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai.", err=True)
+        raise typer.Exit(code=1)
 
     async def _run() -> bool:
         if json:
             ok = True
-            async for event in login_kimi_code(load_config()):
+            async for event in login_fn(load_config()):
                 typer.echo(event.json)
                 if event.type == "error":
                     ok = False
@@ -638,7 +651,7 @@ def login(
         ok = True
         status: Status | None = None
         try:
-            async for event in login_kimi_code(load_config()):
+            async for event in login_fn(load_config()):
                 if event.type == "waiting":
                     if status is None:
                         status = console.status("Waiting for user authorization...")
@@ -669,31 +682,44 @@ def login(
 
 @cli.command()
 def logout(
+    provider: Annotated[
+        str,
+        typer.Argument(
+            help="OAuth provider to log out from (kimi or xai).",
+            case_sensitive=False,
+        ),
+    ] = "kimi",
     json: bool = typer.Option(
         False,
         "--json",
         help="Emit OAuth events as JSON lines.",
     ),
 ) -> None:
-    """Logout from your Kimi account."""
+    """Logout from an OAuth provider account (kimi or xai)."""
     import asyncio
 
     from rich.console import Console
 
-    from kimi_cli.auth.oauth import logout_kimi_code
+    from kimi_cli.auth.oauth import logout_kimi_code, logout_xai
     from kimi_cli.config import load_config
+
+    provider = provider.lower()
+    logout_fn = {"kimi": logout_kimi_code, "xai": logout_xai}.get(provider)
+    if logout_fn is None:
+        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai.", err=True)
+        raise typer.Exit(code=1)
 
     async def _run() -> bool:
         ok = True
         if json:
-            async for event in logout_kimi_code(load_config()):
+            async for event in logout_fn(load_config()):
                 typer.echo(event.json)
                 if event.type == "error":
                     ok = False
             return ok
 
         console = Console()
-        async for event in logout_kimi_code(load_config()):
+        async for event in logout_fn(load_config()):
             match event.type:
                 case "error":
                     style = "red"

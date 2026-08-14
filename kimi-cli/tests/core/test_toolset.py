@@ -6,16 +6,20 @@ import asyncio
 import contextlib
 import json
 import sys
-from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from kosong.tooling.error import ToolNotFoundError as KosongToolNotFoundError, ToolValidateError
 from typing import override
+
+from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
+from kosong.tooling.error import ToolNotFoundError as KosongToolNotFoundError
 from pydantic import BaseModel
 
 from kimi_cli.soul.toolset import (
-    KimiToolset,
     _PLATFORM_REDIRECTS_NORM,
+    KimiToolset,
     _build_platform_redirects,
     _collect_candidates,
+    _parse_stringified_arguments,
+    _repair_argument_format,
+    _unwrap_nested_arguments,
 )
 from kimi_cli.wire.types import TextPart, ToolCall, ToolResult
 
@@ -908,7 +912,7 @@ def test_platform_redirects_norm_is_cache():
     assert isinstance(_PLATFORM_REDIRECTS_NORM, dict)
     # Should match a fresh build
     fresh = _build_platform_redirects()
-    assert _PLATFORM_REDIRECTS_NORM == fresh
+    assert fresh == _PLATFORM_REDIRECTS_NORM
 
 
 def test_collect_candidates_no_redirects():
@@ -1079,3 +1083,164 @@ async def test_handle_redirect_precedes_fuzzy():
         assert "<system-warning>" in output
     finally:
         ts_mod._PLATFORM_REDIRECTS_NORM = original_redirects
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Argument-format hallucination repair tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_unwrap_nested_arguments_extracts_arguments_key():
+    """{"arguments": {...}} should unwrap to the inner dict."""
+    assert _unwrap_nested_arguments({"arguments": {"value": "x"}}) == {"value": "x"}
+
+
+def test_unwrap_nested_arguments_extracts_args_key():
+    """{"args": {...}} should unwrap to the inner dict."""
+    assert _unwrap_nested_arguments({"args": {"value": "x"}}) == {"value": "x"}
+
+
+def test_unwrap_nested_arguments_extracts_stringified_inner():
+    """{"arguments": "{...}"} should unwrap to the stringified JSON object."""
+    assert _unwrap_nested_arguments({"arguments": '{"value": "x"}'}) == '{"value": "x"}'
+
+
+def test_unwrap_nested_arguments_extracts_list_inner():
+    """{"arguments": [...]} should unwrap to the inner list."""
+    assert _unwrap_nested_arguments({"arguments": [1, 2]}) == [1, 2]
+
+
+def test_unwrap_nested_arguments_leaves_plain_dict_alone():
+    """A plain argument dict should not be modified."""
+    assert _unwrap_nested_arguments({"value": "x"}) == {"value": "x"}
+
+
+def test_unwrap_nested_arguments_leaves_multi_key_dict_alone():
+    """A dict with multiple keys should not be unwrapped even if one is 'arguments'."""
+    assert _unwrap_nested_arguments({"arguments": {"value": "x"}, "extra": 1}) == {
+        "arguments": {"value": "x"},
+        "extra": 1,
+    }
+
+
+def test_unwrap_nested_arguments_passes_through_non_dict():
+    """Non-dict values are returned unchanged."""
+    assert _unwrap_nested_arguments("string") == "string"
+    assert _unwrap_nested_arguments([1, 2]) == [1, 2]
+    assert _unwrap_nested_arguments(None) is None
+
+
+def test_parse_stringified_arguments_parses_json_object():
+    """A string containing a JSON object is parsed into a dict."""
+    assert _parse_stringified_arguments('{"value": "x"}') == {"value": "x"}
+
+
+def test_parse_stringified_arguments_parses_json_array():
+    """A string containing a JSON array is parsed into a list."""
+    assert _parse_stringified_arguments('["a", "b"]') == ["a", "b"]
+
+
+def test_parse_stringified_arguments_parses_with_relaxed_json():
+    """Relaxed JSON parsing allows single quotes and trailing commas."""
+    assert _parse_stringified_arguments("{'value': 'x',}") == {"value": "x"}
+
+
+def test_parse_stringified_arguments_leaves_plain_string_alone():
+    """A non-JSON string is returned unchanged."""
+    assert _parse_stringified_arguments("plain text") == "plain text"
+
+
+def test_parse_stringified_arguments_leaves_dict_alone():
+    """A dict input is returned unchanged."""
+    assert _parse_stringified_arguments({"value": "x"}) == {"value": "x"}
+
+
+
+def test_repair_argument_format_unwraps_then_parses():
+    """A stringified object wrapped in {'arguments': ...} is fully repaired."""
+    assert _repair_argument_format({'arguments': '{"value": "x"}'}) == {"value": "x"}
+
+
+def test_repair_argument_format_parses_then_unwraps():
+    """A stringified {'arguments': ...} object is parsed and then unwrapped."""
+    assert _repair_argument_format('{"arguments": {"value": "x"}}') == {"value": "x"}
+
+
+def test_repair_argument_format_noop_for_plain_dict():
+    """A plain dict is not changed by repair."""
+    assert _repair_argument_format({"value": "x"}) == {"value": "x"}
+
+
+async def test_handle_repairs_nested_arguments():
+    """handle() repairs arguments double-wrapped in {'arguments': ...}."""
+    ts = KimiToolset()
+    ts.add(_EchoTool())
+
+    tool_call = ToolCall(
+        id="tc-nested-args",
+        function=ToolCall.FunctionBody(
+            name="EchoTool",
+            arguments=json.dumps({"arguments": {"value": "nested"}}),
+        ),
+    )
+    result = ts.handle(tool_call)
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "nested"
+
+
+async def test_handle_repairs_stringified_arguments():
+    """handle() repairs arguments that are a stringified JSON object."""
+    ts = KimiToolset()
+    ts.add(_EchoTool())
+
+    # arguments field is a JSON-encoded string containing the real args object
+    tool_call = ToolCall(
+        id="tc-stringified-args",
+        function=ToolCall.FunctionBody(
+            name="EchoTool",
+            arguments=json.dumps('{"value": "stringified"}'),
+        ),
+    )
+    result = ts.handle(tool_call)
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "stringified"
+
+
+async def test_handle_repairs_stringified_double_wrapped_arguments():
+    """handle() repairs arguments that are a stringified {'arguments': ...} wrapper."""
+    ts = KimiToolset()
+    ts.add(_EchoTool())
+
+    # arguments field is a JSON-encoded string containing {"arguments": {"value": ...}}
+    tool_call = ToolCall(
+        id="tc-stringified-nested",
+        function=ToolCall.FunctionBody(
+            name="EchoTool",
+            arguments=json.dumps('{"arguments": {"value": "deeply_nested"}}'),
+        ),
+    )
+    result = ts.handle(tool_call)
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "deeply_nested"
+
+
+async def test_handle_repairs_relaxedly_stringified_arguments():
+    """handle() repairs single-quoted/trailing-comma stringified arguments."""
+    ts = KimiToolset()
+    ts.add(_EchoTool())
+
+    # arguments field is a JSON-encoded string containing relaxed JSON
+    tool_call = ToolCall(
+        id="tc-relaxed-stringified",
+        function=ToolCall.FunctionBody(
+            name="EchoTool",
+            arguments=json.dumps("{'value': 'relaxed',}"),
+        ),
+    )
+    result = ts.handle(tool_call)
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "relaxed"

@@ -287,10 +287,21 @@ def _build_platform_redirects() -> dict[str, str]:
         "PushTodo": "todo_push",
         "TodoParent": "todo_push",
         "TodoDown": "todo_push",
+        "StartTodo": "todo_push",
+        "BeginTodo": "todo_push",
+        "TodoStart": "todo_push",
+        "PushTask": "todo_push",
+        "StartTask": "todo_push",
         "PopTodo": "todo_pop",
         "TodoUp": "todo_pop",
         "TodoClose": "todo_pop",
         "TodoFinish": "todo_pop",
+        "EndTodo": "todo_pop",
+        "FinishTodo": "todo_pop",
+        "CompleteTodo": "todo_pop",
+        "PopTask": "todo_pop",
+        "EndTask": "todo_pop",
+        "FinishTask": "todo_pop",
         "SubTodo": "todo_sub",
         "TodoChild": "todo_sub",
         "TodoAdd": "todo_sub",
@@ -298,27 +309,141 @@ def _build_platform_redirects() -> dict[str, str]:
         "TodoDetail": "todo_sub",
         "TodoUpdate": "todo_sub",
         "TodoEdit": "todo_sub",
+        "SubTask": "todo_sub",
+        "AddTask": "todo_sub",
+        "TaskDetail": "todo_sub",
+        "TaskSub": "todo_sub",
         "TodoTree": "todo_write",
         "TodoStack": "todo_write",
         "TodoHierarchy": "todo_write",
+        "TodoPlan": "todo_write",
+        "TaskList": "todo_write",
+        "UpdateTodo": "todo_write",
+        "SetTodo": "todo_write",
         "TodoListPush": "todo_push",
         "TodoListPop": "todo_pop",
         "TodoListSub": "todo_sub",
         # Legacy tool-name redirects (old names -> report canonical names).
         "ReadFile": "read",
+        "OpenFile": "read",
+        "ViewFile": "read",
+        "CatFile": "read",
+        "ShowFile": "read",
+        "FileRead": "read",
+        "ReadText": "read",
+        "ReadCode": "read",
+        "ReadFiles": "read",
+        "Open": "read",
+        "View": "read",
+        "Cat": "read",
         "WriteFile": "write",
+        "CreateFile": "write",
+        "NewFile": "write",
+        "SaveFile": "write",
+        "FileWrite": "write",
+        "WriteText": "write",
+        "Save": "write",
+        "Create": "write",
         "EditFile": "edit",
+        "ModifyFile": "edit",
+        "PatchFile": "edit",
+        "ReplaceFile": "edit",
+        "UpdateFile": "edit",
+        "FileEdit": "edit",
+        "Patch": "edit",
+        "Modify": "edit",
         "Glob": "glob",
+        "FindFiles": "glob",
+        "ListFiles": "glob",
+        "FileGlob": "glob",
+        "GlobFiles": "glob",
+        "FindFile": "glob",
+        "Ls": "glob",
+        "Dir": "glob",
         "Grep": "grep",
+        "SearchCode": "grep",
+        "SearchText": "grep",
+        "FindText": "grep",
+        "GrepFiles": "grep",
+        "CodeSearch": "grep",
+        "Rg": "grep",
+        "Ripgrep": "grep",
         "ReadMediaFile": "read_image",
+        "ReadImage": "read_image",
+        "ViewImage": "read_image",
+        "ImageRead": "read_image",
+        "ReadMedia": "read_image",
+        "ViewMedia": "read_image",
+        "ReadPicture": "read_image",
+        "ShowImage": "read_image",
         "SearchWeb": "web_search",
+        "WebSearch": "web_search",
+        "SearchInternet": "web_search",
+        "InternetSearch": "web_search",
+        "WebQuery": "web_search",
+        "Google": "web_search",
+        "Bing": "web_search",
+        "FetchURL": "fetch_url",
+        "FetchUrl": "fetch_url",
+        "WebFetch": "fetch_url",
+        "UrlFetch": "fetch_url",
+        "HttpFetch": "fetch_url",
+        "FetchPage": "fetch_url",
+        "PageFetch": "fetch_url",
         "Agent": "subagent",
+        "SubAgent": "subagent",
+        "SpawnAgent": "subagent",
+        "LaunchAgent": "subagent",
+        "RunAgent": "subagent",
+        "AgentTool": "subagent",
+        "CreateAgent": "subagent",
+        "Delegate": "subagent",
         "AskAgent": "send_message",
+        "SendMessage": "send_message",
+        "MessageAgent": "send_message",
+        "AgentMessage": "send_message",
+        "AskUser": "AskUserQuestion",
+        "AskQuestion": "AskUserQuestion",
+        "QuestionUser": "AskUserQuestion",
+        "UserQuestion": "AskUserQuestion",
+        "PromptUser": "AskUserQuestion",
+        "GetUserInput": "AskUserQuestion",
         "AgentList": "list_agents",
+        "ListAgents": "list_agents",
+        "ListAgent": "list_agents",
+        "Agents": "list_agents",
         "AgentClose": "interrupt_agent",
+        "InterruptAgent": "interrupt_agent",
+        "CloseAgent": "interrupt_agent",
+        "StopAgent": "interrupt_agent",
+        "KillAgent": "interrupt_agent",
         "TaskOutput": "job_output",
+        "JobOutput": "job_output",
+        "GetJobOutput": "job_output",
+        "ReadJobOutput": "job_output",
+        "BackgroundOutput": "job_output",
         "TodoList": "todo_write",
+        "Todo": "todo_write",
+        "Todos": "todo_write",
         "AgentSwarm": "workflow",
+        "Swarm": "workflow",
+        "MultiAgent": "workflow",
+        "AgentGroup": "workflow",
+        "RunWorkflow": "workflow",
+        "MemoryRetrieve": "retrieve",
+        "RetrieveMemory": "retrieve",
+        "HistorySearch": "retrieve",
+        "SearchHistory": "retrieve",
+        "Recall": "retrieve",
+        "Remember": "retrieve",
+        "MemorySearch": "retrieve",
+        "Python": "python",
+        "Py": "python",
+        "RunPython": "python",
+        "PythonCode": "python",
+        "ExecPython": "python",
+        "RunPy": "python",
+        "PyRun": "python",
     })
 
     if sys.platform == "win32":
@@ -329,9 +454,12 @@ def _build_platform_redirects() -> dict[str, str]:
             "Terminal": "pwsh",
             "Cmd": "pwsh",
             "Command": "pwsh",
+            "Run": "pwsh",
             "Execute": "pwsh",
             "Exec": "pwsh",
             "RunCommand": "pwsh",
+            "RunShell": "pwsh",
+            "ShellRun": "pwsh",
             "Sh": "pwsh",
             "Zsh": "pwsh",
             "ShellCommand": "pwsh",
@@ -342,12 +470,26 @@ def _build_platform_redirects() -> dict[str, str]:
             "PS": "pwsh",
         })
     else:
-        # POSIX (Linux/macOS): PowerShell references → bash
+        # POSIX (Linux/macOS): PowerShell references and generic shells → bash
         _redirects.update({
             "Powershell": "bash",
             "PowerShell": "bash",
             "Pwsh": "bash",
             "PS": "bash",
+            "Shell": "bash",
+            "Terminal": "bash",
+            "Cmd": "bash",
+            "Command": "bash",
+            "Run": "bash",
+            "Execute": "bash",
+            "Exec": "bash",
+            "RunCommand": "bash",
+            "RunShell": "bash",
+            "ShellRun": "bash",
+            "Sh": "bash",
+            "Zsh": "bash",
+            "ShellCommand": "bash",
+            "BashCommand": "bash",
         })
 
     return {
@@ -358,6 +500,57 @@ def _build_platform_redirects() -> dict[str, str]:
 
 
 _PLATFORM_REDIRECTS_NORM: dict[str, str] = _build_platform_redirects()
+
+
+# ── Common argument-format hallucination repairs ──
+# LLMs sometimes double-wrap the argument object (e.g. {"arguments": {...}})
+# or serialize the entire object as a string.  These helpers recover those
+# shapes before the arguments are validated against the tool schema.
+
+
+def _unwrap_nested_arguments(arguments: JsonType) -> JsonType:
+    """Unwrap arguments nested inside {"arguments": ...} or {"args": ...}."""
+    if not isinstance(arguments, dict):
+        return arguments
+    keys = set(arguments.keys())
+    if keys <= {"arguments", "args"} and len(arguments) == 1:
+        inner = next(iter(arguments.values()))
+        if isinstance(inner, (dict, list, str)):
+            return inner
+    return arguments
+
+
+def _parse_stringified_arguments(arguments: JsonType) -> JsonType:
+    """Parse a stringified JSON object/array that the LLM put in the arguments field."""
+    if not isinstance(arguments, str):
+        return arguments
+    stripped = arguments.strip()
+    if not stripped or stripped[0] not in ("{", "["):
+        return arguments
+    try:
+        parsed = orjson.loads(stripped)
+    except orjson.JSONDecodeError:
+        try:
+            from kosong.utils.jsonx import loads_relaxed
+
+            parsed = loads_relaxed(stripped)
+        except Exception:
+            return arguments
+    return parsed if isinstance(parsed, (dict, list)) else arguments
+
+
+def _repair_argument_format(arguments: JsonType) -> JsonType:
+    """Apply argument-format anti-hallucination repairs.
+
+    Repairs applied, in order:
+      1. Unwrap double-wrapped argument objects (`{"arguments": {...}}`).
+      2. Parse stringified JSON objects/arrays.
+    """
+    arguments = _unwrap_nested_arguments(arguments)
+    arguments = _parse_stringified_arguments(arguments)
+    # Unwrap again in case the parsed string was itself wrapped.
+    arguments = _unwrap_nested_arguments(arguments)
+    return arguments
 
 
 _REMINDER_TEXT_1 = (
@@ -752,6 +945,8 @@ class KimiToolset:
                     error=e,
                 )
                 return ToolResult(tool_call_id=tool_call.id, return_value=ToolParseError(str(e)))
+
+            arguments = _repair_argument_format(arguments)
 
             if not isinstance(arguments, dict):
                 arguments = {}
