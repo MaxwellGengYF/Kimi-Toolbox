@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
 import orjson
+import regex as re
 import tomlkit
 from kosong.chat_provider import ThinkingEffort
 from pydantic import (
@@ -17,6 +19,7 @@ from pydantic import (
     field_serializer,
     model_validator,
 )
+from rapidfuzz import fuzz
 from tomlkit.exceptions import TOMLKitError
 
 from kimi_cli.exception import ConfigError
@@ -96,8 +99,15 @@ def _validate_supported_efforts(v: set[ThinkingEffort]) -> set[ThinkingEffort]:
     return v
 
 
-#: (keywords, max_context_size, max_output). All keywords must be present in the
-#: lowercased model name; more specific entries must appear first.
+#: Minimum token-level fuzzy ratio required for an alphabetic keyword token
+#: to match a model-name token when an exact match is not available.
+_FUZZY_TOKEN_THRESHOLD = 80
+
+#: Tokenization pattern for model names and keyword phrases.
+_KEYWORD_SPLIT_RE = re.compile(r"[^a-z0-9]+", flags=re.IGNORECASE)
+
+#: (keywords, max_context_size, max_output). All keyword tokens must be present in
+#: the tokenized model name; more specific entries must appear first.
 _MODEL_DEFAULTS: list[tuple[tuple[str, ...], int, int | None]] = [
     # OpenAI GPT
     (("gpt-5.6", "sol"), 1_050_000, 128_000),
@@ -125,14 +135,55 @@ _MODEL_DEFAULTS: list[tuple[tuple[str, ...], int, int | None]] = [
 ]
 
 
+def _tokenize_model_name(name: str) -> list[str]:
+    """Split a model name into lowercase alphanumeric tokens."""
+    return [token for token in _KEYWORD_SPLIT_RE.split(name.lower()) if token]
+
+
+def _keywords_match(keywords: tuple[str, ...], model_tokens: list[str]) -> bool:
+    """Check whether all keyword tokens are present in the model tokens.
+
+    Tokens are matched exactly when possible.  Alphabetic tokens that fail an
+    exact match are compared with rapidfuzz; numeric/alphanumeric tokens (e.g.
+    ``v4`` or ``3.5``) must match exactly so version numbers are not confused.
+    """
+    remaining = Counter(model_tokens)
+    for keyword in keywords:
+        for keyword_token in _tokenize_model_name(keyword):
+            if remaining[keyword_token] > 0:
+                remaining[keyword_token] -= 1
+                continue
+
+            if not keyword_token.isalpha():
+                return False
+
+            best_match: str | None = None
+            best_score = -1.0
+            for model_token, count in remaining.items():
+                if count <= 0 or not model_token.isalpha():
+                    continue
+                score = fuzz.ratio(keyword_token, model_token)
+                if score > best_score:
+                    best_score = score
+                    best_match = model_token
+
+            if best_match is not None and best_score >= _FUZZY_TOKEN_THRESHOLD:
+                remaining[best_match] -= 1
+            else:
+                return False
+    return True
+
+
 def _resolve_model_defaults(model_name: str) -> tuple[int, int | None] | None:
     """Return default ``(max_context_size, max_tokens)`` for a model name.
 
     Returns ``None`` when the model name does not match any known keyword set.
+    Matching is token-based and tolerates different separators and minor typos
+    in alphabetic keywords while keeping version numbers exact.
     """
-    lower = model_name.lower()
+    model_tokens = _tokenize_model_name(model_name)
     for keywords, context_size, max_output in _MODEL_DEFAULTS:
-        if all(keyword in lower for keyword in keywords):
+        if _keywords_match(keywords, model_tokens):
             return context_size, max_output
     return None
 

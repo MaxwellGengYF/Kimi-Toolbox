@@ -197,3 +197,31 @@ def test_load_config_model_grok_output_none():
     config = load_config_from_string(_model_config("xai/grok"))
     assert config.model.max_context_size == 2_000_000
     assert config.model.max_tokens is None
+
+
+def test_load_config_model_defaults_fuzzy_separator():
+    """Fuzzy matching resolves keywords across different separators."""
+    config = load_config_from_string(_model_config("openai/gpt 5.4 mini"))
+    assert config.model.max_context_size == 1_000_000
+    assert config.model.max_tokens == 65_536
+
+
+def test_load_config_model_defaults_fuzzy_underscores():
+    """Fuzzy matching resolves keywords joined by underscores."""
+    config = load_config_from_string(_model_config("openai_gpt_5_4"))
+    assert config.model.max_context_size == 1_000_000
+    assert config.model.max_tokens == 128_000
+
+
+def test_load_config_model_defaults_fuzzy_typo():
+    """Fuzzy matching resolves keywords with minor typos."""
+    config = load_config_from_string(_model_config("claude-sonet-5"))
+    assert config.model.max_context_size == 1_000_000
+    assert config.model.max_tokens == 128_000
+
+
+def test_load_config_model_defaults_version_numbers_not_confused():
+    """Version numbers are not confused by fuzzy matching."""
+    with pytest.raises(SystemExit) as exc_info:
+        load_config_from_string(_model_config("openai/gpt-5.6"))
+    assert exc_info.value.code == 1
