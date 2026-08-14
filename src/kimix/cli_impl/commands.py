@@ -652,7 +652,7 @@ def _cmd_todo(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
         prompt_str = (
             f'Implement the TODO in {file_path}:\n'
             f'{todo_items}'
-            'Remove TODO comment after done.'
+            '\n\nRemove TODO comment after done.'
         )
     else:
         format_todo = lambda i, todo: f'{i}. Line {todo.line}: {todo.content.strip()}'
@@ -662,7 +662,7 @@ def _cmd_todo(task_split: list[str], text_arr: list[str]) -> tuple[None, bool]:
             f'Implement all TODOs in {file_path} at once:\n\n'
             f'{todo_items}\n\n'
             'Make sure to handle each TODO completely.'
-            'Remove TODO comment after done.'
+            '\n\nRemove TODO comment after done.'
         )
 
     try:
