@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import regex as re
+import os
 from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
-from kosong.chat_provider import StreamedMessagePart, TokenUsage
+import regex as re
+
+from kosong.chat_provider import APITimeoutError, StreamedMessagePart, TokenUsage
 from kosong.message import Message
 
 if TYPE_CHECKING:
@@ -164,21 +167,92 @@ def normalize_tool_call_ids(history: Sequence[Message]) -> Sequence[Message]:
     return normalized_messages
 
 
+T = TypeVar("T")
+
+_STREAM_ITERATION_TIMEOUT_DEFAULT = 60.0
+_STREAM_ITERATION_TIMEOUT_ENV = "KOSONG_STREAM_ITERATION_TIMEOUT"
+
+
+def get_stream_iteration_timeout() -> float:
+    """Return the per-chunk timeout for chat provider streaming iterators.
+
+    Reads ``KOSONG_STREAM_ITERATION_TIMEOUT`` from the environment; falls back
+    to a 60-second default. Unparseable values are ignored.
+    """
+    raw = os.environ.get(_STREAM_ITERATION_TIMEOUT_ENV)
+    if raw is None:
+        return _STREAM_ITERATION_TIMEOUT_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _STREAM_ITERATION_TIMEOUT_DEFAULT
+
+
+class _StreamTimeoutIterator(AsyncIterator[T]):
+    """Wrap an async iterator so each ``__anext__`` has a per-item timeout.
+
+    This prevents a stalled network stream from blocking the caller forever
+    when the underlying SDK stream waits indefinitely for the next chunk.
+    """
+
+    __slots__ = ("_iterator", "_timeout")
+
+    def __init__(self, iterator: AsyncIterator[T], timeout: float) -> None:
+        self._iterator = iterator
+        self._timeout = timeout
+
+    def __aiter__(self) -> AsyncIterator[T]:
+        return self
+
+    async def __anext__(self) -> T:
+        try:
+            return await asyncio.wait_for(self._iterator.__anext__(), timeout=self._timeout)
+        except TimeoutError as exc:
+            raise APITimeoutError(
+                f"Stream stalled: no data received for {self._timeout:.3g}s"
+            ) from exc
+
+
+def with_stream_timeout[T](
+    iterator: AsyncIterator[T], timeout: float | None = None
+) -> AsyncIterator[T]:
+    """Wrap *iterator* with a per-item timeout.
+
+    Args:
+        iterator: The async iterator to wrap.
+        timeout: Per-item timeout in seconds. If ``None``, uses
+            :func:`get_stream_iteration_timeout`.
+    """
+    if timeout is None:
+        timeout = get_stream_iteration_timeout()
+    return _StreamTimeoutIterator(iterator, timeout=timeout)
+
+
 class BaseStreamedMessage:
     """Mixin / base class for provider-specific streamed messages.
 
     Provides the common ``__aiter__`` / ``__anext__`` / ``id`` boilerplate.
     Subclasses must set ``self._iter`` in ``__init__``.
+
+    The underlying iterator is wrapped with a per-item timeout so that a stalled
+    network stream (e.g. the remote server stops sending SSE chunks) is surfaced
+    as :class:`~kosong.chat_provider.APITimeoutError` instead of hanging the
+    caller forever.
     """
 
     _iter: AsyncIterator[StreamedMessagePart]
     _id: str | None = None
+    _timeout_iter: AsyncIterator[StreamedMessagePart] | None = None
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
-        return self
+        if self._timeout_iter is None:
+            self._timeout_iter = with_stream_timeout(
+                self._iter, timeout=get_stream_iteration_timeout()
+            )
+        return self._timeout_iter
 
     async def __anext__(self) -> StreamedMessagePart:
-        return await self._iter.__anext__()
+        return await self.__aiter__().__anext__()
 
     @property
     def id(self) -> str | None:

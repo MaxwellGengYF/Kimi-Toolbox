@@ -1,5 +1,5 @@
 import asyncio
-import json
+import orjson
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -356,7 +356,7 @@ class TestMaybeLogReasoningContentError:
         assert log_path.exists()
         lines = log_path.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 1
-        entry = json.loads(lines[0])
+        entry = orjson.loads(lines[0])
         assert entry["provider"] == "openai"
         assert entry["model"] == "gpt-test"
         assert entry["error"]["status_code"] == 400
@@ -508,7 +508,7 @@ async def test_openai_compatible_provider_aclose_swallows_cancelled_error() -> N
 # ---------------------------------------------------------------------------
 # Tolerant SSE streaming: empty/invalid data events must not kill the stream
 # ---------------------------------------------------------------------------
-# Regression for: ``json.decoder.JSONDecodeError: Expecting value: line 1
+# Regression for: ``orjson.JSONDecodeError: Expecting value: line 1
 # column 1 (char 0)`` raised inside ``openai._streaming.AsyncStream.__stream__``
 # (``sse.json()``) when a backend (Moonshot/Kimi during long compaction
 # requests) emits a keep-alive SSE event whose ``data:`` payload is empty.
@@ -523,7 +523,7 @@ def _sse_chunk(
         delta["role"] = role
     if content is not None:
         delta["content"] = content
-    return json.dumps(
+    return orjson.dumps(
         {
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
@@ -531,7 +531,7 @@ def _sse_chunk(
             "model": "test-model",
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
-    )
+    ).decode()
 
 
 class _ChunkedResponse(httpx.Response):

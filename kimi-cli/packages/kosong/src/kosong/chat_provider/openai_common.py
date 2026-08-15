@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import copy
-import json
+import orjson
 import regex as re
 import ssl
 import time
@@ -265,7 +265,7 @@ def maybe_log_reasoning_content_error(
     }
     try:
         with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            f.write(orjson.dumps(entry, default=str).decode() + "\n")
     except Exception:
         # Logging is best-effort; never let it break the actual error handling.
         pass
@@ -282,7 +282,7 @@ class _TolerantSSEDecoder:
     entire stream on the first event whose ``data:`` payload is empty or not
     valid JSON.  Some backends (observed with Moonshot/Kimi during long
     compaction requests) emit such keep-alive events mid-stream, which turns a
-    healthy response into a ``json.JSONDecodeError``.  This decoder only
+    healthy response into a ``orjson.JSONDecodeError``.  This decoder only
     extracts ``event`` / ``data`` fields and leaves payload interpretation to
     the caller, so unparsable events can be skipped instead of killing the
     response.
@@ -396,7 +396,8 @@ async def _iter_tolerant_chunks(
     compaction requests) emit keep-alive SSE events whose ``data:`` payload is
     empty or otherwise not valid JSON.  The openai SDK's own
     ``AsyncStream.__stream__`` calls ``json.loads`` on every such event and
-    raises ``json.JSONDecodeError``, aborting the whole response.  This
+    raises ``orjson.JSONDecodeError`` (when using ``orjson``), aborting the whole
+    response.  This
     re-implements the same chunk-processing loop (including ``[DONE]`` and
     error-payload handling) over the underlying httpx response with a tolerant
     JSON step, so malformed keep-alive events are skipped instead of killing
@@ -408,8 +409,8 @@ async def _iter_tolerant_chunks(
             if data.startswith("[DONE]"):
                 break
             try:
-                payload: object = json.loads(data)
-            except json.JSONDecodeError:
+                payload: object = orjson.loads(data)
+            except orjson.JSONDecodeError:
                 # Keep-alive / empty data event — nothing to parse, skip it.
                 continue
             if not _is_object_mapping(payload):

@@ -6,13 +6,13 @@ except ModuleNotFoundError as exc:
         'Install with `pip install "kosong[contrib]"`.'
     ) from exc
 
-import pybase64 as base64
-import orjson
 import mimetypes
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self, TypedDict, Unpack, cast
 
 import httpx
+import orjson
+import pybase64 as base64
 from google import genai
 from google.genai import client as genai_client
 from google.genai import errors as genai_errors
@@ -44,7 +44,11 @@ from kosong.chat_provider import (
     convert_httpx_error,
 )
 from kosong.chat_provider.openai_common import apply_generation_kwargs
-from kosong.contrib.chat_provider.common import validate_tool_call_arguments
+from kosong.contrib.chat_provider.common import (
+    get_stream_iteration_timeout,
+    validate_tool_call_arguments,
+    with_stream_timeout,
+)
 from kosong.message import (
     AudioURLPart,
     ContentPart,
@@ -59,7 +63,7 @@ from kosong.tooling import ToolReturnValue
 
 if TYPE_CHECKING:
 
-    def type_check(google_genai: "GoogleGenAI"):
+    def type_check(google_genai: GoogleGenAI):
         _: ChatProvider = google_genai
 
 
@@ -110,7 +114,7 @@ class GoogleGenAI:
         return self._model
 
     @property
-    def thinking_effort(self) -> "ThinkingEffort | None":
+    def thinking_effort(self) -> ThinkingEffort | None:
         thinking_config = self._generation_kwargs.get("thinking_config")
         if thinking_config is None:
             return None
@@ -145,7 +149,7 @@ class GoogleGenAI:
         system_prompt: str,
         tools: Sequence[KosongTool],
         history: Sequence[Message],
-    ) -> "GoogleGenAIStreamedMessage":
+    ) -> GoogleGenAIStreamedMessage:
         contents = messages_to_google_genai_contents(history)
 
         # Google GenAI only accepts ``max_output_tokens``.  Strip other token-limit
@@ -176,7 +180,7 @@ class GoogleGenAI:
         except Exception as e:  # genai_errors.APIError and others
             raise _convert_error(e) from e
 
-    def with_thinking(self, effort: "ThinkingEffort") -> Self:
+    def with_thinking(self, effort: ThinkingEffort) -> Self:
         thinking_config = ThinkingConfig(include_thoughts=True)
 
         # Map thinking effort to budget tokens
@@ -242,12 +246,17 @@ class GoogleGenAIStreamedMessage:
             self._iter = self._convert_stream_response(response)
         self._id: str | None = None
         self._usage: GenerateContentResponseUsageMetadata | None = None
+        self._timeout_iter: AsyncIterator[StreamedMessagePart] | None = None
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
-        return self
+        if self._timeout_iter is None:
+            self._timeout_iter = with_stream_timeout(
+                self._iter, timeout=get_stream_iteration_timeout()
+            )
+        return self._timeout_iter
 
     async def __anext__(self) -> StreamedMessagePart:
-        return await self._iter.__anext__()
+        return await self.__aiter__().__anext__()
 
     @property
     def id(self) -> str | None:
@@ -494,12 +503,18 @@ def _tool_message_to_function_response_part(
     if message.role != "tool":  # pragma: no cover - defensive guard
         # Return the error to the LLM instead of crashing.
         return Part.from_text(
-            text=f"Error: Expected a tool message, got {message.role}. Content: {message.extract_text(sep='\n')}",
+            text=(
+                f"Error: Expected a tool message, got {message.role}. "
+                f"Content: {message.extract_text(sep='\n')}"
+            ),
         )
     if message.tool_call_id is None:
         # Return the error to the LLM instead of crashing.
         return Part.from_text(
-            text=f"Error: Tool response is missing `tool_call_id`. Content: {message.extract_text(sep='\n')}",
+            text=(
+                "Error: Tool response is missing `tool_call_id`. "
+                f"Content: {message.extract_text(sep='\n')}"
+            ),
         )
 
     response_data, tool_result_parts = _tool_result_to_response_and_parts(message.content)
@@ -552,7 +567,10 @@ def _tool_messages_to_google_genai_content(
             # Return the error to the LLM instead of crashing.
             parts.append(
                 Part.from_text(
-                    text=f"Error: Tool response is missing `tool_call_id`. Content: {message.extract_text(sep='\n')}",
+                    text=(
+                        "Error: Tool response is missing `tool_call_id`. "
+                        f"Content: {message.extract_text(sep='\n')}"
+                    ),
                 )
             )
             continue
@@ -670,8 +688,11 @@ def message_to_google_genai(message: Message) -> Content:
             role="user",
             parts=[
                 Part.from_text(
-                    text="Error: Tool messages must be converted via messages_to_google_genai_contents "
-                    "to preserve tool-call ordering and tool-response packing."
+                    text=(
+                        "Error: Tool messages must be converted via "
+                        "messages_to_google_genai_contents to preserve "
+                        "tool-call ordering and tool-response packing."
+                    )
                 )
             ],
         )
