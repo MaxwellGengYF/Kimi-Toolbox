@@ -28,7 +28,8 @@ from kimi_cli.tools.utils import repair_json_string
 
 _TODOLIST_DESCRIPTION = (
     "Bulk read/replace/clear of the whole todo tree. "
-    "For single-item edits use todo_update; for hierarchical work use todo_push and todo_pop.\n\n"
+    "For single- or multi-item edits use todo_update; "
+    "for hierarchical work use todo_push and todo_pop.\n\n"
     "Write modes:\n"
     "- append (default): merges root-level todos by exact title; new titles are appended.\n"
     "- replace: replaces the whole list; only allowed when all existing todos are done (use force=True to override).\n"
@@ -76,7 +77,8 @@ def _hint_error(text: str) -> str:
     return "\nHint: " + text
 
 _TODOLIST_SUCCESS_HINT = (
-    "todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree."
+    "todo_push to start a parent todo, todo_update to edit one or more, "
+    "or todo_write to read the tree."
 )
 
 # Mode map — only canonical values accepted
@@ -1600,8 +1602,8 @@ class todo_pop(TodoList):
 
 
 
-class TodoUpdateParams(BaseModel):
-    """Parameters for todo_update: lightweight single-todo edits without rewriting the tree."""
+class TodoUpdateItem(BaseModel):
+    """Single update operation for todo_update."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -1664,16 +1666,147 @@ class TodoUpdateParams(BaseModel):
         return stripped if stripped else None
 
 
+class TodoUpdateParams(BaseModel):
+    """Parameters for todo_update: one or more lightweight todo edits without rewriting the tree."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Title of the todo to update or create when using a single top-level "
+            "update. Use `updates` to batch multiple edits."
+        ),
+        min_length=1,
+        max_length=65536,
+    )
+    status: TodoStatus | None = Field(
+        default=None,
+        description=(
+            "New status for the single top-level update. Ignored when `updates` is provided."
+        ),
+    )
+    notes: str | None = Field(
+        default=None,
+        description=(
+            "New notes for the single top-level update. Ignored when `updates` is provided."
+        ),
+        max_length=65536,
+    )
+    rename_to: str | None = Field(
+        default=None,
+        description=(
+            "Rename for the single top-level update. Ignored when `updates` is provided."
+        ),
+    )
+    parent: str | None = Field(
+        default=None,
+        description=(
+            "Optional common parent title applied to items in `updates` that do not "
+            "specify their own parent. Also usable as a top-level parent for a single update."
+        ),
+    )
+    fuzzy: bool = Field(
+        default=True,
+        description=(
+            "Fuzzy matching setting for the single top-level update. "
+            "Ignored when `updates` is provided."
+        ),
+    )
+    force: bool = Field(
+        default=False,
+        description=(
+            "Force setting for the single top-level update. "
+            "Ignored when `updates` is provided."
+        ),
+    )
+    updates: list[TodoUpdateItem] | TodoUpdateItem | None = Field(
+        default=None,
+        validation_alias=AliasChoices("updates", "todos"),
+        description=(
+            "One or more update operations. Each item has the same shape as a single "
+            "todo_update call (title, status, notes, rename_to, parent, fuzzy, force). "
+            "Use this to batch multiple lightweight edits in one call. When provided, "
+            "top-level title/status/notes/rename_to must not be used."
+        ),
+    )
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _validate_status(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        return _canonical_status(v)
+
+    @field_validator("title", "parent")
+    @classmethod
+    def _validate_title(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip()
+
+    @field_validator("rename_to")
+    @classmethod
+    def _validate_rename_to(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped if stripped else None
+
+    @field_validator("updates", mode="before")
+    @classmethod
+    def _validate_updates(cls, v: Any) -> list[TodoUpdateItem] | TodoUpdateItem | None:
+        if v is None:
+            return None
+        if isinstance(v, TodoUpdateItem):
+            return [v]
+        if isinstance(v, dict):
+            return [TodoUpdateItem.model_validate(v)]
+        if isinstance(v, list):
+            out: list[TodoUpdateItem] = []
+            for idx, item in enumerate(v):
+                if isinstance(item, TodoUpdateItem):
+                    out.append(item)
+                    continue
+                if isinstance(item, dict):
+                    try:
+                        out.append(TodoUpdateItem.model_validate(item))
+                    except ValidationError as exc:
+                        msg = _first_pydantic_message(exc)
+                        raise ValueError(f"Invalid update at index {idx}: {msg}") from exc
+                    continue
+                raise ValueError(
+                    f"Invalid update at index {idx}: expected a dict or TodoUpdateItem, "
+                    f"got {type(item).__name__}"
+                )
+            return out
+        raise ValueError(
+            "updates must be a list of updates, a single update dict/object, or None"
+        )
+
+    @model_validator(mode="after")
+    def _check_no_mixed_fields(self) -> TodoUpdateParams:
+        if self.updates is not None:
+            mixed = {"title", "status", "notes", "rename_to"} & self.model_fields_set
+            if mixed:
+                raise ValueError(
+                    "Cannot mix top-level "
+                    f"{sorted(mixed)} with `updates`; pass all edits inside `updates`."
+                )
+        return self
+
+
 class todo_update(TodoList):
-    """Lightweight single-todo edit or child creation by title; no need to resend the whole tree."""
+    """Lightweight edit or creation of one or more todos by title; no need to resend the whole tree."""
 
     name: str = "todo_update"
     description: str = (
-        "Update a single existing todo by title, or create a child under an explicit parent. "
-        "Use this for lightweight edits such as marking an item done, setting it in_progress, "
-        "editing notes, renaming, or adding a sub-todo via parent=... . "
-        "Searches the whole tree unless parent is provided; exact match is tried first, "
-        "then fuzzy matching if enabled."
+        "Update one or more existing todos by title, or create children under explicit parents. "
+        "Use this for lightweight edits such as marking items done, setting them in_progress, "
+        "editing notes, renaming, or adding sub-todos via parent=... . "
+        "For a single edit, pass the update fields directly; for multiple edits, pass an "
+        "`updates` (alias `todos`) list. Searches the whole tree unless parent is provided; "
+        "exact match is tried first, then fuzzy matching if enabled."
     )
     params: type[TodoUpdateParams] = TodoUpdateParams
 
@@ -1684,26 +1817,156 @@ class todo_update(TodoList):
 
     @override
     async def __call__(self, params: TodoUpdateParams) -> ToolReturnValue:
+        items, error = self._normalize_update_items(params)
+        if error is not None:
+            return error
+
         todos = self._load_todos()
         warnings: list[str] = []
-        parent_raw = params.parent.strip() if params.parent is not None else None
+        summaries: list[str] = []
+        renames: list[tuple[str, str]] = []
 
-        if not todos and not (parent_raw is not None and parent_raw == ""):
-            hint = "Use todo_push or todo_write to create todos first."
+        messages: list[str] = []
+        for item in items:
+            result = self._apply_one_update(todos, item, warnings)
+            if isinstance(result, ToolReturnValue):
+                return result
+            todos, summary, message, rename_pair = result
+            summaries.append(summary)
+            messages.append(message)
+            if rename_pair is not None:
+                renames.append(rename_pair)
+
+            conflicts = self._enforce_single_in_progress(todos)
+            if conflicts:
+                todos = self._auto_fix_in_progress(todos, warnings)
+
+        archived = self._load_archived_todos()
+        save_error = self._save_todos(todos, archived)
+        if save_error:
+            hint = "Use todo_write to read the tree and retry todo_update."
             return ToolError(
-                message="No todos to update.",
+                message="Failed to save todos.",
                 brief=hint,
-                output="Error: No todos exist." + _hint_error(hint),
+                output=save_error + _hint_error(hint),
             )
 
-        if parent_raw is not None:
-            return await self._update_or_create_under_parent(todos, parent_raw, params, warnings)
+        # Heal the stack if any renamed title is part of the breadcrumb.
+        stack = self._load_stack()
+        updated_stack = stack
+        for old, new in renames:
+            if old in updated_stack:
+                updated_stack = [new if t == old else t for t in updated_stack]
+        stack_error = self._save_stack(updated_stack)
+        if stack_error:
+            hint = "Use todo_write to read the tree and retry todo_update."
+            return ToolError(
+                message="Failed to save todo stack.",
+                brief=hint,
+                output=stack_error + _hint_error(hint),
+            )
 
-        return await self._update_global(todos, params, warnings)
+        output_lines: list[str] = ["Current todo list:"]
+        if updated_stack:
+            output_lines.append(f"Stack: {' > '.join(updated_stack)}")
+        tree = self._render_read_tree(todos, max_lines=_MAX_READ_ITEMS)
+        if tree:
+            output_lines.append(tree)
 
-    async def _update_global(
-        self, todos: list[Todo], params: TodoUpdateParams, warnings: list[str]
-    ) -> ToolReturnValue:
+        output = "\n".join(output_lines) + "\n" + "\n".join(summaries)
+        if len(items) == 1 and updated_stack and summaries and summaries[0].startswith('Created "'):
+            next_hint = (
+                "todo_update to edit another item, todo_update(parent=...) to add a child, "
+                "todo_pop to finish the parent, or todo_write to read the tree."
+            )
+        else:
+            next_hint = (
+                "todo_update to edit another item, todo_update(parent=...) to add a child, "
+                "or todo_write to read the tree."
+            )
+        output += _hint_next(next_hint)
+        if warnings:
+            output += "\n" + "\n".join(warnings)
+
+        message = "; ".join(messages)
+        return ToolReturnValue(
+            is_error=False,
+            output=output,
+            message=message,
+            display=[self._build_display_block(todos)],
+        )
+
+    def _normalize_update_items(
+        self, params: TodoUpdateParams
+    ) -> tuple[list[TodoUpdateItem], ToolReturnValue | None]:
+        """Normalize params into a list of ``TodoUpdateItem`` and an optional error."""
+        if params.updates is not None:
+            items = list(params.updates)
+            common_parent = params.parent.strip() if params.parent is not None else None
+            if common_parent is not None:
+                applied: list[TodoUpdateItem] = []
+                for item in items:
+                    if item.parent is None:
+                        applied.append(item.model_copy(update={"parent": common_parent}))
+                    else:
+                        applied.append(item)
+                items = applied
+            return items, None
+
+        # Single top-level update mode.
+        if params.title is None:
+            hint = (
+            "Provide a title for a single update, or pass updates=[...] for multiple updates."
+        )
+            return [], ToolError(
+                message="No todo title provided.",
+                brief=hint,
+                output="Error: title is required when updates is not provided." + _hint_error(hint),
+            )
+        single = TodoUpdateItem(
+            title=params.title,
+            status=params.status,
+            notes=params.notes,
+            rename_to=params.rename_to,
+            parent=params.parent,
+            fuzzy=params.fuzzy,
+            force=params.force,
+        )
+        return [single], None
+
+    def _apply_one_update(
+        self,
+        todos: list[Todo],
+        params: TodoUpdateItem,
+        warnings: list[str],
+    ) -> tuple[list[Todo], str, str, tuple[str, str] | None] | ToolReturnValue:
+        """Apply a single update item to an in-memory todo tree.
+
+        Returns ``(new_tree, summary, message, rename_pair)`` on success, where
+        ``summary`` is the detailed human-readable line, ``message`` is the
+        short confirmation, and ``rename_pair`` is ``(old_title, new_title)`` if
+        a rename happened. On failure returns a ``ToolReturnValue`` error.
+        """
+        parent_raw = params.parent.strip() if params.parent is not None else None
+
+        if parent_raw is None:
+            if not todos:
+                hint = "Use todo_push or todo_write to create todos first."
+                return ToolError(
+                    message="No todos to update.",
+                    brief=hint,
+                    output="Error: No todos exist." + _hint_error(hint),
+                )
+            return self._update_global_in_memory(todos, params, warnings)
+
+        return self._update_or_create_under_parent_in_memory(todos, parent_raw, params, warnings)
+
+    def _update_global_in_memory(
+        self,
+        todos: list[Todo],
+        params: TodoUpdateItem,
+        warnings: list[str],
+    ) -> tuple[list[Todo], str, str, tuple[str, str] | None] | ToolReturnValue:
         target_title = params.title
         path = self._find_path(todos, target_title)
         matched_title = target_title
@@ -1736,14 +1999,18 @@ class todo_update(TodoList):
             warnings.append(f'Fuzzy matched "{target_title}" to "{matched_title}".')
 
         assert path is not None
-        return self._apply_update(todos, path, matched_title, params, warnings)
+        return self._apply_update_to_tree(todos, path, matched_title, params, warnings)
 
-    async def _update_or_create_under_parent(
-        self, todos: list[Todo], parent_title: str, params: TodoUpdateParams, warnings: list[str]
-    ) -> ToolReturnValue:
+    def _update_or_create_under_parent_in_memory(
+        self,
+        todos: list[Todo],
+        parent_title: str,
+        params: TodoUpdateItem,
+        warnings: list[str],
+    ) -> tuple[list[Todo], str, str, tuple[str, str] | None] | ToolReturnValue:
         if parent_title == "":
             parent_path: list[int] | None = []
-            parent_node = None
+            parent_node: Todo | None = None
             resolved_parent_title = "root"
         else:
             parent_path = self._find_path(todos, parent_title)
@@ -1809,8 +2076,8 @@ class todo_update(TodoList):
         child_index = next((i for i, t in enumerate(scope) if t.content == target_title), None)
 
         if child_index is not None:
-            path = [*parent_path, child_index] if parent_path is not None else [child_index]
-            return self._apply_update(todos, path, target_title, params, warnings)
+            path = [*parent_path, child_index] if parent_path else [child_index]
+            return self._apply_update_to_tree(todos, path, target_title, params, warnings)
 
         # New child creation under the resolved parent.
         if params.rename_to is not None:
@@ -1842,67 +2109,17 @@ class todo_update(TodoList):
         )
         final_todos = self._insert_child_at_path(todos, parent_path, new_child)
 
-        if new_child.status == "in_progress":
-            conflicts = self._enforce_single_in_progress(final_todos)
-            if conflicts:
-                final_todos = self._auto_fix_in_progress(final_todos, warnings)
+        summary = f'Created "{target_title}" under "{resolved_parent_title}".'
+        return final_todos, summary, summary, None
 
-        archived = self._load_archived_todos()
-        save_error = self._save_todos(final_todos, archived)
-        if save_error:
-            hint = "Use todo_write to read the tree and retry todo_update."
-            return ToolError(
-                message="Failed to save todos.",
-                brief=hint,
-                output=save_error + _hint_error(hint),
-            )
-
-        stack = self._load_stack()
-        stack_error = self._save_stack(stack)
-        if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_update."
-            return ToolError(
-                message="Failed to save todo stack.",
-                brief=hint,
-                output=stack_error + _hint_error(hint),
-            )
-
-        output_lines: list[str] = ["Current todo list:"]
-        if stack:
-            output_lines.append(f"Stack: {' > '.join(stack)}")
-        tree = self._render_read_tree(final_todos, max_lines=_MAX_READ_ITEMS)
-        if tree:
-            output_lines.append(tree)
-
-        output = (
-            "\n".join(output_lines)
-            + "\n"
-            + f'Created "{target_title}" under "{resolved_parent_title}".'
-        )
-        next_hint = (
-            'todo_update to edit another item, todo_update(parent=...) to add a child, '
-            'todo_pop to finish the parent, or todo_write to read the tree.'
-            if stack
-            else 'todo_update to edit another item, todo_update(parent=...) to add a child, or todo_write to read the tree.'
-        )
-        output += _hint_next(next_hint)
-        if warnings:
-            output += "\n" + "\n".join(warnings)
-        return ToolReturnValue(
-            is_error=False,
-            output=output,
-            message=f'Created "{target_title}" under "{resolved_parent_title}".',
-            display=[self._build_display_block(final_todos)],
-        )
-
-    def _apply_update(
+    def _apply_update_to_tree(
         self,
         todos: list[Todo],
         path: list[int],
         matched_title: str,
-        params: TodoUpdateParams,
+        params: TodoUpdateItem,
         warnings: list[str],
-    ) -> ToolReturnValue:
+    ) -> tuple[list[Todo], str, str, tuple[str, str] | None] | ToolReturnValue:
         old_node = self._node_at_path(todos, path)
         new_status = params.status if params.status is not None else old_node.status
 
@@ -1923,6 +2140,7 @@ class todo_update(TodoList):
 
         # Rename collision guard within the matched scope.
         final_title = matched_title
+        rename_pair: tuple[str, str] | None = None
         if params.rename_to is not None and params.rename_to != matched_title:
             new_title = params.rename_to
             parent_path = path[:-1]
@@ -1943,6 +2161,7 @@ class todo_update(TodoList):
                     ),
                 )
             final_title = new_title
+            rename_pair = (matched_title, final_title)
 
         # Notes: None means keep existing; empty string clears notes.
         final_notes = old_node.notes if params.notes is None else (params.notes.strip() or None)
@@ -1957,42 +2176,6 @@ class todo_update(TodoList):
             },
         )
 
-        # Enforce single in_progress across the whole tree.
-        conflicts = self._enforce_single_in_progress(final_todos)
-        if conflicts:
-            final_todos = self._auto_fix_in_progress(final_todos, warnings)
-
-        archived = self._load_archived_todos()
-        save_error = self._save_todos(final_todos, archived)
-        if save_error:
-            hint = "Use todo_write to read the tree and retry todo_update."
-            return ToolError(
-                message="Failed to save todos.",
-                brief=hint,
-                output=save_error + _hint_error(hint),
-            )
-
-        # Heal the stack if the renamed title is part of the breadcrumb.
-        stack = self._load_stack()
-        updated_stack = stack
-        if params.rename_to is not None and matched_title in stack:
-            updated_stack = [final_title if t == matched_title else t for t in stack]
-        stack_error = self._save_stack(updated_stack)
-        if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_update."
-            return ToolError(
-                message="Failed to save todo stack.",
-                brief=hint,
-                output=stack_error + _hint_error(hint),
-            )
-
-        output_lines: list[str] = ["Current todo list:"]
-        if updated_stack:
-            output_lines.append(f"Stack: {' > '.join(updated_stack)}")
-        tree = self._render_read_tree(final_todos, max_lines=_MAX_READ_ITEMS)
-        if tree:
-            output_lines.append(tree)
-
         change_parts: list[str] = []
         if params.status is not None:
             change_parts.append(f"status={new_status}")
@@ -2001,19 +2184,9 @@ class todo_update(TodoList):
         if params.rename_to is not None:
             change_parts.append(f'renamed to "{final_title}"')
         change_summary = ", ".join(change_parts) if change_parts else "no changes"
-
-        output = "\n".join(output_lines) + "\n" + f'Updated "{matched_title}" ({change_summary}).'
-        output += _hint_next(
-            'todo_update to edit another item, todo_update(parent=...) to add a child, or todo_write to read the tree.'
-        )
-        if warnings:
-            output += "\n" + "\n".join(warnings)
-        return ToolReturnValue(
-            is_error=False,
-            output=output,
-            message=f'Updated "{matched_title}".',
-            display=[self._build_display_block(final_todos)],
-        )
+        summary = f'Updated "{matched_title}" ({change_summary}).'
+        message = f'Updated "{matched_title}".'
+        return final_todos, summary, message, rename_pair
 
     @staticmethod
     def _insert_child_at_path(

@@ -7,6 +7,11 @@ import time
 import queue
 from typing import Any, Awaitable, Callable, cast
 
+BackgroundOutputFormatter = Callable[
+    [str, bool, int | None, float | None, bool | None],
+    Awaitable[tuple[str, str, str | None, str | None, bool]],
+]
+
 from kimix.native_loader import (
     get_module as _native_get_module,
     use_native as _native_use_native,
@@ -126,6 +131,7 @@ class BackgroundStream:
         self._last_output_time = time.monotonic()
         self._completed_event = threading.Event()
         self._process_elapsed: float | None = None
+        self.format_output: BackgroundOutputFormatter | None = None
 
     async def success(self) -> bool:
         return self._success

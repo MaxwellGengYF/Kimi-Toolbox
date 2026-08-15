@@ -834,7 +834,7 @@ class TestCrossToolHints:
         res = await tool(Params(todos=[Todo(content="A", status="pending")]))
         assert not res.is_error
         assert res.output.endswith(
-            "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree."
+            "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree."
         )
         # Hint is output-only, never in message.
         assert "Next:" not in res.message
@@ -844,7 +844,7 @@ class TestCrossToolHints:
         await tool(Params(todos=[Todo(content="A", status="pending")]))
         res = await tool(Params(todos=None))
         assert not res.is_error
-        assert "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree." in res.output
+        assert "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree." in res.output
         assert res.message == "Current todo list displayed."
 
     async def test_todolist_zero_total_write_suppresses_hint(self, runtime: Runtime) -> None:
@@ -997,4 +997,4 @@ class TestTodoListErrorHints:
         res = await lst(Params(todos=None))
         assert not res.is_error
         assert "Todo list is empty." in res.output
-        assert "Next: todo_push to start a parent todo, todo_update to edit one, or todo_write to read the tree." in res.output
+        assert "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree." in res.output

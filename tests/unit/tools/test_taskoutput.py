@@ -115,6 +115,7 @@ class TestTaskOutputOriginalSavedSuffix:
     @staticmethod
     def _stream_with_rtk_output(output: str) -> MagicMock:
         stream = MagicMock()
+        stream.format_output = None
         stream.wait_for_output = AsyncMock(return_value=(output, False, 0.1))
         stream.wait_with_inactivity_timeout = AsyncMock(return_value=(True, 0.1, False))
         stream.pop_output = AsyncMock(return_value=output)
@@ -155,4 +156,62 @@ class TestTaskOutputOriginalSavedSuffix:
 
         assert not result.is_error
         assert "[original saved to" not in result.message
+
+
+class TestTaskOutputFormatterCallback:
+    """Completed tasks should inherit the originating tool's output formatter."""
+
+    @staticmethod
+    def _stream_with_formatter(formatter_return: tuple) -> MagicMock:
+        stream = MagicMock()
+        stream.format_output = AsyncMock(return_value=formatter_return)
+        stream.wait_with_inactivity_timeout = AsyncMock(
+            return_value=(True, 0.1, False)
+        )
+        stream.pop_output = AsyncMock(return_value="raw output")
+        stream.thread_is_alive = AsyncMock(return_value=False)
+        stream.success = AsyncMock(return_value=True)
+        stream.exit_code = 0
+        stream.process_elapsed = 1.23
+        return stream
+
+    def _register(self, mock_session: MagicMock, stream: MagicMock) -> None:
+        from kimix.tools.background.utils import TaskData
+
+        data = TaskData()
+        data.tasks = {"bash_1": stream}
+        mock_session.custom_data["background_task_data"] = data
+
+    async def test_formatter_callback_is_used_for_success(
+        self, mock_session: MagicMock
+    ) -> None:
+        to = TaskOutput(session=mock_session)
+        stream = self._stream_with_formatter(
+            ("processed output", "success [original saved to x]", None, None, False)
+        )
+        self._register(mock_session, stream)
+
+        result = await to(TaskOutputParams(task_id="bash_1"))
+
+        assert not result.is_error
+        assert "processed output" in result.output
+        assert "success [original saved to x]" in result.message
+        stream.format_output.assert_awaited_once_with("raw output", True, 0, 1.23, None)
+
+    async def test_formatter_callback_is_used_for_failure(
+        self, mock_session: MagicMock
+    ) -> None:
+        to = TaskOutput(session=mock_session)
+        stream = self._stream_with_formatter(
+            ("processed output", "failed [command saved to y]", None, None, False)
+        )
+        stream.success = AsyncMock(return_value=False)
+        self._register(mock_session, stream)
+
+        result = await to(TaskOutputParams(task_id="bash_1"))
+
+        assert result.is_error
+        assert "failed [command saved to y]" in result.message
+        assert "processed output" in result.output
+        stream.format_output.assert_awaited_once_with("raw output", False, 0, 1.23, None)
 

@@ -498,6 +498,14 @@ class Powershell(CallableTool2[PowershellParams]):
                 ps_args.extend(["-NoExit", "-Command", _PWSH_CONSOLE_INIT])
             process_task = ProcessTask(executable, ps_args, None, _env_with_rg_bin_path(), append_newline=True)
             task_id = await process_task.start(self._session, "pwsh")
+            if process_task.stream is not None:
+                process_task.stream.format_output = functools.partial(
+                    self._format_background_output,
+                    cmd,
+                    params,
+                    rtk_rewritten=rtk_rewritten,
+                    transform_warning=transform_warning,
+                )
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
                 inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
@@ -554,6 +562,14 @@ class Powershell(CallableTool2[PowershellParams]):
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                cmd,
+                params,
+                rtk_rewritten=rtk_rewritten,
+                transform_warning=transform_warning,
+            )
 
         wait_matched: bool | None = None
         elapsed_seconds: float | None = None
@@ -755,6 +771,14 @@ class Powershell(CallableTool2[PowershellParams]):
             _env_with_rg_bin_path(),
         )
         task_id = await process_task.start(self._session, "pwsh")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                cmd,
+                params,
+                rtk_rewritten=False,
+                transform_warning=note,
+            )
 
         return ToolOk(
             output=f"Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output.",
@@ -905,3 +929,45 @@ class Powershell(CallableTool2[PowershellParams]):
         if suffix:
             message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)
+
+    async def _format_background_output(
+        self,
+        command: str,
+        params: PowershellParams,
+        output: str,
+        success: bool,
+        exit_code: int | None,
+        elapsed_seconds: float | None,
+        wait_matched: bool | None,
+        *,
+        rtk_rewritten: bool = False,
+        transform_warning: str = "",
+    ) -> tuple[str, str, str | None, str | None, bool]:
+        """Format the output of a background/pwsh task for ``job_output``.
+
+        Mirrors the foreground completion path so that messages about saved
+        original output and saved command scripts are inherited when a task
+        is retrieved via ``job_output``.
+
+        Returns ``(processed_output, message, original_path, output_path,
+        output_truncated)``.
+        """
+        processed, output_path, output_truncated, original_path = await self._process_output(
+            command, params, output, rtk_rewritten=rtk_rewritten
+        )
+        suffix = _original_saved_message(original_path)
+        if not success:
+            hint = annotate_failure(output, command, exit_code)
+            msg = "failed" + (f" Hint: {hint}" if hint else "")
+            msg += transform_warning
+            cmd_suffix = _command_saved_message(params.command, ".ps1", "PowerShell")
+            if cmd_suffix:
+                msg = f"{msg} {cmd_suffix}"
+            if suffix:
+                msg = f"{msg} {suffix}"
+        else:
+            msg = "[rtk] success" if rtk_rewritten else "success"
+            msg += transform_warning
+            if suffix:
+                msg = f"{msg} {suffix}"
+        return processed, msg, original_path, output_path, output_truncated

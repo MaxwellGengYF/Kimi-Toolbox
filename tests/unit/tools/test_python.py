@@ -606,3 +606,42 @@ class TestScriptTempFolder:
         assert ".kimix_cache/tmp_" in str(result.message)
         assert "sessions" not in str(result.message)
         assert not list(Path(tool._session.dir).glob("*.py"))
+
+
+# ---------------------------------------------------------------------------
+# Background (send) mode inherits the formatter so job_output gets the same
+# original-saved / script-saved messages as the foreground completion path.
+# ---------------------------------------------------------------------------
+class TestBackgroundFormatter:
+    @pytest.mark.asyncio
+    async def test_formatter_attached_in_send_mode(
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import functools
+
+        mock_cls = _fake_process_task(monkeypatch)
+        result = await tool(PythonParams(code="print('hello')", mode="send"))
+        assert isinstance(result, ToolOk)
+        inst = mock_cls.return_value
+        assert inst.stream.format_output is not None
+        assert isinstance(inst.stream.format_output, functools.partial)
+
+    @pytest.mark.asyncio
+    async def test_format_background_output_includes_original_saved(
+        self, tool: python, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import unittest.mock as um
+
+        long_output = _long_output()
+        monkeypatch.setattr(
+            "kimix.tools.py._summarize_long_output_async",
+            um.AsyncMock(return_value="[summary]"),
+        )
+        params = PythonParams(code="print('x')")
+        processed, message, original_path, _, _ = await tool._format_background_output(
+            params, "Script", "script.py", sys.executable, long_output, True, 0, 1.0, None
+        )
+        assert original_path is not None
+        assert processed == "[summary]"
+        assert "[original saved to .kimix_cache/tmp_" in message
+        assert "Script: `script.py`" in message

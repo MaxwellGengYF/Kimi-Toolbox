@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.display import TodoDisplayBlock
@@ -10,8 +11,8 @@ from kimi_cli.tools.todo import (
     Params,
     Todo,
     TodoList,
-    todo_update,
     TodoUpdateParams,
+    todo_update,
 )
 
 
@@ -206,7 +207,7 @@ class TestTodoUpdateTreeSearch:
 
 class TestTodoUpdateStack:
     async def test_rename_heals_stack_breadcrumb(self, runtime: Runtime) -> None:
-        from kimi_cli.tools.todo import todo_push, TodoPushParams
+        from kimi_cli.tools.todo import TodoPushParams, todo_push
 
         await todo_push(runtime)(TodoPushParams(title="Parent"))
         await todo_push(runtime)(TodoPushParams(title="Child"))
@@ -229,6 +230,174 @@ class TestTodoUpdateDisplay:
         assert not res.is_error
         assert len(res.display) == 1
         assert isinstance(res.display[0], TodoDisplayBlock)
+
+
+class TestTodoUpdateMultiple:
+    async def test_update_multiple_statuses(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "A", "status": "done"},
+                    {"title": "B", "status": "in_progress"},
+                ]
+            )
+        )
+        assert not res.is_error
+        a = _find_todo(update, "A")
+        b = _find_todo(update, "B")
+        assert a.status == "done"
+        assert b.status == "in_progress"
+        assert 'Updated "A" (status=done)' in res.output
+        assert 'Updated "B" (status=in_progress)' in res.output
+        assert res.message == 'Updated "A".; Updated "B".'
+
+    async def test_create_multiple_children_under_common_parent(
+        self, runtime: Runtime
+    ) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
+
+        res = await update(
+            TodoUpdateParams(
+                parent="Parent",
+                updates=[
+                    {"title": "Child1"},
+                    {"title": "Child2", "status": "in_progress"},
+                ],
+            )
+        )
+        assert not res.is_error
+        parent = _find_todo(update, "Parent")
+        assert [c.content for c in parent.children] == ["Child1", "Child2"]
+        assert parent.children[0].status == "pending"
+        assert parent.children[1].status == "in_progress"
+        assert 'Created "Child1" under "Parent".' in res.output
+        assert 'Created "Child2" under "Parent".' in res.output
+
+    async def test_updates_alias_todos(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                todos=[{"title": "A", "status": "done"}, {"title": "B", "status": "done"}]
+            )
+        )
+        assert not res.is_error
+        assert _find_todo(update, "A").status == "done"
+        assert _find_todo(update, "B").status == "done"
+
+    async def test_batch_error_leaves_state_unchanged(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="done"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "A", "status": "done"},
+                    {"title": "B", "status": "in_progress"},
+                ]
+            )
+        )
+        assert res.is_error
+        assert "Cannot regress completed todo" in res.output
+        assert _find_todo(update, "A").status == "pending"
+        assert _find_todo(update, "B").status == "done"
+
+    async def test_batch_auto_fixes_multiple_in_progress(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "A", "status": "in_progress"},
+                    {"title": "B", "status": "in_progress"},
+                ]
+            )
+        )
+        assert not res.is_error
+        a = _find_todo(update, "A")
+        b = _find_todo(update, "B")
+        assert a.status == "done"
+        assert b.status == "in_progress"
+        assert "Auto-fixed" in res.output
+
+    async def test_batch_rename_then_update_child(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="Parent",
+                        status="pending",
+                        children=[Todo(content="Child", status="pending")],
+                    )
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "Parent", "rename_to": "NewParent"},
+                    {"parent": "NewParent", "title": "Child", "status": "done"},
+                ]
+            )
+        )
+        assert not res.is_error
+        new_parent = _find_todo(update, "NewParent")
+        assert new_parent.children[0].status == "done"
+
+    async def test_batch_creates_root_children_when_empty(self, runtime: Runtime) -> None:
+        update = todo_update(runtime)
+        res = await update(
+            TodoUpdateParams(parent="", updates=[{"title": "A"}, {"title": "B"}])
+        )
+        assert not res.is_error
+        todos = update._load_todos()
+        assert [t.content for t in todos] == ["A", "B"]
+
+    def test_cannot_mix_top_level_title_with_updates(self) -> None:
+        with pytest.raises(ValidationError):
+            TodoUpdateParams(title="A", updates=[{"title": "B"}])
 
 
 class TestTodoUpdateParent:

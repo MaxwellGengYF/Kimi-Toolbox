@@ -1,6 +1,7 @@
 """Python tool that executes code or runs .py files via the system Python executable."""
 
 import asyncio
+import functools
 import os
 import sys
 from pathlib import Path
@@ -323,6 +324,8 @@ class python(CallableTool2[Params]):
         """Start an interactive Python session."""
         # Determine script path from `code` (auto-detect .py file or inline code)
         script_path, is_file_mode = self._resolve_script_source(params)
+        source_label = "File" if is_file_mode else "Script"
+        display_script_path = _display_temp_path(script_path) if script_path else ""
 
         # Fail-fast syntax pre-check before spawning (config-gated).
         syntax_error = self._syntax_check_error(params, script_path, is_file_mode)
@@ -353,6 +356,14 @@ class python(CallableTool2[Params]):
             append_newline=True,
         )
         task_id = await process_task.start(self._session, "python")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                params,
+                source_label,
+                display_script_path,
+                python_exe,
+            )
 
         if params.wait_for_pattern is not None and process_task.stream is not None:
             from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
@@ -426,6 +437,14 @@ class python(CallableTool2[Params]):
             redact=redact_on,
         )
         task_id = await process_task.start(self._session, "python")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                params,
+                source_label,
+                display_script_path,
+                python_exe,
+            )
 
         if background:
             return ToolOk(
@@ -701,3 +720,42 @@ class python(CallableTool2[Params]):
         if suffix:
             message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)
+
+    async def _format_background_output(
+        self,
+        params: Params,
+        source_label: str,
+        display_script_path: str,
+        python_exe: str,
+        output: str,
+        success: bool,
+        exit_code: int | None,
+        elapsed_seconds: float | None,
+        wait_matched: bool | None,
+    ) -> tuple[str, str, str | None, str | None, bool]:
+        """Format the output of a background/python task for ``job_output``.
+
+        Mirrors the foreground completion path so that messages about saved
+        original output are inherited when a task is retrieved via
+        ``job_output``.
+
+        Returns ``(processed_output, message, original_path, output_path,
+        output_truncated)``.
+        """
+        processed, output_path, output_truncated, original_path = await self._process_output(
+            params, output
+        )
+        suffix = _original_saved_message(original_path)
+        if not success:
+            msg = (
+                f"{source_label}: `{display_script_path}` failed "
+                f"(interpreter: {python_exe})"
+                + self._module_not_found_hint(output, python_exe)
+            )
+            if suffix:
+                msg = f"{msg} {suffix}"
+        else:
+            msg = f"{source_label}: `{display_script_path}`"
+            if suffix:
+                msg = f"{msg} {suffix}"
+        return processed, msg, original_path, output_path, output_truncated

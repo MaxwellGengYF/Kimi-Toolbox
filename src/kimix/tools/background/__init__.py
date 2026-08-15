@@ -188,22 +188,52 @@ class TaskOutput(CallableTool2):
         output = await stream.pop_output()
         remove_task_id(self._session, params.job_id.strip())
 
+        processed, message, original_path, _output_path, _output_truncated = await self._process_completed_output(
+            stream, output, None
+        )
         success = await stream.success()
         if not success:
             elapsed = stream.process_elapsed
-            msg = output if output else "Task process failed (non-zero exit)"
             if elapsed is not None:
-                msg += f" ({elapsed:.1f}s)"
+                message += f" ({elapsed:.1f}s)"
             return ToolError(
-                message=msg,
-                output=output if output else "",
+                message=message,
+                output=processed if processed else "",
                 brief=f"Task '{params.job_id}' killed (non-zero exit)"
             )
 
         return ToolOk(
-            output=output if output else "(no output)",
+            output=processed if processed else "(no output)",
+            message=message,
             brief=f"Task '{params.job_id}' killed",
         )
+
+    async def _process_completed_output(
+        self,
+        stream: BackgroundStream,
+        output: str,
+        wait_matched: bool | None,
+    ) -> tuple[str, str, str | None, str | None, bool]:
+        """Apply the originating tool's output formatter if one was registered.
+
+        Returns ``(processed_output, message, original_path, output_path,
+        output_truncated)``.  When no formatter is available, the legacy generic
+        post-processing (rtk export + large-output export) is used.
+        """
+        if stream.format_output is not None:
+            success = await stream.success()
+            exit_code = stream.exit_code
+            elapsed = stream.process_elapsed
+            return await stream.format_output(
+                output, success, exit_code, elapsed, wait_matched
+            )
+
+        rtk_original_path: str | None = None
+        if output:
+            rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
+        processed = await _maybe_export_output_async(output)
+        message = _original_saved_message(rtk_original_path)
+        return processed, message, rtk_original_path, None, False
 
     async def _get_output(self, tasks: dict, params: TaskOutputParams) -> ToolReturnValue:
         """Get output from a specific task."""
@@ -257,23 +287,40 @@ class TaskOutput(CallableTool2):
 
             # Use pop_output to ensure each call returns only new data
             output = await stream.pop_output()
+
         if not task_alive:
             remove_task_id(self._session, params.job_id.strip())
+            processed, message, original_path, _output_path, _output_truncated = await self._process_completed_output(
+                stream, output, wait_matched
+            )
             if not await stream.success():
                 elapsed = stream.process_elapsed
-                msg = output if output else "Task process failed (non-zero exit)"
                 if elapsed is not None:
-                    msg += f" ({elapsed:.1f}s)"
+                    message += f" ({elapsed:.1f}s)"
+                if params.output_path:
+                    from pathlib import Path
+                    import anyio
+                    path = Path(params.output_path)
+                    async with await anyio.open_file(path, 'w', encoding='utf-8') as f:
+                        await f.write(output)
+                    display_path = str(path).replace("\\", "/")
+                    output_text = f"output exported to file `{display_path}`"
+                else:
+                    output_text = processed if processed else "(no output)"
                 return ToolError(
-                    message=msg,
-                    output=output if output else "",
+                    message=message,
+                    output=output_text,
                     brief=f"Task '{params.job_id}' failed"
                 )
-
-        # If rtk folded the output, preserve the full stream for later paging.
-        rtk_original_path: str | None = None
-        if output:
-            rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
+        else:
+            processed = await _maybe_export_output_async(output)
+            message = ""
+            original_path = None
+            if output:
+                rtk_original_path, _ = await _maybe_export_rtk_original_async(output)
+                if rtk_original_path:
+                    message = _original_saved_message(rtk_original_path)
+                    original_path = rtk_original_path
 
         if params.output_path:
             from pathlib import Path
@@ -282,16 +329,16 @@ class TaskOutput(CallableTool2):
             async with await anyio.open_file(path, 'w', encoding='utf-8') as f:
                 await f.write(output)
             display_path = str(path).replace("\\", "/")
-            output = f"{f'`{params.job_id}` is still running, call `job_output` again, ' if task_alive else ''}output exported to file `{display_path}`"
+            output_text = f"{f'`{params.job_id}` is still running, call `job_output` again, ' if task_alive else ''}output exported to file `{display_path}`"
         else:
-            output = await _maybe_export_output_async(output)
+            output_text = processed if processed else "(no output)"
+            if not task_alive and original_path:
+                display_path = original_path.replace("\\", "/")
+                if stream.format_output is not None:
+                    output_text += f"\n[original output exported to: {display_path}]"
+                else:
+                    output_text += f"\n[rtk output exported to: {display_path}]"
 
-        kind = params.job_id.split("_")[0] if params.job_id else "task"
-        status = "running" if task_alive else "completed"
-        output_text = output if output else "(no output)"
-        if rtk_original_path:
-            display_rtk_path = rtk_original_path.replace("\\", "/")
-            output_text += f"\n[rtk output exported to: {display_rtk_path}]"
         if wait_matched is not None:
             output_text += f"\nwait_matched: {str(wait_matched).lower()}"
         if not task_alive:
@@ -299,7 +346,14 @@ class TaskOutput(CallableTool2):
             if elapsed is not None:
                 output_text += f"\n[Process completed in {elapsed:.2f}s]"
 
-        message = _original_saved_message(rtk_original_path)
+        # For completed tasks with a registered formatter, the message already
+        # contains the original-saved / command-saved suffixes.  Otherwise,
+        # derive it from any exported original path.
+        if not message and original_path:
+            message = _original_saved_message(original_path)
+
+        kind = params.job_id.split("_")[0] if params.job_id else "task"
+        status = "running" if task_alive else "completed"
         return ToolOk(
             output=output_text,
             message=message,
@@ -311,6 +365,7 @@ class TaskOutput(CallableTool2):
                 description=output_text[:200] if output_text else "(no output)",
             ),
         )
+
 
 
 __all__ = [

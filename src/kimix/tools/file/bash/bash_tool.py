@@ -736,6 +736,12 @@ class Bash(CallableTool2[BashParams]):
                 bash_args = ["-i"]
             process_task = ProcessTask(self._bash, bash_args, None, _bash_subprocess_env(), append_newline=True)
             task_id = await process_task.start(self._session, "bash")
+            if process_task.stream is not None:
+                process_task.stream.format_output = functools.partial(
+                    self._format_background_output,
+                    params,
+                    rtk_rewritten=rtk_rewritten,
+                )
             if params.wait_for_pattern is not None and process_task.stream is not None:
                 from kimix.tools.background.utils import DEFAULT_INACTIVITY_TIMEOUT
                 inactivity_timeout = min(DEFAULT_INACTIVITY_TIMEOUT, float(params.timeout))
@@ -780,6 +786,12 @@ class Bash(CallableTool2[BashParams]):
             return blocked
         process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                params,
+                rtk_rewritten=rtk_rewritten,
+            )
 
         wait_matched: bool | None = None
         elapsed_seconds: float | None = None
@@ -976,6 +988,12 @@ class Bash(CallableTool2[BashParams]):
             return blocked
         process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
+        if process_task.stream is not None:
+            process_task.stream.format_output = functools.partial(
+                self._format_background_output,
+                params,
+                rtk_rewritten=rtk_rewritten,
+            )
 
         return ToolOk(
             output=f"Running in background. task_id: `{task_id}`. Use `job_output` tool to retrieve output.",
@@ -1143,3 +1161,41 @@ class Bash(CallableTool2[BashParams]):
         if suffix:
             message = f"{message} {suffix}" if message else suffix
         return ToolOk(output=block, message=message, brief=brief)
+
+    async def _format_background_output(
+        self,
+        params: BashParams,
+        output: str,
+        success: bool,
+        exit_code: int | None,
+        elapsed_seconds: float | None,
+        wait_matched: bool | None,
+        *,
+        rtk_rewritten: bool = False,
+    ) -> tuple[str, str, str | None, str | None, bool]:
+        """Format the output of a background/bash task for ``job_output``.
+
+        Mirrors the foreground completion path so that messages about saved
+        original output and saved command scripts are inherited when a task
+        is retrieved via ``job_output``.
+
+        Returns ``(processed_output, message, original_path, output_path,
+        output_truncated)``.
+        """
+        processed, output_path, output_truncated, original_path = await self._process_output(
+            params, output, rtk_rewritten=rtk_rewritten
+        )
+        suffix = _original_saved_message(original_path)
+        if not success:
+            hint = annotate_failure(output, params.cmd, exit_code)
+            msg = "failed" + (f" Hint: {hint}" if hint else "")
+            cmd_suffix = _command_saved_message(params.cmd, ".sh", "bash")
+            if cmd_suffix:
+                msg = f"{msg} {cmd_suffix}"
+            if suffix:
+                msg = f"{msg} {suffix}"
+        else:
+            msg = "[rtk] success" if rtk_rewritten else "success"
+            if suffix:
+                msg = f"{msg} {suffix}"
+        return processed, msg, original_path, output_path, output_truncated
