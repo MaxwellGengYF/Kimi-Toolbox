@@ -24,16 +24,14 @@ from kimi_cli.auth.platforms import (
     ModelInfo,
     get_platform_by_id,
     list_models,
-    managed_model_key,
-    managed_provider_key,
 )
 from kimi_cli.config import (
     Config,
+    FetchConfig,
     LLMModel,
     LLMProvider,
-    FetchConfig,
-    SearchConfig,
     OAuthRef,
+    SearchConfig,
     save_config,
 )
 from kimi_cli.constant import VERSION
@@ -41,10 +39,8 @@ from kimi_cli.share import get_share_dir
 from kimi_cli.utils.logging import logger
 
 if TYPE_CHECKING:
-    import aiohttp
 
     from kimi_cli.soul.agent import Runtime
-    from kimi_cli.utils.aiohttp import new_client_session
 
 
 def __getattr__(name: str) -> Any:
@@ -69,7 +65,26 @@ XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:acces
 XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
 XAI_OAUTH_DEFAULT_TOKEN_URL = f"{XAI_OAUTH_ISSUER}/oauth2/token"
 XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
+XAI_TOKEN_AUTH_HEADER = {"X-XAI-Token-Auth": "xai-grok-cli"}
+XAI_API_KEY_ENV = "XAI_API_KEY"
+XAI_API_KEY_LEGACY_ENV = "GROK_CODE_XAI_API_KEY"
 REFRESH_INTERVAL_SECONDS = 60
+
+
+def read_xai_api_key_env() -> str | None:
+    """Read the xAI API key from the environment.
+
+    Checks ``XAI_API_KEY`` first, then falls back to the legacy
+    ``GROK_CODE_XAI_API_KEY`` name for backward compatibility.
+    """
+    return os.getenv(XAI_API_KEY_ENV) or os.getenv(XAI_API_KEY_LEGACY_ENV)
+
+
+def has_xai_api_key_env() -> bool:
+    """Return ``True`` if an xAI API key is set in the environment."""
+    return read_xai_api_key_env() is not None
+
+
 MIN_REFRESH_THRESHOLD_SECONDS = 300
 REFRESH_THRESHOLD_RATIO = 0.5
 UNAUTHORIZED_REFRESH_RETRY_COOLDOWN_SECONDS = 300
@@ -486,7 +501,7 @@ def delete_tokens(ref: OAuthRef) -> None:
 
 async def request_device_authorization() -> DeviceAuthorization:
     # Resolved through the module attribute so tests can monkeypatch it.
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
 
     async with (
         new_client_session() as session,
@@ -513,7 +528,7 @@ async def request_device_authorization() -> DeviceAuthorization:
 async def _request_device_token(auth: DeviceAuthorization) -> tuple[int, dict[str, Any]]:
     import aiohttp
 
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
 
     try:
         async with (
@@ -544,7 +559,7 @@ async def refresh_token(refresh_token: str, *, max_retries: int = 3) -> OAuthTok
     import aiohttp
 
     # Resolved through the module attribute so tests can monkeypatch it.
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
 
     last_exc: Exception | None = None
     for attempt in range(max_retries):
@@ -595,8 +610,8 @@ async def _xai_oauth_discovery(*, timeout: float = 15.0, max_retries: int = 3) -
     """Fetch and validate xAI OIDC discovery metadata."""
     import aiohttp
 
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
-    last_exc: Exception | None = None
+    new_client_session = sys.modules[__name__].new_client_session
+
     for attempt in range(max_retries):
         try:
             async with (
@@ -611,7 +626,6 @@ async def _xai_oauth_discovery(*, timeout: float = 15.0, max_retries: int = 3) -
                     raise OAuthError(f"xAI OIDC discovery returned status {response.status}.")
                 data_any = await response.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
-            last_exc = exc
             if attempt < max_retries - 1:
                 await asyncio.sleep(2**attempt)
                 logger.warning(
@@ -639,7 +653,7 @@ async def refresh_xai_token(
     """Refresh an xAI OAuth access token."""
     import aiohttp
 
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
     if token_endpoint is None:
         discovery = await _xai_oauth_discovery()
         token_endpoint = discovery["token_endpoint"]
@@ -695,7 +709,7 @@ async def refresh_xai_token(
 
 async def request_xai_device_authorization() -> DeviceAuthorization:
     """Request an xAI OAuth device code."""
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
 
     async with (
         new_client_session() as session,
@@ -725,7 +739,7 @@ async def _request_xai_device_token(auth: DeviceAuthorization) -> tuple[int, dic
     """Poll the xAI token endpoint for a device authorization decision."""
     import aiohttp
 
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
     discovery = await _xai_oauth_discovery()
     token_endpoint = discovery["token_endpoint"]
 
@@ -924,7 +938,11 @@ async def logout_kimi_code(config: Config) -> AsyncIterator[OAuthEvent]:
     delete_tokens(OAuthRef(storage="file", key=KIMI_CODE_OAUTH_KEY))
 
     provider = config.provider
-    if provider is not None and provider.oauth is not None and provider.oauth.key == KIMI_CODE_OAUTH_KEY:
+    if (
+        provider is not None
+        and provider.oauth is not None
+        and provider.oauth.key == KIMI_CODE_OAUTH_KEY
+    ):
         config.provider = None
         config.model = None
 
@@ -1016,7 +1034,11 @@ async def login_xai(
         if models:
             model_name = models[0]
     except Exception as exc:
-        logger.warning("Failed to list xAI models, falling back to {model}: {error}", model=default_model_name, error=exc)
+        logger.warning(
+            "Failed to list xAI models, falling back to {model}: {error}",
+            model=default_model_name,
+            error=exc,
+        )
 
     from kimi_cli.config import _resolve_model_defaults
 
@@ -1026,6 +1048,7 @@ async def login_xai(
         base_url=XAI_DEFAULT_BASE_URL,
         api_key=SecretStr(""),
         oauth=oauth_ref,
+        custom_headers=dict(XAI_TOKEN_AUTH_HEADER),
     )
     config.model = LLMModel(
         model=model_name,
@@ -1039,9 +1062,8 @@ async def login_xai(
 
 async def _list_xai_models(access_token: str) -> list[str]:
     """Best-effort fetch of available xAI model IDs."""
-    import aiohttp
 
-    new_client_session = getattr(sys.modules[__name__], "new_client_session")
+    new_client_session = sys.modules[__name__].new_client_session
     async with (
         new_client_session() as session,
         session.get(
@@ -1058,6 +1080,61 @@ async def _list_xai_models(access_token: str) -> list[str]:
     return [str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")]
 
 
+async def register_xai_api_key(
+    config: Config,
+    api_key: str,
+) -> AsyncIterator[OAuthEvent]:
+    """Register a plain xAI API key and configure the provider.
+
+    This mirrors grok's ``grok login --api-key`` / ``xai::api_key`` path.
+    The API key is stored directly in the provider config; no OAuth refresh
+    flow is used. Plain API keys must NOT send the ``X-XAI-Token-Auth`` header,
+    so ``custom_headers`` is left unset.
+    """
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Register requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    stripped = api_key.strip()
+    if not stripped:
+        yield OAuthEvent("error", "xAI API key is required.")
+        return
+
+    default_model_name = "grok-3"
+    model_name = default_model_name
+    try:
+        models = await _list_xai_models(stripped)
+        if models:
+            model_name = models[0]
+    except Exception as exc:
+        logger.warning(
+            "Failed to list xAI models, falling back to {model}: {error}",
+            model=default_model_name,
+            error=exc,
+        )
+
+    from kimi_cli.config import _resolve_model_defaults
+
+    context_size, _ = _resolve_model_defaults(model_name) or (2_000_000, None)
+
+    config.provider = LLMProvider(
+        type="xai",
+        base_url=XAI_DEFAULT_BASE_URL,
+        api_key=SecretStr(stripped),
+    )
+    config.model = LLMModel(
+        model=model_name,
+        max_context_size=context_size,
+    )
+
+    save_config(config)
+    yield OAuthEvent("success", "xAI API key registered successfully.")
+    return
+
+
 async def logout_xai(config: Config) -> AsyncIterator[OAuthEvent]:
     if not config.is_from_default_location:
         yield OAuthEvent(
@@ -1070,7 +1147,7 @@ async def logout_xai(config: Config) -> AsyncIterator[OAuthEvent]:
     delete_tokens(OAuthRef(storage="file", key=XAI_OAUTH_KEY))
 
     provider = config.provider
-    if provider is not None and provider.oauth is not None and provider.oauth.key == XAI_OAUTH_KEY:
+    if provider is not None and provider.type == "xai":
         config.provider = None
         config.model = None
 

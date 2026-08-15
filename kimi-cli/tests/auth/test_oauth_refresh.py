@@ -11,15 +11,24 @@ from pydantic import SecretStr
 
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
+    XAI_API_KEY_ENV,
+    XAI_API_KEY_LEGACY_ENV,
+    XAI_DEFAULT_BASE_URL,
+    XAI_OAUTH_KEY,
+    XAI_OAUTH_SCOPE,
+    XAI_TOKEN_AUTH_HEADER,
     OAuthError,
     OAuthManager,
     OAuthToken,
     OAuthUnauthorized,
     _refresh_threshold,
     _save_to_file,
+    has_xai_api_key_env,
+    login_xai,
+    logout_xai,
+    read_xai_api_key_env,
     refresh_token,
-    refresh_xai_token,
-    XAI_OAUTH_KEY,
+    register_xai_api_key,
 )
 from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, Services
 from kimi_cli.llm import LLM
@@ -656,3 +665,144 @@ def test_apply_access_token_xai_fallback_to_configured_key():
     manager._apply_access_token(ref, runtime, "")
 
     assert chat_provider.client.api_key == "xai-configured-key"
+
+
+# ── xAI API key env helpers ─────────────────────────────────────
+
+
+def test_read_xai_api_key_env_prefers_xai_api_key(monkeypatch):
+    monkeypatch.setenv(XAI_API_KEY_ENV, "xai-key")
+    monkeypatch.setenv(XAI_API_KEY_LEGACY_ENV, "legacy-key")
+    assert read_xai_api_key_env() == "xai-key"
+
+
+def test_read_xai_api_key_env_falls_back_to_legacy(monkeypatch):
+    monkeypatch.delenv(XAI_API_KEY_ENV, raising=False)
+    monkeypatch.setenv(XAI_API_KEY_LEGACY_ENV, "legacy-key")
+    assert read_xai_api_key_env() == "legacy-key"
+
+
+def test_read_xai_api_key_env_returns_none_when_unset(monkeypatch):
+    monkeypatch.delenv(XAI_API_KEY_ENV, raising=False)
+    monkeypatch.delenv(XAI_API_KEY_LEGACY_ENV, raising=False)
+    assert read_xai_api_key_env() is None
+
+
+def test_has_xai_api_key_env(monkeypatch):
+    monkeypatch.delenv(XAI_API_KEY_ENV, raising=False)
+    monkeypatch.delenv(XAI_API_KEY_LEGACY_ENV, raising=False)
+    assert has_xai_api_key_env() is False
+
+    monkeypatch.setenv(XAI_API_KEY_ENV, "xai-key")
+    assert has_xai_api_key_env() is True
+
+
+# ── xAI login sets token auth header ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_login_xai_sets_token_auth_custom_headers(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    config = _make_xai_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+
+    async def fake_device_authorization():
+        from kimi_cli.auth.oauth import DeviceAuthorization
+
+        return DeviceAuthorization(
+            user_code="code",
+            device_code="device",
+            verification_uri="https://auth.x.ai/verify",
+            verification_uri_complete="https://auth.x.ai/verify?code=code",
+            expires_in=300,
+            interval=1,
+        )
+
+    async def fake_device_token(auth):
+        return 200, {
+            "access_token": "xai-access",
+            "refresh_token": "xai-refresh",
+            "expires_in": 900,
+            "scope": XAI_OAUTH_SCOPE,
+            "token_type": "Bearer",
+        }
+
+    with (
+        patch("kimi_cli.auth.oauth.request_xai_device_authorization", fake_device_authorization),
+        patch("kimi_cli.auth.oauth._request_xai_device_token", fake_device_token),
+        patch("kimi_cli.auth.oauth._list_xai_models", AsyncMock(return_value=["grok-3"])),
+        patch("kimi_cli.auth.oauth.save_tokens", return_value=OAuthRef(storage="file", key=XAI_OAUTH_KEY)),
+    ):
+        events = [e async for e in login_xai(config, open_browser=False)]
+
+    assert any(e.type == "success" for e in events)
+    assert config.provider is not None
+    assert config.provider.custom_headers == XAI_TOKEN_AUTH_HEADER
+    assert config.provider.oauth is not None
+    assert config.provider.oauth.key == XAI_OAUTH_KEY
+
+
+# ── xAI API key registration ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_register_xai_api_key_stores_key_and_default_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    config = _make_xai_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+
+    with patch("kimi_cli.auth.oauth._list_xai_models", AsyncMock(return_value=["grok-3"])):
+        events = [e async for e in register_xai_api_key(config, "xai-api-key-123")]
+
+    assert any(e.type == "success" for e in events)
+    assert config.provider is not None
+    assert config.provider.type == "xai"
+    assert config.provider.api_key.get_secret_value() == "xai-api-key-123"
+    assert config.provider.oauth is None
+    assert config.provider.custom_headers is None
+    assert config.model is not None
+    assert config.model.model == "grok-3"
+
+
+@pytest.mark.asyncio
+async def test_register_xai_api_key_requires_default_config_location():
+    config = _make_xai_config()
+    config.is_from_default_location = False
+
+    events = [e async for e in register_xai_api_key(config, "xai-api-key-123")]
+    assert any(e.type == "error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_register_xai_api_key_rejects_empty_key():
+    config = _make_xai_config()
+
+    events = [e async for e in register_xai_api_key(config, "   ")]
+    assert any(e.type == "error" for e in events)
+
+
+# ── xAI logout clears API key providers ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_logout_xai_clears_api_key_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    config = _make_xai_config()
+    config.provider = LLMProvider(
+        type="xai",
+        base_url=XAI_DEFAULT_BASE_URL,
+        api_key=SecretStr("xai-api-key"),
+    )
+    config.model = LLMModel(model="grok-3", max_context_size=131_072)
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+
+    with patch("kimi_cli.auth.oauth.save_config") as mock_save:
+        events = [e async for e in logout_xai(config)]
+
+    assert any(e.type == "success" for e in events)
+    assert config.provider is None
+    assert config.model is None
+    mock_save.assert_called_once()

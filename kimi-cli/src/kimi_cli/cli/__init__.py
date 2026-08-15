@@ -622,19 +622,46 @@ def login(
         "--json",
         help="Emit OAuth events as JSON lines.",
     ),
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            help="Register a plain API key for xai instead of using OAuth.",
+        ),
+    ] = None,
 ) -> None:
     """Login to an OAuth provider account (kimi or xai)."""
     import asyncio
+    from collections.abc import AsyncIterator, Callable
 
     from rich.console import Console
     from rich.status import Status
 
-    from kimi_cli.auth.oauth import login_kimi_code, login_xai
-    from kimi_cli.config import load_config
+    from kimi_cli.auth.oauth import OAuthEvent, login_kimi_code, login_xai, register_xai_api_key
+    from kimi_cli.config import Config, load_config
 
     provider = provider.lower()
-    login_fn = {"kimi": login_kimi_code, "xai": login_xai}.get(provider)
-    if login_fn is None:
+    if provider != "xai" and api_key is not None:
+        typer.echo("--api-key is only supported for xai.", err=True)
+        raise typer.Exit(code=1)
+
+    login_fn: Callable[[Config], AsyncIterator[OAuthEvent]]
+    if provider == "xai" and api_key is not None:
+        async def _xai_api_key_login(config: Config) -> AsyncIterator[OAuthEvent]:
+            async for event in register_xai_api_key(config, api_key):
+                yield event
+        login_fn = _xai_api_key_login
+    elif provider == "kimi":
+        async def _kimi_login(config: Config) -> AsyncIterator[OAuthEvent]:
+            async for event in login_kimi_code(config):
+                yield event
+        login_fn = _kimi_login
+    elif provider == "xai":
+        async def _xai_oauth_login(config: Config) -> AsyncIterator[OAuthEvent]:
+            async for event in login_xai(config):
+                yield event
+        login_fn = _xai_oauth_login
+    else:
         typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai.", err=True)
         raise typer.Exit(code=1)
 
