@@ -1,6 +1,6 @@
 """Tests for kimix.tools.file.bash.shell_common (shared one-shot shell helpers).
 
-The Bash tool, the Powershell tool and the TodoList runner all delegate their
+The bash tool, the pwsh tool and the todo_write runner all delegate their
 one-shot command building here; these tests pin the shared behavior (fixer
 pipeline order, argv/env shapes, PowerShell wrapper) so refactors of the
 individual call sites cannot silently diverge.

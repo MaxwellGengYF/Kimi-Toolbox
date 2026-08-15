@@ -209,7 +209,7 @@ class SubAgentParams(BaseModel):
     response: str | None = Field(
         default=None,
         description="[Deprecated] Response to the sub-agent's pending question. "
-        "Use the AgentRespond tool instead."
+        "Use the send_message tool instead."
     )
     context_files: list[str] | None = Field(
         default=None,
@@ -480,7 +480,7 @@ class Agent(CallableTool2):
         "final assistant message; send_message starts a later turn in the same "
         "child conversation. Set run_in_background: false only when your next "
         "action depends on receiving the result. "
-        "Use AgentRespond to answer a sub-agent's pending question."
+        "Use send_message to answer a sub-agent's pending question."
     )
     params: type[SubAgentParams] = SubAgentParams
 

@@ -38,7 +38,7 @@ dependencies = [
     "apsw>=3.45.0",
     "pendulum>=3.0.0",
     "uvloop>=0.22.1; sys_platform != 'win32'",
-    # Document parsing for ReadFile's office/notebook extraction.
+    # Document parsing for read's office/notebook extraction.
     # python-docx's Document.iter_inner_content() requires 1.1+.
     "python-docx>=1.1.0",
     "openpyxl>=3.1.5",

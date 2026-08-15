@@ -543,7 +543,7 @@ class EditFile(CallableTool2[Params]):
             )
 
         except (OSError, ValueError, RuntimeError) as e:
-            logger.warning("EditFile failed: {path}: {error}", path=params.file_path, error=e)
+            logger.warning("edit failed: {path}: {error}", path=params.file_path, error=e)
             _outside_ex = False
             with contextlib.suppress(Exception):
                 _outside_ex = not is_within_directory(

@@ -100,7 +100,7 @@ class SearchWeb(CallableTool2[Params]):
             ):
                 if response.status != 200:
                     logger.warning(
-                        "SearchWeb HTTP error: status={status}, query={query}",
+                        "web_search HTTP error: status={status}, query={query}",
                         status=response.status,
                         query=params.query,
                     )
@@ -116,7 +116,7 @@ class SearchWeb(CallableTool2[Params]):
                     results = Response(**await response.json()).search_results
                 except ValidationError as e:
                     logger.warning(
-                        "SearchWeb response parse error: {error}, query={query}",
+                        "web_search response parse error: {error}, query={query}",
                         error=e,
                         query=params.query,
                     )
@@ -128,14 +128,14 @@ class SearchWeb(CallableTool2[Params]):
                         brief="Failed to parse search results",
                     )
         except TimeoutError:
-            logger.warning("SearchWeb request timed out: query={query}", query=params.query)
+            logger.warning("web_search request timed out: query={query}", query=params.query)
             return builder.error(
                 "Search request timed out. The search service may be slow or unavailable.",
                 brief="Search request timed out",
             )
         except aiohttp.ClientError as e:
             logger.warning(
-                "SearchWeb network error: {error}, query={query}",
+                "web_search network error: {error}, query={query}",
                 error=e,
                 query=params.query,
             )

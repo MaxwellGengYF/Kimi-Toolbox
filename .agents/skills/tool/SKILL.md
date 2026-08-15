@@ -317,14 +317,14 @@ At startup, `KimiToolset.load_tools()` (in `kimi-cli/src/kimi_cli/soul/toolset.p
 | File | Purpose |
 |------|---------|
 | `agent_worker.json` | Default worker agent (default agent file) |
-| `agent_boss.json` | Boss agent with ReadFile/Glob/Grep/fetch_url/Note |
-| `agent_subagent.json` | Sub-agent with Run/TaskOutput/TodoList/WriteFile/ReadFile/Glob/Grep/EditFile/fetch_url |
+| `agent_boss.json` | Boss agent with read/glob/grep/fetch_url/web_search/Note plans |
+| `agent_subagent.json` | Sub-agent with bash/pwsh/Run/python/job_output/todo tools/read/read_image/edit/write/glob/grep/fetch_url/web_search |
 
 **kimi-cli base agents** (in `kimi-cli/src/kimi_cli/agents/default/`):
 
 | File | Purpose |
 |------|---------|
-| `agent.yaml` | Default base agent with full toolset (Shell, TaskList, ReadMediaFile, SearchWeb, etc.) |
+| `agent.yaml` | Default base agent with full toolset (bash/pwsh, todo_write, read_image, web_search, etc.) |
 | `coder.yaml` | Subagent coder — extends agent.yaml, restricts to code-editing tools |
 | `explore.yaml` | Subagent explorer — extends agent.yaml, read-only exploration tools only |
 | `plan.yaml` | Subagent planner — extends agent.yaml, read-only planning tools, no Shell |
@@ -359,7 +359,7 @@ All kimix agent YAML files use `extend: default`, which resolves to `kimi-cli/sr
 
 | Prefix | Source |
 |--------|--------|
-| `kimi_cli.tools.*` | Built-in kimi-cli tools (Shell, ReadFile, Grep, etc.) |
-| `kimix.tools.*` | Kimix-extended tools (Run, fetch_url, Agent, Note, etc.) |
+| `kimi_cli.tools.*` | Built-in kimi-cli tools (read, write, edit, glob, grep, todo_write, etc.) |
+| `kimix.tools.*` | Kimix-extended tools (Run, fetch_url, subagent, Note, etc.) |
 
 Use `kimix.tools.*` for new tools created under `src/kimix/tools/`.

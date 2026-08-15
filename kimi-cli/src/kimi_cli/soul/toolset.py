@@ -78,9 +78,9 @@ print_tool_func = print
 
 _DEFAULT_TOOL_OUTPUT_MAX_BYTES = 128 << 10  # 128 KiB fallback
 _TOOL_OUTPUT_BYTES_PER_TOKEN = 4  # conservative UTF-8 bytes/token estimate
-_TOOL_OUTPUT_CONTEXT_FRACTION = 1.0  # budget derived from total context size
+_TOOL_OUTPUT_CONTEXT_FRACTION = 0.5  # budget derived from total context size
 _TOOL_OUTPUT_REMAINING_FRACTION = 0.9  # must stay strictly below remaining context
-_TOOL_OUTPUT_ABS_MAX_BYTES = 1 << 20  # 1 MiB hard ceiling
+
 
 _READ_ONLY_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "bash",
@@ -767,8 +767,9 @@ class KimiToolset:
         """Estimate the per-tool output budget in bytes.
 
         The budget is the more restrictive of:
-          - a fraction of the model's total context size, and
-          - a fraction of the currently remaining context tokens.
+          - a fraction of the model's total context size,
+          - a fraction of the currently remaining context tokens, and
+          - an absolute byte ceiling.
         """
         total_budget_bytes = int(
             max_context_size * _TOOL_OUTPUT_BYTES_PER_TOKEN * _TOOL_OUTPUT_CONTEXT_FRACTION
@@ -779,7 +780,7 @@ class KimiToolset:
         )
         return max(
             0,
-            min(total_budget_bytes, remaining_budget_bytes, _TOOL_OUTPUT_ABS_MAX_BYTES),
+            min(total_budget_bytes, remaining_budget_bytes, _DEFAULT_TOOL_OUTPUT_MAX_BYTES),
         )
 
     def estimate_tool_output_token_budget(

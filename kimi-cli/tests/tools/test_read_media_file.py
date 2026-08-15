@@ -151,7 +151,7 @@ async def test_read_large_image_is_downsampled(
     assert "Original dimensions: 2200x2200 pixels." in message
     assert "The attached image was downsampled to 2000x2000 pixels" in message
     assert "fine detail may be lost" in message
-    assert "call ReadMediaFile again with the region parameter" in message
+    assert "call read_image again with the region parameter" in message
     part = result.output[2]
     assert isinstance(part, ImageURLPart)
     width, height = _part_dimensions(part)
@@ -306,7 +306,7 @@ async def test_large_image_mipmap_note(
     assert "Original dimensions: 4000x3000 pixels." in message
     assert "The attached image was downsampled to" in message
     assert "fine detail may be lost" in message
-    assert "call ReadMediaFile again with the region parameter" in message
+    assert "call read_image again with the region parameter" in message
 
 
 async def test_extremely_large_image_still_errors(
@@ -359,7 +359,7 @@ async def test_read_image_decode_cap_precheck_region(
         f"({len(data)} bytes; safe decode limit 100 bytes). "
         "The original image was not sent to the model. Do not retry the same file unchanged. "
         "Use Bash or an available image-processing tool to create a smaller copy or crop the "
-        "needed region into a separate image, then call ReadMediaFile on the resulting file."
+        "needed region into a separate image, then call read_image on the resulting file."
     )
     assert read_calls == [512]
 

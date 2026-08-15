@@ -1,6 +1,6 @@
 {
   "_comment": "KimiX custom configuration file. Place this file at \u003cwork_dir\u003e/.kimix/config.json to customize tool behavior for your workspace.",
-  "_comment_protected_write_paths": "List of directories and files that EditFile and WriteFile are blocked from modifying. Supports absolute paths and paths relative to the working directory. Glob patterns are NOT supported �?use exact paths or directory paths.",
+  "_comment_protected_write_paths": "List of directories and files that edit and write are blocked from modifying. Supports absolute paths and paths relative to the working directory. Glob patterns are NOT supported �?use exact paths or directory paths.",
   "protected_write_paths": [
     "/etc/passwd",
     "/etc/shadow",
@@ -15,7 +15,7 @@
     "config.json",
     ".kimix/config.json"
   ],
-  "_comment_protected_read_paths": "List of directories and files that ReadFile is blocked from reading. Supports absolute paths and paths relative to the working directory. Useful for preventing accidental exposure of credentials, keys, or sensitive config files.",
+  "_comment_protected_read_paths": "List of directories and files that read is blocked from reading. Supports absolute paths and paths relative to the working directory. Useful for preventing accidental exposure of credentials, keys, or sensitive config files.",
   "protected_read_paths": [
     "/etc/shadow",
     "/home/user/.ssh/id_rsa",

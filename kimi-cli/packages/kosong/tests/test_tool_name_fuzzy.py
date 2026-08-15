@@ -312,10 +312,9 @@ def test_redirect_map_contains_expected_entries():
     from kosong.tooling import TOOL_NAME_REDIRECTS
 
     assert "AppendFile" in TOOL_NAME_REDIRECTS
-    assert TOOL_NAME_REDIRECTS["AppendFile"] == "WriteFile"
+    assert TOOL_NAME_REDIRECTS["AppendFile"] == "write"
     assert "Shell" in TOOL_NAME_REDIRECTS
-    assert "Rm" not in TOOL_NAME_REDIRECTS  # canonical — no redirect
-    assert "TodoList" not in TOOL_NAME_REDIRECTS  # canonical — no redirect
+    assert "Rm" not in TOOL_NAME_REDIRECTS  # canonical — no redirect needed
 
 
 def test_normalized_redirects_no_self_mappings():

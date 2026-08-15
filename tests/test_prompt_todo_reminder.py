@@ -152,7 +152,10 @@ def test_reminder_injected_when_todos_unfinished(monkeypatch: Any) -> None:
 
     strong_reminder = session.prompts[2]
     assert "CRITICAL" in strong_reminder
-    assert "Mark every remaining item `completed` with `todo_write`" in strong_reminder
+    assert (
+        "Mark every remaining item `completed` with `todo_update` (or `todo_write` for bulk edits)"
+        in strong_reminder
+    )
     assert "- [pending] Analyze requirement" in strong_reminder
     assert "- [in_progress] Implement helper" in strong_reminder
     # Done todos are excluded from strong reminder too

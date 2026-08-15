@@ -361,7 +361,7 @@ from kimix.base import print_agent_json
 # - TextPart: prints text chunks directly
 # - ToolCall, ToolCallPart: prints "⚡ <name>" header (name resolved against the
 #   session's live toolset — future-compatible, no hardcoded tool list), then
-#   streams long argument values (keys in _STREAM_ARG_KEYS, e.g. WriteFile
+#   streams long argument values (keys in _STREAM_ARG_KEYS, e.g. write
 #   `content`) decoded, token by token, as fragments arrive, each on its own
 #   `key:\n` line; short arguments print inline on the header line as
 #   ` key:value` segments. Every tool streams — there is no whitelist and no

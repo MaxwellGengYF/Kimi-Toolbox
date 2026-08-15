@@ -12,7 +12,7 @@ from kimi_cli.subagents.runner import ForegroundRunRequest, ForegroundSubagentRu
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.logging import logger
 
-NAME = "Agent"
+NAME = "subagent"
 
 MAX_FOREGROUND_TIMEOUT = 60 * 60  # 1 hour
 MAX_BACKGROUND_TIMEOUT = 60 * 60  # 1 hour
@@ -248,7 +248,7 @@ class AgentTool(CallableTool2[Params]):
                     "next_step: Use job_output with this task_id for a non-blocking status/output "
                     "snapshot. Only set block=true when you intentionally want to wait."
                 ),
-                f'resume_hint: Use Agent(resume="{agent_id}", prompt="...") to continue this '
+                f'resume_hint: Use subagent(resume="{agent_id}", prompt="...") to continue this '
                 "instance later.",
             ]
             return ToolReturnValue(

@@ -730,22 +730,23 @@ def test_max_output_bytes_fallback_without_runtime():
 
 
 def test_max_output_bytes_with_total_context_budget():
-    """Empty context: the remaining-context term dominates for typical models."""
+    """Empty context: the total-context term dominates for typical models."""
     ts = KimiToolset(runtime=_MockRuntime(32_768))
-    # total_budget = 32768 * 4 = 131072
+    # total_budget = int(32768 * 4 * 0.5) = 65536
     # remaining_budget = int(32768 * 4 * 0.9) = 117964
-    assert ts._get_max_output_bytes() == 117_964
+    # default cap = 131072
+    assert ts._get_max_output_bytes() == 65_536
 
 
 def test_max_output_bytes_with_partial_context():
     """Partially filled context shrinks the budget via the remaining-context term."""
     ts = KimiToolset(
-        runtime=_MockRuntime(131_072),
-        context_token_provider=lambda: 65_536,
+        runtime=_MockRuntime(1_048_576),
+        context_token_provider=lambda: 1_020_000,
     )
-    # total_budget = 131072 * 4 = 524288
-    # remaining_budget = int((131072 - 65536) * 4 * 0.9) = 235929
-    assert ts._get_max_output_bytes() == 235_929
+    # total_budget = int(1048576 * 4 * 0.5) = 2097152
+    # remaining_budget = int((1048576 - 1020000) * 4 * 0.9) = 102873
+    assert ts._get_max_output_bytes() == 102_873
 
 
 def test_max_output_bytes_near_full_context():
@@ -759,40 +760,41 @@ def test_max_output_bytes_near_full_context():
 
 
 def test_max_output_bytes_absolute_ceiling():
-    """Very large contexts are capped by the absolute 1 MiB ceiling."""
+    """Very large contexts are capped by the default 128 KiB ceiling."""
     ts = KimiToolset(runtime=_MockRuntime(1_048_576))
-    assert ts._get_max_output_bytes() == 1 << 20
+    assert ts._get_max_output_bytes() == 128 << 10
 
 
 def test_set_context_token_provider_overrides_provider():
     """The setter can replace the callback used by _get_max_output_bytes."""
     ts = KimiToolset(
-        runtime=_MockRuntime(131_072),
-        context_token_provider=lambda: 65_536,
+        runtime=_MockRuntime(1_048_576),
+        context_token_provider=lambda: 1_020_000,
     )
-    assert ts._get_max_output_bytes() == 235_929
+    assert ts._get_max_output_bytes() == 102_873
 
-    ts.set_context_token_provider(lambda: 130_000)
-    assert ts._get_max_output_bytes() == 3_859
+    ts.set_context_token_provider(lambda: 1_046_528)
+    # remaining_budget = int((1048576 - 1046528) * 4 * 0.9) = 7372
+    assert ts._get_max_output_bytes() == 7_372
 
 
 def test_estimate_tool_output_token_budget_matches_byte_budget():
     """The token-budget helper mirrors the existing byte-budget logic."""
     ts = KimiToolset(runtime=_MockRuntime(131_072))
 
-    # Empty context: dominated by remaining-context term.
-    # remaining_budget_bytes = int(131072 * 4 * 0.9) = 471859 -> tokens = 471859 // 4 = 117964
-    assert ts.estimate_tool_output_token_budget(131_072, 0) == 117_964
+    # Empty context: capped by the default 128 KiB ceiling.
+    # total_budget_bytes = int(131072 * 4 * 0.5) = 262144 -> capped at 131072 -> tokens = 32768
+    assert ts.estimate_tool_output_token_budget(131_072, 0) == 32_768
 
-    # Partial context.
-    # remaining_budget_bytes = int((131072 - 65536) * 4 * 0.9) = 235929 -> tokens = 58982
-    assert ts.estimate_tool_output_token_budget(131_072, 65_536) == 58_982
+    # Partial context: still capped by the default 128 KiB ceiling.
+    # remaining_budget_bytes = int((131072 - 65536) * 4 * 0.9) = 235929 -> capped -> tokens = 32768
+    assert ts.estimate_tool_output_token_budget(131_072, 65_536) == 32_768
 
-    # Near-full context.
+    # Near-full context: remaining-context term dominates.
     assert ts.estimate_tool_output_token_budget(131_072, 130_000) == 964
 
-    # Absolute 1 MiB ceiling.
-    assert ts.estimate_tool_output_token_budget(1_048_576, 0) == 262_144
+    # Very large context: default ceiling applies.
+    assert ts.estimate_tool_output_token_budget(1_048_576, 0) == 32_768
 
 
 async def test_oversized_string_output_is_truncated():

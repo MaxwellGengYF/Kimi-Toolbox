@@ -526,15 +526,15 @@ def test_grep_tool_uses_custom_aliases() -> None:
 
     # Repair a dict that uses aliases from all three categories.
     data = {
-        "regex": "test",          # FILE alias -> pattern
-        "filter": "*.py",         # FILE alias -> glob
-        "file_type": "py",        # FILE alias -> type
-        "format": "content",      # FILE alias -> output_mode
-        "link": "n/a",            # not a field – stays as-is (no ``url`` field)
+        "regex": "test",  # FILE alias -> pattern
+        "filter": "*.py",  # Grep alias -> include
+        "file_type": "py",  # FILE alias -> type
+        "format": "content",  # FILE alias -> output_mode
+        "link": "n/a",  # not a field – stays as-is (no ``url`` field)
     }
     repaired = _repair_dict_for_model(data, GrepParams, aliases)
     assert repaired["pattern"] == "test"
-    assert repaired["glob"] == "*.py"
+    assert repaired["include"] == "*.py"
     assert repaired["type"] == "py"
     assert repaired["output_mode"] == "content"
     assert "link" in repaired  # no ``url`` field in GrepParams, so stays

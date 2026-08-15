@@ -119,8 +119,8 @@ The `KimiSoul` core loop actively keeps long runs on track — no manual babysit
 - **Decision-aware compaction** — compaction summaries preserve a `Decisions & Conclusions` and a `Verification Status` section, so early decisions and verified work survive.
 - **Context pruning** — stale tool outputs, thinking blocks, and near-duplicate content are automatically elided to reclaim context space.
 
-### TodoList
-The `TodoList` tool tracks multi-step plans:
+### todo_write
+The `todo_write` tool tracks multi-step plans:
 - Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
 - Nested sub-todos via `todo_push`/`todo_pop` with `todo_update(parent=...)`, showing a `Stack:` breadcrumb.
 

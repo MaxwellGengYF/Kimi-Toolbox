@@ -481,7 +481,7 @@ async def test_agent_tool_starts_background_task(agent_tool, runtime, monkeypatc
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="investigate bug",
@@ -523,7 +523,7 @@ async def test_agent_tool_background_rejects_resume_when_instance_is_already_run
     )
     runtime.subagent_store.update_instance("abgrunning", status="running_background")
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="resume work",
@@ -576,7 +576,7 @@ async def test_agent_tool_background_resume_marks_running_before_dispatch(
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="concurrent resume",
@@ -620,7 +620,7 @@ async def test_agent_tool_background_new_instance_marks_running_before_dispatch(
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="fresh bg",
@@ -662,7 +662,7 @@ async def test_agent_tool_background_rolls_back_status_on_dispatch_failure(
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="rollback resume",
@@ -680,7 +680,7 @@ async def test_agent_tool_background_rolls_back_status_on_dispatch_failure(
 
 
 async def test_agent_tool_background_rejects_missing_resume_instance(agent_tool, runtime):
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="resume work",
@@ -712,7 +712,7 @@ async def test_agent_tool_background_returns_tool_error_when_task_limit_is_hit(
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="investigate bug",
@@ -743,7 +743,7 @@ async def test_agent_tool_background_rolls_back_fresh_instance_when_task_start_f
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="rollback instance",
@@ -761,7 +761,7 @@ async def test_agent_tool_background_rolls_back_fresh_instance_when_task_start_f
 
 
 async def test_agent_tool_background_rejects_invalid_subagent_type(agent_tool, runtime):
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="invalid type",
@@ -800,7 +800,7 @@ async def test_agent_tool_background_rejects_invalid_model_alias_before_start(
 
     monkeypatch.setattr(runtime.background_tasks, "create_agent_task", fake_create_agent_task)
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="invalid model",
@@ -851,7 +851,7 @@ async def test_agent_tool_background_resume_rejects_invalid_model_alias_before_s
         ),
     )
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="resume bad model",
@@ -902,7 +902,7 @@ async def test_agent_tool_background_resume_rejects_stale_effective_model_before
         ),
     )
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="resume stale model",
@@ -961,7 +961,7 @@ async def test_agent_tool_background_agent_waits_for_approval(agent_tool, runtim
 
     queue = runtime.root_wire_hub.subscribe()
     try:
-        with tool_call_context("Agent"):
+        with tool_call_context("subagent"):
             result = await agent_tool(
                 agent_tool.params(
                     description="investigate bug",
@@ -1393,7 +1393,7 @@ async def test_background_agent_marks_failed_when_final_response_is_none(
         fake_run_with_summary,
     )
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="bg none response",
@@ -1509,7 +1509,7 @@ async def test_background_agent_marks_killed_when_run_cancelled(agent_tool, runt
         fake_run_with_summary,
     )
 
-    with tool_call_context("Agent"):
+    with tool_call_context("subagent"):
         result = await agent_tool(
             agent_tool.params(
                 description="bg run cancelled",

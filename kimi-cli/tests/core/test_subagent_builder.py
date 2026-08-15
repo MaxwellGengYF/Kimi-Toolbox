@@ -27,12 +27,12 @@ async def test_builder_builds_coder_with_write_tools(runtime):
     )
 
     tool_names = [tool.name for tool in coder.toolset.tools]
-    assert "Shell" in tool_names
-    assert "WriteFile" in tool_names
-    assert "EditFile" in tool_names
-    assert "Agent" not in tool_names
+    assert "bash" in tool_names
+    assert "write" in tool_names
+    assert "edit" in tool_names
+    assert "subagent" not in tool_names
     assert "AskUserQuestion" not in tool_names
-    assert "TodoList" not in tool_names
+    assert "todo_write" not in tool_names
 
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
@@ -52,12 +52,12 @@ async def test_builder_builds_explore_read_only_with_shell(runtime):
     )
 
     tool_names = [tool.name for tool in explore.toolset.tools]
-    assert "Shell" in tool_names
-    assert "ReadFile" in tool_names
-    assert "Grep" in tool_names
-    assert "WriteFile" not in tool_names
-    assert "EditFile" not in tool_names
-    assert "Agent" not in tool_names
+    assert "bash" in tool_names
+    assert "read" in tool_names
+    assert "grep" in tool_names
+    assert "write" not in tool_names
+    assert "edit" not in tool_names
+    assert "subagent" not in tool_names
 
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
@@ -77,13 +77,13 @@ async def test_builder_builds_plan_without_shell_or_write_tools(runtime):
     )
 
     tool_names = [tool.name for tool in plan.toolset.tools]
-    assert "ReadFile" in tool_names
-    assert "Glob" in tool_names
-    assert "SearchWeb" in tool_names
-    assert "Shell" not in tool_names
-    assert "WriteFile" not in tool_names
-    assert "EditFile" not in tool_names
-    assert "Agent" not in tool_names
+    assert "read" in tool_names
+    assert "glob" in tool_names
+    assert "web_search" in tool_names
+    assert "bash" not in tool_names
+    assert "write" not in tool_names
+    assert "edit" not in tool_names
+    assert "subagent" not in tool_names
 
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")

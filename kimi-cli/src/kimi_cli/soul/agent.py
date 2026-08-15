@@ -65,7 +65,7 @@ class BuiltinSystemPromptArgs:
     KIMI_OS: str
     """The operating system kind, e.g. 'Windows', 'macOS', 'Linux'."""
     KIMI_SHELL: str
-    """The shell executable used by the Shell tool, e.g. 'bash (`/bin/bash`)'."""
+    """The shell executable used by the bash tool, e.g. 'bash (`/bin/bash`)'."""
 
 
 _AGENTS_MD_MAX_BYTES = 32 * 1024  # 32 KiB
@@ -221,7 +221,7 @@ class Runtime:
     current_prompt: str | None = None
     """The current user prompt string, set by prompt_async before each prompt.
 
-    Consumed by TodoList (ALL_DONE_REMINDER) and _maybe_build_todo_reminder
+    Consumed by todo_write (ALL_DONE_REMINDER) and _maybe_build_todo_reminder
     to inject the original request into reminders.
     """
 

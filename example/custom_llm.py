@@ -182,8 +182,8 @@ async def demo_custom_llm_read_file() -> None:
                 ToolCall(
                     id="call_readfile",
                     function=ToolCall.FunctionBody(
-                        name="ReadFile",
-                        arguments=orjson.dumps({"path": test_file_path}).decode("utf-8"),
+                        name="read",
+                        arguments=orjson.dumps({"file_path": test_file_path}).decode("utf-8"),
                     ),
                 )
             ],
@@ -221,9 +221,9 @@ max_retries_per_step = 1
 
             if len(tool_calls) < 1:
                 raise RuntimeError("Expected at least one tool call")
-            if tool_calls[0].function.name != "ReadFile":
+            if tool_calls[0].function.name != "read":
                 raise RuntimeError(
-                    f"Expected ReadFile, got: {tool_calls[0].function.name}")
+                    f"Expected read, got: {tool_calls[0].function.name}")
             if len(tool_results) < 1:
                 raise RuntimeError("Expected at least one tool result")
             result_output = str(tool_results[0].return_value.output)

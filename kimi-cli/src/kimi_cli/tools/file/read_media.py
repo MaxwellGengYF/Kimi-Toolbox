@@ -1,4 +1,4 @@
-"""ReadMediaFile — read image/video files as multi-modal content.
+"""read_image — read image/video files as multi-modal content.
 
 Returns a 3-part wrap as ``output`` via
 :func:`kimi_cli.utils.media_tags.wrap_media_part`
@@ -89,7 +89,7 @@ def _build_image_delivery_limit_error(
         f"limit {read_byte_budget} bytes and {max_edge}px on the longest edge). "
         "The original image was not sent to the model. Do not retry the same file unchanged. "
         "Use Bash or an available image-processing tool to create a smaller copy within both "
-        "limits, then call ReadMediaFile on the smaller copy."
+        "limits, then call read_image on the smaller copy."
     )
 
 
@@ -99,7 +99,7 @@ def _build_image_decode_limit_error(final_bytes: int) -> str:
         f"({final_bytes} bytes; safe decode limit {MAX_IMAGE_DECODE_BYTES} bytes). "
         "The original image was not sent to the model. Do not retry the same file unchanged. "
         "Use Bash or an available image-processing tool to create a smaller copy or crop the "
-        "needed region into a separate image, then call ReadMediaFile on the resulting file."
+        "needed region into a separate image, then call read_image on the resulting file."
     )
 
 
@@ -281,7 +281,7 @@ def _build_media_note(
             "to fit model limits; fine detail may be lost."
         )
         parts.append(
-            "To inspect fine detail, call ReadMediaFile again with the region parameter "
+            "To inspect fine detail, call read_image again with the region parameter "
             "(original-image pixel coordinates) to view a crop at full fidelity."
         )
         if delivery.mipmap:
@@ -744,7 +744,7 @@ class ReadMediaFile(CallableTool2[Params]):
 
             return await self._read_media(p, file_type, params, size)
         except Exception as e:
-            logger.warning("ReadMediaFile failed: {path}: {error}", path=params.file_path, error=e)
+            logger.warning("read_image failed: {path}: {error}", path=params.file_path, error=e)
             return ToolError(
                 message=f"Failed to read {params.file_path}. Error: {e}",
                 brief="Failed to read file",

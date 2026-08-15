@@ -178,6 +178,23 @@ def test_load_config_model_max_tokens_quarter_when_context_set():
     assert config.model.max_tokens == 50_000
 
 
+def test_load_config_syncs_top_level_max_tokens_from_model():
+    """When top-level max_tokens is unset, it inherits the model's max_tokens."""
+    config = load_config_from_string(_model_config("unknown-model", max_context_size=256_000))
+    assert config.model.max_tokens == 64_000
+    assert config.max_tokens == 64_000
+
+
+def test_load_config_explicit_top_level_max_tokens_takes_precedence():
+    """An explicitly set top-level max_tokens is not overwritten by the model."""
+    config = load_config_from_string(
+        '{"model": {"model": "unknown-model", "max_context_size": 256000}, '
+        '"max_tokens": 128000, "provider": {"type": "openai_legacy", "base_url": "https://example.com", "api_key": "k"}}'
+    )
+    assert config.model.max_tokens == 64_000
+    assert config.max_tokens == 128_000
+
+
 def test_load_config_model_explicit_max_tokens_preserved():
     """Explicit max_tokens is preserved while max_context_size is derived from name."""
     config = load_config_from_string(_model_config("claude-sonnet-5", max_tokens=10_000))

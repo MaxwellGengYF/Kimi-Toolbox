@@ -122,10 +122,10 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 - **决策感知压缩**：压缩摘要保留 `Decisions & Conclusions` 与 `Verification Status` 两节，早期决策与已验证的工作不丢失。
 - **上下文剪枝**：自动清理过期工具输出、thinking 块与近似重复内容，回收上下文空间。
 
-### 可执行验证的 TodoList
+### 可执行验证的 todo_write
 
-### TodoList
-`TodoList` 工具用于跟踪多步计划：
+### todo_write
+`todo_write` 工具用于跟踪多步计划：
 - 支持增量更新（append/overwrite 模式）、标题模糊匹配与逐项备注。
 - 通过 `todo_push`/`todo_pop` 与 `todo_update(parent=...)` 支持嵌套子任务，并以 `Stack:` 面包屑展示当前层级。
 

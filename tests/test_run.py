@@ -168,7 +168,7 @@ class TestRunShellCwdViaCd:
             )
         assert isinstance(result, ToolOk)
         params = captured["params"]
-        assert params.cmd == r"cd 'C:\work dir'; echo hi"
+        assert params.command == r"cd 'C:\work dir'; echo hi"
         assert not hasattr(params, "cwd")
         assert not hasattr(params, "deduplicate_output")
 

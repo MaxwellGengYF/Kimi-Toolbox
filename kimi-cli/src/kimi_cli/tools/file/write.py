@@ -318,7 +318,7 @@ class WriteFile(CallableTool2[Params]):
                 actual_size = (await p.stat()).st_size
             except Exception as e:
                 logger.warning(
-                    "WriteFile verification failed: {path}: {error}", path=params.file_path, error=e
+                    "write verification failed: {path}: {error}", path=params.file_path, error=e
                 )
                 return ToolError(
                     message=(
@@ -380,7 +380,7 @@ class WriteFile(CallableTool2[Params]):
 
         except Exception as e:
             logger.warning(
-                "WriteFile failed: {path}: {error}", path=params.file_path, error=e
+                "write failed: {path}: {error}", path=params.file_path, error=e
             )
             _outside_ex = False
             with contextlib.suppress(Exception):

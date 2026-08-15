@@ -41,7 +41,7 @@
 - W-14 Approval reject: `reject` ends turn; tool does not run.
 - W-15 Session approval: `approve_for_session` removes subsequent blocking approvals.
 - W-16 YOLO: `--yolo` skips blocking approvals.
-- W-17 DisplayBlock coverage: `Shell`/`WriteFile`/`EditFile`/`TodoList` emit expected
+- W-17 DisplayBlock coverage: `bash`/`write`/`edit`/`todo_write` emit expected
   display types.
 - W-18 Tool args streaming: `ToolCallPart.arguments_part` can be stitched into full args.
 

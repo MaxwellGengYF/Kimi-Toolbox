@@ -138,7 +138,7 @@ def format_todo_injection(
     if len(lines) > max_items:
         overflow = len(lines) - max_items
         lines = lines[:max_items]
-        lines.append(f"- … and {overflow} more (call TodoList to read all)")
+        lines.append(f"- … and {overflow} more (call todo_write to read all)")
 
     text = TODO_INJECTION_HEADER + "\n" + "\n".join(lines)
     if len(text) > max_chars:

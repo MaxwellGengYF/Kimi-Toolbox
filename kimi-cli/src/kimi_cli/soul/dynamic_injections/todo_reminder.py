@@ -33,7 +33,7 @@ _MAX_REMINDER_ITEMS = 20
 
 
 class TodoReminderProvider(DynamicInjectionProvider):
-    """Periodically re-injects unfinished TodoList items into the context tail."""
+    """Periodically re-injects unfinished todo_write items into the context tail."""
 
     def __init__(
         self,
@@ -128,14 +128,14 @@ class TodoReminderProvider(DynamicInjectionProvider):
         self._last_signature = signature
 
         lines = [
-            "Reminder — unfinished TodoList tasks (re-injected to keep your plan in focus):",
+            "Reminder — unfinished todo_write tasks (re-injected to keep your plan in focus):",
         ]
         if stack:
             lines.append(f"- (stack: {' > '.join(stack)})")
         for depth, item in unfinished[: self._max_items]:
             lines.append(f"{'  ' * depth}- [{item.status}] {item.title}")
         if len(unfinished) > self._max_items:
-            lines.append(f"- … and {len(unfinished) - self._max_items} more (call `TodoList` to read all)")
+            lines.append(f"- … and {len(unfinished) - self._max_items} more (call `todo_write` to read all)")
         lines.append(
             "Keep exactly one item `in_progress` and mark items `done` as you finish them."
         )

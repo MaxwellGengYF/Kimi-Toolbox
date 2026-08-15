@@ -623,7 +623,7 @@ async def prompt_async(
         merge_wire_messages = output_function is not None
 
     # Store the (possibly transformed) prompt_str on the runtime so that
-    # TodoList and _maybe_build_todo_reminder can inject it into their
+    # todo_write and _maybe_build_todo_reminder can inject it into their
     # ALL_DONE_REMINDER / reminder messages.
     cli = getattr(session, "_cli", None)
     if cli is not None:

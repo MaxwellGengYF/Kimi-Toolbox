@@ -168,32 +168,32 @@ function getSummary(event: WireEvent): string {
       let detail = "";
       try {
         const args = JSON.parse(fn.arguments as string) as Record<string, unknown>;
-        if (name === "ReadFile" || name === "ReadMediaFile" || name === "PlanModeReadFile") {
-          detail = ` ${args.path}`;
-          if (args.line_offset || args.n_lines) detail += ` [${args.line_offset ?? 1}:${(args.n_lines as number) ?? ""}]`;
-        } else if (name === "WriteFile") {
-          detail = ` ${args.path}`;
-        } else if (name === "EditFile") {
-          detail = ` ${args.path}`;
-        } else if (name === "Shell") {
-          const cmd = String(args.command ?? "");
-          detail = ` ${truncate(cmd, 80)}`;
-          if (args.run_in_background) detail += " [bg]";
-        } else if (name === "Glob") {
-          detail = ` ${args.pattern}`;
-          if (args.directory) detail += ` in ${args.directory}`;
-        } else if (name === "Grep") {
-          detail = ` /${args.pattern}/`;
-          if (args.path) detail += ` in ${args.path}`;
-        } else if (name === "Agent") {
-          detail = ` ${truncate(String(args.description ?? ""), 60)}`;
-          if (args.subagent_type) detail += ` [${args.subagent_type}]`;
-        } else if (name === "SearchWeb" || name === "fetch_url") {
-          detail = ` ${truncate(String(args.query ?? args.url ?? ""), 80)}`;
-        } else if (name === "TodoList") {
-          const items = args.items as Array<Record<string, unknown>> | undefined;
-          detail = items ? ` (${items.length} items)` : "";
-        } else if (name === "AskUserQuestion") {
+          if (name === "read" || name === "ReadFile" || name === "read_image" || name === "ReadMediaFile" || name === "PlanModeReadFile") {
+            detail = ` ${args.path ?? args.file_path}`;
+            if (args.line_offset || args.n_lines) detail += ` [${args.line_offset ?? 1}:${(args.n_lines as number) ?? ""}]`;
+          } else if (name === "write" || name === "WriteFile") {
+            detail = ` ${args.path ?? args.file_path}`;
+          } else if (name === "edit" || name === "EditFile") {
+            detail = ` ${args.path ?? args.file_path}`;
+          } else if (name === "bash" || name === "Shell") {
+            const cmd = String(args.command ?? "");
+            detail = ` ${truncate(cmd, 80)}`;
+            if (args.run_in_background) detail += " [bg]";
+          } else if (name === "glob" || name === "Glob") {
+            detail = ` ${args.pattern}`;
+            if (args.directory) detail += ` in ${args.directory}`;
+          } else if (name === "grep" || name === "Grep") {
+            detail = ` /${args.pattern}/`;
+            if (args.path) detail += ` in ${args.path}`;
+          } else if (name === "subagent" || name === "Agent") {
+            detail = ` ${truncate(String(args.description ?? ""), 60)}`;
+            if (args.subagent_type) detail += ` [${args.subagent_type}]`;
+          } else if (name === "web_search" || name === "SearchWeb" || name === "fetch_url") {
+            detail = ` ${truncate(String(args.query ?? args.url ?? ""), 80)}`;
+          } else if (name === "todo_write" || name === "TodoList") {
+            const items = (args.items ?? args.todos) as Array<Record<string, unknown>> | undefined;
+            detail = items ? ` (${items.length} items)` : "";
+          } else if (name === "AskUserQuestion") {
           detail = ` ${truncate(String(args.question ?? ""), 60)}`;
         }
       } catch {

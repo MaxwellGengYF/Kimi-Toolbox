@@ -435,7 +435,7 @@ class ReadFile(CallableTool2[Params]):
 
         except Exception as e:
             logger.warning(
-                "ReadFile glob expansion failed: {path}: {error}",
+                "read glob expansion failed: {path}: {error}",
                 path=raw_path,
                 error=e,
             )
@@ -496,7 +496,7 @@ class ReadFile(CallableTool2[Params]):
                             entries.append((path_str, opts, canonical))
                         except Exception as e:
                             logger.warning(
-                                "ReadFile path resolution failed: {path}: {error}",
+                                "read path resolution failed: {path}: {error}",
                                 path=path_str,
                                 error=e,
                             )
@@ -512,7 +512,7 @@ class ReadFile(CallableTool2[Params]):
                     entries.append((raw_path, options, canonical))
                 except Exception as e:
                     logger.warning(
-                        "ReadFile path resolution failed: {path}: {error}",
+                        "read path resolution failed: {path}: {error}",
                         path=raw_path,
                         error=e,
                     )
@@ -732,7 +732,7 @@ class ReadFile(CallableTool2[Params]):
                 self._session.file_mtime.clean_file(raw_path)
             return result
         except Exception as e:
-            logger.warning("ReadFile failed: {path}: {error}", path=raw_path, error=e)
+            logger.warning("read failed: {path}: {error}", path=raw_path, error=e)
             return ToolError(
                 message=f"Failed to read {display_path}. Error: {e}",
                 brief="Failed to read file",

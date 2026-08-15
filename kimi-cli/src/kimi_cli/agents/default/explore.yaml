@@ -16,7 +16,7 @@ agent:
       Guidelines:
       - Use Glob for broad file pattern matching
       - Use Grep for searching file contents with regex
-      - Use ReadFile when you know the specific file path
+      - Use read when you know the specific file path
       - Use Shell ONLY for read-only operations (ls, git status, git log, git diff, find)
       - NEVER use Shell for any file creation or modification commands
       - Adapt your search depth based on the thoroughness level specified by the caller

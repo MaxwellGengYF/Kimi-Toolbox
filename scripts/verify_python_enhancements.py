@@ -53,7 +53,7 @@ async def main() -> int:
         ok += 1
         print("PASS 1: env scrubbing removes secret-looking vars")
 
-        # 2. capture-time redaction (background mode -> TaskOutput path reads raw stream)
+        # 2. capture-time redaction (background mode -> job_output path reads raw stream)
         fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
         tool2 = python(session=session)
         code2 = f"print('{fake_jwt}')"

@@ -4,7 +4,7 @@ The toolset's streak detection keys on ``(tool_name, canonical_args)`` —
 it catches *identical* calls only. Two loop shapes escape it:
 
 1. **File churn**: the same file is modified over and over through
-   *different* tools (``WriteFile`` → ``EditFile`` → ``Powershell`` sed)
+   *different* tools (``write`` → ``edit`` → ``pwsh`` sed)
    or with different arguments each time.
 2. **Error churn**: the same underlying error (identical modulo line
    numbers / paths) is hit repeatedly without its root cause being fixed.

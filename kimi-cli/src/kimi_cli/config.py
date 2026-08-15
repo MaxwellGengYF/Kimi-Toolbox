@@ -328,21 +328,21 @@ Default is 3."""
     # ── Recency-edge re-injection & memory durability ────────────────────────
 
     todo_reminder_enabled: bool = Field(default=True)
-    """When true, periodically re-inject unfinished TodoList items at the end
+    """When true, periodically re-inject unfinished todo_write items at the end
     of the context window, where model attention is strongest (recency edge).
     Default is true."""
     todo_reminder_interval_steps: int = Field(default=20, ge=1)
     """Minimum number of steps between repeated todo reminder injections when
     the todo list has not changed. Default is 20."""
     todo_compact_injection_enabled: bool = Field(default=True)
-    """When true, the active (unfinished) TodoList plan is deterministically
+    """When true, the active (unfinished) todo_write plan is deterministically
     appended to the context-compaction output under a stable header, so the
     plan survives summarization. Default is true."""
     todo_compact_injection_max_items: int = Field(default=20, ge=1, le=100)
     """Maximum unfinished items re-injected into the compaction output.
     Default is 20."""
     todo_max_layers: int = Field(default=4, ge=1, le=8)
-    """Maximum TodoList tree/stack depth (layers). push beyond this errors.
+    """Maximum todo_write tree/stack depth (layers). push beyond this errors.
     Default 4."""
 
     target_churn_enabled: bool = Field(default=False)
@@ -739,6 +739,21 @@ class Config(BaseModel):
     def validate_model(self) -> Self:
         if self.model is not None and self.provider is None:
             raise ValueError("Active model configured without a provider")
+        return self
+
+    @model_validator(mode="after")
+    def sync_max_tokens_from_model(self) -> Self:
+        """When top-level ``max_tokens`` is not explicitly set, inherit it from the model.
+
+        This keeps the runtime output budget (used by both the LLM API and the
+        compaction heuristics) consistent with the configured model's limits.
+        """
+        if (
+            "max_tokens" not in self.model_fields_set
+            and self.model is not None
+            and self.model.max_tokens is not None
+        ):
+            self.max_tokens = self.model.max_tokens
         return self
 
 

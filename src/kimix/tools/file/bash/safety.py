@@ -225,7 +225,7 @@ _LONG_RUNNING_PATTERNS = [
 
 _FG_BG_HINT = (
     "Long-running process detected. Consider mode='send' (background) + "
-    "job_output to avoid blocking on timeout."
+    "TaskOutput to avoid blocking on timeout."
 )
 
 

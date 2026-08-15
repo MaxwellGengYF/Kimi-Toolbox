@@ -287,7 +287,7 @@ def _resolve_display_tool_name(name: str, session: Session) -> str:
     execution-side resolution in ``kosong.tooling`` (``resolve_tool_name``
     + ``TOOL_NAME_REDIRECTS``, applied by ``KimiToolset.handle``): a model
     that sends ``write_file`` or ``AppendFile`` has its call auto-corrected
-    to ``WriteFile`` at execution time, but the wire message shown here
+    to ``write`` at execution time, but the wire message shown here
     still carries the raw name.
 
     Future-compatible: the candidate names come from the session's live
@@ -773,7 +773,7 @@ class _ToolCallStreamPrinter:
         Short arguments never get their own line: they stay inline on the
         header line as `` key:value`` segments, e.g.::
 
-            ⚡ EditFile path:C:/dev/x.py line_offset:1125 max_char:15000
+            ⚡ edit path:C:/dev/x.py line_offset:1125 max_char:15000
 
         Only values whose keys are in :data:`_STREAM_ARG_KEYS` are printed
         on a new line (decoded, token by token) — see
@@ -1106,7 +1106,7 @@ async def print_agent_json(
     Every tool call is printed via the incremental stream printer: the
     ``⚡ Name`` header appears as soon as the ``ToolCall`` arrives, long
     string values whose keys are in ``_STREAM_ARG_KEYS`` (e.g. the
-    ``content`` parameter of ``WriteFile``) are streamed decoded token by
+    ``content`` parameter of ``write``) are streamed decoded token by
     token as ``ToolCallPart`` fragments arrive from the LLM, each on its
     own ``key:\n`` line, while short arguments print inline on the header
     line as `` key:value`` segments.  The design is fully generic — new

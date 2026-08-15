@@ -81,9 +81,9 @@
 ## Filesystem (ACP client-backed)
 - When the client advertises `fs.readTextFile` / `fs.writeTextFile`, `ACPKaos` routes
   reads and writes through ACP `fs/*` methods.
-- `ReadFile` uses `KaosPath.read_lines`, which `ACPKaos` implements via ACP reads.
-- `ReadMediaFile` uses `KaosPath.read_bytes` to load image/video payloads through ACP reads.
-- `WriteFile` uses `KaosPath.read_text/write_text/append_text` and still generates diffs
+- `read` uses `KaosPath.read_lines`, which `ACPKaos` implements via ACP reads.
+- `read_image` uses `KaosPath.read_bytes` to load image/video payloads through ACP reads.
+- `write` uses `KaosPath.read_text/write_text/append_text` and still generates diffs
   and approvals in the tool layer.
 
 ## Zed-specific notes (as of current integration)

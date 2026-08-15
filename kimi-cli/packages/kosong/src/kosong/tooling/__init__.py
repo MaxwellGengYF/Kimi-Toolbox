@@ -380,10 +380,10 @@ FIELD_ALIASES_FILE: dict[str, str] = {
     "file_pattern": "glob",
     # directory (Glob)
     "path": "directory",
-    # pages (ReadFile)
+    # pages (read)
     "page": "pages",
     "page_range": "pages",
-    # edit (EditFile)
+    # edit (edit)
     "edits": "edit",
     # line_number (Grep)
     "show_line_numbers": "line_number",
@@ -544,7 +544,7 @@ FIELD_ALIASES_SUBAGENT: dict[str, str] = {
 # is a Literal type, as a first-pass before fuzzy matching.
 
 
-# --- TodoList status (Literal["pending", "in_progress", "done"]) ---
+# --- todo_write status (Literal["pending", "in_progress", "done"]) ---
 # source: kimi_cli/tools/todo/__init__.py:46
 VALUE_ALIASES_STATUS: dict[str, str] = {
     # "done" synonyms
@@ -795,7 +795,7 @@ VALUE_ALIASES_HISTORY_FORMAT: dict[str, str] = {
     "short": "summary",
 }
 
-# --- TaskOutput action (Literal["get", "list", "kill"]) ---
+# --- job_output action (Literal["get", "list", "kill"]) ---
 # source: src/kimix/tools/background/__init__.py:23
 VALUE_ALIASES_TASK_ACTION: dict[str, str] = {
     "get": "get",
@@ -1649,7 +1649,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "TaskPlan": "todo_write",
     "Plan": "todo_write",
     "Checklist": "todo_write",
-    # "TodoList" is a canonical name — no redirect needed
+    # "TodoList" redirects above (legacy class name)
     "TaskTracker": "todo_write",
     "Progress": "todo_write",
     # ── fetch_url hallucinations ──
@@ -1668,7 +1668,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "Curl": "fetch_url",
     "Wget": "fetch_url",
     # ── SearchWeb hallucinations ──
-    # "SearchWeb" is a canonical name — no redirect needed
+    # "SearchWeb" redirects above (legacy class name)
     "WebSearch": "web_search",
     "GoogleSearch": "web_search",
     "SearchInternet": "web_search",
@@ -1709,12 +1709,12 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "CreateAgent": "subagent",
     "NewAgent": "subagent",
     "Agents": "list_agents",
-    # "AgentList" is a canonical name — no redirect needed
+    # "AgentList" redirects above (legacy class name)
     "ListAgents": "list_agents",
     "ActiveAgents": "list_agents",
     "AgentStatus": "list_agents",
     "CloseAgent": "interrupt_agent",
-    # "AgentClose" is a canonical name — no redirect needed
+    # "AgentClose" redirects above (legacy class name)
     "StopAgent": "interrupt_agent",
     "KillAgent": "interrupt_agent",
     "EndAgent": "interrupt_agent",
@@ -1730,7 +1730,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "Tasks": "TaskList",
     "TaskStatus": "TaskList",
     "GetTaskOutput": "job_output",
-    # "TaskOutput" is a canonical name — no redirect needed
+    # "TaskOutput" redirects above (legacy class name)
     "TaskResult": "job_output",
     "GetOutput": "job_output",
     "ReadOutput": "job_output",
@@ -1756,7 +1756,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "Execute": "Python",
     "Exec": "Python",
     # ── Miscellaneous hallucinations ──
-    # "ReadMediaFile" is a canonical name — no redirect needed
+    # "ReadMediaFile" redirects above (legacy class name)
     "MediaRead": "read_image",
     "ReadMedia": "read_image",
     "ViewMedia": "read_image",
@@ -1822,9 +1822,11 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
 }
 
 # Pre-normalized version for O(1) lookup after normalize_tool_name().
-# Self-mapping entries (k == v) are filtered out — they add no value.
+# Self-mapping entries (raw or normalized) are filtered out — they add no value.
 _TOOL_NAME_REDIRECTS_NORMALIZED: dict[str, str] = {
-    normalize_tool_name(k): v for k, v in TOOL_NAME_REDIRECTS.items() if k != v
+    normalize_tool_name(k): v
+    for k, v in TOOL_NAME_REDIRECTS.items()
+    if k != v and normalize_tool_name(k) != normalize_tool_name(v)
 }
 
 

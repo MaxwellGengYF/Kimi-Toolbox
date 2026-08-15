@@ -64,7 +64,7 @@ class TestFormatTodoInjection:
         todos = [_todo(f"Task {i}", "pending") for i in range(25)]
         text = format_todo_injection(todos, max_items=20)
         assert text is not None
-        assert "- … and 5 more (call TodoList to read all)" in text
+        assert "- … and 5 more (call todo_write to read all)" in text
         assert "- [ ] Task 0 (pending)" in text
         assert "- [ ] Task 19 (pending)" in text
         assert "Task 20" not in text
@@ -212,7 +212,7 @@ class TestCompactTodoInjection:
         )
         summary_text = result.messages[0].extract_text(" ")
         assert TODO_INJECTION_HEADER in summary_text
-        assert "- … and 22 more (call TodoList to read all)" in summary_text
+        assert "- … and 22 more (call todo_write to read all)" in summary_text
 
 
 # ---------------------------------------------------------------------------

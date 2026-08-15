@@ -60,7 +60,7 @@ def prepare_bash_command(command: str) -> str:
 def bash_argv(command: str, *, login: bool = True) -> tuple[list[str], dict[str, str]]:
     """Return ``(argv, env)`` executing the *already prepared* *command* via bash.
 
-    ``login`` selects ``bash -l -c`` (login shell; used by the TodoList runner)
+    ``login`` selects ``bash -l -c`` (login shell; used by the todo_write runner)
     vs ``bash -c`` (used by the Bash tool's one-shot path).  The command is
     MSYSTEM-neutralized on Git Bash and run with the shared bash subprocess
     environment.

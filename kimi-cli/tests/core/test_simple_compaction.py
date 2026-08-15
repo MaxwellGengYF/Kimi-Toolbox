@@ -459,6 +459,59 @@ class TestShouldAutoCompact:
             safety_margin_tokens=safety_margin,
         )
 
+    def test_256k_context_with_64k_max_tokens_no_premature_trigger(self):
+        """Regression: a 256K context with 64K max_tokens should not compact at ~27% usage.
+
+        The dynamic tool-call output buffer for a 256K context used to be ~166K tokens,
+        which pulled the reserved boundary down to ~90K tokens. With a correctly capped
+        buffer the reservation is dominated by ``reserved_context_size`` (75K), so the
+        trigger stays near ``max_context - reserved_context_size`` (~181K).
+        """
+        from kimi_cli.soul.toolset import KimiToolset
+
+        max_context = 256_000
+        current_tokens = 71_265
+        reserved = 75_000
+        max_tokens = 64_000
+        safety_margin = 1024
+
+        ts = KimiToolset()
+        tool_buffer = ts.estimate_tool_output_token_budget(max_context, current_tokens)
+
+        # At the user's observed usage (~27%) compaction must not fire.
+        assert not should_auto_compact(
+            current_tokens,
+            max_context,
+            trigger_ratio=0.8,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+
+        # Even at 120K tokens it must not fire; the trigger should be far higher.
+        assert not should_auto_compact(
+            120_000,
+            max_context,
+            trigger_ratio=0.8,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+
+        # The trigger should be at the reserved_context_size boundary.
+        boundary = max_context - reserved
+        assert should_auto_compact(
+            boundary,
+            max_context,
+            trigger_ratio=0.8,
+            reserved_context_size=reserved,
+            max_tokens=max_tokens,
+            tool_call_buffer_tokens=tool_buffer,
+            safety_margin_tokens=safety_margin,
+        )
+
     def test_large_tool_buffer_does_not_shrink_output_boundary(self):
         """Regression: a large tool buffer must not shrink the boundary below the
         output reservation.
