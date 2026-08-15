@@ -38,8 +38,10 @@ Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes"):
       file/bash/safety.py)
   - base_command_name(command) -> str                 (kernel; used by
       interpret_exit_code)
-  - interpret_exit_code(command, exit_code) -> str|None (WIRED in
-      file/bash/output_enhance.py)
+  - interpret_exit_code(command, exit_code) -> str|None (pure Python; WIRED
+      in file/bash/output_enhance.py)
+  - is_expected_exit(command, exit_code) -> bool      (pure Python; WIRED
+      in file/bash/output_enhance.py)
   - annotate_failure(output, command, exit_code) -> str|None (WIRED in
       file/bash/output_enhance.py)
   - pattern_has_regex_newline(pattern) -> bool        (WIRED in grep_local.py)
@@ -1049,31 +1051,21 @@ def base_command_name(command: str) -> str:
 
 
 def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
-    """Explain a non-zero exit code for well-known commands, else None."""
-    if exit_code is None or exit_code == 0:
-        return None
-    # Checked before the native fast path: the compiled kernel predates the
-    # SIGPIPE rule, so the pipeline-truncation meaning is decided here to stay
-    # identical under native and pure-Python execution.
-    if exit_code == 141 and _compat_has_top_level_pipe(command):
-        return "SIGPIPE: an upstream pipeline stage was truncated (expected when piping to head/tail)"
-    if use_native("TOOLS") and _native is not None and command.isascii():
-        return _native.tools.interpret_exit_code(command, exit_code)
+    """Explain a non-zero exit code for well-known commands, else None.
+
+    Pure-Python implementation: the compiled kernel predates the SIGPIPE
+    rule, so the pipeline-truncation meaning is decided by the compat mirror
+    to stay identical under every execution mode.
+    """
     return _compat_interpret_exit_code(command, exit_code)
 
 
 def is_expected_exit(command: str, exit_code: int | None) -> bool:
     """True when *exit_code* is a normal, expected outcome for *command*.
 
-    The compiled kernel may not expose this helper yet; fall back to the
-    compat mirror so the classification stays available everywhere.
+    Pure-Python implementation: the compiled kernel does not expose this
+    helper, so the compat mirror is the single source of truth.
     """
-    if exit_code is None or exit_code == 0:
-        return False
-    if use_native("TOOLS") and _native is not None and command.isascii():
-        impl = getattr(_native.tools, "is_expected_exit", None)
-        if impl is not None:
-            return impl(command, exit_code)
     return _compat_is_expected_exit(command, exit_code)
 
 
