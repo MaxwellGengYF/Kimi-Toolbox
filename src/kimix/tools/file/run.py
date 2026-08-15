@@ -31,6 +31,7 @@ from kimix.tools.common import (
 from kimix.tools.file.bash.output_enhance import (
     annotate_failure,
     interpret_exit_code,
+    is_expected_exit,
     redact_sensitive_output,
 )
 from kimix.tools.file.bash.safety import (
@@ -522,8 +523,9 @@ class Run(CallableTool2[RunParams]):
                 real_exit_code = task.stream.exit_code if task.stream else None
                 meaning = interpret_exit_code(params.command, real_exit_code)
                 hint = annotate_failure(output, params.command, real_exit_code)
+                expected = is_expected_exit(params.command, real_exit_code)
 
-                if not success:
+                if not success and not expected:
                     if output and not params.output_path:
                         if len(output) > 65536:
                             original_path = await _save_original_output_async(output, original_path)
@@ -579,7 +581,7 @@ class Run(CallableTool2[RunParams]):
                     original_path=original_path,
                 )
                 elapsed = task.stream.process_elapsed if task.stream else None
-                msg = "[rtk] success" if rtk_rewritten else "success"
+                msg = (meaning or "expected non-zero exit") if not success else ("[rtk] success" if rtk_rewritten else "success")
                 suffix = _original_saved_message(original_path)
                 if suffix:
                     msg = f"{msg} {suffix}"

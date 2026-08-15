@@ -49,6 +49,7 @@ from kimix.tools.prompt_common import (
 from kimix.tools.file.bash.output_enhance import (
     annotate_failure,
     interpret_exit_code,
+    is_expected_exit,
     redact_sensitive_output,
 )
 from kimix.tools.file.bash.safety import (
@@ -632,6 +633,7 @@ class Powershell(CallableTool2[PowershellParams]):
         # redacted text is what gets displayed/exported below).
         meaning = interpret_exit_code(params.command, real_exit_code)
         hint = annotate_failure(output, params.command, real_exit_code)
+        expected = is_expected_exit(params.command, real_exit_code)
 
         # Unify success/error path: always pass the real exit code.
         processed, output_path, output_truncated, original_path = await self._process_output(
@@ -653,7 +655,7 @@ class Powershell(CallableTool2[PowershellParams]):
         elapsed = stream.process_elapsed if stream else None
 
         suffix = _original_saved_message(original_path)
-        if not success:
+        if not success and not expected:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             msg += transform_warning
             # Long failing commands are preserved as a re-runnable `.ps1` script
@@ -665,8 +667,13 @@ class Powershell(CallableTool2[PowershellParams]):
                 msg = f"{msg} {suffix}"
             return ToolError(output=block, message=msg, brief="Command execution failed")
 
-        msg = "[rtk] success" if rtk_rewritten else "success"
-        msg += transform_warning
+        if not success:
+            # Expected/benign non-zero exit (grep "no matches", diff "files
+            # differ"): report the meaning instead of "failed ... run it again".
+            msg = (meaning or "expected non-zero exit") + transform_warning
+        else:
+            msg = "[rtk] success" if rtk_rewritten else "success"
+            msg += transform_warning
         if suffix:
             msg = f"{msg} {suffix}"
         return ToolOk(
@@ -956,7 +963,8 @@ class Powershell(CallableTool2[PowershellParams]):
             command, params, output, rtk_rewritten=rtk_rewritten
         )
         suffix = _original_saved_message(original_path)
-        if not success:
+        expected = is_expected_exit(command, exit_code)
+        if not success and not expected:
             hint = annotate_failure(output, command, exit_code)
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             msg += transform_warning
@@ -966,8 +974,11 @@ class Powershell(CallableTool2[PowershellParams]):
             if suffix:
                 msg = f"{msg} {suffix}"
         else:
-            msg = "[rtk] success" if rtk_rewritten else "success"
-            msg += transform_warning
+            if not success:
+                msg = (interpret_exit_code(command, exit_code) or "expected non-zero exit") + transform_warning
+            else:
+                msg = "[rtk] success" if rtk_rewritten else "success"
+                msg += transform_warning
             if suffix:
                 msg = f"{msg} {suffix}"
         return processed, msg, original_path, output_path, output_truncated

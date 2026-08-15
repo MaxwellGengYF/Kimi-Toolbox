@@ -2902,6 +2902,53 @@ class TestBashCall:
         result = await bash(params)
         assert isinstance(result, ToolError)
 
+    async def test_pipefail_surfaces_real_exit_code(
+        self, mock_session: MagicMock
+    ) -> None:
+        """A failing producer piped to a consumer must report the producer's
+        non-zero exit (one-shot commands run with ``set -o pipefail``), not the
+        consumer's 0 that previously masked crashes behind ``| head``."""
+        bash = Bash(session=mock_session)
+        params = BashParams(cmd="false | head -1")
+        result = await bash(params)
+        assert isinstance(result, ToolError)
+        assert "exit_code: 1" in result.output
+
+    async def test_pipefail_keeps_success_pipeline(
+        self, mock_session: MagicMock
+    ) -> None:
+        bash = Bash(session=mock_session)
+        params = BashParams(cmd="echo hi | head -1")
+        result = await bash(params)
+        assert isinstance(result, ToolOk)
+        assert "hi" in result.output
+
+    async def test_grep_no_match_reports_success(
+        self, mock_session: MagicMock, tmp_path: Path
+    ) -> None:
+        """grep exit 1 (no matches) is a normal outcome: it must be a ToolOk
+        with the meaning noted, not a 'failed ... run it again' error."""
+        f = tmp_path / "sample.txt"
+        f.write_text("nothing here\n", encoding="utf-8")
+        posix = str(f).replace("\\", "/")
+        bash = Bash(session=mock_session)
+        params = BashParams(cmd=f"grep __definitely_missing__ {posix}")
+        result = await bash(params)
+        assert isinstance(result, ToolOk)
+        assert "No matches found" in result.message
+        assert "failed" not in result.message.lower()
+
+    async def test_sigpipe_truncation_reports_success(
+        self, mock_session: MagicMock
+    ) -> None:
+        """SIGPIPE (141) from a truncated pipeline is an expected outcome when
+        the one-shot shell runs with pipefail."""
+        bash = Bash(session=mock_session)
+        params = BashParams(cmd="seq 1 100000 | head -1", timeout=30)
+        result = await bash(params)
+        assert isinstance(result, ToolOk)
+        assert "SIGPIPE" in result.message
+
     async def test_unknown_command_error(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
         params = BashParams(cmd="no_such_command_12345", timeout=5)
@@ -3356,8 +3403,10 @@ class TestComplexCommands:
         posix2 = str(f2).replace("\\", "/")
         params = BashParams(cmd=f"diff <(cat {posix1}) <(cat {posix2})")
         result = await bash(params)
-        # diff returns 1 (ToolError) when files differ
-        assert isinstance(result, ToolError)
+        # diff returns 1 when files differ — an expected, informative outcome
+        # (not a failure): reported as success with the meaning noted.
+        assert isinstance(result, ToolOk)
+        assert "Files differ" in result.message
 
     # -- inline env ----------------------------------------------------------
 
@@ -4043,7 +4092,9 @@ class TestBashInteractiveArgumentBuilding:
 
             assert isinstance(result, ToolOk)
             args = mock_pt.call_args
-            assert args[0][1] == ["-c", "echo hello"]
+            # One-shot commands run with pipefail so pipelines surface the
+            # real failing stage's exit code instead of the consumer's 0.
+            assert args[0][1] == ["-c", "set -o pipefail; echo hello"]
 
     async def test_interactive_args_with_cmd(self, mock_session: MagicMock) -> None:
         with patch("kimix.tools.file.bash.bash_tool.find_bash", return_value=r"C:\Git\bin\bash.exe"), patch(
@@ -4164,8 +4215,9 @@ class TestBashRtkRewrite:
 
                 assert isinstance(result, ToolOk)
                 args = mock_pt.call_args
-                # Rewritten to the bare `rtk` prefix (shared bin dir is first on PATH).
-                assert args[0][1] == ["-c", "rtk git status"]
+                # Rewritten to the bare `rtk` prefix (shared bin dir is first
+                # on PATH) with the one-shot pipefail prelude.
+                assert args[0][1] == ["-c", "set -o pipefail; rtk git status"]
 
     async def test_bash_read_builtin_not_rewritten(
         self, mock_session: MagicMock
@@ -4201,7 +4253,7 @@ class TestBashRtkRewrite:
 
             assert isinstance(result, ToolOk)
             args = mock_pt.call_args
-            assert args[0][1] == ["-c", "read var"]
+            assert args[0][1] == ["-c", "set -o pipefail; read var"]
 
 
 # ============================================================================
@@ -5029,3 +5081,6 @@ class TestCommandParamAcceptsScriptFile:
         desc = PowershellParams.model_json_schema()["properties"]["command"]["description"]
         assert "`.ps1` script file" in desc
         assert "executed via PowerShell" in desc
+
+
+

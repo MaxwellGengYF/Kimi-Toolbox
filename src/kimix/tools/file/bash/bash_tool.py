@@ -55,6 +55,7 @@ from kimix.tools.file.bash.bash_fix import (
 from kimix.tools.file.bash.output_enhance import (
     annotate_failure,
     interpret_exit_code,
+    is_expected_exit,
     redact_sensitive_output,
 )
 from kimix.tools.file.bash.safety import (
@@ -265,6 +266,11 @@ def _is_git_bash_install(bash_path: str) -> bool:
 
 
 _MSYSTEM_NEUTRALIZE_PREFIX = "export MSYSTEM=; "
+
+# Enable bash pipefail so a pipeline reports the rightmost non-zero stage's
+# exit code instead of the last consumer's (e.g. ``cmd | head`` returned 0 even
+# when *cmd* crashed, silently masking real failures from the model).
+_PIPEFAIL_PREFIX = "set -o pipefail; "
 
 
 def _with_msystem_neutralized(cmd: str, bash_path: str | None) -> str:
@@ -784,7 +790,7 @@ class Bash(CallableTool2[BashParams]):
         blocked = self._hardline_blocked(rtk_cmd)
         if blocked is not None:
             return blocked
-        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(rtk_cmd, self._bash)], None, _bash_subprocess_env())
+        process_task = ProcessTask(self._bash, ["-c", _with_msystem_neutralized(_PIPEFAIL_PREFIX + rtk_cmd, self._bash)], None, _bash_subprocess_env())
         task_id = await process_task.start(self._session, "bash")
         if process_task.stream is not None:
             process_task.stream.format_output = functools.partial(
@@ -853,6 +859,7 @@ class Bash(CallableTool2[BashParams]):
         # redacted text is what gets displayed/exported below).
         meaning = interpret_exit_code(params.cmd, real_exit_code)
         hint = annotate_failure(output, params.cmd, real_exit_code)
+        expected = is_expected_exit(params.cmd, real_exit_code)
 
         # Unify success/error path: always pass the real exit code.
         processed, output_path, output_truncated, original_path = await self._process_output(
@@ -872,7 +879,7 @@ class Bash(CallableTool2[BashParams]):
             original_path=original_path,
         )
         suffix = _original_saved_message(original_path)
-        if not success:
+        if not success and not expected:
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             # Long failing commands are preserved as a re-runnable `.sh` script
             # in the shared temp folder so the exact source is never lost.
@@ -883,7 +890,14 @@ class Bash(CallableTool2[BashParams]):
                 msg = f"{msg} {suffix}"
             return ToolError(output=block, message=msg, brief="Command execution failed")
 
-        msg = "[rtk] success" if rtk_rewritten else "success"
+        if not success:
+            # Expected/benign non-zero exit (grep "no matches", diff "files
+            # differ", truncated pipeline): report the meaning instead of
+            # "failed ... run it again" so the agent does not retry a command
+            # that ran exactly as intended.
+            msg = meaning or "expected non-zero exit"
+        else:
+            msg = "[rtk] success" if rtk_rewritten else "success"
         if suffix:
             msg = f"{msg} {suffix}"
         return ToolOk(
@@ -1186,7 +1200,8 @@ class Bash(CallableTool2[BashParams]):
             params, output, rtk_rewritten=rtk_rewritten
         )
         suffix = _original_saved_message(original_path)
-        if not success:
+        expected = is_expected_exit(params.cmd, exit_code)
+        if not success and not expected:
             hint = annotate_failure(output, params.cmd, exit_code)
             msg = "failed" + (f" Hint: {hint}" if hint else "")
             cmd_suffix = _command_saved_message(params.cmd, ".sh", "bash")
@@ -1195,7 +1210,10 @@ class Bash(CallableTool2[BashParams]):
             if suffix:
                 msg = f"{msg} {suffix}"
         else:
-            msg = "[rtk] success" if rtk_rewritten else "success"
+            if not success:
+                msg = interpret_exit_code(params.cmd, exit_code) or "expected non-zero exit"
+            else:
+                msg = "[rtk] success" if rtk_rewritten else "success"
             if suffix:
                 msg = f"{msg} {suffix}"
         return processed, msg, original_path, output_path, output_truncated

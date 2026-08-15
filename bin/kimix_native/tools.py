@@ -881,7 +881,66 @@ def _compat_interpret_exit_code(command: str, exit_code: int | None) -> str | No
             return notes[code]
     if name == "git" and code == 1:
         return "Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)"
+    if code == 141 and _compat_has_top_level_pipe(command):
+        return "SIGPIPE: an upstream pipeline stage was truncated (expected when piping to head/tail)"
     return None
+
+
+def _compat_has_top_level_pipe(command: str) -> bool:
+    """Exact mirror of output_enhance.py::_has_top_level_pipe."""
+    if not command:
+        return False
+    quote = None
+    escaped = False
+    depth = 0
+    n = len(command)
+    for i, ch in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            continue
+        if ch != "|" or depth != 0:
+            continue
+        # A ``||`` logical-OR operator is not a pipeline: skip both pipes.
+        if i + 1 < n and command[i + 1] == "|":
+            continue
+        if i > 0 and command[i - 1] == "|":
+            continue
+        return True
+    return False
+
+
+def _compat_is_expected_exit(command: str, exit_code: int | None) -> bool:
+    """Exact mirror of output_enhance.py::is_expected_exit."""
+    if exit_code is None or exit_code == 0:
+        return False
+    if exit_code == 141 and _compat_has_top_level_pipe(command):
+        return True
+    name = _compat_base_command_name(command).lower()
+    if exit_code != 1:
+        return False
+    return (
+        name in ("grep", "egrep", "fgrep", "rg", "ag", "ack")
+        or name in ("diff", "colordiff")
+        or name in ("test", "[")
+        or name == "find"
+    )
+
 
 
 def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
@@ -991,9 +1050,32 @@ def base_command_name(command: str) -> str:
 
 def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
     """Explain a non-zero exit code for well-known commands, else None."""
+    if exit_code is None or exit_code == 0:
+        return None
+    # Checked before the native fast path: the compiled kernel predates the
+    # SIGPIPE rule, so the pipeline-truncation meaning is decided here to stay
+    # identical under native and pure-Python execution.
+    if exit_code == 141 and _compat_has_top_level_pipe(command):
+        return "SIGPIPE: an upstream pipeline stage was truncated (expected when piping to head/tail)"
     if use_native("TOOLS") and _native is not None and command.isascii():
         return _native.tools.interpret_exit_code(command, exit_code)
     return _compat_interpret_exit_code(command, exit_code)
+
+
+def is_expected_exit(command: str, exit_code: int | None) -> bool:
+    """True when *exit_code* is a normal, expected outcome for *command*.
+
+    The compiled kernel may not expose this helper yet; fall back to the
+    compat mirror so the classification stays available everywhere.
+    """
+    if exit_code is None or exit_code == 0:
+        return False
+    if use_native("TOOLS") and _native is not None and command.isascii():
+        impl = getattr(_native.tools, "is_expected_exit", None)
+        if impl is not None:
+            return impl(command, exit_code)
+    return _compat_is_expected_exit(command, exit_code)
+
 
 
 def annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:

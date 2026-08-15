@@ -5,6 +5,7 @@ import pytest
 from kimix.tools.file.bash.output_enhance import (
     annotate_failure,
     interpret_exit_code,
+    is_expected_exit,
     redact_sensitive_output,
 )
 
@@ -60,6 +61,81 @@ class TestInterpretExitCode:
 
     def test_unknown_command_returns_none(self) -> None:
         assert interpret_exit_code("frobnicate --all", 42) is None
+
+    @pytest.mark.parametrize(
+        ("command", "code"),
+        [
+            ("seq 1 1000 | head -1", 141),
+            ("producer | tail -5", 141),
+            ("echo $(echo x | cat) | head -1", 141),
+        ],
+    )
+    def test_sigpipe_in_pipeline_meaning(self, command: str, code: int) -> None:
+        meaning = interpret_exit_code(command, code)
+        assert meaning is not None
+        assert "SIGPIPE" in meaning
+
+    @pytest.mark.parametrize(
+        ("command", "code"),
+        [
+            ("seq 1 1000", 141),  # no pipeline -> real crash, not truncation
+            ("seq 1 1000 || head -1", 141),  # || is not a pipeline
+            ("echo 'a | b'", 141),  # pipe inside quotes is data
+        ],
+    )
+    def test_sigpipe_without_pipeline_has_no_meaning(
+        self, command: str, code: int
+    ) -> None:
+        assert interpret_exit_code(command, code) is None
+
+
+# ============================================================================
+# is_expected_exit
+# ============================================================================
+
+class TestIsExpectedExit:
+    """Benign non-zero exits must be classifiable as expected outcomes so shell
+    tools report grep/diff/test/find and truncated pipelines as informative
+    successes instead of hard failures with retry guidance."""
+
+    @pytest.mark.parametrize(
+        ("command", "code"),
+        [
+            ("grep foo file.txt", 1),
+            ("egrep foo file.txt", 1),
+            ("fgrep foo file.txt", 1),
+            ("rg foo", 1),
+            ("ag foo", 1),
+            ("ack foo", 1),
+            ("diff a b", 1),
+            ("colordiff a b", 1),
+            ("find / -name x", 1),
+            ("test -f x", 1),
+            ("[ -f x ]", 1),
+            ("echo a | grep foo", 1),
+            ("seq 1 1000 | head -1", 141),
+            ("producer | tail -5", 141),
+        ],
+    )
+    def test_expected(self, command: str, code: int) -> None:
+        assert is_expected_exit(command, code) is True
+
+    @pytest.mark.parametrize(
+        ("command", "code"),
+        [
+            ("echo hi", 0),
+            ("echo hi", None),
+            ("nosuchcommand_xyz", 127),
+            ("python script.py", 2),
+            ("git diff", 1),  # git 1 is ambiguous -> stays a failure
+            ("grep foo file", 2),
+            ("seq 1 1000", 141),  # no pipeline -> real crash
+            ("seq 1 1000 || head -1", 141),  # || is not a pipeline
+            ("echo 'a | b'", 141),  # pipe inside quotes is data
+        ],
+    )
+    def test_not_expected(self, command: str, code: int | None) -> None:
+        assert is_expected_exit(command, code) is False
 
 
 # ============================================================================
