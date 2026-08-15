@@ -514,7 +514,9 @@ async def test_openai_compatible_provider_aclose_swallows_cancelled_error() -> N
 # requests) emits a keep-alive SSE event whose ``data:`` payload is empty.
 
 
-def _sse_chunk(*, content: str | None = None, role: str | None = None) -> str:
+def _sse_chunk(
+    *, content: str | None = None, role: str | None = None, finish_reason: str | None = None
+) -> str:
     """Build a chat.completion.chunk JSON payload for one SSE event."""
     delta: dict[str, Any] = {}
     if role is not None:
@@ -527,7 +529,7 @@ def _sse_chunk(*, content: str | None = None, role: str | None = None) -> str:
             "object": "chat.completion.chunk",
             "created": 1,
             "model": "test-model",
-            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
     )
 
@@ -652,6 +654,35 @@ async def test_tolerant_stream_handles_crlf_and_multiple_events_per_chunk() -> N
     )
     message, _ = _build_message([body.encode()])
     assert await _collect_texts(message) == ["x", "y"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_normalizes_unknown_finish_reason() -> None:
+    """Non-standard finish_reason values such as ``unexpected_state`` must be
+    treated as ``None`` so the stream continues instead of raising a pydantic
+    validation error.
+    """
+    body = (
+        f"data: {_sse_chunk(content='Hello', finish_reason='unexpected_state')}\n\n"
+        "data: [DONE]\n\n"
+    )
+    message, _ = _build_message([body.encode()])
+    assert await _collect_texts(message) == ["Hello"]
+
+
+@pytest.mark.asyncio
+async def test_tolerant_stream_concise_validation_error() -> None:
+    """Validation errors that cannot be repaired must surface as a concise
+    ``ChatProviderError`` rather than the full pydantic traceback.
+    """
+    body = (
+        f"data: {_sse_chunk(content='Hello')}\n\n"
+        'data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": "not-a-dict"}]}\n\n'
+    )
+    message, _ = _build_message([body.encode()])
+    with pytest.raises(ChatProviderError, match="Backend returned an invalid chat stream chunk"):
+        async for _ in message:
+            pass
 
 
 @pytest.mark.asyncio

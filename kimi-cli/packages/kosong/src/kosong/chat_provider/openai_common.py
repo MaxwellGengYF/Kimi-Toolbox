@@ -14,6 +14,7 @@ import certifi
 import httpx
 import openai
 from openai import AsyncOpenAI, AsyncStream, OpenAIError
+from pydantic import ValidationError
 from openai.types import ReasoningEffort
 from openai.types.chat import (
     ChatCompletion,
@@ -348,6 +349,44 @@ def _is_object_mapping(data: object) -> TypeGuard[Mapping[str, object]]:
     return isinstance(data, dict)
 
 
+# OpenAI's ChatCompletionChunk.Choice only accepts these finish_reason values.
+# Some OpenAI-compatible backends (observed with Moonshot/Kimi during tool calls)
+# emit non-standard values such as ``unexpected_state``; normalize those to
+# ``None`` so the stream can continue instead of raising a pydantic validation
+# error.
+_VALID_FINISH_REASONS = frozenset({"stop", "length", "tool_calls", "content_filter", "function_call"})
+
+
+def _normalize_unknown_finish_reason(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Replace unknown ``finish_reason`` strings in *payload* with ``None``.
+
+    The returned mapping is a shallow copy only when mutation is required;
+    otherwise the original mapping is returned unchanged.
+    """
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return payload
+    mutated = False
+    new_choices: list[object] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            new_choices.append(choice)
+            continue
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason not in _VALID_FINISH_REASONS:
+            if not mutated:
+                # First mutation: copy the payload and previous choices.
+                new_payload = dict(payload)
+                new_payload["choices"] = new_choices[:]
+                payload = new_payload
+                mutated = True
+            cast("dict[str, object]", choice)["finish_reason"] = None
+        new_choices.append(choice)
+    if mutated:
+        cast("dict[str, object]", payload)["choices"] = new_choices
+    return payload
+
+
 async def _iter_tolerant_chunks(
     stream: AsyncStream[Any],
 ) -> AsyncIterator[ChatCompletionChunk]:
@@ -388,7 +427,19 @@ async def _iter_tolerant_chunks(
                     request=response.request,
                     body=payload["error"],
                 )
-            yield ChatCompletionChunk.model_validate(payload)
+            payload = _normalize_unknown_finish_reason(cast(Mapping[str, object], payload))
+            try:
+                yield ChatCompletionChunk.model_validate(payload)
+            except ValidationError as exc:
+                # Provide a concise backend-facing error instead of the full
+                # pydantic traceback. Re-raise only the first issue to keep the
+                # message short and actionable.
+                first_error = exc.errors()[0] if exc.errors() else {"loc": ()}
+                loc = ".".join(str(part) for part in first_error.get("loc", ()))
+                msg = first_error.get("msg", "invalid response chunk")
+                if loc:
+                    raise ChatProviderError(f"Backend returned an invalid chat stream chunk at {loc}: {msg}")
+                raise ChatProviderError(f"Backend returned an invalid chat stream chunk: {msg}")
     finally:
         await response.aclose()
 

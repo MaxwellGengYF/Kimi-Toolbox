@@ -253,11 +253,11 @@ version config files are touched — never hard-code the version anywhere else.
 | kimi-agent | `KIMIX_NATIVE_VERSION` (root) | fallback marker read by `native_loader._fallback_version()` and synced by `install.py`. Keep the file **without a trailing newline** (matches git history). |
 | kimi-agent | `install.py` → `KIMIX_BASE_VERSION` | used for the GitHub release download URL and binary verification; `_sync_kimix_native_version(KIMIX_BASE_VERSION)` rewrites `KIMIX_NATIVE_VERSION` during install. |
 
-### Minimal-change workflow (0.5.1 → 0.6.0 example)
+### Minimal-change workflow (0.6.0 → 0.6.1 example)
 
-1. `kimix-base/version.txt`: `0.5.1` → `0.6.0`
-2. `kimi-agent/KIMIX_NATIVE_VERSION`: `0.5.1` → `0.6.0`
-3. `kimi-agent/install.py`: `KIMIX_BASE_VERSION = "0.5.1"` → `"0.6.0"`
+1. `kimix-base/version.txt`: `0.6.0` → `0.6.1`
+2. `kimi-agent/KIMIX_NATIVE_VERSION`: `0.6.0` → `0.6.1`
+3. `kimi-agent/install.py`: `KIMIX_BASE_VERSION = "0.6.0"` → `"0.6.1"`
 
 That is the whole diff. Do **not** edit `bin/kimix_native/__init__.py` (it reads
 `version.txt` at runtime), `src/kimix/native_loader.py` or
@@ -295,7 +295,7 @@ Windows PE (`MZ`/`PE\x00\x00` magic, x64) or simply:
 
 ```bash
 python -c "import sys; sys.path.insert(0, r'<repo>\bin'); import runtime_py; print(runtime_py.version())"
-# expect: kimix-runtime 0.6.0
+# expect: kimix-runtime 0.6.1
 ```
 
 ### Verification
@@ -307,4 +307,4 @@ python -m pytest tests/test_install_kimix_native.py tests/native/test_loader.py 
 ```
 
 `KIMIX_NATIVE=0` fallback also picks up the new version automatically:
-`native_loader.version()` → `kimix-native 0.6.0 (python fallback)`.
+`native_loader.version()` → `kimix-native 0.6.1 (python fallback)`.
