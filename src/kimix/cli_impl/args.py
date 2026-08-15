@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,63 @@ def _extract_config_from_remaining(args: argparse.Namespace, remaining: list[str
         if token == "--config" and i + 1 < len(remaining):
             args.config = remaining[i + 1]
             return
+
+
+def _maybe_run_default_config_init(args: argparse.Namespace) -> None:
+    """Create ``src/kimix/default_config.json`` when no provider is configured.
+
+    Without this guard, starting the CLI without an explicit ``--config`` and
+    without the default config file leaves the global provider unset, which
+    later surfaces as a cryptic ``LLM not set`` error. When stdin is a TTY we
+    run the interactive ``/init`` flow; otherwise we write a minimal template
+    config so non-interactive runs (tests, CI) can still boot. The API key can
+    be supplied via the ``KIMI_API_KEY`` or ``KIMIX_API_KEY`` environment
+    variables when running non-interactively.
+    """
+    from kimix.utils.config import init as kimix_init
+
+    if getattr(args, "config", None) is not None:
+        return
+    if base._default_provider is not None:
+        return
+
+    default_config_path = Path(__file__).parent.parent / "default_config.json"
+    if default_config_path.exists():
+        return
+
+    from .init import default_config as _default_config_template
+    from .init import init as run_init
+
+    if sys.stdin.isatty():
+        try:
+            run_init(initialize=False)
+        except KeyboardInterrupt:
+            return
+    else:
+        # Non-interactive environment: write a minimal template so the CLI can
+        # start. The user must set KIMI_API_KEY/KIMIX_API_KEY or edit the file.
+        api_key = os.environ.get("KIMI_API_KEY") or os.environ.get("KIMIX_API_KEY") or ""
+        config = orjson.loads(_default_config_template)
+        config["api_key"] = api_key
+        with open(default_config_path, "wb") as f:
+            f.write(orjson.dumps(config, option=orjson.OPT_INDENT_2))
+        print_warning(
+            f"Created default config at {default_config_path}. "
+            "Please set KIMI_API_KEY/KIMIX_API_KEY or edit the file."
+        )
+
+    # Reload global state with the newly created config file.
+    if default_config_path.exists():
+        kimix_init(
+            config_path=None,
+            yolo=not args.no_yolo,
+            think=not args.no_think,
+            skill_dir=args.skill_dir,
+            ralph=args.ralph,
+            manually_cot=args.manually_cot,
+            colorful_print=not args.no_color,
+            clean=args.clean,
+        )
 
 
 def set_arg() -> tuple[str | None, argparse.Namespace]:
@@ -188,6 +246,10 @@ def set_arg() -> tuple[str | None, argparse.Namespace]:
         colorful_print=not args.no_color,
         clean=args.clean,
     )
+
+    # If no provider config was loaded, run the interactive init flow (or fall
+    # back to a non-interactive template) so the CLI has a usable LLM config.
+    _maybe_run_default_config_init(args)
 
     if args.command == "mcp":
         print_debug(f"Starting kimix mcp {args.mcp_command}.")
