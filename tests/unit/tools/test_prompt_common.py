@@ -12,6 +12,7 @@ fragments from the four tools, leaving only tool-specific sentences.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,15 @@ def test_descriptions_unchanged() -> None:
     """
     tools = _build_tools()
 
+    # Proactive self-kill hint appended by the shell tools at init time; the
+    # PID is the live process PID, so the snapshot interpolates it.
+    self_kill_hint_text = (
+        f" Safety: this tool runs inside the agent process (PID {os.getpid()}); "
+        "never run kill/taskkill/Stop-Process/pkill commands targeting that "
+        "PID, its parent processes, or this process's image name — the "
+        "self-kill guard blocks such commands."
+    )
+
     assert tools["bash"].description == (
         "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
         "Prefer `glob`/`grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
@@ -171,6 +181,7 @@ def test_descriptions_unchanged() -> None:
         "Send 'exit' to close the session. "
         "On Windows, unquoted backslash paths are auto-converted to forward slashes "
         "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
+        + self_kill_hint_text
     )
 
     assert tools["pwsh"].description == (
@@ -180,6 +191,7 @@ def test_descriptions_unchanged() -> None:
         "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
         "Send 'exit' to close the session. "
         "Windows paths must use backslashes (`\\`) instead of forward slashes (`/`)."
+        + self_kill_hint_text
     )
 
     assert tools["python"].description == (

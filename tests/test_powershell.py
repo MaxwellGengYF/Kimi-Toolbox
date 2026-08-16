@@ -1,6 +1,7 @@
 """Tests for the PowerShell tool interactive mode and shared ProcessTask behavior."""
 
 import asyncio
+import os
 import shutil
 import sys
 from typing import Any
@@ -556,3 +557,55 @@ class TestPowershellSafetyWiring:
         assert isinstance(result, ToolError)
         assert result.brief == "Blocked (hardline)"
         mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_blocks_own_pid(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(
+                PowershellParams(cmd=f"Stop-Process -Id {os.getpid()}")
+            )
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        assert str(os.getpid()) in result.message
+        mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_blocks_own_image_name(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        stem = os.path.splitext(os.path.basename(sys.executable))[0]
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(
+                PowershellParams(cmd=f"Stop-Process -Name {stem}")
+            )
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_skipped_when_config_disabled(
+        self, mock_session: MagicMock
+    ) -> None:
+        mock_session.custom_config.get.return_value = {"shell": {"self_kill_guard": False}}
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.find_pwsh",
+            return_value=r"C:\pwsh\pwsh.exe",
+        ):
+            pwsh = Powershell(session=mock_session)
+        mock_instance = MagicMock()
+        mock_instance.start = AsyncMock(return_value="pwsh-selfkill-id")
+        mock_instance.wait_with_monitor = AsyncMock(return_value=None)
+        mock_instance.thread_is_alive = AsyncMock(return_value=False)
+        mock_instance.stream = MagicMock()
+        mock_instance.stream.pop_output = AsyncMock(return_value="")
+        mock_instance.stream.success = AsyncMock(return_value=True)
+        mock_instance.stream.exit_code = 0
+        mock_instance.stream.process_elapsed = None
+        with patch(
+            "kimix.tools.file.bash.pwsh_tool.ProcessTask",
+            return_value=mock_instance,
+        ) as mock_pt:
+            result = await pwsh(
+                PowershellParams(cmd=f"Stop-Process -Id {os.getpid()}")
+            )
+        assert isinstance(result, ToolOk)
+        mock_pt.assert_called_once()

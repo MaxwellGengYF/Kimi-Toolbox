@@ -8,7 +8,17 @@ recursive deletes of root/home, device formatting, ``dd`` to raw devices,
 system power commands, fork bombs, ``kill`` of PID 1, and Windows
 ``format``/``del`` of a drive root — even when spelling tricks (quoting,
 backslash escapes, case) are used to obfuscate them.
+
+The self-kill guard (:func:`self_kill_hint`) stops the LLM backend from
+accidentally terminating the very process hosting the agent: kill-style
+commands (``kill``/``tskill``/``taskkill``/``Stop-Process``/``pkill``/
+``killall``/``wmic ... delete``) whose target PID is the agent process or
+one of its ancestors, or whose image-name/pattern target matches the
+agent's own image name or command line.
 """
+
+import os
+import sys
 
 import regex as re
 
@@ -24,7 +34,9 @@ __all__ = [
     "check_hardline_blocked",
     "command_detection_variants",
     "detect_hardline_command",
+    "detect_self_kill",
     "foreground_background_guidance",
+    "self_kill_hint",
     "validate_workdir",
 ]
 
@@ -250,4 +262,430 @@ def foreground_background_guidance(command: str) -> str | None:
     text = " ".join(stripped.split())
     if any(re.search(pattern, text) for pattern in _LONG_RUNNING_PATTERNS):
         return _FG_BG_HINT
+    return None
+
+
+# ── Self-kill guard ──────────────────────────────────────────────────────────
+#
+# The LLM backend occasionally resolves the wrong PID (or reaches for a broad
+# image-name/pattern kill such as ``taskkill /IM python.exe /F`` or
+# ``pkill -f python``) and would terminate the very process hosting the
+# agent.  ``self_kill_hint`` compares kill targets against the current PID,
+# its ancestors, and the agent's own image name / command line, returning a
+# smart hint so the tool can refuse to execute such a command.
+
+_AGENT_PIDS_CACHE: set[int] | None = None
+_AGENT_IMAGE_NAMES_CACHE: set[str] | None = None
+_AGENT_CMDLINE_CACHE: str | None = None
+
+# Words that make a following ``kill`` act on container/remote entities rather
+# than host PIDs (``docker kill <container>``, ``kubectl kill`` ...).
+_KILL_PRECEDING_SKIP = frozenset({"docker", "podman", "kubectl", "compose"})
+
+# Executable-style suffixes stripped when deriving image-name stems.
+_EXECUTABLE_SUFFIXES = ("exe", "com", "bat", "cmd", "py", "sh")
+
+
+def _posix_ppid(pid: int) -> int | None:
+    """Return the parent PID of *pid* via ``/proc`` (None when unavailable)."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as fh:
+            stat = fh.read()
+        # ``comm`` (field 2) is parenthesized and may contain spaces/parens;
+        # the ppid is the second whitespace-separated field after the last ``)``.
+        tail = stat.rsplit(")", 1)[1].split()
+        return int(tail[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _windows_parent_map() -> dict[int, int]:
+    """Return a ``pid -> parent pid`` map via a Toolhelp32 snapshot.
+
+    Returns an empty dict on any failure so the caller degrades to just
+    ``getpid()``/``getppid()``.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),  # ULONG_PTR
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return {}
+    result: dict[int, int] = {}
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+        while ok:
+            result[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            ok = kernel32.Process32NextW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(snapshot))
+    return result
+
+
+def _agent_pids() -> set[int]:
+    """Return the current PID plus all ancestor PIDs (cached for process life).
+
+    Killing any of these terminates the agent session.  The ancestor walk
+    never fails hard: worst case it degenerates to ``{getpid(), getppid()}``.
+    """
+    global _AGENT_PIDS_CACHE
+    if _AGENT_PIDS_CACHE is not None:
+        return _AGENT_PIDS_CACHE
+    pids = {os.getpid()}
+    ppid = os.getppid()
+    if ppid > 0:
+        pids.add(ppid)
+    current = ppid
+    if os.name == "nt":
+        try:
+            parent_map = _windows_parent_map()
+        except Exception:
+            parent_map = {}
+        for _ in range(64):
+            parent = parent_map.get(current, 0)
+            if parent <= 0 or parent in pids:
+                break
+            pids.add(parent)
+            current = parent
+    else:
+        for _ in range(64):
+            parent = _posix_ppid(current)
+            if parent is None or parent <= 1 or parent in pids:
+                break
+            pids.add(parent)
+            current = parent
+    _AGENT_PIDS_CACHE = pids
+    return pids
+
+
+def _split_image_name(name: str) -> tuple[str, str]:
+    """Return ``(basename, stem)`` of *name*, lowercased.
+
+    The stem drops a known executable suffix (``python.exe`` -> ``python``);
+    other dotted names (``python3.12``) keep their full form as the stem.
+    """
+    base = re.split(r"[\\/]", name.strip().strip("\"'"))[-1].lower()
+    stem, dot, ext = base.rpartition(".")
+    if dot and stem and ext in _EXECUTABLE_SUFFIXES:
+        return base, stem
+    return base, base
+
+
+def _agent_image_names() -> set[str]:
+    """Return lowercase image names identifying the agent process (cached).
+
+    Covers the interpreter/launcher basename (``python.exe``) and its stem
+    (``python``) for both ``sys.executable`` and ``sys.argv[0]`` (e.g. the
+    ``kimi`` console script), so name-based kills of the agent are caught.
+    """
+    global _AGENT_IMAGE_NAMES_CACHE
+    if _AGENT_IMAGE_NAMES_CACHE is not None:
+        return _AGENT_IMAGE_NAMES_CACHE
+    candidates = [sys.executable]
+    if sys.argv and sys.argv[0]:
+        candidates.append(sys.argv[0])
+    names: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        base, stem = _split_image_name(candidate)
+        # Names shorter than 3 chars (e.g. a ``5.py`` scratch-script stem)
+        # are too generic to match safely.
+        if len(base) >= 3:
+            names.add(base)
+        if len(stem) >= 3:
+            names.add(stem)
+    _AGENT_IMAGE_NAMES_CACHE = names
+    return names
+
+
+def _agent_cmdline() -> str:
+    """Return the agent's own command line (cached); used for ``pkill -f``."""
+    global _AGENT_CMDLINE_CACHE
+    if _AGENT_CMDLINE_CACHE is None:
+        argv = list(sys.argv) if sys.argv else []
+        _AGENT_CMDLINE_CACHE = " ".join([sys.executable, *argv])
+    return _AGENT_CMDLINE_CACHE
+
+
+def _segment_text(text: str, start: int) -> str:
+    """Return the shell segment (up to ``;``/``&&``/``||``/``|``/newline) at *start*."""
+    return re.split(r";|\|\||&&|\||\n", text[start:], maxsplit=1)[0]
+
+
+def _numeric_pid_targets(tokens: list[str]) -> list[int]:
+    """Return integer PIDs among *tokens* (flags excluded; comma lists split)."""
+    pids: list[int] = []
+    for token in tokens:
+        if _looks_like_flag(token):
+            continue
+        for part in token.split(","):
+            part = part.strip().strip("\"'()")
+            if part.isdigit():
+                pids.append(int(part))
+                continue
+            # PowerShell expression style: ``2100).Kill()`` from e.g.
+            # ``(Get-Process -Id 2100).Kill()`` — leading digits followed by
+            # ``)`` or ``.`` still denote a PID.
+            expr = re.match(r"^(\d+)[).]", part)
+            if expr:
+                pids.append(int(expr.group(1)))
+    return pids
+
+
+def _name_kill_hit(token: str, image_names: set[str]) -> str | None:
+    """Return the matched agent image name when *token* names the agent process.
+
+    Handles exact names (``python.exe``), suffix-less stems (``python``) and
+    PowerShell-style trailing wildcards (``python*``).
+    """
+    base, stem = _split_image_name(token)
+    if not base or not re.search(r"[a-z0-9]", base, re.IGNORECASE):
+        return None
+    if base.endswith("*"):
+        prefix = base[:-1]
+        if len(prefix) < 3:
+            return None
+        for name in image_names:
+            if name.startswith(prefix):
+                return name
+        return None
+    for name in image_names:
+        if base == name or stem == name:
+            return name
+    return None
+
+
+def _pattern_kill_hit(pattern: str, haystacks: list[str]) -> str | None:
+    """Return the haystack matched by a pkill-style regex *pattern*.
+
+    pkill treats the pattern as an extended regex (substring search); a
+    pattern that fails to compile falls back to a plain substring test.
+    Tokens without any alphanumeric character (``()``, ``$@`` from shell
+    function definitions/wrappers) are never treated as patterns.
+    """
+    p = pattern.strip().strip("\"'")
+    if not p or not re.search(r"[a-z0-9]", p, re.IGNORECASE):
+        return None
+    for haystack in haystacks:
+        if not haystack:
+            continue
+        try:
+            if re.search(p, haystack, re.IGNORECASE):
+                return haystack
+        except re.error:
+            if p.lower() in haystack.lower():
+                return haystack
+    return None
+
+
+def _pkill_full_match(tokens: list[str]) -> bool:
+    """Return True when pkill *tokens* include the ``-f``/``--full`` flag."""
+    for token in tokens:
+        tl = token.lower()
+        if tl == "--full":
+            return True
+        if tl.startswith("-") and not tl.startswith("--") and "f" in tl[1:]:
+            return True
+    return False
+
+
+def detect_self_kill(
+    command: str,
+    *,
+    protected_pids: set[int] | None = None,
+    image_names: set[str] | None = None,
+    cmdline: str | None = None,
+) -> str | None:
+    """Return a short description when *command* would kill the agent process.
+
+    Detects kill-style commands — POSIX ``kill``, Windows ``tskill`` /
+    ``taskkill`` (``/PID``, ``/FI "PID eq n"``, ``/IM``), PowerShell
+    ``Stop-Process`` (``-Id``/``-Name``, plus ``Get-Process`` piped into a
+    kill), ``pkill``/``killall`` name patterns (``pkill -f`` matches against
+    the full agent command line), and ``wmic ... ProcessId=n ... delete`` —
+    whose target is one of *protected_pids* or whose name/pattern target
+    matches the agent's own image name.  Returns ``None`` for safe commands.
+
+    The keyword arguments exist for testing; the defaults describe the live
+    agent process (current PID + ancestors, own image names, own cmdline).
+    """
+    if not command or not command.strip():
+        return None
+    if protected_pids is None:
+        protected_pids = set(_agent_pids())
+    if image_names is None:
+        image_names = set(_agent_image_names())
+    if cmdline is None:
+        cmdline = _agent_cmdline()
+    if not protected_pids:
+        return None
+    image_names = {n.lower() for n in image_names if n}
+    text = " ".join(command.split()).lower()
+
+    def _pid_hit(tokens: list[str], via: str) -> str | None:
+        for pid in _numeric_pid_targets(tokens):
+            if pid in protected_pids:
+                return (
+                    f"targets PID {pid} via {via}, which is the agent process "
+                    "or one of its parent processes"
+                )
+        return None
+
+    # 1. POSIX kill / Windows tskill: numeric PID targets.
+    for match in re.finditer(r"\b(?:kill|tskill)(?:\.exe)?\b", text):
+        word = match.group(0)
+        if word.startswith("kill"):
+            prev = text[: match.start()].rstrip().split()
+            if prev and prev[-1] in _KILL_PRECEDING_SKIP:
+                continue  # docker/podman/kubectl kill: container, not a host PID
+        hit = _pid_hit(_segment_tokens(text, match.end()), f"`{word}`")
+        if hit is not None:
+            return hit
+
+    # 2. taskkill: /PID values and /FI pid filters (numeric scan), /IM names.
+    for match in re.finditer(r"\btaskkill(?:\.exe)?\b", text):
+        tokens = _segment_text(text, match.end()).split()
+        hit = _pid_hit(tokens, "`taskkill`")
+        if hit is not None:
+            return hit
+        for index, token in enumerate(tokens[:-1]):
+            if token == "/im":
+                name_hit = _name_kill_hit(tokens[index + 1], image_names)
+                if name_hit is not None:
+                    return (
+                        f"kills by image name `{name_hit}` via `taskkill /IM`, "
+                        "which also matches the agent process"
+                    )
+
+    # 3. Stop-Process -Id / -Name, and Get-Process piped into a kill.
+    for match in re.finditer(r"\bstop-process\b", text):
+        tokens = _segment_tokens(text, match.end())
+        hit = _pid_hit(tokens, "`Stop-Process`")
+        if hit is not None:
+            return hit
+        for token in tokens:
+            if _looks_like_flag(token):
+                continue
+            name_hit = _name_kill_hit(token, image_names)
+            if name_hit is not None:
+                return (
+                    f"kills by process name `{name_hit}` via `Stop-Process`, "
+                    "which also matches the agent process"
+                )
+    if "stop-process" in text or "| kill" in text or ".kill()" in text:
+        for match in re.finditer(r"\bget-process\b", text):
+            tokens = _segment_tokens(text, match.end())
+            hit = _pid_hit(tokens, "`Get-Process` piped to a kill")
+            if hit is not None:
+                return hit
+            for token in tokens:
+                if _looks_like_flag(token):
+                    continue
+                name_hit = _name_kill_hit(token, image_names)
+                if name_hit is not None:
+                    return (
+                        f"kills by process name `{name_hit}` via `Get-Process` "
+                        "piped to a kill, which also matches the agent process"
+                    )
+
+    # 4. pkill / killall: name patterns; ``pkill -f`` matches full cmdlines.
+    for match in re.finditer(r"\b(?:pkill|killall)(?:\.exe)?\b", text):
+        is_pkill = match.group(0).startswith("pkill")
+        segment_tokens = _segment_tokens(text, match.end())
+        full = is_pkill and _pkill_full_match(segment_tokens)
+        for token in segment_tokens:
+            if _looks_like_flag(token):
+                continue
+            if is_pkill:
+                haystacks = sorted(image_names)
+                if full and cmdline:
+                    haystacks.append(cmdline)
+                pattern_hit = _pattern_kill_hit(token, haystacks)
+                if pattern_hit is not None:
+                    display = token.strip().strip("\"'")
+                    return (
+                        f"kills processes matching `{display}` via "
+                        f"`pkill{' -f' if full else ''}`, which also matches "
+                        "the agent process"
+                    )
+            else:
+                name_hit = _name_kill_hit(token, image_names)
+                if name_hit is not None:
+                    return (
+                        f"kills by process name `{name_hit}` via `killall`, "
+                        "which also matches the agent process"
+                    )
+
+    # 5. wmic process where ProcessId=<pid> delete / call terminate.
+    for match in re.finditer(r"\bwmic(?:\.exe)?\b", text):
+        segment = _segment_text(text, match.end())
+        if not re.search(r"\b(?:delete|terminate)\b", segment):
+            continue
+        pid_match = re.search(r"processid\s*=\s*(\d+)", segment)
+        if pid_match and int(pid_match.group(1)) in protected_pids:
+            return (
+                f"targets PID {pid_match.group(1)} via `wmic`, which is the "
+                "agent process or one of its parent processes"
+            )
+
+    return None
+
+
+_SELF_KILL_GUIDANCE = (
+    "If you meant to stop a different process, re-check its PID first "
+    "(`tasklist` / `Get-Process` / `ps aux`) and retry with a PID that does "
+    "not belong to the agent. If the target merely shares the agent's image "
+    "name, terminate that specific PID instead of a name/pattern match. If "
+    "you really intend to stop or restart the agent itself, ask the user to "
+    "do it from outside this session."
+)
+
+
+def self_kill_hint(command: str) -> str | None:
+    """Return a smart hint when *command* would kill the running agent process.
+
+    Runs :func:`detect_self_kill` over every deobfuscation variant (see
+    :func:`command_detection_variants`) so quoting/backslash/case tricks are
+    caught.  The returned message explains what was detected, which PID is
+    the agent, and safer alternatives; ``None`` means the command is safe.
+    """
+    if not command or not command.strip():
+        return None
+    protected = set(_agent_pids())
+    names = set(_agent_image_names())
+    cmdline = _agent_cmdline()
+    for variant in command_detection_variants(command):
+        desc = detect_self_kill(
+            variant, protected_pids=protected, image_names=names, cmdline=cmdline
+        )
+        if desc is not None:
+            return (
+                f"The command {desc}. Executing it would terminate this agent "
+                f"session (current agent PID: {os.getpid()}). "
+                + _SELF_KILL_GUIDANCE
+            )
     return None

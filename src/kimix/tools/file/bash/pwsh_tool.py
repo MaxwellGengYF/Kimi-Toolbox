@@ -55,6 +55,7 @@ from kimix.tools.file.bash.output_enhance import (
 from kimix.tools.file.bash.safety import (
     check_hardline_blocked,
     foreground_background_guidance,
+    self_kill_hint,
 )
 
 if TYPE_CHECKING:
@@ -340,9 +341,20 @@ class Powershell(CallableTool2[PowershellParams]):
         if isinstance(shell_cfg, dict):
             self._hardline_enabled = shell_cfg.get("hardline", True)
             self._redact_secrets = shell_cfg.get("redact_secrets", True)
+            self._self_kill_guard_enabled = shell_cfg.get("self_kill_guard", True)
         else:
             self._hardline_enabled = True
             self._redact_secrets = True
+            self._self_kill_guard_enabled = True
+
+        # Proactive self-kill hint: make the agent's own PID visible up front
+        # so the model avoids targeting it; the guard below blocks attempts.
+        self.description += (
+            f" Safety: this tool runs inside the agent process (PID {os.getpid()}); "
+            "never run kill/taskkill/Stop-Process/pkill commands targeting that "
+            "PID, its parent processes, or this process's image name — the "
+            "self-kill guard blocks such commands."
+        )
 
     def _hardline_blocked(self, command: str) -> ToolError | None:
         r"""Return a ToolError when *command* hits the unconditional hardline floor.
@@ -364,6 +376,28 @@ class Powershell(CallableTool2[PowershellParams]):
                 "via the agent."
             ),
             brief="Blocked (hardline)",
+        )
+
+    def _self_kill_blocked(self, command: str) -> ToolError | None:
+        r"""Return a ToolError when *command* would kill the agent process itself.
+
+        The LLM backend sometimes resolves the wrong PID (or uses a broad
+        image-name/pattern kill such as ``taskkill /IM python.exe /F`` or
+        ``pkill -f python``), terminating the very process hosting the agent.
+        The guard compares kill targets against the current PID, its ancestor
+        PIDs, and the agent's own image name, returning a smart hint instead
+        of executing.  Skipped when the ``shell.self_kill_guard`` config gate
+        is explicitly ``False``.
+        """
+        if not self._self_kill_guard_enabled or not command:
+            return None
+        hint = self_kill_hint(command)
+        if hint is None:
+            return None
+        return ToolError(
+            output="",
+            message=f"Blocked (self-kill guard): {hint}",
+            brief="Blocked (self-kill guard)",
         )
 
     def _resolve_pwsh(self) -> None:
@@ -394,6 +428,10 @@ class Powershell(CallableTool2[PowershellParams]):
         """
         # Hardline safety floor: never spawn a process for destructive commands.
         blocked = self._hardline_blocked(params.command)
+        if blocked is not None:
+            return blocked
+        # Self-kill guard: never run a command that kills the agent process.
+        blocked = self._self_kill_blocked(params.command)
         if blocked is not None:
             return blocked
 
@@ -483,6 +521,9 @@ class Powershell(CallableTool2[PowershellParams]):
                     )
         # Re-check the prepared text (rtk-rewritten / PS5.1-transformed) too.
         blocked = self._hardline_blocked(cmd)
+        if blocked is not None:
+            return blocked
+        blocked = self._self_kill_blocked(cmd)
         if blocked is not None:
             return blocked
         # Refresh PATH/PATHEXT from registry so that tools installed
@@ -763,6 +804,9 @@ class Powershell(CallableTool2[PowershellParams]):
                 cmd = fix.command
                 note = "\n[WARNING] " + fix.warning
         blocked = self._hardline_blocked(cmd)
+        if blocked is not None:
+            return blocked
+        blocked = self._self_kill_blocked(cmd)
         if blocked is not None:
             return blocked
         self._resolve_pwsh()

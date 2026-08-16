@@ -2,6 +2,7 @@
 
 import asyncio
 import ntpath
+import os
 import shutil
 import subprocess
 import sys
@@ -4562,6 +4563,59 @@ class TestShellSafetyWiring:
             "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
         ) as mock_pt:
             result = await bash(BashParams(cmd="rm -rf /"))
+        assert isinstance(result, ToolOk)
+        mock_pt.assert_called_once()
+
+    # -- self-kill guard ----------------------------------------------------
+
+    async def test_self_kill_guard_blocks_own_pid(
+        self, bash_instance: Bash
+    ) -> None:
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd=f"kill -9 {os.getpid()}"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        assert str(os.getpid()) in result.message
+        mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_blocks_own_image_name(
+        self, bash_instance: Bash
+    ) -> None:
+        image = Path(sys.executable).name  # e.g. python.exe hosting the agent
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd=f"taskkill /F /IM {image}"))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_allows_unrelated_pid(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ) as mock_pt:
+            result = await bash_instance(BashParams(cmd="kill 999999999"))
+        assert isinstance(result, ToolOk)
+        mock_pt.assert_called_once()
+
+    async def test_self_kill_guard_skipped_when_config_disabled(
+        self, mock_session: MagicMock
+    ) -> None:
+        mock_session.custom_config.get.return_value = {"shell": {"self_kill_guard": False}}
+        with patch(
+            "kimix.tools.file.bash.bash_tool.find_bash",
+            return_value=r"C:\Git\bin\bash.exe",
+        ), patch(
+            "kimix.tools.file.bash.bash_tool._should_enable_bash",
+            return_value=True,
+        ):
+            bash = Bash(session=mock_session)
+        process_task = self._completed_process_task()
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ) as mock_pt:
+            result = await bash(BashParams(cmd=f"kill -9 {os.getpid()}"))
         assert isinstance(result, ToolOk)
         mock_pt.assert_called_once()
 
