@@ -9,7 +9,6 @@
       "kimix.tools.web.fetch_url:fetch_url",
       "kimi_cli.tools.web:web_search",
       "kimi_cli.tools.memory:retrieve",
-      "kimix.tools.context:context_usage",
       "kimix.tools.context:compact"
     ]
   }

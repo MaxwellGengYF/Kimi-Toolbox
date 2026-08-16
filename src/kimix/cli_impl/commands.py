@@ -826,7 +826,6 @@ def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path, kimi_cli_tool
         ('grep', kimi_cli_tools_dir / 'file' / 'grep_local.py'),
         ('fetch_url', kimix_tools_dir / 'web' / 'fetch_url.py'),
         ('web_search', kimi_cli_tools_dir / 'web' / 'search.py'),
-        ('context_usage', kimix_tools_dir / 'context' / '__init__.py'),
         ('compact', kimix_tools_dir / 'context' / '__init__.py'),
     ]
     return '\n'.join(f'- `{name}` — `{rel(path)}`' for name, path in tools)
@@ -877,7 +876,7 @@ Every builtin tool and the exact file where its implementation lives:
 - Worker tool manifest: `{worker_agent_json}` — the exact tool list for the worker agent
   (`agent.extend=default`): Bash, pwsh, Run, python, job_output, todo_write, retrieve,
   read, read_image, edit, write, subagent, send_message, list_agents, interrupt_agent,
-  workflow, glob, grep, fetch_url, web_search, context_usage, compact (from `kimix.tools.*`
+  workflow, glob, grep, fetch_url, web_search, compact (from `kimix.tools.*`
   and `kimi_cli.tools.*`).
 - Soul runtime: `{soul_dir}`
   - agent.py — Runtime + BuiltinSystemPromptArgs; loads AGENTS.md, skills, additional dirs

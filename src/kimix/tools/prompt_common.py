@@ -60,41 +60,31 @@ def wait_for_pattern_field() -> Field:
     return Field(default=None, description="Pattern to wait for in the tool output.")
 
 
-def task_id_field(payload: str = "cmd", tail: str = "being executed.") -> Field:
+def task_id_field(payload: str = "cmd", tail: str = "") -> Field:
     """``task_id``: resume-session param; ``payload`` is the stdin carrier name.
 
-    Bash/Powershell pass ``"cmd"``, Python passes ``"code"`` (with the extra
-    "as a new script" tail), Run passes ``"command"``.
+    Bash/Powershell pass ``"cmd"``, Python passes ``"code"`` (optionally with
+    a short ``tail`` describing what sending instead of executing means), Run
+    passes ``"command"``.
     """
-    return Field(
-        default=None,
-        description=(
-            "Existing session/task ID to continue. When provided, "
-            f"'{payload}' is sent to the process stdin instead of {tail}"
-        ),
-    )
+    description = f"Continue existing session. When set, sends '{payload}' to stdin."
+    if tail:
+        description = description[:-1] + f" instead of {tail}."
+    return Field(default=None, description=description)
 
 
 def mode_field(
     *,
-    aliases: bool = True,
     execute_desc: str,
     send_desc: str,
     interactive_desc: str | None = None,
 ) -> Field:
     """``mode`` field with per-tool wording.
 
-    Shell/Python tools document the deprecated ``run``/``background`` aliases
-    and the ``interactive`` mode; Run (``aliases=False``, no interactive mode)
-    uses its own literal wording.
+    Deprecated ``run``/``background`` aliases are normalized silently by
+    ``normalize_mode_validator``, so they are not documented here.
     """
-    if aliases:
-        parts = [
-            f"'execute' (alias: 'run'): {execute_desc}",
-            f"'send' (alias: 'background'): {send_desc}",
-        ]
-    else:
-        parts = [f"'execute': {execute_desc}", f"'send': {send_desc}"]
+    parts = [f"'execute': {execute_desc}", f"'send': {send_desc}"]
     if interactive_desc:
         parts.append(f"'interactive': {interactive_desc}")
     return Field(default="execute", description=" ".join(parts))

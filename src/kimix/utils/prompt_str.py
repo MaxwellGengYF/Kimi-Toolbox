@@ -2,6 +2,7 @@
 
 import regex as re
 import unicodedata
+import uuid as _uuid
 from pathlib import Path
 
 
@@ -187,14 +188,8 @@ def _sanitize_text(text: str) -> str:
     # to half-width (U+0021-U+007E) and full-width space (U+3000) to regular space.
     text = unicodedata.normalize("NFKC", text)
 
-    # Traditional to Simplified (optional)
-    try:
-        import opencc
-
-        converter = opencc.OpenCC("t2s")
-        text = converter.convert(text)
-    except ImportError:
-        pass
+    # Traditional to Simplified (optional, lazy) — only imported when used.
+    text = _to_simplified(text)
 
     # From remove_meaningless_symbols
     trans = str.maketrans("", "", _ZW_CHARS)
@@ -317,27 +312,54 @@ _ZW_CHARS = "".join(
 )
 
 
-def _extract_code(text: str) -> tuple[str, list[str]]:
-    """Extract markdown fenced code blocks and inline code into placeholders."""
-    placeholders: list[str] = []
-    counter = 0
+def _extract_code(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract markdown fenced code blocks and inline code into placeholders.
+
+    Returns ``(text, [(token, original), ...])`` where each ``token`` is a
+    unique digit-only null-delimited string (UUID-derived) that survives the
+    normalization passes (NFKC, case folds, whitespace collapse) without
+    colliding with real content.
+    """
+    pairs: list[tuple[str, str]] = []
 
     def _repl(m: re.Match[str]) -> str:
-        nonlocal counter
-        placeholders.append(m.group(0))
-        result = f"\x00{counter:08d}\x00"
-        counter += 1
-        return result
+        token = f"\x00{_uuid.uuid4().int:032d}\x00"
+        pairs.append((token, m.group(0)))
+        return token
 
     text = re.sub(r"```[\s\S]*?```", _repl, text)
     text = re.sub(r"`[^`]*`", _repl, text)
-    return text, placeholders
+    return text, pairs
 
 
-def _restore_code(text: str, placeholders: list[str]) -> str:
+def _restore_code(text: str, placeholders: list[tuple[str, str]]) -> str:
     """Restore placeholders to original code blocks."""
-    for i, ph in enumerate(placeholders):
-        text = text.replace(f"\x00{i:08d}\x00", ph, 1)
+    for token, original in placeholders:
+        text = text.replace(token, original, 1)
+    return text
+
+
+_opencc_converter = None
+_opencc_checked = False
+
+
+def _to_simplified(text: str) -> str:
+    """Convert Traditional → Simplified Chinese when ``opencc`` is installed.
+
+    Lazily probes the optional dependency once per process (module-level flag),
+    avoiding a try/except import on every sanitize call when it is not present.
+    """
+    global _opencc_converter, _opencc_checked
+    if not _opencc_checked:
+        _opencc_checked = True
+        try:
+            import opencc  # type: ignore[import-not-found]
+
+            _opencc_converter = opencc.OpenCC("t2s")
+        except ImportError:
+            _opencc_converter = None
+    if _opencc_converter is not None:
+        return _opencc_converter.convert(text)
     return text
 
 

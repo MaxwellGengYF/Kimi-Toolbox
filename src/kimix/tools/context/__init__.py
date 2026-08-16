@@ -8,44 +8,6 @@ from kimi_cli.soul.kimisoul import KimiSoul
 from pydantic import BaseModel, Field, model_validator
 
 
-class ContextUsageParams(BaseModel):
-    """No parameters required."""
-
-    pass
-
-
-class context_usage(CallableTool2):
-    name = "context_usage"
-    description = (
-        "Report the current conversation context usage: percentage, used tokens, "
-        "and maximum context size. Use this to decide whether to call compact."
-    )
-    params = ContextUsageParams
-
-    async def __call__(self, params: ContextUsageParams) -> ToolReturnValue:
-        soul = get_current_soul_or_none()
-        if soul is None:
-            return ToolError(
-                message="No active soul/session.",
-                output="",
-                brief="No active session",
-            )
-        status = soul.status
-        used_pct = round(status.context_usage * 100, 1)
-        output = (
-            f"Context usage: {status.context_usage:.1%} "
-            f"({status.context_tokens:,} / {status.max_context_tokens:,} tokens)"
-        )
-        result = ToolOk(output=output)
-        result.extras = {
-            "context_usage_pct": used_pct,
-            "used_tokens": status.context_tokens,
-            "max_tokens": status.max_context_tokens,
-            "free_tokens": status.max_context_tokens - status.context_tokens,
-        }
-        return result
-
-
 class CompactParams(BaseModel):
     instruction: str | None = Field(
         default=None,
@@ -90,11 +52,11 @@ class compact(CallableTool2):
     name = "compact"
     description = (
         "Compact / summarize the conversation context to reduce token usage. "
-        "Call this when context_usage shows usage is high and you want to free up context. "
+        "Call this when context usage shows usage is high and you want to free up context. "
         "Optionally pass an instruction and a compaction mode (balanced, aggressive, "
         "retentive, technical, auto) to control the summary style. "
         "[IMPORTANT] Do NOT call compact more than once every 5 steps, "
-        "and only call it when context_usage exceeds 70%."
+        "and only call it when context usage exceeds 70%."
     )
     params = CompactParams
 

@@ -35,7 +35,7 @@ _DEFAULT_TOOL_NAMES = (
     "write", "WritePlan", "read", "ReadPlan", "edit", "EditPlan",
     "python", "subagent", "list_agents", "interrupt_agent", "Run", "pwsh",
     "bash", "grep", "glob", "fetch_url", "todo_write", "job_output",
-    "compact", "context_usage", "retrieve",
+    "compact", "retrieve",
 )
 
 

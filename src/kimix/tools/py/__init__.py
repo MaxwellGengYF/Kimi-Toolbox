@@ -63,7 +63,7 @@ class Params(BaseModel):
         send_desc="Execute code in background, return immediately with task_id.",
         interactive_desc="Start a persistent Python REPL, return task_id for further input.",
     )
-    task_id: str | None = task_id_field("code", tail="being executed as a new script.")
+    task_id: str | None = task_id_field("code", tail="running a new script")
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
 

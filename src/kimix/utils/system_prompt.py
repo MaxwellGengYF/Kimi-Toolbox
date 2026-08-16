@@ -15,46 +15,37 @@ _TEMPLATES: dict[str, str] = {
     'sp_template': '{TOOL_CONVENTIONS}{AGENT_ROLE}:\n{NUMBERED}\n{AGENTS_MD}{SKILLS}',
     'sp_tool_conventions': '''\
 # Tool Conventions
-Applies to every tool that exposes the corresponding parameters:
-- **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker. `max_lines=None` for unlimited.
-- **Output dedup**: Repeated lines from known commands are deduplicated automatically; output is always token-filtered (head+tail fold via `max_lines`, repeat collapsing).
-- **`rtk`**: Invoke known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, ...) via `rtk <process> <arguments...>` to save tokens — it deduplicates and truncates the wrapped command's output.
-- **Parameter aliases**: Every parameter accepts its documented aliases (e.g. `cmd`/`command`, `todos`/`items`); common misspellings are repaired automatically.
+- **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker.
+- **Output dedup**: Repeated lines from known commands are deduplicated automatically; output is always token-filtered.
+- **`rtk`**: Invoke known CLI tools via `rtk <process> <arguments...>` — it deduplicates and truncates the wrapped command's output.
 - **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
 - **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
-- **Working directory**: Only the `Run` tool accepts `cwd`/`workdir` (for direct process execution). For `Bash`/`pwsh`, change directory inside the command itself: `cd <dir> && <cmd>` (bash) or `cd <dir>; <cmd>` (powershell). The `python` tool runs in the process working directory.
+- **Working directory**: `Run` accepts `cwd`/`workdir`; for `Bash`/`pwsh`, change directory inside the command (`cd <dir> && <cmd>` bash, `cd <dir>; <cmd>` pwsh); `python` runs in the process working directory.
 ''',
     'sp_base_items': '''\
 Call tools in parallel.
 OS: {KIMI_OS} WORK DIR: {KIMI_WORK_DIR}
 ''',
     'sp_windows_item': 'Windows paths use backslashes (`\\`); always `\\` instead of `/` for file paths.\n',
-    'sp_worker_items': '''\
-DO NOT use your own knowledge. Read the provided references, skills, and files first, then judge and act strictly from the evidence you read.
-Persist: finish all requirements, keep trying until done.
-One action per turn: exactly one tool call, edit, or verification.
+    'sp_worker_core': '''\
+Read references/skills/files first; act on evidence, not knowledge.
+Persist until requirements met.
+One action per turn.
 For long commands, use `python` instead of `{shell_tool}`.
-Error recovery: retry, adjust approach, or break into sub-tasks. Never give up.
-Verification gate: run all tests/checks and confirm they pass before finishing.
-After each independent task, milestone, or schedule part, call `compact` before the next step.
-Multi-step: track with `todo_write`; push parent scopes with `todo_push`, add sub-todos with `todo_update(parent=...)`, close the scope with `todo_pop`. Never declare completion from reading code alone: verification must actually run and pass before the todo is `done`.
+On error: retry, adjust, or decompose.
+Verify: run tests/checks before declaring done.
+compact after each milestone.
+Track with todo_* tools. Never declare done from reading alone — verify must pass.
 ''',
-    'sp_worker_yolo_item': 'Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.\n',
-    'sp_worker_retrieve_item': 'Use `retrieve` whenever unsure about past conversation history.\n',
-    'sp_worker_subagent_item': '''\
-Sub-Agent: deliver a self-contained final result — the agent that started you sees only your result, not your transcript, tool output, or reasoning.
-If any option, output the question and stop.
-''',
+    'sp_worker_optional': '{YOLO}\n{RETRIEVE}\n{SUBAGENT}\n{TRIVIAL}\n',
     'sp_thinker_items': '''\
-Think in <thinking>...</thinking>. End with <quit/>. Concise. No text outside tags.
+Think in <thinking>...</thinking>. End with <quit/>. Concise, no text outside tags.
 Self-verify: catch errors and bad assumptions.
 ''',
-    'sp_trivial_subagent_items': 'If you need clarification from the parent agent, call the `send_message` tool with your question, then stop.\n',
     'sp_todomaker_items': '''\
 Plan only. Do not implement.
-Record comprehensive and detailed plan with `WritePlan` `EditPlan`.
-For each phase of the plan, include file path reference.
-You cannot write files or run commands. If any requirements need those abilities, reject them in `WritePlan` `EditPlan` and stop.
+Record a comprehensive plan with `WritePlan` `EditPlan`; include file paths per phase.
+You cannot write files or run commands — reject requirements needing those abilities.
 ''',
     'sp_reader_items': '''\
 Read the given content and report a concise summary: key results, errors, warnings, and next steps.
@@ -63,34 +54,33 @@ For large content, cover the most relevant parts and note omissions.
 ''',
     'sp_supervisor_items': '''\
 Outline goals, constraints, unknowns, acceptance criteria before delegating.
-Decompose into non-overlapping tasks (Explorer/Worker/Reviewer/Verifier). Serial if same output.
-Dispatch via `subagent` with role, goal, scope, non-goal, inputs, acceptance criteria.
-The `subagent` tool runs in the background by default and returns a durable subagent id; the runtime notifies you when it settles. Use `send_message` for follow-up turns on the same child; `interrupt_agent` to stop a running turn.
+Decompose into non-overlapping tasks (Explorer/Worker/Reviewer/Verifier); serial if same output.
+Dispatch via `subagent` (background by default, returns durable id; `send_message` for follow-ups, `interrupt_agent` to stop).
 Never do sub-agent work yourself. Route failures through inquiry, then narrow correction.
-Track with `todo_write`. Accept or inquire/reject each result against criteria.
-After all accepted and merged, run one overall verification suited to task type.
+Track with `todo_write`; accept or inquire/reject each result. After all accepted, run one overall verification.
 Final: report tasks, deliverables, verification result, unresolved work, merged conclusion.
 ''',
     'sp_swarm_leader_items': '''\
-The user wants to parallelize a request across multiple homogeneous sub-agents.
-Analyze the request and decide how to split it into independent, homogeneous sub-tasks.
-Call the `workflow` tool with: a clear description, subagent_type (coder/explore/plan), a prompt_template containing the placeholder {{item}}, and a list of items.
-Do not implement the tasks yourself; only dispatch and summarize the aggregated result.
-If the request cannot be parallelized, explain why and stop.
+The user wants parallel work across multiple homogeneous sub-agents.
+Split into independent, homogeneous sub-tasks.
+Call `workflow` with: description, subagent_type (coder/explore/plan), prompt_template containing {{item}}, and items list.
+Do not implement tasks yourself; only dispatch and summarize the aggregated result. If not parallelizable, explain why and stop.
 ''',
-    'sp_roles': '''\
-Worker: You are a helpful software engineer assistant
-TodoMaker: You are a helpful software engineer planner
-Thinker: You are a helpful software engineer thinker
-TrivialSubAgent: You are a helpful software engineer assistant sub-agent
-Supervisor: You are a helpful software engineer assistant supervisor
-Reader: You are a helpful software engineer assistant reader
-SwarmLeader: You are a helpful software engineer assistant swarm orchestrator
-''',
-    'sp_compact_export_item': 'Pre-compaction context exported to: {path}\n',
     'sp_agent_md': 'AGENTS.md:\n```\n{content}\n```\n',
     'sp_read_agents_md': 'read AGENTS.md before work\n',
     'sp_skills': 'Skills:\n{skills}\n',
+}
+
+# Optional worker clauses, substituted into ``sp_worker_optional`` per role.
+_WORKER_OPTIONAL_CLAUSES: dict[str, str] = {
+    'YOLO': 'Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.',
+    'RETRIEVE': 'Use `retrieve` whenever unsure about past conversation history.',
+    'SUBAGENT': (
+        'Sub-Agent: deliver a self-contained final result — the agent that started you '
+        'sees only your result, not your transcript, tool output, or reasoning.\n'
+        'If any option, output the question and stop.'
+    ),
+    'TRIVIAL': 'If you need clarification from the parent agent, call the `send_message` tool with your question, then stop.',
 }
 
 
@@ -107,20 +97,9 @@ def _load_items(name: str, **substitutions: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def _load_roles() -> dict[str, str]:
-    roles: dict[str, str] = {}
-    for line in _load('sp_roles').splitlines():
-        if not line.strip():
-            continue
-        key, _, doc = line.partition(': ')
-        roles[key.strip()] = doc.strip()
-    return roles
-
-
 # Concise system prompt to reduce LLM overthinking and hallucination
 _SYSTEM_PROMP = _load('sp_template').rstrip('\n')
 _TOOL_CONVENTIONS = _load('sp_tool_conventions').strip() + '\n'
-_ROLES = _load_roles()
 
 
 class SystemPromptType(Enum):
@@ -189,44 +168,44 @@ def get_system_prompt(
             use_agent_md = True
             use_skills = True
             role_doc = role
-            items.extend(_load_items('sp_worker_items', shell_tool=_shell_tool_name()))
-            if not is_sub_agent:
-                if yolo:
-                    items.extend(_load_items('sp_worker_yolo_item'))
-
-                items.extend(_load_items('sp_worker_retrieve_item'))
+            items.extend(_load_items('sp_worker_core', shell_tool=_shell_tool_name()))
+            subs = {'YOLO': '', 'RETRIEVE': '', 'SUBAGENT': '', 'TRIVIAL': ''}
+            if is_sub_agent:
+                subs['SUBAGENT'] = _WORKER_OPTIONAL_CLAUSES['SUBAGENT']
             else:
-                items.extend(_load_items('sp_worker_subagent_item'))
+                if yolo:
+                    subs['YOLO'] = _WORKER_OPTIONAL_CLAUSES['YOLO']
+                subs['RETRIEVE'] = _WORKER_OPTIONAL_CLAUSES['RETRIEVE']
+            items.extend(_load_items('sp_worker_optional', **subs))
         if extra_system_prompt and extra_system_prompt.role_callback:
             extra_system_prompt.role_callback(agent_role, items)
 
         match agent_role:
             case SystemPromptType.Worker:
-                worker_logic(_ROLES['Worker'])
+                worker_logic("You are a helpful software engineer assistant")
             case SystemPromptType.TodoMaker:
                 use_agent_md = True
                 use_skills = True
-                role_doc = _ROLES['TodoMaker']
+                role_doc = "You are a helpful software engineer planner"
                 items.extend(_load_items('sp_todomaker_items'))
             case SystemPromptType.Thinker:
-                worker_logic(_ROLES['Thinker'])
+                worker_logic("You are a helpful software engineer thinker")
                 items.extend(_load_items('sp_thinker_items'))
             case SystemPromptType.TrivialSubAgent:
-                worker_logic(_ROLES['TrivialSubAgent'], True)
-                items.extend(_load_items('sp_trivial_subagent_items'))
+                worker_logic("You are a helpful software engineer assistant sub-agent", True)
+                items.append(_WORKER_OPTIONAL_CLAUSES['TRIVIAL'])
             case SystemPromptType.Reader:
-                role_doc = _ROLES['Reader']
+                role_doc = "You are a helpful software engineer assistant reader"
                 items.extend(_load_items('sp_reader_items'))
             case SystemPromptType.Supervisor:
                 use_agent_md = True
                 use_skills = True
-                role_doc = _ROLES['Supervisor']
-                # Supervisor: outline → decompose → dispatch → track → accept/inquire/correct → verify.
+                role_doc = "You are a helpful software engineer assistant supervisor"
                 items.extend(_load_items('sp_supervisor_items'))
             case SystemPromptType.SwarmLeader:
                 use_agent_md = True
                 use_skills = True
-                role_doc = _ROLES['SwarmLeader']
+                role_doc = "You are a helpful software engineer assistant swarm orchestrator"
                 items.extend(_load_items('sp_swarm_leader_items'))
 
         def _build_agent_md_doc() -> str:
@@ -239,7 +218,7 @@ def get_system_prompt(
             return ''
 
         if compact_export_path:
-            items.extend(_load_items('sp_compact_export_item', path=compact_export_path))
+            items.append(f"Pre-compaction context exported to: {compact_export_path}")
 
         if use_skills and args.KIMI_SKILLS:
             skill_doc = _load('sp_skills').replace('{skills}', args.KIMI_SKILLS)

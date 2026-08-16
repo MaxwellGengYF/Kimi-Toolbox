@@ -277,3 +277,40 @@ class TestCleanText:
         text = "a\nb\tc"
         assert clean_text(text, keep_newlines=False) == "abc"
 
+
+class TestCodePlaceholders:
+    """UUID-based placeholders survive normalization and restore verbatim."""
+
+    def test_extract_restore_roundtrip(self):
+        from kimix.utils.prompt_str import _extract_code, _restore_code
+
+        text = "```python\n  x = 1\n```\n`inline` and plain"
+        masked, pairs = _extract_code(text)
+        assert "```" not in masked
+        assert "`inline`" not in masked
+        assert len(pairs) == 2
+        # Tokens are unique, digit-only, and null-delimited (case-stable).
+        tokens = [t for t, _ in pairs]
+        assert len(set(tokens)) == len(tokens)
+        assert all(t.startswith("\x00") and t.endswith("\x00") for t in tokens)
+        assert all(t[1:-1].isdigit() for t in tokens)
+        assert _restore_code(masked, pairs) == text
+
+    def test_placeholders_survive_case_title(self):
+        from kimix.utils.prompt_str import _extract_code, _restore_code
+
+        text = "`hello` world"
+        masked, pairs = _extract_code(text)
+        titled = masked.title()
+        assert _restore_code(titled, pairs) == "`hello` World"
+
+    def test_placeholders_do_not_collide_with_counter_scheme(self):
+        from kimix.utils.prompt_str import _extract_code, _restore_code
+
+        # Multiple blocks produce distinct tokens even with the same content.
+        text = "`same`\n`same`"
+        masked, pairs = _extract_code(text)
+        tokens = [t for t, _ in pairs]
+        assert len(set(tokens)) == 2
+        assert _restore_code(masked, pairs) == text
+

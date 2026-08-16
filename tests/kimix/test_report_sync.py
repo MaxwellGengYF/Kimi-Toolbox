@@ -305,7 +305,7 @@ def test_legacy_tool_names_resolve_via_redirects() -> None:
 
     valid = set(REPORT_TOOLS) | {
         "bash", "Run", "python", "todo_push", "todo_pop",
-        "retrieve", "fetch_url", "context_usage", "compact",
+        "retrieve", "fetch_url", "compact",
     }
     legacy_map = {
         "ReadFile": "read", "WriteFile": "write", "EditFile": "edit",

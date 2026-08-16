@@ -55,7 +55,6 @@ def test_build_reflection_prompt_includes_architecture_map():
         "grep",
         "fetch_url",
         "web_search",
-        "context_usage",
         "compact",
     ):
         assert tool in prompt

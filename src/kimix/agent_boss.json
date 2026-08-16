@@ -21,7 +21,6 @@
       "kimi_cli.tools.todo:todo_pop",
       "kimi_cli.tools.todo:todo_update",
       "kimi_cli.tools.memory:retrieve",
-      "kimix.tools.context:context_usage",
       "kimix.tools.context:compact"
     ]
   }

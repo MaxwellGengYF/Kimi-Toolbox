@@ -108,10 +108,10 @@ def test_shared_fragments_identical() -> None:
 
     # task_id: Bash == Powershell (payload 'cmd'); Python uses 'code' + tail.
     assert desc(BashParams, "task_id") == desc(PowershellParams, "task_id")
-    assert "'cmd' is sent" in desc(BashParams, "task_id")
-    assert "'code' is sent" in desc(PyParams, "task_id")
-    assert "executed as a new script" in desc(PyParams, "task_id")
-    assert "'command' is sent" in desc(RunParams, "task_id")
+    assert "'cmd' to stdin" in desc(BashParams, "task_id")
+    assert "'code' to stdin" in desc(PyParams, "task_id")
+    assert "running a new script" in desc(PyParams, "task_id")
+    assert "'command' to stdin" in desc(RunParams, "task_id")
 
     # deduplicate_output was removed from every running tool (always-on dedup).
     for model in (BashParams, PowershellParams, PyParams, RunParams):
@@ -125,10 +125,14 @@ def test_shared_fragments_identical() -> None:
     assert "cwd" not in PyParams.model_json_schema()["properties"]
     assert "cwd" in RunParams.model_json_schema()["properties"]
 
-    # mode: execute/send/interactive aliases documented for the shell tools.
+    # mode: execute/send/interactive modes documented; deprecated aliases are
+    # normalized silently and not exposed to the LLM.
     for model in (BashParams, PowershellParams, PyParams):
-        assert "(alias: 'run')" in desc(model, "mode")
-        assert "(alias: 'background')" in desc(model, "mode")
+        assert "'execute'" in desc(model, "mode")
+        assert "'send'" in desc(model, "mode")
+        assert "'interactive'" in desc(model, "mode")
+        assert "(alias: 'run')" not in desc(model, "mode")
+        assert "(alias: 'background')" not in desc(model, "mode")
     assert "(alias: 'run')" not in desc(RunParams, "mode")
 
 

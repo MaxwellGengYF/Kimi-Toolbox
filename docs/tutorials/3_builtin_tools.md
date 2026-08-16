@@ -47,7 +47,7 @@
 | **代码执行** | `Run`, `Python`, `Bash`, `pwsh` | 执行可执行文件、bash / powershell 命令或 Python 代码 |
 | **进程管理** | `job_output` | 读取、列出、导出或终止后台任务 |
 | **搜索与信息** | `fetch_url`, `web_search` | 获取网页内容、执行网络搜索 |
-| **状态、记忆与上下文** | `todo_write`, `todo_update`, `retrieve`, `context_usage`, `compact` | 追踪任务进度、回溯历史、监控与压缩上下文 |
+| **状态、记忆与上下文** | `todo_write`, `todo_update`, `retrieve`, `compact` | 追踪任务进度、回溯历史、监控与压缩上下文 |
 | **子代理与并行** | `subagent`, `list_agents`, `interrupt_agent`, `workflow` | 创建/列出/关闭子代理，并行分发同质任务 |
 
 ---
@@ -170,10 +170,6 @@
 - **参数**：`query`（自然语言查询）、`id`（指定轮次引用，如 `prune_0`）、`k`（返回条数，1–10）。
 - **要点**：上下文窗口是易失的；压缩/剪枝后的旧消息可通过本工具回溯，不确定历史时用它找回之前的决策、路径或结论。
 - **示例场景**：压缩后回溯之前的决策、文件路径、结论；按 `prune_0` 引用取回被剪枝的完整内容。
-
-#### `context_usage`
-- **功能**：报告当前对话上下文的占用情况（已用 / 总上限 token 数、剩余可用空间），用于判断是否应当调用 `compact`。
-- **示例场景**：长任务执行中定期检查上下文水位，接近上限时及时压缩。
 
 #### `compact`
 - **功能**：压缩/总结当前对话上下文以释放空间。支持 `instruction`（压缩保留指引）和 `mode`（`retentive` / `balanced` / `aggressive` / `technical` / `auto`，默认 `auto` 按当前占用自动选择）。

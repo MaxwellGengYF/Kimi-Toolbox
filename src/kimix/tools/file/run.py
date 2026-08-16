@@ -125,7 +125,6 @@ class RunParams(BaseModel):
         )
     )
     mode: Literal["execute", "send"] = mode_field(
-        aliases=False,
         execute_desc="Run `command` as a direct process (default).",
         send_desc="Send `command` as stdin text to an existing session identified by `task_id`.",
     )

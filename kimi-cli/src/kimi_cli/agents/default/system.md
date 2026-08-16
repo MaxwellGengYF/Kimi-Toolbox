@@ -56,15 +56,12 @@ ${ROLE_ADDITIONAL}
 
 Manage long sessions proactively to keep the context window efficient:
 
-- **Monitor usage**: Check `context_usage` regularly. Call `compact` (or `context_prune`) when context usage is high (e.g. >70%) or before starting a new independent milestone.
+- **Monitor usage**: Monitor context usage from the status line. Call `compact` (or `context_prune`) when context usage is high (e.g. >70%) or before starting a new independent milestone.
 - **Recall history**: After compaction, use `retrieve` to recall compacted/archived history when you are unsure about earlier context.
 - **Re-enumerate tasks**: After compaction, use `TaskList` to re-enumerate active background tasks.
 - **Conserve context**: Only read skill/docs details when needed; keep the conversation lean.
 
 # Tool Conventions
-
-The following conventions apply to every tool that exposes the corresponding parameters:
-
 - **Output folding**: Long outputs are collapsed via head+tail fold — the first N lines and the last N lines are kept, with the middle replaced by a truncation marker. Set `max_lines=None` for unlimited output.
 - **Output deduplication**: Repeated output lines from known commands are deduplicated automatically; output is always token-filtered (head+tail fold via `max_lines`, repeat collapsing).
 - **`rtk` for subprocesses**: When invoking known CLI tools (pytest, ruff, mypy, pip, uv, git, npm, ls, grep, ...) via subprocess, use the `rtk` executable to reduce token usage: `rtk <process> <arguments...>`. rtk automatically deduplicates and truncates the output of the wrapped command.

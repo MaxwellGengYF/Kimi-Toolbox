@@ -1682,7 +1682,7 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "LookupWeb": "web_search",
     "FindOnline": "web_search",
     # ── Context management hallucinations ──
-    # context_usage, compact, context_prune, retrieve are canonical
+    # compact, context_prune, retrieve are canonical
     "PruneContext": "context_prune",
     "CompactContext": "compact",
     "Summarize": "compact",
@@ -1694,8 +1694,6 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "RetrieveContext": "retrieve",
     "SearchHistory": "retrieve",
     "HistorySearch": "retrieve",
-    "GetContext": "context_usage",
-    "ContextInfo": "context_usage",
     # ── Agent/Subagent hallucinations ──
     "SubAgent": "subagent",
     "Subagent": "subagent",

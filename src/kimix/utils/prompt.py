@@ -41,6 +41,89 @@ def _read_subagent_state(path: Path) -> dict[str, Any]:
     return data
 
 
+def _get_session_todos(session: Session) -> list[Any]:
+    """Return the unified todo list for a session (root or subagent).
+
+    Mirrors the persistence split in ``kimi_cli.tools.todo.TodoList``: root
+    sessions store todos in ``SessionState`` and subagent sessions store them
+    in a separate ``state.json`` under the subagent instance directory.
+    Subagent items are returned as ``SimpleNamespace`` objects so callers can
+    use ``getattr`` uniformly; root items keep their native shape (dicts or
+    objects), which the existing render/export paths already handle.
+    """
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return []
+    runtime = getattr(cli, "_runtime", None)
+    role = getattr(runtime, "role", "root") if runtime is not None else "root"
+    if role == "root":
+        state = getattr(getattr(cli, "session", None), "state", None)
+        if state is None:
+            return []
+        return getattr(state, "todos", None) or []
+    subagent_store = getattr(runtime, "subagent_store", None)
+    subagent_id = getattr(runtime, "subagent_id", None)
+    if subagent_store is None or subagent_id is None:
+        return []
+    state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+    data = _read_subagent_state(state_file)
+    raw_todos = data.get("todos", []) if isinstance(data.get("todos"), list) else []
+    todos: list[Any] = []
+    for t in raw_todos:
+        children_raw = t.get("children", None) or []
+        children_ns = [
+            SimpleNamespace(title=st.get("title", ""), status=st.get("status", ""), notes=st.get("notes", None))
+            for st in children_raw
+        ]
+        todos.append(
+            SimpleNamespace(
+                title=t.get("title", ""),
+                status=t.get("status", ""),
+                notes=t.get("notes", None),
+                children=children_ns,
+            )
+        )
+    return todos
+
+
+def _set_session_todos(session: Session, todos: list[Any]) -> None:
+    """Persist a todo list for the session (root or subagent).
+
+    Mirrors the persistence split in ``kimi_cli.tools.todo.TodoList``: root
+    sessions store todos in ``SessionState`` and subagent sessions store them
+    in a separate ``state.json`` under the subagent instance directory. The
+    in-memory ``SessionState.todos`` is updated for every role; persistence is
+    skipped when the runtime is unavailable (same as the original logic).
+    """
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return
+    state = getattr(getattr(cli, "session", None), "state", None)
+    if state is not None and hasattr(state, "todos"):
+        state.todos = todos
+    runtime = getattr(cli, "_runtime", None)
+    if runtime is None:
+        return
+    if getattr(runtime, "role", "root") == "root":
+        # Root session: persist through SessionState.save_state.
+        cli_session = getattr(cli, "session", None)
+        if cli_session is not None and hasattr(cli_session, "save_state"):
+            cli_session.save_state()
+    else:
+        # Subagent session: persist to the subagent state file.
+        subagent_store = getattr(runtime, "subagent_store", None)
+        subagent_id = getattr(runtime, "subagent_id", None)
+        if subagent_store is None or subagent_id is None:
+            return
+        from kimi_cli.utils.io import atomic_json_write
+
+        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        data = _read_subagent_state(state_file)
+        data["todos"] = todos
+        atomic_json_write(data, state_file)
+
+
 async def steer_session(session: Session, content: str | list[ContentPart]) -> bool:
     """Push a follow-up message into a running agent session.
 
@@ -91,38 +174,7 @@ async def _maybe_build_todo_reminder(session: Session, *, strong: bool = False) 
     if todo_tool is None:
         return None
     runtime = getattr(cli, "_runtime", None)
-    # Mirror the persistence split in ``kimi_cli.tools.todo.TodoList``:
-    # root sessions store todos in ``SessionState`` and subagent sessions store
-    # them in a separate ``state.json`` under the subagent instance directory.
-    role = getattr(runtime, "role", "root") if runtime is not None else "root"
-    if role == "root":
-        state = getattr(getattr(cli, "session", None), "state", None)
-        if state is None:
-            return None
-        todos = getattr(state, "todos", None) or []
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is None or subagent_id is None:
-            return None
-        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-        data = _read_subagent_state(state_file)
-        raw_todos = data.get("todos", []) if isinstance(data.get("todos"), list) else []
-        todos = []
-        for t in raw_todos:
-            children_raw = t.get("children", None) or []
-            children_ns = [
-                SimpleNamespace(title=st.get("title", ""), status=st.get("status", ""), notes=st.get("notes", None))
-                for st in children_raw
-            ]
-            todos.append(
-                SimpleNamespace(
-                    title=t.get("title", ""),
-                    status=t.get("status", ""),
-                    notes=t.get("notes", None),
-                    children=children_ns,
-                )
-            )
+    todos = _get_session_todos(session)
 
     if not todos:
         return None
@@ -186,12 +238,7 @@ def _get_cli_closing_reminder_rounds(session: Session) -> int:
 
 
 async def _clear_session_todos(session: Session) -> None:
-    """Clear both in-memory and persisted todo content for the session.
-
-    Mirrors the persistence split in ``kimi_cli.tools.todo.TodoList``:
-    root sessions store todos in ``SessionState`` and subagent sessions store
-    them in a separate ``state.json`` under the subagent instance directory.
-    """
+    """Clear both in-memory and persisted todo content for the session."""
     cli = getattr(session, "_cli", None)
     if cli is None:
         return
@@ -200,39 +247,11 @@ async def _clear_session_todos(session: Session) -> None:
     if state is None:
         return
 
-    if hasattr(state, "todos"):
-        state.todos = []
-
-    runtime = getattr(cli, "_runtime", None)
-    if runtime is None:
-        return
-
-    if getattr(runtime, "role", "root") == "root":
-        # Root session: persist the cleared list through SessionState.
-        cli_session = cli.session
-        if hasattr(cli_session, "save_state"):
-            cli_session.save_state()
-    else:
-        # Subagent session: persist the cleared list to the subagent state file.
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is not None and subagent_id is not None:
-            from kimi_cli.utils.io import atomic_json_write
-
-            state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            data = _read_subagent_state(state_file)
-            data["todos"] = []
-            atomic_json_write(data, state_file)
+    _set_session_todos(session, [])
 
 
 async def _export_session_todos(session: Session, path: Path) -> None:
-    """Export the session's current todo list to ``path`` as JSON.
-
-    Mirrors the persistence split in ``kimi_cli.tools.todo.TodoList``:
-    root sessions read todos from ``SessionState`` and subagent sessions read
-    them from a separate ``state.json`` under the subagent instance directory.
-    """
+    """Export the session's current todo list to ``path`` as JSON."""
     cli = getattr(session, "_cli", None)
     if cli is None:
         return
@@ -248,22 +267,7 @@ async def _export_session_todos(session: Session, path: Path) -> None:
     if todo_tool is None:
         return
 
-    runtime = getattr(cli, "_runtime", None)
-    role = getattr(runtime, "role", "root") if runtime is not None else "root"
-
-    if role == "root":
-        state = getattr(getattr(cli, "session", None), "state", None)
-        if state is None:
-            return
-        todos = getattr(state, "todos", None) or []
-    else:
-        subagent_store = getattr(runtime, "subagent_store", None)
-        subagent_id = getattr(runtime, "subagent_id", None)
-        if subagent_store is None or subagent_id is None:
-            return
-        state_file = subagent_store.instance_dir(subagent_id) / "state.json"
-        data = _read_subagent_state(state_file)
-        todos = data.get("todos", []) if isinstance(data.get("todos"), list) else []
+    todos = _get_session_todos(session)
 
     export_data: list[dict[str, Any]] = []
     for todo in todos:
@@ -420,19 +424,20 @@ async def _run_prompt_attempts(
     Returns normally on success (after printing usage info).
     """
     max_retries = 3
+
+    async def _run_prompt_iter():
+        async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
+            if cancel_callable is not None and cancel_callable():
+                session.cancel()
+                break
+            await print_agent_json(message, session, output_function, format_output=format_output)
+
     for attempt in range(max_retries):
         if session._cancel_event is not None and session._cancel_event.is_set():
             return  # caller treats normal return as success; cancel handled by caller
         try:
             start_time = time.time()
             base._stream._last_char_was_newline = True
-
-            async def _run_prompt_iter():
-                async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
-                    if cancel_callable is not None and cancel_callable():
-                        session.cancel()
-                        break
-                    await print_agent_json(message, session, output_function, format_output=format_output)
 
             if deadline is not None:
                 remaining = deadline - time.monotonic()
