@@ -16,6 +16,7 @@ import kimix.base as base
 import kimix.utils as utils
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from kimi_agent_sdk import Session as SdkSession
+from kimix.tools.common import _create_script_file, _display_temp_path
 from kimix.tools.prompt_common import accepts_alias_text
 from kimix.ui.printing import MessageType
 from kimix.utils import _create_session_async, close_session_async
@@ -159,6 +160,48 @@ def _format_pending_messages(messages: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_prompt(prompt: str, base_dir: Path | None) -> str:
+    """Return the effective task text.
+
+    ``prompt`` is either inline text, or ``@path`` referencing a file whose
+    UTF-8 content becomes the prompt. Relative paths resolve against
+    *base_dir* (the parent session work dir), falling back to the process
+    CWD so retry hints pointing at the shared temp folder
+    (``.kimix_cache/tmp_<pid>/<n>.md``, which is CWD-relative) resolve even
+    when the session work dir differs from the process cwd.
+    Raises FileNotFoundError when the referenced file is missing.
+    """
+    if not prompt.startswith("@"):
+        return prompt
+    rel = prompt[1:]
+    base = base_dir if base_dir is not None else Path(".")
+    path = Path(rel)
+    if not path.is_absolute():
+        candidate = base / path
+        if not candidate.exists():
+            candidate = path  # fall back to CWD-relative resolution
+        path = candidate
+    if not path.exists():
+        raise FileNotFoundError(f"prompt file not found: {rel}")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _prompt_saved_message(prompt: str, ext: str = ".md") -> str:
+    """Save *prompt* to the shared temp folder; return a retry hint suffix.
+
+    Returns "" for empty prompts. Format matches the bash tool so the LLM
+    can retry with subagent(prompt="@<path>") without re-emitting the text.
+    """
+    if not prompt:
+        return ""
+    saved = _create_script_file(prompt, ext=ext)
+    shown = _display_temp_path(saved)
+    return (
+        f"[prompt saved to {shown}] "
+        f"Retry with subagent(prompt=@{shown}) to reuse this prompt."
+    )
+
+
 class SubAgentParams(BaseModel):
     model_config = {"populate_by_name": True}
 
@@ -171,8 +214,9 @@ class SubAgentParams(BaseModel):
     prompt: str = Field(
         validation_alias=AliasChoices("prompt", "task"),
         description=(
-            "The complete, self-contained task for the subagent. It does not "
-            "share this conversation's context, so include everything it needs. "
+            "The complete, self-contained task for the subagent. "
+            "Inline prompt text, or @path to read the task from a file "
+            "(saved prompt paths are returned on failure). "
             + accepts_alias_text("prompt", "task", word=False)
         ),
     )
@@ -519,26 +563,24 @@ class Agent(CallableTool2):
                 store = _get_store(self._session)
                 entry = store.get(session_id)
 
-                # Handle very long prompts by offloading to a temp file
-                prompt_bytes = params.prompt.encode('utf-8')
+                # Resolve @file prompt references to the full task text first.
+                work_dir = _session_work_dir(self._session)
+                base_dir = Path(str(work_dir)) if work_dir is not None else Path(".")
+                task_text = _resolve_prompt(params.prompt, base_dir)
+
+                # Handle very long prompts by offloading to a shared temp file.
+                prompt_bytes = task_text.encode('utf-8')
                 if len(prompt_bytes) > 100 * 1024:
-                    cache_dir = Path('.kimix_cache')
-                    cache_dir.mkdir(parents=True, exist_ok=True)
-                    temp_path = cache_dir / f'prompt_{uuid.uuid4().hex}.md'
-                    temp_path.write_bytes(prompt_bytes)
-                    task_prompt = f'Please read the task from `{temp_path}` and execute it.'
+                    temp_path = _create_script_file(task_text, ext=".md")
+                    task_prompt = f"Please read the task from `{_display_temp_path(temp_path)}` and execute it."
                 else:
-                    task_prompt = params.prompt
+                    task_prompt = task_text
 
                 # Build prompt with context files / context_data if provided
                 prompt = task_prompt
                 if params.context_files or params.context_data:
                     context_parts = ["<context>"]
                     if params.context_files:
-                        work_dir = _session_work_dir(self._session)
-                        base_dir = (
-                            Path(str(work_dir)) if work_dir is not None else Path(".")
-                        )
                         for fp in params.context_files:
                             try:
                                 file_path = base_dir / fp
@@ -605,14 +647,20 @@ class Agent(CallableTool2):
                     # streamed live (formatted and colored) by the CLI printer
                     # while the tool call is generated (see kimix.base), so
                     # printing it here would show it twice.
+                    saved_suffix = _prompt_saved_message(prompt)  # full effective prompt actually sent
+                    message = f"{err_msg} {saved_suffix}".strip() if saved_suffix else err_msg
                     result = ToolError(
                         output=output_prefix + output_text,
-                        message=err_msg,
+                        message=message,
                         brief="sub-agent task failed",
                     )
-                    result.extras = self._build_extras(
+                    extras = self._build_extras(
                         params, session_id, collector.turns, "closed"
                     )
+                    if saved_suffix:
+                        prompt_file = saved_suffix.split("[prompt saved to ", 1)[1].split("]", 1)[0]
+                        extras["prompt_file"] = prompt_file
+                    result.extras = extras
                     await close_session_async(session)
                     store.close(session_id)
                     _unregister_entry(session_id)

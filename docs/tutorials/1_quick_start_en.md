@@ -99,7 +99,7 @@ Run `/init` in the interactive terminal to create the default config interactive
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | Provider: `kimi`, `openai_legacy`, `openai_responses`, `anthropic`, `google_genai`, `gemini`, `vertexai` |
+| `type` | Yes | Provider type — see [Supported Providers](#supported-providers) below |
 | `model` | Yes | Model name for API requests |
 | `url` | Yes | API base URL |
 | `max_context_size` | Yes | Max context length (`128k`, `200k`, `256k`, `512k`, `1M`) |
@@ -116,6 +116,40 @@ Run `/init` in the interactive terminal to create the default config interactive
 | `notifications` | No | Notification settings |
 | `mcp` | No | MCP (Model Context Protocol) config |
 | `env` | No | Extra env vars (dict) |
+
+### Supported Providers
+
+`type` accepts the provider identifiers grouped below (mirroring `kimi_cli/llm.py`):
+
+**Core providers**
+
+| `type` | Notes |
+|--------|-------|
+| `kimi` | Moonshot / Kimi |
+| `xai` | xAI (Grok) |
+| `openai_legacy` | OpenAI Chat Completions |
+| `openai_responses` | OpenAI Responses API |
+| `anthropic` | Anthropic Claude |
+| `google_genai` | Google GenAI (legacy alias for `gemini`) |
+| `gemini` | Google Gemini (Google AI Studio) |
+| `vertexai` | Google Vertex AI (legacy alias for `vertex`) |
+| `vertex` | Google Vertex AI |
+
+**OpenAI-compatible providers (Hermes-ported)**
+
+`ai-gateway`, `alibaba`, `alibaba-coding-plan`, `arcee`, `azure-foundry`, `copilot`, `custom`, `deepinfra`, `deepseek`, `fireworks`, `gmi`, `huggingface`, `kilocode`, `kimi-coding`, `nous`, `novita`, `nvidia`, `ollama-cloud`, `opencode-zen`, `openrouter`, `qwen-oauth`, `stepfun`, `upstage`, `xiaomi`, `zai`
+
+**Special-mode providers**
+
+| `type` | Notes |
+|--------|-------|
+| `actual` | Actual Computer (Codex-style API) |
+| `bedrock` | AWS Bedrock (Converse API) |
+| `minimax` | MiniMax (Anthropic-compatible) |
+| `openai-codex` | OpenAI Codex (ChatGPT backend) |
+| `copilot-acp` | GitHub Copilot ACP subprocess (external agent; no in-process LLM) |
+
+> When `api_key` / `url` are omitted, the provider registry falls back to each provider's standard environment variables (e.g. `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `XIAOMI_API_KEY`, `GLM_API_KEY`/`ZAI_API_KEY`, `MINIMAX_API_KEY`). See `kimi-cli/packages/kosong/src/kosong/providers/__init__.py` for the full per-provider list.
 
 Load custom config:
 ```bash

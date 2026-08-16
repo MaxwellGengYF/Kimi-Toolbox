@@ -14,7 +14,7 @@ from kosong.tooling import Tool
 
 if TYPE_CHECKING:
 
-    def type_check(mock: "MockChatProvider"):
+    def type_check(mock: MockChatProvider):
         _: ChatProvider = mock
 
 
@@ -45,7 +45,7 @@ class MockChatProvider(ChatProvider):
         system_prompt: str,
         tools: Sequence[Tool],
         history: Sequence[Message],
-    ) -> "MockStreamedMessage":
+    ) -> MockStreamedMessage:
         """Always return the predefined message parts."""
         return MockStreamedMessage(self._message_parts)
 

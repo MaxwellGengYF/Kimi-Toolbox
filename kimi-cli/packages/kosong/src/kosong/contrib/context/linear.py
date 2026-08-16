@@ -1,7 +1,9 @@
 import asyncio
-import orjson
+import json
 from pathlib import Path
 from typing import IO, Protocol, runtime_checkable
+
+import orjson
 
 from kosong.message import Message
 from kosong.utils.jsonx import loads_relaxed
@@ -12,7 +14,7 @@ class LinearContext:
     A context that contains a linear history of messages.
     """
 
-    def __init__(self, storage: "LinearStorage"):
+    def __init__(self, storage: LinearStorage):
         self._storage = storage
 
     @property

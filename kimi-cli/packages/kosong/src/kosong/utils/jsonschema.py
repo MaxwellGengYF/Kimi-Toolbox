@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import copy
-import regex as re
 from typing import cast
+
+import regex as re
 
 from kosong.utils.typing import JsonType
 

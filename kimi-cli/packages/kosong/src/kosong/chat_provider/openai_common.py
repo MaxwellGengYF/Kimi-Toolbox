@@ -1,8 +1,6 @@
 import asyncio
 import contextlib
 import copy
-import orjson
-import regex as re
 import ssl
 import time
 import uuid
@@ -13,8 +11,9 @@ from typing import Any, TypeGuard, cast
 import certifi
 import httpx
 import openai
+import orjson
+import regex as re
 from openai import AsyncOpenAI, AsyncStream, OpenAIError
-from pydantic import ValidationError
 from openai.types import ReasoningEffort
 from openai.types.chat import (
     ChatCompletion,
@@ -23,13 +22,15 @@ from openai.types.chat import (
     ChatCompletionToolParam,
 )
 from openai.types.completion_usage import CompletionUsage
+from pydantic import ValidationError
+from typing_extensions import TypedDict
 
 from kosong.chat_provider import (
+    DEFAULT_MAX_RETRIES,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     ChatProviderError,
-    DEFAULT_MAX_RETRIES,
     StreamedMessagePart,
     ThinkingEffort,
     TokenUsage,
@@ -44,8 +45,6 @@ from kosong.message import (
     ToolCallPart,
 )
 from kosong.tooling import Tool
-
-from typing_extensions import TypedDict
 
 
 class CommonGenerationKwargs(TypedDict, total=False):
@@ -123,7 +122,7 @@ def _on_close_task_done(task: asyncio.Task[None]) -> None:
 async def _drain_awaitable(awaitable: Awaitable[object]) -> None:
     try:
         await asyncio.wait_for(awaitable, timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return
     except asyncio.CancelledError:
         # Outer task was cancelled (e.g. during event-loop shutdown).
@@ -354,7 +353,9 @@ def _is_object_mapping(data: object) -> TypeGuard[Mapping[str, object]]:
 # emit non-standard values such as ``unexpected_state``; normalize those to
 # ``None`` so the stream can continue instead of raising a pydantic validation
 # error.
-_VALID_FINISH_REASONS = frozenset({"stop", "length", "tool_calls", "content_filter", "function_call"})
+_VALID_FINISH_REASONS = frozenset(
+    {"stop", "length", "tool_calls", "content_filter", "function_call"}
+)
 
 
 def _normalize_unknown_finish_reason(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -439,8 +440,12 @@ async def _iter_tolerant_chunks(
                 loc = ".".join(str(part) for part in first_error.get("loc", ()))
                 msg = first_error.get("msg", "invalid response chunk")
                 if loc:
-                    raise ChatProviderError(f"Backend returned an invalid chat stream chunk at {loc}: {msg}")
-                raise ChatProviderError(f"Backend returned an invalid chat stream chunk: {msg}")
+                    raise ChatProviderError(
+                        f"Backend returned an invalid chat stream chunk at {loc}: {msg}"
+                    ) from exc
+                raise ChatProviderError(
+                    f"Backend returned an invalid chat stream chunk: {msg}"
+                ) from exc
     finally:
         await response.aclose()
 

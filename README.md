@@ -34,7 +34,7 @@ Kimi-CLI-X is a deep optimization of the original Kimi-CLI, focusing on **prompt
 6. **Explicit conversation management** — Clearer multi-task orchestration and state tracking.
 7. **Write-and-validate** — Auto format checks and warnings on strict config files to prevent model-hallucinated errors.
 8. **Multi-API support** — Import custom configs compatible with OpenAI, Anthropic, and more.
-9. **Verified backends** — Tested against kimi, anthropic, openai_legacy, openai_responses, google_genai, vertexai, etc. See `kimi-cli/tests/core/test_create_llm.py`.
+9. **Verified backends** — Tested against kimi, xai, anthropic, openai_legacy, openai_responses, google_genai/gemini, vertexai/vertex, plus 25+ Hermes-ported providers (deepseek, openrouter, xiaomi, zai, minimax, bedrock, ...). See `kimi-cli/tests/core/test_create_llm.py` and the [Supported Providers](docs/tutorials/1_quick_start_en.md#supported-providers) list.
 
 ### New Capabilities
 

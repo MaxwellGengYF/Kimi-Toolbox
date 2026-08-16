@@ -25,6 +25,39 @@ type ProviderType = Literal[
     "google_genai",  # for backward-compatibility, equals to `gemini`
     "gemini",
     "vertexai",
+    # Hermes-ported OpenAI-compatible providers
+    "ai-gateway",
+    "alibaba",
+    "alibaba-coding-plan",
+    "arcee",
+    "azure-foundry",
+    "copilot",
+    "custom",
+    "deepinfra",
+    "deepseek",
+    "fireworks",
+    "gmi",
+    "huggingface",
+    "kilocode",
+    "kimi-coding",
+    "nous",
+    "novita",
+    "nvidia",
+    "ollama-cloud",
+    "opencode-zen",
+    "openrouter",
+    "qwen-oauth",
+    "stepfun",
+    "upstage",
+    "xiaomi",
+    "zai",
+    # Hermes-ported special-mode providers
+    "actual",
+    "bedrock",
+    "minimax",
+    "openai-codex",
+    "vertex",
+    "copilot-acp",
     "_echo",
     "_scripted_echo",
     "_chaos",
@@ -124,6 +157,60 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
                 provider.base_url = base_url
             if not provider.api_key.get_secret_value() and (api_key := os.getenv("OPENAI_API_KEY")):
                 provider.api_key = SecretStr(api_key)
+        case (
+            "ai-gateway"
+            | "alibaba"
+            | "alibaba-coding-plan"
+            | "arcee"
+            | "azure-foundry"
+            | "copilot"
+            | "custom"
+            | "deepinfra"
+            | "deepseek"
+            | "fireworks"
+            | "gmi"
+            | "huggingface"
+            | "kilocode"
+            | "kimi-coding"
+            | "nous"
+            | "novita"
+            | "nvidia"
+            | "ollama-cloud"
+            | "opencode-zen"
+            | "openrouter"
+            | "qwen-oauth"
+            | "stepfun"
+            | "upstage"
+            | "xiaomi"
+            | "zai"
+            | "actual"
+            | "minimax"
+            | "openai-codex"
+        ):
+            # Hermes-ported providers: default api_key / base_url from the
+            # provider profile (env vars first, then the profile defaults).
+            from kosong.providers import get_provider_profile
+
+            profile = get_provider_profile(provider.type)
+            if profile is not None:
+                if not provider.api_key.get_secret_value():
+                    for var in profile.env_vars:
+                        if var.endswith("_BASE_URL"):
+                            continue
+                        if value := os.getenv(var):
+                            provider.api_key = SecretStr(value)
+                            applied[var] = "******"
+                            break
+                if not provider.base_url:
+                    for var in profile.env_vars:
+                        if var.endswith("_BASE_URL") and (value := os.getenv(var)):
+                            provider.base_url = value
+                            applied[var] = value
+                            break
+                    else:
+                        if profile.base_url:
+                            provider.base_url = profile.base_url
+                            applied["base_url"] = profile.base_url
         case _:
             pass
 
@@ -339,6 +426,184 @@ def create_llm(
                 gen_kwargs["user"] = session_id
             if gen_kwargs:
                 chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
+        case (
+            "ai-gateway"
+            | "alibaba"
+            | "alibaba-coding-plan"
+            | "arcee"
+            | "azure-foundry"
+            | "copilot"
+            | "custom"
+            | "deepinfra"
+            | "deepseek"
+            | "fireworks"
+            | "gmi"
+            | "huggingface"
+            | "kilocode"
+            | "kimi-coding"
+            | "nous"
+            | "novita"
+            | "nvidia"
+            | "ollama-cloud"
+            | "opencode-zen"
+            | "openrouter"
+            | "qwen-oauth"
+            | "stepfun"
+            | "upstage"
+            | "xiaomi"
+            | "zai"
+        ):
+            # Hermes-ported OpenAI-compatible providers. Each follows the
+            # openai_legacy pattern: the Chat Completions API has no server-side
+            # session, so `user` is the standard identity field. OpenRouter is
+            # the exception: its `session_id` maps to extra_body.session_id for
+            # sticky routing (see the OpenRouter provider).
+            from kosong.chat_provider.compat import (
+                AIGateway,
+                Alibaba,
+                Arcee,
+                AzureFoundry,
+                Copilot,
+                Custom,
+                DeepInfra,
+                DeepSeek,
+                Fireworks,
+                GMI,
+                HuggingFace,
+                Kilocode,
+                KimiCoding,
+                NVIDIA,
+                Nous,
+                Novita,
+                OllamaCloud,
+                OpenCodeZen,
+                OpenRouter,
+                QwenOAuth,
+                StepFun,
+                Upstage,
+                Xiaomi,
+                ZAI,
+            )
+            compat_providers = {
+                "ai-gateway": AIGateway,
+                "alibaba": Alibaba,
+                "alibaba-coding-plan": Alibaba,
+                "arcee": Arcee,
+                "azure-foundry": AzureFoundry,
+                "copilot": Copilot,
+                "custom": Custom,
+                "deepinfra": DeepInfra,
+                "deepseek": DeepSeek,
+                "fireworks": Fireworks,
+                "gmi": GMI,
+                "huggingface": HuggingFace,
+                "kilocode": Kilocode,
+                "kimi-coding": KimiCoding,
+                "nous": Nous,
+                "novita": Novita,
+                "nvidia": NVIDIA,
+                "ollama-cloud": OllamaCloud,
+                "opencode-zen": OpenCodeZen,
+                "openrouter": OpenRouter,
+                "qwen-oauth": QwenOAuth,
+                "stepfun": StepFun,
+                "upstage": Upstage,
+                "xiaomi": Xiaomi,
+                "zai": ZAI,
+            }
+            chat_provider = compat_providers[provider.type](
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                default_headers=_kimi_default_headers(provider, oauth),
+                supported_efforts=model.supported_efforts,
+            ).with_parallel_tool_calls(enabled=True)
+
+            gen_kwargs: OpenAILegacy.GenerationKwargs = {}
+            if max_tokens is None:
+                max_tokens = os.getenv("KIMI_MODEL_MAX_TOKENS")
+            if max_tokens is None:
+                max_tokens = model.max_context_size
+            if max_tokens is not None:
+                max_tokens_int = int(max_tokens)
+                gen_kwargs["max_tokens"] = max_tokens_int
+                gen_kwargs["max_completion_tokens"] = max_tokens_int
+            if temperature is not None:
+                gen_kwargs["temperature"] = float(temperature)
+            if top_p is None:
+                top_p = os.getenv("KIMI_MODEL_TOP_P")
+            if top_p is not None:
+                gen_kwargs["top_p"] = float(top_p)
+            if session_id:
+                if provider.type == "openrouter":
+                    # OpenRouter sticky routing key lives in extra_body.session_id.
+                    gen_kwargs["session_id"] = session_id
+                else:
+                    gen_kwargs["user"] = session_id
+            if gen_kwargs:
+                chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
+        case "minimax":
+            from kosong.contrib.chat_provider.minimax import MiniMaxAnthropic
+
+            chat_provider = MiniMaxAnthropic(
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                default_max_tokens=50000,
+                metadata={"user_id": session_id} if session_id else None,
+                default_headers=_kimi_default_headers(provider, oauth),
+                supported_efforts=model.supported_efforts,
+            ).with_parallel_tool_calls(enabled=True)
+        case "bedrock":
+            from kosong.contrib.chat_provider.bedrock import Bedrock
+
+            chat_provider = Bedrock(
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                default_max_tokens=50000,
+                default_headers=_kimi_default_headers(provider, oauth),
+                supported_efforts=model.supported_efforts,
+            ).with_parallel_tool_calls(enabled=True)
+        case "openai-codex" | "actual":
+            if provider.type == "openai-codex":
+                from kosong.chat_provider.codex import OpenAICodex as CodexProvider
+            else:
+                from kosong.chat_provider.codex import Actual as CodexProvider
+
+            chat_provider = CodexProvider(
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                default_headers=_kimi_default_headers(provider, oauth),
+                supported_efforts=model.supported_efforts,
+            ).with_parallel_tool_calls(enabled=True)
+
+            gen_kwargs: OpenAIResponses.GenerationKwargs = {}
+            if max_tokens is not None:
+                gen_kwargs["max_output_tokens"] = int(max_tokens)
+            if session_id:
+                gen_kwargs["user"] = session_id
+            if gen_kwargs:
+                chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
+        case "vertex":
+            from kosong.contrib.chat_provider.google_genai import GoogleGenAI
+
+            os.environ.update(provider.env or {})
+            chat_provider = GoogleGenAI(
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=resolved_api_key,
+                vertexai=True,
+                default_headers=_kimi_default_headers(provider, oauth),
+            )
+        case "copilot-acp":
+            # External ACP subprocess — no kosong ChatProvider implementation.
+            logger.warning(
+                "Provider type 'copilot-acp' is not supported by kosong; "
+                "no LLM will be created."
+            )
+            return None
         case "anthropic":
             from kosong.contrib.chat_provider.anthropic import Anthropic
 

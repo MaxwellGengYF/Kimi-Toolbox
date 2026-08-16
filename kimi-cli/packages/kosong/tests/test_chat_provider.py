@@ -1,6 +1,6 @@
 import asyncio
 
-from kosong.chat_provider import APIStatusError, ChatProviderError, StreamedMessagePart
+from kosong.chat_provider import ChatProviderError, StreamedMessagePart
 from kosong.chat_provider.chaos import ChaosChatProvider, ChaosConfig
 from kosong.chat_provider.kimi import Kimi
 from kosong.chat_provider.mock import MockChatProvider

@@ -19,13 +19,12 @@ import sys
 from pathlib import Path
 from typing import ClassVar, override
 
+import pydantic
 import pytest
 from pydantic import BaseModel, Field
 
-import pydantic
-
 from kosong.tooling import (
-    CallableTool2,
+    _COMMON_FIELD_ALIASES,
     FIELD_ALIASES_ACTIVE,
     FIELD_ALIASES_FILE,
     FIELD_ALIASES_GENERAL,
@@ -37,16 +36,14 @@ from kosong.tooling import (
     FIELD_ALIASES_TASK,
     FIELD_ALIASES_TODO,
     FIELD_ALIASES_WEB,
-    ToolError,
+    CallableTool2,
     ToolOk,
     ToolReturnValue,
-    _COMMON_FIELD_ALIASES,
     _clean_error_loc,
     _format_pydantic_validation_error,
     _repair_dict_for_model,
 )
 from kosong.tooling.error import ToolValidateError
-
 
 # ---------------------------------------------------------------------------
 # 1. Category dict sanity checks
@@ -380,7 +377,7 @@ def _discover_params_classes(base_dir: Path, package_prefix: str) -> list[type[B
 
     # Use iter_modules (does not import) so that broken packages do not
     # abort the whole walk.
-    for finder, module_name, is_pkg in pkgutil.iter_modules(
+    for _finder, module_name, is_pkg in pkgutil.iter_modules(
         path=[str(base_dir)], prefix=package_prefix + "."
     ):
         if is_pkg:
@@ -428,6 +425,7 @@ def test_real_params_can_be_repaired_with_common_aliases(params_cls: type[BaseMo
     """Every discovered Params class should survive a no-op repair round."""
     # Build a dict with every field set to a plausible default.
     import typing
+
     from pydantic_core import PydanticUndefined
 
     data: dict[str, object] = {}
@@ -445,7 +443,9 @@ def test_real_params_can_be_repaired_with_common_aliases(params_cls: type[BaseMo
             data[fname] = ""
         elif annotation is int or (isinstance(annotation, type) and issubclass(annotation, int)):
             data[fname] = 1  # safer than 0 for fields with ``ge=1``
-        elif annotation is float or (isinstance(annotation, type) and issubclass(annotation, float)):
+        elif annotation is float or (
+            isinstance(annotation, type) and issubclass(annotation, float)
+        ):
             data[fname] = 0.0
         elif annotation is bool or (isinstance(annotation, type) and issubclass(annotation, bool)):
             data[fname] = False
@@ -484,7 +484,7 @@ def test_real_params_can_be_repaired_with_common_aliases(params_cls: type[BaseMo
     # It should also be validatable with the guessed defaults.
     try:
         instance = params_cls.model_validate(repaired)
-    except Exception as exc:
+    except Exception:
         # If our guessed defaults are insufficient (e.g. custom validators),
         # fall back to model_construct which skips validation but proves
         # the repaired dict contains all required keys.
@@ -500,7 +500,8 @@ def test_real_params_can_be_repaired_with_common_aliases(params_cls: type[BaseMo
 def test_grep_tool_uses_custom_aliases() -> None:
     """Grep sets ``field_aliases`` to GENERAL | FILE | WEB."""
     pytest.importorskip("kimi_cli")
-    from kimi_cli.tools.file.grep_local import Grep, Params as GrepParams
+    from kimi_cli.tools.file.grep_local import Grep
+    from kimi_cli.tools.file.grep_local import Params as GrepParams
 
     class FakeRuntime:
         class builtin_args:
@@ -508,7 +509,7 @@ def test_grep_tool_uses_custom_aliases() -> None:
         additional_dirs = []
         skills_dirs = []
 
-    runtime = FakeRuntime()  # type: ignore[arg-type]
+    FakeRuntime()  # type: ignore[arg-type]
 
     # We can't fully instantiate Grep because it expects a real Runtime,
     # but we can instantiate the Params class directly and test repair.
@@ -754,7 +755,7 @@ def test_format_validation_error_enum() -> None:
     """enum error shows allowed options."""
     from enum import Enum
 
-    class Color(str, Enum):
+    class Color(str, Enum):  # noqa: UP042
         RED = "red"
         GREEN = "green"
 
@@ -1301,8 +1302,7 @@ def test_callable_tool2_invalid_json_string_nested_model_still_errors() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-from kosong.tooling import _fuzzy_match_literal_value, _COMMON_VALUE_ALIASES
-
+from kosong.tooling import _fuzzy_match_literal_value  # noqa: E402
 
 # --- _fuzzy_match_literal_value unit tests ---
 
@@ -1344,7 +1344,7 @@ def test_fuzzy_match_literal_fuzzy_fallback() -> None:
     # 'cmopleted' is ~0.69 with 'completed' but we need to check against
     # the options directly - 'cmopleted' has ratio ~0.5-0.6 with each.
     # Use a value that's clearly close to one option.
-    result = _fuzzy_match_literal_value("cmopleted", options)
+    _fuzzy_match_literal_value("cmopleted", options)
     # Since we check against options (pending, in_progress, done), not aliases,
     # and the cutoff is 0.60, we need a value close enough.
     # 'in_progres' (missing 's') should be close to 'in_progress'

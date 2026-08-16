@@ -22,7 +22,7 @@ async def generate(
     *,
     on_message_part: Callback[[StreamedMessagePart], None] | None = None,
     on_tool_call: Callback[[ToolCall], None] | None = None,
-) -> "GenerateResult":
+) -> GenerateResult:
     """
     Generate one message based on the given context.
     Parts of the message will be streamed to the specified callbacks if provided.

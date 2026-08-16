@@ -1,18 +1,18 @@
+import typing
 from abc import ABC, abstractmethod
 from asyncio import Future
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from rapidfuzz import fuzz
 from functools import lru_cache
-import orjson
-import typing
 from typing import Any, ClassVar, Protocol, Self, cast, override, runtime_checkable
 
 import jsonschema
+import orjson
 import pydantic
 from pydantic import BaseModel, GetCoreSchemaHandler, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
+from rapidfuzz import fuzz
 
 from kosong.message import ContentPart, ToolCall
 from kosong.utils.jsonschema import deref_json_schema
@@ -60,7 +60,7 @@ class DisplayBlock(BaseModel, ABC):
     display blocks for their applications.
     """
 
-    __display_block_registry: ClassVar[dict[str, type["DisplayBlock"]]] = {}
+    __display_block_registry: ClassVar[dict[str, type[DisplayBlock]]] = {}
 
     type: str
     ...  # to be added by subclasses
@@ -168,7 +168,9 @@ class ToolOk(ToolReturnValue):
             is_error=False,
             output=([output] if isinstance(output, ContentPart) else output),
             message=message,
-            display=[display_block] if display_block is not None else ([BriefDisplayBlock(text=brief)] if brief else []),
+            display=[display_block]
+            if display_block is not None
+            else ([BriefDisplayBlock(text=brief)] if brief else []),
         )
 
 
@@ -1078,7 +1080,9 @@ def _clamp_numeric_value(value: Any, finfo: Any) -> Any | None:
     return _apply_constraints(value, constraints)
 
 
-def _extract_constraints(finfo: Any) -> tuple[float | int | None, float | int | None, bool, bool] | None:
+def _extract_constraints(
+    finfo: Any,
+) -> tuple[float | int | None, float | int | None, bool, bool] | None:
     """Extract numeric constraints from a FieldInfo's metadata.
 
     Returns (min_val, max_val, min_inclusive, max_inclusive) if any constraints exist,
@@ -1111,7 +1115,10 @@ def _extract_constraints(finfo: Any) -> tuple[float | int | None, float | int | 
     return (min_val, max_val, min_inclusive, max_inclusive) if has_any else None
 
 
-def _apply_constraints(value: Any, constraints: tuple[float | int | None, float | int | None, bool, bool]) -> Any | None:
+def _apply_constraints(
+    value: Any,
+    constraints: tuple[float | int | None, float | int | None, bool, bool],
+) -> Any | None:
     """Clamp a numeric value to pre-extracted constraints.
 
     Returns the clamped value if it was out of bounds, otherwise None.
@@ -1413,14 +1420,16 @@ def fuzzy_match_tool_name(
     lowers, norms = _prepared_candidates(valid_tuple)
 
     # 1. Case-insensitive exact match (preserves prior behavior).
-    ci_exact = [c for c, cl in zip(valid_tuple, lowers) if cl == lower]
+    ci_exact = [c for c, cl in zip(valid_tuple, lowers, strict=False) if cl == lower]
     if ci_exact:
         return ci_exact
 
     # 2. Separator-insensitive normalized exact match
     #    (snake/kebab/SCREAMING/mixed -> CamelCase).
     norm = normalize_tool_name(tool_name)
-    norm_exact = [(c, cl) for c, cl, cn in zip(valid_tuple, lowers, norms) if cn == norm]
+    norm_exact = [
+        (c, cl) for c, cl, cn in zip(valid_tuple, lowers, norms, strict=False) if cn == norm
+    ]
     if norm_exact:
         # Deterministic order for the rare multi-candidate (collision) case.
         norm_exact.sort(key=lambda t: (-_sequence_ratio(lower, t[1]), t[0]))
@@ -1430,7 +1439,7 @@ def fuzzy_match_tool_name(
     #    is memoized, so repeated (query, candidate) pairs collapse to a cache
     #    hit across calls.
     scored: list[tuple[float, float, str]] = []
-    for c, cl, cn in zip(valid_tuple, lowers, norms):
+    for c, cl, cn in zip(valid_tuple, lowers, norms, strict=False):
         ratio = _sequence_ratio(norm, cn)
         if ratio >= cutoff:
             scored.append((ratio, _sequence_ratio(lower, cl), c))
@@ -1626,7 +1635,8 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "MatchFiles": "glob",
     "Wildcard": "glob",
     # ── Grep hallucinations ──
-    "Search": "grep",
+    # NOTE: ``Search`` is intentionally redirected in the SearchWeb section
+    # below (web_search wins over this earlier grep entry).
     "Find": "grep",
     "RipGrep": "grep",
     "Rg": "grep",
@@ -1641,10 +1651,11 @@ TOOL_NAME_REDIRECTS: dict[str, str] = {
     "MatchPattern": "grep",
     "Lookup": "grep",
     # ── TodoList hallucinations ──
+    # NOTE: ``Tasks`` is intentionally redirected in the Background task
+    # section below (TaskList wins over this earlier todo_write entry).
     "TaskList": "todo_write",
     "Todo": "todo_write",
     "Todos": "todo_write",
-    "Tasks": "todo_write",
     "TaskManager": "todo_write",
     "TaskPlan": "todo_write",
     "Plan": "todo_write",
@@ -1853,7 +1864,11 @@ def _score_argument_fit(
     Returns ``(0.0, None)`` when the model is not a BaseModel subclass
     (e.g. legacy CallableTool without typed params).
     """
-    if params_model is None or not isinstance(params_model, type) or not issubclass(params_model, BaseModel):
+    if (
+        params_model is None
+        or not isinstance(params_model, type)
+        or not issubclass(params_model, BaseModel)
+    ):
         return 0.0, None
     if not isinstance(arguments, dict) or not arguments:
         return 0.0, None
@@ -1881,7 +1896,6 @@ def _score_argument_fit(
     coercion_count = 0
 
     # Track which original argument keys were successfully mapped.
-    original_keys = set(arguments.keys())
     mapped_keys: set[str] = set()
 
     for fname, finfo in model_fields.items():
@@ -2307,7 +2321,9 @@ def _format_pydantic_validation_error(
             case "enum":
                 expected = ctx.get("expected", "")
                 if expected:
-                    lines.append(f"  Hint: this value is not one of the allowed options: {expected}")
+                    lines.append(
+                    f"  Hint: this value is not one of the allowed options: {expected}"
+                )
                 else:
                     lines.append("  Hint: this value is not one of the allowed options.")
             case "value_error":

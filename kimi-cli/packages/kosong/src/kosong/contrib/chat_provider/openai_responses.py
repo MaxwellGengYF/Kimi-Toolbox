@@ -470,9 +470,12 @@ def _strip_reasoning_encrypted_content(inputs: ResponseInputParam) -> bool:
     """
     stripped = False
     for item in inputs:
-        if isinstance(item, dict) and item.get("type") == "reasoning":
-            if item.pop("encrypted_content", None) is not None:
-                stripped = True
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "reasoning"
+            and item.pop("encrypted_content", None) is not None
+        ):
+            stripped = True
     return stripped
 
 

@@ -5,6 +5,7 @@ and the ``ToolNameResolution`` result type in ``kosong.tooling``.
 """
 
 import pytest
+from pydantic import BaseModel
 
 from kosong.tooling import (
     CallableTool2,
@@ -16,8 +17,6 @@ from kosong.tooling import (
     normalize_tool_name,
     resolve_tool_name,
 )
-from kosong.tooling.error import ToolError
-from pydantic import BaseModel
 
 # Default valid names used across the tests.
 VALID = [
@@ -424,7 +423,6 @@ class _ToolA(CallableTool2[_DummyParams]):
 
 
 def test_tool_candidate_creation():
-    from kosong.tooling import ToolCandidate
 
     c = ToolCandidate(name="test_tool", score=0.85)
     assert c.name == "test_tool"
@@ -453,7 +451,7 @@ def test_resolve_by_arguments_no_candidates_with_params():
 
 
 def test_resolve_by_arguments_with_real_tool():
-    from kosong.tooling import resolve_tool_by_arguments, _TOOL_NAME_REDIRECTS_NORMALIZED
+    from kosong.tooling import resolve_tool_by_arguments
 
     tool = _ToolA()
     tool_dict = {"ToolA": tool}
@@ -472,7 +470,7 @@ def test_resolve_by_arguments_below_threshold():
     tool = _ToolA()
     tool_dict = {"ToolA": tool}
     # Provide only an optional field with no required match — likely below threshold
-    result = resolve_tool_by_arguments(
+    resolve_tool_by_arguments(
         "SomeTool", {"mode": "append"}, ["ToolA"], tool_dict,
         min_argument_score=0.5,  # Raise threshold
     )

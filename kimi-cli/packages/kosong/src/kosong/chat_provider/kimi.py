@@ -1,11 +1,11 @@
 import copy
 import mimetypes
 import os
-import regex as re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, Unpack, cast
 
 import httpx
+import regex as re
 from openai import AsyncOpenAI, AsyncStream, BaseModel, OpenAIError, omit
 from openai._types import RequestFiles, RequestOptions
 from openai.types.chat import (

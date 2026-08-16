@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import orjson
 from typing import Any, cast
+
+import orjson
 
 from kosong.chat_provider import (
     APIConnectionError,

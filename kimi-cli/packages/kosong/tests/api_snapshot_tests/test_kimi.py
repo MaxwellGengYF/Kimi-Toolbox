@@ -6,7 +6,6 @@ import respx
 from common import COMMON_CASES, Case, make_chat_completion_response, run_test_cases
 from httpx import Response
 from inline_snapshot import snapshot
-
 from openai.types.chat import ChatCompletionChunk
 
 from kosong.chat_provider.kimi import (  # pyright: ignore[reportPrivateUsage]
@@ -987,7 +986,9 @@ async def test_kimi_stream_buffers_argument_deltas_until_name_arrives():
     function name for a stream index. Those early chunks must be buffered
     and prepended to the header — never dropped."""
     chunks = [
-        _make_stream_chunk([{"index": 0, "id": "call_delayed", "function": {"name": "", "arguments": ""}}]),
+        _make_stream_chunk(
+            [{"index": 0, "id": "call_delayed", "function": {"name": "", "arguments": ""}}]
+        ),
         _make_stream_chunk([{"index": 0, "function": {"arguments": '{"a'}}]),
         _make_stream_chunk([{"index": 0, "function": {"name": "foo"}}]),
         _make_stream_chunk([{"index": 0, "function": {"arguments": '":1}'}}]),

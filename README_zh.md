@@ -33,7 +33,7 @@ Kimi-CLI-X 在原版 Kimi-CLI 基础上，围绕**提示词效率**、**工具�
 6. **显式对话管理** — 提供更清晰的多任务编排与对话状态追踪，降低复杂交互的隐晦性。
 7. **写入即校验** — 对格式严格的配置文件自动触发格式检查和警告，防止因模型幻觉产生错误。
 8. **兼容多种 API** — 支持直接导入自定义配置，兼容 OpenAI、Anthropic 等多种 API 格式。
-9. **快速兼容多家API Key** — 已覆盖测试验证的全部后端（kimi、anthropic、openai_legacy、openai_responses、google_genai、vertexai 等），详见 `kimi-cli\tests\core\test_create_llm.py`。
+9. **快速兼容多家API Key** — 已覆盖测试验证的全部后端（kimi、xai、anthropic、openai_legacy、openai_responses、google_genai/gemini、vertexai/vertex 等），并支持 25+ 个 Hermes 移植的 OpenAI 兼容 Provider（deepseek、openrouter、xiaomi、zai、minimax、bedrock 等），详见 `kimi-cli\tests\core\test_create_llm.py` 与 [支持的 Provider](docs/tutorials/1_quick_start.md#支持的-provider) 列表。
 
 ### 新增
 

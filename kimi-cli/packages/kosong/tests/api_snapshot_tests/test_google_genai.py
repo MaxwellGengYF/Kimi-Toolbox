@@ -18,7 +18,10 @@ from kosong.message import Message, TextPart, ToolCall
 # Force google-genai to use httpx so respx can mock requests.
 _api_client.has_aiohttp = False
 
-from kosong.contrib.chat_provider.google_genai import GoogleGenAI, GoogleGenAIStreamedMessage  # noqa: E402
+from kosong.contrib.chat_provider.google_genai import (  # noqa: E402
+    GoogleGenAI,
+    GoogleGenAIStreamedMessage,
+)
 
 
 def make_response() -> dict[str, Any]:
@@ -358,7 +361,13 @@ async def test_google_genai_vertexai_message_conversion():
                         },
                         {
                             "parts": [
-                                {"functionResponse": {"parts": [], "name": "add", "response": {"output": "5"}}}
+                                {
+                                    "functionResponse": {
+                                        "parts": [],
+                                        "name": "add",
+                                        "response": {"output": "5"},
+                                    }
+                                }
                             ],
                             "role": "user",
                         },
@@ -430,7 +439,10 @@ async def test_google_genai_vertexai_message_conversion():
                         {
                             "parts": [
                                 {"text": "I'll add those."},
-                                {"functionCall": {"args": {"a": 2, "b": 3}, "name": "add"}, "thoughtSignature": "dGhvdWdodF9zaWduYXR1cmVfZGF0YQ=="},
+                                {
+                                    "functionCall": {"args": {"a": 2, "b": 3}, "name": "add"},
+                                    "thoughtSignature": "dGhvdWdodF9zaWduYXR1cmVfZGF0YQ==",
+                                },
                             ],
                             "role": "model",
                         },

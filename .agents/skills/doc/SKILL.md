@@ -37,8 +37,12 @@ Reference for the Kimix documentation layout and how to modify or extend it safe
         ├── google_genai.json
         ├── gemini.json
         ├── vertexai.json
-        └── deepseek.json
+        ├── deepseek.json
+        ├── deepseek_responses.json
+        └── multiple_models.json
 ```
+
+> The `*.json` files are copy-paste samples for a subset of providers. The authoritative list of supported `type` values lives in `kimi-cli/src/kimi_cli/llm.py` (`ProviderType`) and is summarized in `docs/tutorials/1_quick_start.md` / `1_quick_start_en.md` (Supported Providers).
 
 | Area | What lives there |
 |------|------------------|

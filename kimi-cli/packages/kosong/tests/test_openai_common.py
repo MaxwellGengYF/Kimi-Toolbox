@@ -1,11 +1,11 @@
 import asyncio
-import orjson
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import openai
+import orjson
 import pytest
 from openai.types.chat import ChatCompletionChunk
 
@@ -677,7 +677,8 @@ async def test_tolerant_stream_concise_validation_error() -> None:
     """
     body = (
         f"data: {_sse_chunk(content='Hello')}\n\n"
-        'data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": "not-a-dict"}]}\n\n'
+        'data: {"object": "chat.completion.chunk", "choices": '
+        '[{"index": 0, "delta": "not-a-dict"}]}\n\n'
     )
     message, _ = _build_message([body.encode()])
     with pytest.raises(ChatProviderError, match="Backend returned an invalid chat stream chunk"):

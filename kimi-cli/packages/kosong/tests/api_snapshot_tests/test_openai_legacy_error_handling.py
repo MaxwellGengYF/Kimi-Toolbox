@@ -7,8 +7,6 @@ model can recover.
 
 from __future__ import annotations
 
-import pytest
-
 from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
 from kosong.message import Message, TextPart, ToolCall
 

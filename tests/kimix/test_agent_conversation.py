@@ -26,6 +26,7 @@ from kimix.tools.agent import (
     _queue_pending_message,
     _register_agent_session,
     _register_entry,
+    _resolve_prompt,
     _unregister_agent_session,
     _unregister_entry,
 )
@@ -362,6 +363,152 @@ async def test_agent_error_path(
     assert "boom" in result.message
     assert result.extras["status"] == "closed"
     mock_close.assert_awaited_once()
+
+
+async def test_agent_error_saves_prompt_file(
+    mock_session: MagicMock, mock_sub_session: MagicMock, tmp_path: Path
+) -> None:
+    """A failed sub-agent run saves the effective prompt for retry."""
+    mock_session.custom_config = {"chat_provider": None}
+    saved_files: list[Path] = []
+
+    def fake_create_script_file(content: str, ext: str = ".md") -> str:
+        target = tmp_path / f"saved_{len(saved_files)}{ext}"
+        target.write_text(content, encoding="utf-8")
+        saved_files.append(target)
+        return str(target)
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ) as mock_prompt:
+            mock_prompt.side_effect = RuntimeError("boom")
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ) as mock_close:
+                with patch(
+                    "kimix.tools.agent._create_script_file",
+                    side_effect=fake_create_script_file,
+                ):
+                    agent = Agent(mock_session)
+                    result = await agent(
+                        SubAgentParams(prompt="do X", close_session=False)
+                    )
+
+    assert result.is_error
+    assert "boom" in result.message
+    assert "[prompt saved to" in result.message
+    assert "prompt=@" in result.message
+    expected_display = str(tmp_path / "saved_0.md").replace("\\", "/")
+    assert result.extras["prompt_file"] == expected_display
+    # The saved file contains the exact prompt string sent to prompt_async.
+    sent_prompt = mock_prompt.await_args.kwargs["prompt_str"]
+    assert saved_files[0].read_text(encoding="utf-8") == sent_prompt
+    mock_close.assert_awaited_once()
+
+
+async def test_agent_prompt_from_file(
+    mock_session: MagicMock, mock_sub_session: MagicMock, tmp_path: Path
+) -> None:
+    """prompt=@path reads the task text from the referenced file."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("do the file task", encoding="utf-8")
+    mock_session.custom_config = {"chat_provider": None}
+    mock_session.work_dir = KaosPath(str(tmp_path))
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ) as mock_prompt:
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                agent = Agent(mock_session)
+                result = await agent(
+                    SubAgentParams(prompt="@task.md", close_session=False)
+                )
+
+    assert not result.is_error
+    prompt_str = mock_prompt.await_args.kwargs["prompt_str"]
+    assert "do the file task" in prompt_str
+    assert "@task.md" not in prompt_str
+
+
+async def test_agent_prompt_file_missing(
+    mock_session: MagicMock, mock_sub_session: MagicMock
+) -> None:
+    """prompt=@missing.md fails with a clear prompt-file error."""
+    mock_session.custom_config = {"chat_provider": None}
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        agent = Agent(mock_session)
+        result = await agent(SubAgentParams(prompt="@missing.md"))
+
+    assert result.is_error
+    assert "prompt file not found" in result.message
+
+
+async def test_resolve_prompt_cwd_fallback(monkeypatch, tmp_path: Path) -> None:
+    """Relative @path falls back to the process CWD when not under base_dir.
+
+    The error-path retry hint points at the shared temp folder
+    (``.kimix_cache/tmp_<pid>/<n>.md``), which is CWD-relative; the fallback
+    keeps that retry working when the session work dir differs from CWD.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "task.md").write_text("from cwd", encoding="utf-8")
+
+    assert _resolve_prompt("@task.md", work_dir) == "from cwd"
+    with pytest.raises(FileNotFoundError):
+        _resolve_prompt("@nope.md", work_dir)
+
+
+async def test_agent_long_prompt_offloads_to_temp_file(
+    mock_session: MagicMock, mock_sub_session: MagicMock, tmp_path: Path
+) -> None:
+    """Very long prompts are offloaded to a temp file the sub-agent reads."""
+    mock_session.custom_config = {"chat_provider": None}
+    prompt_text = "x" * (100 * 1024 + 1)
+    calls: list[tuple[str, str]] = []
+    fake_path = tmp_path / "saved.md"
+
+    def fake_create_script_file(content: str, ext: str = ".md") -> str:
+        calls.append((content, ext))
+        return str(fake_path)
+
+    with patch(
+        "kimix.tools.agent._create_session_async", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_sub_session
+        with patch(
+            "kimix.tools.agent.utils.prompt_async", new_callable=AsyncMock
+        ) as mock_prompt:
+            with patch(
+                "kimix.tools.agent.close_session_async", new_callable=AsyncMock
+            ):
+                with patch(
+                    "kimix.tools.agent._create_script_file",
+                    side_effect=fake_create_script_file,
+                ):
+                    agent = Agent(mock_session)
+                    result = await agent(SubAgentParams(prompt=prompt_text))
+
+    assert not result.is_error
+    assert calls == [(prompt_text, ".md")]
+    prompt_str = mock_prompt.await_args.kwargs["prompt_str"]
+    assert "Please read the task from `" in prompt_str
+    assert "` and execute it." in prompt_str
 
 
 async def test_agent_lru_eviction(

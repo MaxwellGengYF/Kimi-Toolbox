@@ -6,7 +6,7 @@ from kosong.tooling.error import ToolNotFoundError
 
 if TYPE_CHECKING:
 
-    def type_check(empty: "EmptyToolset"):
+    def type_check(empty: EmptyToolset):
         _: Toolset = empty
 
 

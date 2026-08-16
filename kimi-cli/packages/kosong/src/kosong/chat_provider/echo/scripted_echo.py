@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
-import orjson
 from collections import deque
 from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import TYPE_CHECKING, Self
+
+import orjson
 
 from kosong.chat_provider import (
     ChatProvider,

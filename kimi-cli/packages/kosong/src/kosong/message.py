@@ -25,7 +25,7 @@ class ContentPart(BaseModel, ABC, MergeableMixin):
     `ChatProvider`s that supports new content part types.
     """
 
-    __content_part_registry: ClassVar[dict[str, type["ContentPart"]]] = {}
+    __content_part_registry: ClassVar[dict[str, type[ContentPart]]] = {}
 
     type: str
     ...  # to be added by subclasses

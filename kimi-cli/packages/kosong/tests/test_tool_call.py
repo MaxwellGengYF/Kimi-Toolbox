@@ -21,7 +21,6 @@ from kosong.tooling import (
 )
 from kosong.tooling.error import (
     ToolNotFoundError,
-    ToolParseError,
     ToolRuntimeError,
     ToolValidateError,
 )
@@ -99,7 +98,7 @@ def test_simple_toolset():
         }
 
         @override
-        async def __call__(self, a: int, b: int) -> ToolReturnValue:
+        async def __call__(self, a: int, b: int) -> "ToolReturnValue":  # noqa: UP037
             return ToolOk(output=str(a + b))
 
     class CompareTool(CallableTool):
@@ -115,7 +114,7 @@ def test_simple_toolset():
         }
 
         @override
-        async def __call__(self, a: int, b: int) -> ToolReturnValue:
+        async def __call__(self, a: int, b: int) -> "ToolReturnValue":  # noqa: UP037
             return ToolOk(output="greater" if a > b else "less" if a < b else "equal")
 
     class RaiseTool(CallableTool):
@@ -338,7 +337,7 @@ def test_simple_toolset_with_string_annotation_callable_tool():
         }
 
         @override
-        async def __call__(self) -> "ToolReturnValue":  # type: ignore[reportIncompatibleMethodOverride]
+        async def __call__(self) -> "ToolReturnValue":  # noqa: UP037  # type: ignore[reportIncompatibleMethodOverride]
             return ToolOk(output="test")
 
     # Verify the annotation is actually a string
@@ -362,7 +361,7 @@ def test_simple_toolset_with_invalid_string_annotation_rejected():
         }
 
         @override
-        async def __call__(self) -> "InvalidType":  # noqa: F821  # type: ignore[reportUnknownParameterType]
+        async def __call__(self) -> "InvalidType":  # noqa: F821, UP037  # type: ignore[reportUnknownParameterType]
             return ToolOk(output="test")  # type: ignore[return-value]
 
     tool_instance = TestTool()
@@ -414,7 +413,7 @@ def test_simple_toolset_with_string_annotation_callable_tool2():
         params: type[TestParams] = TestParams
 
         @override
-        async def __call__(self, params: TestParams) -> "ToolReturnValue":
+        async def __call__(self, params: TestParams) -> "ToolReturnValue":  # noqa: UP037
             return ToolOk(output=f"value: {params.value}")
 
     # Verify the annotation is actually a string
@@ -442,7 +441,7 @@ async def _test_handle_async_with_string_annotation():
         }
 
         @override
-        async def __call__(self, a: int, b: int) -> "ToolReturnValue":
+        async def __call__(self, a: int, b: int) -> "ToolReturnValue":  # noqa: UP037
             return ToolOk(output=str(a + b))
 
     # Verify the annotation is actually a string

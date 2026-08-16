@@ -1,10 +1,10 @@
-import orjson
 import os
 import random
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import orjson
 from pydantic import BaseModel
 
 from kosong.chat_provider import (
@@ -22,7 +22,7 @@ from kosong.tooling import Tool
 if TYPE_CHECKING:
 
     def type_check(
-        chaos: "ChaosChatProvider",
+        chaos: ChaosChatProvider,
     ):
         _: ChatProvider = chaos
         _: RetryableChatProvider = chaos
@@ -38,7 +38,7 @@ class ChaosConfig(BaseModel):
     corrupt_tool_call_probability: float = 0.1
 
     @classmethod
-    def from_env(cls) -> "ChaosConfig":
+    def from_env(cls) -> ChaosConfig:
         """Create config from environment variables."""
         seed_str = os.getenv("CHAOS_SEED")
         return cls(
@@ -115,7 +115,7 @@ class ChaosChatProvider:
         system_prompt: str,
         tools: Sequence[Tool],
         history: Sequence[Message],
-    ) -> "ChaosStreamedMessage":
+    ) -> ChaosStreamedMessage:
         base_stream = await self._provider.generate(system_prompt, tools, history)
         return ChaosStreamedMessage(base_stream, self._chaos_config)
 
@@ -189,13 +189,13 @@ class ChaosChatProvider:
             self._monkey_patch_client()
         return recovered
 
-    def with_thinking(self, effort: ThinkingEffort) -> "ChaosChatProvider":
+    def with_thinking(self, effort: ThinkingEffort) -> ChaosChatProvider:
         return ChaosChatProvider(self._provider.with_thinking(effort), self._chaos_config)
 
     @classmethod
     def for_kimi(
         cls, chaos_config: ChaosConfig | None = None, **kwargs: Any
-    ) -> "ChaosChatProvider":
+    ) -> ChaosChatProvider:
         """Helper to wrap a Kimi provider without changing caller sites."""
         from kosong.chat_provider.kimi import Kimi
 

@@ -9,12 +9,12 @@ except ModuleNotFoundError as exc:
 import asyncio
 import contextlib
 import json
-import orjson
-import regex as re
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict, Unpack, cast
 
 import httpx
+import orjson
+import regex as re
 from anthropic import (
     AnthropicError,
     AsyncAnthropic,
@@ -70,12 +70,12 @@ from anthropic.types import (
 from anthropic.types.tool_result_block_param import Content as ToolResultContent
 
 from kosong.chat_provider import (
+    DEFAULT_MAX_RETRIES,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     ChatProvider,
     ChatProviderError,
-    DEFAULT_MAX_RETRIES,
     StreamedMessagePart,
     ThinkingEffort,
     TokenUsage,
@@ -102,7 +102,7 @@ from kosong.tooling import Tool
 
 if TYPE_CHECKING:
 
-    def type_check(anthropic: "Anthropic"):
+    def type_check(anthropic: Anthropic):
         _: ChatProvider = anthropic
 
 
@@ -126,7 +126,7 @@ async def _drain_awaitable(awaitable: Awaitable[object]) -> None:
     """Drain an awaitable, ignoring harmless shutdown errors."""
     try:
         await asyncio.wait_for(awaitable, timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return
     except asyncio.CancelledError:
         # Outer task was cancelled (e.g. during event-loop shutdown).
@@ -195,9 +195,9 @@ def _supports_adaptive_thinking(model: str) -> bool:
 
 
 def _clamp_effort(
-    effort: "ThinkingEffort",
-    supported_efforts: frozenset["ThinkingEffort"],
-) -> "ThinkingEffort":
+    effort: ThinkingEffort,
+    supported_efforts: frozenset[ThinkingEffort],
+) -> ThinkingEffort:
     """Clamp an effort level to the highest one supported by the model.
 
     ``off`` is passed through unchanged as it represents "disable thinking"
@@ -269,7 +269,7 @@ class Anthropic:
     # ``xhigh`` is documented as Opus 4.7-only, so it is excluded from the
     # default set. Callers that know their model supports ``xhigh`` can opt in
     # by passing ``supported_efforts`` explicitly.
-    _DEFAULT_SUPPORTED_EFFORTS: frozenset["ThinkingEffort"] = frozenset(
+    _DEFAULT_SUPPORTED_EFFORTS: frozenset[ThinkingEffort] = frozenset(
         {"low", "medium", "high", "max"}
     )
 
@@ -329,7 +329,7 @@ class Anthropic:
         return self._model
 
     @property
-    def thinking_effort(self) -> "ThinkingEffort | None":
+    def thinking_effort(self) -> ThinkingEffort | None:
         thinking_config = self._generation_kwargs.get("thinking")
         if thinking_config is None:
             return None
@@ -353,7 +353,7 @@ class Anthropic:
         system_prompt: str,
         tools: Sequence[Tool],
         history: Sequence[Message],
-    ) -> "AnthropicStreamedMessage":
+    ) -> AnthropicStreamedMessage:
         # https://docs.claude.com/en/api/messages#body-messages
         # Anthropic API does not support system roles, but just a system prompt.
         system = (
@@ -457,7 +457,7 @@ class Anthropic:
         except (AnthropicError, httpx.HTTPError) as e:
             raise _convert_error(e) from e
 
-    def with_thinking(self, effort: "ThinkingEffort") -> Self:
+    def with_thinking(self, effort: ThinkingEffort) -> Self:
         if effort == "off":
             new = self.with_generation_kwargs(thinking={"type": "disabled"})
             # Clear any stale output_config from a prior adaptive configuration.
@@ -500,7 +500,13 @@ class Anthropic:
         # effort parameter (e.g. Opus 4.5) get `output_config` emitted; other
         # pre-4.6 models (Sonnet 4, Sonnet 4.5, Haiku 4.5, Claude 3.x) omit it
         # to avoid 400 validation errors on models that don't accept it.
-        budgets: dict[str, int] = {"low": 1024, "medium": 4096, "high": 32_000, "xhigh": 64_000, "max": 128_000}
+        budgets: dict[str, int] = {
+            "low": 1024,
+            "medium": 4096,
+            "high": 32_000,
+            "xhigh": 64_000,
+            "max": 128_000,
+        }
         kwargs: dict[str, Any] = {
             "thinking": {"type": "enabled", "budget_tokens": budgets[effective]},
         }
@@ -745,22 +751,25 @@ class AnthropicStreamedMessage(BaseStreamedMessage):
                                 args = block.input
                             else:
                                 yield TextPart(
-                                    text=(
-                                        f"Error: Tool call '{block.name}' returned non-object input: {block.input}"
-                                    )
+                                text=(
+                                    f"Error: Tool call '{block.name}' returned non-object "
+                                    f"input: {block.input}"
+                                )
                                 )
                                 continue
                         except json.JSONDecodeError:
                             yield TextPart(
                                 text=(
-                                    f"Error: Tool call '{block.name}' returned invalid JSON input: {block.input}"
+                                    f"Error: Tool call '{block.name}' returned invalid JSON "
+                                    f"input: {block.input}"
                                 )
                             )
                             continue
                     else:
                         yield TextPart(
                             text=(
-                                f"Error: Tool call '{block.name}' returned unexpected input type {type(block.input).__name__}: {block.input}"
+                                f"Error: Tool call '{block.name}' returned unexpected input type "
+                                f"{type(block.input).__name__}: {block.input}"
                             )
                         )
                         continue

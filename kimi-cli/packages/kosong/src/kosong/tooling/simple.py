@@ -25,7 +25,7 @@ from kosong.utils.typing import JsonType
 if TYPE_CHECKING:
 
     def type_check(
-        simple: "SimpleToolset",
+        simple: SimpleToolset,
     ):
         _: Toolset = simple
 
@@ -80,7 +80,7 @@ class SimpleToolset:
         self._tool_dict[tool.name] = tool
         return self
 
-    def __add__(self, tool: ToolType) -> "SimpleToolset":
+    def __add__(self, tool: ToolType) -> SimpleToolset:
         """
         @public
         Return a new toolset with the given tool added.

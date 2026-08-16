@@ -82,7 +82,7 @@ from kosong.tooling import ToolError, ToolResult, ToolResultFuture, Toolset
 from kosong.utils.aio import Callback
 
 # Explicitly import submodules
-from . import chat_provider, contrib, message, tooling, utils
+from . import chat_provider, contrib, message, providers, tooling, utils
 
 logger.disable("kosong")
 
@@ -93,6 +93,7 @@ __all__ = [
     "message",
     "utils",
     "contrib",
+    "providers",
     # classes and functions
     "generate",
     "GenerateResult",
@@ -109,7 +110,7 @@ async def step(
     *,
     on_message_part: Callback[[StreamedMessagePart], None] | None = None,
     on_tool_result: Callable[[ToolResult], None] | None = None,
-) -> "StepResult":
+) -> StepResult:
     """
     Run one agent "step". In one step, the function generates LLM response based on the given
     context for exactly one time. All new message parts will be streamed to `on_message_part` in

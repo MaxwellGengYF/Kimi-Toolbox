@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import anthropic
 import httpx
 import pytest
 
@@ -27,11 +26,11 @@ from anthropic import (
 )
 
 from kosong.chat_provider import (
+    DEFAULT_MAX_RETRIES,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     ChatProviderError,
-    DEFAULT_MAX_RETRIES,
     convert_httpx_error,
 )
 from kosong.contrib.chat_provider.anthropic import (

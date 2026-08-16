@@ -213,7 +213,7 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `type` | 是 | Provider 类型，可选值：`kimi`、`openai_legacy`、`openai_responses`、`anthropic`、`google_genai`、`gemini`、`vertexai` |
+| `type` | 是 | Provider 类型，可选值见下文「[支持的 Provider](#支持的-provider)」（如 `kimi`、`openai_legacy`、`anthropic`） |
 | `model` | 是 | 实际请求的模型名称 |
 | `url` | 是 | API 基础地址 |
 | `max_context_size` | 是 | 最大上下文长度（token 数），可选 `128k`、`200k`、`256k`、`512k`、`1M` |
@@ -231,6 +231,40 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 | `notifications` | 否 | 通知配置 |
 | `mcp` | 否 | MCP (Model Context Protocol) 配置 |
 | `env` | 否 | 启动时注入的额外环境变量（dict） |
+
+### 支持的 Provider
+
+`type` 接受以下 Provider 标识（分组与 `kimi_cli/llm.py` 保持一致）：
+
+**核心 Provider**
+
+| `type` | 说明 |
+|--------|------|
+| `kimi` | Moonshot / Kimi |
+| `xai` | xAI（Grok） |
+| `openai_legacy` | OpenAI Chat Completions |
+| `openai_responses` | OpenAI Responses API |
+| `anthropic` | Anthropic Claude |
+| `google_genai` | Google GenAI（`gemini` 的旧别名） |
+| `gemini` | Google Gemini（Google AI Studio） |
+| `vertexai` | Google Vertex AI（`vertex` 的旧别名） |
+| `vertex` | Google Vertex AI |
+
+**OpenAI 兼容 Provider（Hermes 移植）**
+
+`ai-gateway`、`alibaba`、`alibaba-coding-plan`、`arcee`、`azure-foundry`、`copilot`、`custom`、`deepinfra`、`deepseek`、`fireworks`、`gmi`、`huggingface`、`kilocode`、`kimi-coding`、`nous`、`novita`、`nvidia`、`ollama-cloud`、`opencode-zen`、`openrouter`、`qwen-oauth`、`stepfun`、`upstage`、`xiaomi`、`zai`
+
+**特殊模式 Provider**
+
+| `type` | 说明 |
+|--------|------|
+| `actual` | Actual Computer（Codex 风格 API） |
+| `bedrock` | AWS Bedrock（Converse API） |
+| `minimax` | MiniMax（兼容 Anthropic） |
+| `openai-codex` | OpenAI Codex（ChatGPT 后端） |
+| `copilot-acp` | GitHub Copilot ACP 子进程（外部 Agent，无进程内 LLM） |
+
+> 当省略 `api_key` / `url` 时，Provider 注册表会回退到各 Provider 的标准环境变量（如 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`、`XIAOMI_API_KEY`、`GLM_API_KEY`/`ZAI_API_KEY`、`MINIMAX_API_KEY`）。完整的逐 Provider 环境变量列表见 `kimi-cli/packages/kosong/src/kosong/providers/__init__.py`。
 
 **自定义配置示例（参考 `docs/anthropic.json` 等）：**
 
