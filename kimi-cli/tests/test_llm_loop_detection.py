@@ -27,18 +27,18 @@ def test_char_loop_not_triggered_by_whitespace() -> None:
 
 
 def test_word_loop_detected() -> None:
-    detector = TextLoopDetector(word_threshold=50, word_window=100)
-    assert detector.feed("foo " * 50)
+    detector = TextLoopDetector(word_threshold=5, word_window=10)
+    assert detector.feed("foo " * 5)
 
 
 def test_word_loop_not_triggered_below_threshold() -> None:
-    detector = TextLoopDetector(word_threshold=50, word_window=100)
-    assert not detector.feed("foo " * 49)
+    detector = TextLoopDetector(word_threshold=5, word_window=10)
+    assert not detector.feed("foo " * 4)
 
 
 def test_word_loop_across_chunks() -> None:
-    detector = TextLoopDetector(word_threshold=50, word_window=100)
-    for _ in range(49):
+    detector = TextLoopDetector(word_threshold=5, word_window=10)
+    for _ in range(4):
         assert not detector.feed("foo ")
     assert not detector.feed("fo")
     assert detector.feed("o ")
@@ -65,6 +65,7 @@ def test_empty_feed_does_not_trigger() -> None:
 @pytest.mark.asyncio
 async def test_wrapper_raises_loop_detected_error_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KIMIX_LOOP_DETECTION_ENABLED", "1")
+    monkeypatch.setenv("KIMIX_LOOP_WORD_THRESHOLD", "5")
     parts = [TextPart(text="loop ")] * 60
     provider = MockChatProvider(parts)
     _wrap_generate_with_loop_detection(provider)
@@ -77,6 +78,7 @@ async def test_wrapper_raises_loop_detected_error_text(monkeypatch: pytest.Monke
 @pytest.mark.asyncio
 async def test_wrapper_raises_loop_detected_error_think(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KIMIX_LOOP_DETECTION_ENABLED", "1")
+    monkeypatch.setenv("KIMIX_LOOP_WORD_THRESHOLD", "5")
     parts = [ThinkPart(think="loop ")] * 60
     provider = MockChatProvider(parts)
     _wrap_generate_with_loop_detection(provider)

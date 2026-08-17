@@ -109,9 +109,9 @@ class TextLoopDetector:
 
     def __init__(
         self,
-        char_threshold: int = 50,
-        word_threshold: int = 50,
-        word_window: int = 100,
+        char_threshold: int = 500,
+        word_threshold: int = 500,
+        word_window: int = 10,
     ) -> None:
         self.char_threshold = char_threshold
         self.word_threshold = word_threshold
@@ -128,9 +128,9 @@ class TextLoopDetector:
         enabled = os.getenv("KIMIX_LOOP_DETECTION_ENABLED", "1").strip().lower()
         if enabled not in {"1", "true", "yes", "on"}:
             return None
-        char_threshold = int(os.getenv("KIMIX_LOOP_CHAR_THRESHOLD", "50"))
-        word_threshold = int(os.getenv("KIMIX_LOOP_WORD_THRESHOLD", "50"))
-        word_window = int(os.getenv("KIMIX_LOOP_WORD_WINDOW", "100"))
+        char_threshold = int(os.getenv("KIMIX_LOOP_CHAR_THRESHOLD", "500"))
+        word_threshold = int(os.getenv("KIMIX_LOOP_WORD_THRESHOLD", "500"))
+        word_window = int(os.getenv("KIMIX_LOOP_WORD_WINDOW", "10"))
         return cls(char_threshold, word_threshold, word_window)
 
     def feed(self, text: str) -> bool:

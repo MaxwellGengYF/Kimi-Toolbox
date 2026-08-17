@@ -59,6 +59,7 @@ def _suppress_output(monkeypatch: Any) -> list[str]:
 async def test_run_prompt_iter_cancels_on_word_loop(monkeypatch: Any) -> None:
     """A high-level word loop should cancel the session and print a warning."""
     monkeypatch.setenv("KIMIX_LOOP_DETECTION_ENABLED", "1")
+    monkeypatch.setenv("KIMIX_LOOP_WORD_THRESHOLD", "5")
     printed = _suppress_output(monkeypatch)
     sleeps: list[float] = []
 
