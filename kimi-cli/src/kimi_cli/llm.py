@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import os
+from collections import Counter, deque
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import orjson
-from kosong.chat_provider import ChatProvider
+from kosong.chat_provider import ChatProvider, ChatProviderError, StreamedMessagePart
+from kosong.message import TextPart, ThinkPart
 from pydantic import SecretStr
 
 from kimi_cli.constant import get_user_agent
 from kimi_cli.utils.logging import logger
 
 if TYPE_CHECKING:
+    from kosong.chat_provider import StreamedMessage, TokenUsage
+    from kosong.message import Message
+    from kosong.tooling import Tool
     from kimi_cli.auth.oauth import OAuthManager
     from kimi_cli.config import Config, LLMModel, LLMProvider
 
@@ -86,6 +92,161 @@ class LLM:
     @property
     def model_name(self) -> str:
         return self.chat_provider.model_name
+
+
+class LoopDetectedError(ChatProviderError):
+    """Raised when the LLM stream repeats a single character or word too many times."""
+
+
+class TextLoopDetector:
+    """Detect single-character or single-word loops in streamed text.
+
+    The detector keeps O(1) bounded state: it tracks a single-character run,
+    a small pending word fragment, and a sliding word window of fixed size.
+    It never stores the full response, so memory usage is independent of
+    response length.
+    """
+
+    def __init__(
+        self,
+        char_threshold: int = 50,
+        word_threshold: int = 50,
+        word_window: int = 100,
+    ) -> None:
+        self.char_threshold = char_threshold
+        self.word_threshold = word_threshold
+        self.word_window = word_window
+        self._char_run_char: str = ""
+        self._char_run_length: int = 0
+        self._pending: str = ""
+        self._window: deque[str] = deque(maxlen=word_window)
+        self._counts: Counter = Counter()
+
+    @classmethod
+    def from_env(cls) -> TextLoopDetector | None:
+        """Create a detector from environment variables, or ``None`` if disabled."""
+        enabled = os.getenv("KIMIX_LOOP_DETECTION_ENABLED", "1").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return None
+        char_threshold = int(os.getenv("KIMIX_LOOP_CHAR_THRESHOLD", "50"))
+        word_threshold = int(os.getenv("KIMIX_LOOP_WORD_THRESHOLD", "50"))
+        word_window = int(os.getenv("KIMIX_LOOP_WORD_WINDOW", "100"))
+        return cls(char_threshold, word_threshold, word_window)
+
+    def feed(self, text: str) -> bool:
+        """Return ``True`` as soon as a loop is detected in *text*."""
+        if not text:
+            return False
+
+        # 1. Single-character loop: repeated identical non-whitespace characters.
+        for char in text:
+            if char.isspace():
+                self._char_run_char = ""
+                self._char_run_length = 0
+            elif char == self._char_run_char:
+                self._char_run_length += 1
+                if self._char_run_length >= self.char_threshold:
+                    return True
+            else:
+                self._char_run_char = char
+                self._char_run_length = 1
+
+        # 2. Single-word loop: repeated tokens inside a bounded sliding window.
+        combined = self._pending + text
+        pending_completed = False
+        if text[0].isspace() and self._pending:
+            if self._add_word(self._pending):
+                return True
+            pending_completed = True
+            self._pending = ""
+
+        tokens = combined.split()
+        if text[-1].isspace():
+            num_complete = len(tokens)
+            new_pending = ""
+        else:
+            num_complete = len(tokens) - 1 if tokens else 0
+            new_pending = tokens[-1] if tokens else ""
+
+        # If the pending word was just completed, it is the first token and has
+        # already been counted above.
+        start_idx = 1 if pending_completed and tokens else 0
+        for token in tokens[start_idx:num_complete]:
+            if self._add_word(token):
+                return True
+
+        self._pending = new_pending
+        return False
+
+    def _add_word(self, word: str) -> bool:
+        if len(self._window) == self.word_window:
+            oldest = self._window.popleft()
+            self._counts[oldest] -= 1
+            if self._counts[oldest] <= 0:
+                del self._counts[oldest]
+        self._window.append(word)
+        self._counts[word] += 1
+        return self._counts[word] >= self.word_threshold
+
+
+class _LoopDetectedStreamedMessage:
+    """Wrap a provider stream and raise :class:`LoopDetectedError` on loops."""
+
+    def __init__(self, original: StreamedMessage, detector: TextLoopDetector) -> None:
+        self._original = original
+        self._detector = detector
+
+    def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
+        return self._iter()
+
+    async def _iter(self) -> AsyncIterator[StreamedMessagePart]:
+        async for part in self._original:
+            if isinstance(part, TextPart):
+                if self._detector.feed(part.text):
+                    raise LoopDetectedError(
+                        "Repeated single character or word detected in LLM stream."
+                    )
+            elif isinstance(part, ThinkPart) and not part.encrypted:
+                if self._detector.feed(part.think):
+                    raise LoopDetectedError(
+                        "Repeated single character or word detected in LLM stream."
+                    )
+            yield part
+
+    @property
+    def id(self) -> str | None:
+        return self._original.id
+
+    @property
+    def usage(self) -> TokenUsage | None:
+        return self._original.usage
+
+
+def _wrap_generate_with_loop_detection(chat_provider: ChatProvider) -> None:
+    """Wrap a provider instance so its generated stream is monitored for loops."""
+    detector = TextLoopDetector.from_env()
+    if detector is None:
+        return
+
+    char_threshold = detector.char_threshold
+    word_threshold = detector.word_threshold
+    word_window = detector.word_window
+    original_generate = chat_provider.generate
+
+    async def generate_wrapper(
+        system_prompt: str,
+        tools: Sequence[Tool],
+        history: Sequence[Message],
+    ) -> _LoopDetectedStreamedMessage:
+        fresh_detector = TextLoopDetector(
+            char_threshold=char_threshold,
+            word_threshold=word_threshold,
+            word_window=word_window,
+        )
+        stream = await original_generate(system_prompt, tools, history)
+        return _LoopDetectedStreamedMessage(stream, fresh_detector)
+
+    chat_provider.generate = generate_wrapper
 
 
 def model_display_name(model_name: str | None, model: LLMModel | None = None) -> str:
@@ -696,6 +857,11 @@ def create_llm(
             thinking_keep := os.getenv("KIMI_MODEL_THINKING_KEEP")
         ):
             chat_provider = chat_provider.with_extra_body({"thinking": {"keep": thinking_keep}})
+
+    # Wrap every real provider with loop detection. Skip the test echo providers
+    # so scripted repetition used in tests does not trip the detector.
+    if chat_provider is not None and provider.type not in {"_echo", "_scripted_echo"}:
+        _wrap_generate_with_loop_detection(chat_provider)
 
     return LLM(
         chat_provider=chat_provider,

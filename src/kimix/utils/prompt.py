@@ -12,7 +12,8 @@ import kimix.base as base
 from kaos.path import KaosPath
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
-from kosong.message import ContentPart
+from kimi_cli.llm import LoopDetectedError, TextLoopDetector
+from kosong.message import ContentPart, TextPart, ThinkPart
 from kimix.ui.printing import Color, MessageType, Style
 from kimix.ui.stream import print_agent_json, print_agent_json_flush_text
 from kimix.tools.common import _export_to_temp_file
@@ -426,11 +427,36 @@ async def _run_prompt_attempts(
     max_retries = 3
 
     async def _run_prompt_iter():
-        async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
-            if cancel_callable is not None and cancel_callable():
-                session.cancel()
-                break
-            await print_agent_json(message, session, output_function, format_output=format_output)
+        detector = TextLoopDetector.from_env()
+        try:
+            async for message in session.prompt(prompt_str, merge_wire_messages=merge_wire_messages):
+                if cancel_callable is not None and cancel_callable():
+                    session.cancel()
+                    break
+                if detector is not None:
+                    loop_text = None
+                    if isinstance(message, TextPart):
+                        loop_text = message.text
+                    elif isinstance(message, ThinkPart) and not message.encrypted:
+                        loop_text = message.think
+                    if loop_text is not None and detector.feed(loop_text):
+                        base._stream.colorful_print_word(
+                            "Loop detected; cancelling session.",
+                            fg=Color.BRIGHT_RED,
+                            styles=[Style.BOLD],
+                            require_new_line=True,
+                        )
+                        session.cancel()
+                        break
+                await print_agent_json(message, session, output_function, format_output=format_output)
+        except LoopDetectedError:
+            base._stream.colorful_print_word(
+                "Loop detected; cancelling session.",
+                fg=Color.BRIGHT_RED,
+                styles=[Style.BOLD],
+                require_new_line=True,
+            )
+            session.cancel()
 
     for attempt in range(max_retries):
         if session._cancel_event is not None and session._cancel_event.is_set():
