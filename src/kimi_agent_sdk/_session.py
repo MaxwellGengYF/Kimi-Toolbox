@@ -217,6 +217,62 @@ class Session:
         self._cancel_event = None
         self._closed = False
 
+    async def _restart(self, **custom_arguments) -> None:
+        """Restart the session while preserving context, state and wire history.
+
+        This is used by :meth:`prompt` when a transient error (e.g. a persistent
+        5xx or connection failure) forces a session restart. Unlike
+        :meth:`clear`, it does not delete the context file, ``state.json`` or
+        ``wire.jsonl``; instead it reloads the existing session so the new
+        KimiCLI can restore the previous conversation and resume from where the
+        failure occurred.
+        """
+        self._tmp_data.clear()
+        if self._closed:
+            return
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        await self._cleanup_tools()
+        await self._close_chat_provider()
+        # Close the KimiSoul's context storage (aiosqlite worker thread)
+        # before recreating the CLI. On Windows the SQLite database file stays
+        # locked while the connection is open, causing PermissionError.
+        soul = getattr(self._cli, "soul", None)
+        if soul is not None:
+            try:
+                await soul.close()
+            except Exception:
+                pass
+
+        # Close the session's ContextDB before reloading the session object.
+        await self._cli.session.close_context_db()
+
+        work_dir = self._cli.session.work_dir
+        session_id = self._cli.session.id
+        old_custom_data = self._cli.session.custom_data.copy()
+        old_custom_config = self._cli.session.custom_config.copy()
+
+        # Reload the existing session so context/state/wire history are kept.
+        cli_session = await CliSession.find(work_dir, session_id)
+        if cli_session is None:
+            cli_session = await CliSession.create(work_dir, session_id)
+
+        # Preserve provider_dict/chat_provider overrides if the config file
+        # does not already contain them (mirrors the logic in :meth:`rename`).
+        custom_config = await _load_config_json(work_dir)
+        for key in ("provider_dict", "chat_provider"):
+            if key in old_custom_config and key not in custom_config:
+                custom_config[key] = old_custom_config[key]
+        cli_session.custom_config = custom_config
+
+        kwargs = self._create_kwargs.copy()
+        kwargs.pop("resumed", None)
+        kwargs.update(custom_arguments)
+        self._cli = await KimiCLI.create(cli_session, resumed=True, **kwargs)
+        self._cli.session.custom_data.update(old_custom_data)
+        self._cancel_event = None
+        self._closed = False
+
     async def rename(self, new_session_id: str) -> None:
         """Rename the session to a new session ID.
 
@@ -635,10 +691,9 @@ class Session:
         if self._closed:
             raise SessionStateError("Session is closed")
 
-        from kimi_cli.utils.export import build_export_jsonl, build_export_markdown
-
         import aiofiles
         import pendulum
+        from kimi_cli.utils.export import build_export_jsonl, build_export_markdown
 
         soul = self._cli.soul
         session = self._cli.session
@@ -801,11 +856,13 @@ class Session:
                         f"Restarting session (attempt {restart_count}/{max_restarts})...\n"
                     )
                 )
-                # Clear and restart — this cancels any ongoing prompt, cleans up
-                # tools, deletes context, and recreates a fresh CLI + session.
-                await self.clear()
-                # After clear(), self._cancel_event is None,
-                # self._closed is False, and self._cli is fresh.
+                # Restart while preserving the existing session context. This
+                # cancels any ongoing prompt, cleans up broken tools/providers,
+                # and recreates the CLI from the same session so the next turn
+                # resumes the prior conversation.
+                await self._restart()
+                # After _restart(), self._cancel_event is None,
+                # self._closed is False, and self._cli resumes the same session.
                 # current_user_input is preserved from the outer scope.
             finally:
                 if self._cancel_event is cancel_event:

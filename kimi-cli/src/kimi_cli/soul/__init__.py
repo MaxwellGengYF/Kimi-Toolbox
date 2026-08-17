@@ -57,8 +57,8 @@ class SessionRestartRequired(Exception):
     This is raised when retryable errors (e.g. persistent 5xx, connection
     failures) exhaust all retries and the session needs a fresh start.
     The exception propagates through the agent loop and is handled by
-    :meth:`kimi_agent_sdk.Session.prompt`, which calls :meth:`Session.clear`
-    and re-invokes the prompt.
+    :meth:`kimi_agent_sdk.Session.prompt`, which calls :meth:`Session._restart`
+    and re-invokes the prompt while preserving the existing session context.
     """
 
     def __init__(
