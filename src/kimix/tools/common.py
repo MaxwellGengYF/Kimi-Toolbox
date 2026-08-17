@@ -14,12 +14,241 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import orjson
+
 from kimi_agent_sdk import ToolReturnValue
 
 from kimix.native_loader import (
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
+
+# ── Long param extraction ──────────────────────────────────────────────────
+# Mapping of tool names to their "long content" parameter names.
+# These are parameters that can contain extremely long content (code, commands,
+# file content, etc.) and are candidates for fuzzy extraction when the LLM
+# hallucinates their format.
+_LONG_CONTENT_PARAMS: dict[str, list[str]] = {
+    "bash": ["command", "cmd"],
+    "pwsh": ["command", "cmd"],
+    "Run": ["command", "cmd"],
+    "python": ["code", "source_code", "file"],
+    "write": ["content", "text"],
+    "edit": ["old_string", "new_string", "old", "new"],
+    "subagent": ["prompt", "task"],
+}
+"""Tool names mapped to their long-content parameter names.
+
+Tools known to accept large multi-line text payloads (code, commands, file
+content, prompts).  When the LLM hallucinates the format of such a parameter
+(e.g. a JSON-encoded string instead of a raw string, or a list of lines), the
+raw content is extracted and saved to a temp file, and the file path is returned
+in the error message so the next call can reference the file directly.
+"""
+
+
+_LONG_PARAM_MIN_LENGTH = 200
+"""Minimum character length for a param value to be considered "long".
+
+Values shorter than this are not worth the overhead of saving to a temp file.
+"""
+
+
+def _looks_like_malformed_json_param(value: str) -> bool:
+    """Return True when *value* looks like a malformed JSON string param.
+
+    Detects patterns where the LLM has wrapped a string value in extra JSON
+    encoding, such as:
+    - Starting with ``""`` (double-quote) -- the value is a JSON-encoded string
+    - Starting with ``[`` or ``{`` and the value is clearly a list/object
+      being passed where a string is expected
+    - Contains a common JSON-encoding artifact pattern
+
+    This is a heuristic: it may produce false positives for legitimate string
+    values that happen to start with these characters, but the threshold length
+    and the extract-then-retry pattern make this safe.
+    """
+    if not value or len(value) < _LONG_PARAM_MIN_LENGTH:
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    # Case 1: JSON-encoded string: the value is literally "..." with escaped quotes
+    if stripped.startswith('"') and stripped.endswith('"'):
+        # Try to actually parse it as JSON
+        try:
+            parsed = orjson.loads(stripped)
+            if isinstance(parsed, str) and len(parsed) > _LONG_PARAM_MIN_LENGTH:
+                return True
+        except Exception:
+            pass
+        # Also check if it looks like a JSON string that wasn't decoded
+        # e.g. starts with " and has escaped quotes inside
+        if '"' in stripped[1:-1] and '\\' in stripped:
+            return True
+    # Case 2: Looks like a JSON array or object — the value is a structured
+    # JSON value (list or dict) being passed where a plain string is expected.
+    if stripped and stripped[0] in ('[', '{'):
+        try:
+            parsed = orjson.loads(stripped)
+            if isinstance(parsed, list) and len(parsed) > 1:
+                if all(isinstance(item, str) for item in parsed):
+                    return True
+            if isinstance(parsed, dict):
+                return True
+        except Exception:
+            pass
+    # Case 3: Contains escaped newlines (\n instead of actual newlines)
+    if '\\n' in stripped and '\n' not in stripped and len(stripped) > _LONG_PARAM_MIN_LENGTH:
+        return True
+    return False
+
+
+def _extract_content_from_malformed(value: str) -> str | None:
+    """Try to extract the actual content from a malformed param value.
+
+    Returns the extracted content string, or None if extraction is not possible.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    # Case 1: JSON-encoded string -- parse it
+    if stripped.startswith('"') and stripped.endswith('"'):
+        try:
+            parsed = orjson.loads(stripped)
+            if isinstance(parsed, str):
+                return parsed
+        except Exception:
+            pass
+
+    # Case 2: JSON array of strings -- join them
+    if stripped.startswith('['):
+        try:
+            parsed = orjson.loads(stripped)
+            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+                return "\n".join(parsed)
+        except Exception:
+            pass
+
+    # Case 3: JSON object -- try to find a content-like key
+    if stripped.startswith('{'):
+        try:
+            parsed = orjson.loads(stripped)
+            if isinstance(parsed, dict):
+                # Try known content keys
+                for key in ("content", "text", "code", "command", "cmd", "prompt", "task", "value"):
+                    val = parsed.get(key)
+                    if isinstance(val, str) and len(val) > _LONG_PARAM_MIN_LENGTH:
+                        return val
+                    if isinstance(val, list) and all(isinstance(item, str) for item in val):
+                        return "\n".join(val)
+        except Exception:
+            pass
+
+    # Case 4: Escaped newlines -- replace \\n with \n
+    if '\\n' in stripped and '\n' not in stripped:
+        return stripped.replace('\\n', '\n')
+
+    return None
+
+
+def _extract_and_save_long_param(
+    arguments: dict[str, object],
+    tool_name: str,
+    *,
+    ext: str = ".txt",
+) -> dict[str, str] | None:
+    """Extract malformed long-content params and save them to temp files.
+
+    Detects when a long-content param (e.g. ``command``, ``code``, ``content``)
+    is passed in the wrong format (JSON-encoded, list instead of string, etc.),
+    extracts the actual content, saves it to a temp file in the shared temp
+    folder, and returns a dict mapping param names to the saved file paths.
+
+    Returns None when no extraction is needed (params are already in the
+    correct format).
+
+    The returned file paths can be included in error messages so the LLM can
+    ``read`` the file and retry with the correct format.
+
+    Args:
+        arguments: The raw tool call arguments dict.
+        tool_name: The canonical tool name.
+        ext: File extension for the temp file (default ``.txt``).
+
+    Returns:
+        A dict mapping param names to temp file paths, or None.
+    """
+    long_params = _LONG_CONTENT_PARAMS.get(tool_name)
+    if not long_params:
+        return None
+
+    saved: dict[str, str] = {}
+    for param_name in long_params:
+        value = arguments.get(param_name)
+        if value is None:
+            continue
+
+        # Already a plain string -- check if it's malformed
+        if isinstance(value, str):
+            # If it's a short string, no need to extract
+            if len(value) < _LONG_PARAM_MIN_LENGTH:
+                continue
+            extracted = _extract_content_from_malformed(value)
+            if extracted is not None:
+                file_path = _create_script_file(extracted, ext=ext)
+                saved[param_name] = file_path
+        elif isinstance(value, list):
+            # List of strings -- save as joined content
+            content = "\n".join(str(item) for item in value)
+            file_path = _create_script_file(content, ext=ext)
+            saved[param_name] = file_path
+        elif isinstance(value, dict):
+            # Dict -- serialize and save
+            try:
+                content = orjson.dumps(value, option=orjson.OPT_INDENT_2).decode("utf-8")
+            except Exception:
+                content = str(value)
+            file_path = _create_script_file(content, ext=ext)
+            saved[param_name] = file_path
+
+    return saved if saved else None
+
+
+def _build_long_param_retry_msg(
+    saved_files: dict[str, str],
+    original_error: str,
+) -> str:
+    """Build an error message with references to saved temp files.
+
+    When the LLM passes long content params in the wrong format, the raw
+    content is saved to temp files.  This function builds an error message
+    that tells the LLM about the saved files and suggests reading them.
+
+    Args:
+        saved_files: Dict mapping param names to temp file paths.
+        original_error: The original error message from the tool.
+
+    Returns:
+        A combined error message with file references.
+    """
+    file_notes = []
+    for param_name, file_path in saved_files.items():
+        display = _display_temp_path(file_path)
+        file_notes.append(
+            f"  - `{param_name}`: saved to `{display}`"
+        )
+
+    return (
+        f"{original_error}\n\n"
+        f"[Long content extracted to temp files]\n"
+        f"The following parameters appear to be in the wrong format. "
+        f"The raw content has been saved to temp files.\n"
+        f"Please use `read` to inspect the files and retry with the correct format.\n"
+        + "\n".join(file_notes)
+    )
+
 
 # Resolved once at import time: the runtime environment is stable, so
 # ``_native_get_module("stream")`` can never change while the process lives.

@@ -1094,6 +1094,36 @@ class KimiToolset:
                 t0 = time.monotonic()
                 try:
                     repaired_arguments = repair_tool_arguments(tool.params, arguments)
+
+                    # Long-content param extraction: detect malformed params and save to temp files.
+                    # When the LLM passes a long content param (command, code, content, etc.) in
+                    # the wrong format (JSON-encoded, list instead of string, etc.), the raw content
+                    # is saved to a temp file and a helpful error message is returned.  The next call
+                    # can use ``read`` to inspect the file and retry with the correct format.
+                    # NOTE: inline import to avoid circular import (kimix → kimi_agent_sdk → kimi_cli.app → toolset)
+                    from kimix.tools.common import (  # fmt: skip
+                        _extract_and_save_long_param,
+                        _build_long_param_retry_msg,
+                    )
+                    saved_files = _extract_and_save_long_param(
+                        arguments if isinstance(arguments, dict) else {},
+                        tool_name,
+                        ext=".txt",
+                    )
+                    if saved_files:
+                        msg = _build_long_param_retry_msg(
+                            saved_files,
+                            "Parameters appear to be in the wrong format. "
+                            "The raw content has been saved to temp files.",
+                        )
+                        return ToolResult(
+                            tool_call_id=tool_call.id,
+                            return_value=ToolError(
+                                message=msg,
+                                brief="Malformed parameter",
+                            ),
+                        )
+
                     ret = await tool.call(repaired_arguments)
                     if isinstance(ret.output, str):
                         ret.output = sanitize_for_tokenizer(ret.output)
