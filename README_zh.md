@@ -127,7 +127,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 ### todo_write
 `todo_write` 工具用于跟踪多步计划：
 - 支持增量更新（append/overwrite 模式）、标题模糊匹配与逐项备注。
-- 通过 `todo_push`/`todo_pop` 与 `todo_update(parent=...)` 支持嵌套子任务，并以 `Stack:` 面包屑展示当前层级。
+- 通过 `todo_write`（一次写入整棵任务树）或 `todo_update(parent=...)` 支持嵌套子任务；`todo_update(complete=True)` 可一次完成整个子树。
 
 ### Best-of-N 采样
 

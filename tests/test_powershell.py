@@ -582,6 +582,18 @@ class TestPowershellSafetyWiring:
         assert result.brief == "Blocked (self-kill guard)"
         mock_pt.assert_not_called()
 
+    async def test_self_kill_guard_blocks_foreach_loop_pid_target(
+        self, pwsh_instance: Powershell
+    ) -> None:
+        # PID reached only through a PowerShell ``foreach`` loop variable.
+        cmd = f"foreach ($pid in {os.getpid()},99999) {{ Stop-Process -Id $pid }}"
+        with patch("kimix.tools.file.bash.pwsh_tool.ProcessTask") as mock_pt:
+            result = await pwsh_instance(PowershellParams(cmd=cmd))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        assert str(os.getpid()) in result.message
+        mock_pt.assert_not_called()
+
     async def test_self_kill_guard_skipped_when_config_disabled(
         self, mock_session: MagicMock
     ) -> None:

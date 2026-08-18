@@ -688,8 +688,12 @@ class Bash(CallableTool2[BashParams]):
         ``pkill -f python``), terminating the very process hosting the agent.
         The guard compares kill targets against the current PID, its ancestor
         PIDs, and the agent's own image name, returning a smart hint instead
-        of executing.  Skipped when the ``shell.self_kill_guard`` config gate
-        is explicitly ``False``.
+        of executing.  PID targets reached through shell loop variables are
+        resolved too, so a batch cleanup such as
+        ``for pid in <pids>; do taskkill /PID $pid /F; done`` is blocked as
+        soon as the loop's literal PID list includes the agent process.
+        Skipped when the ``shell.self_kill_guard`` config gate is explicitly
+        ``False``.
         """
         if not self._self_kill_guard_enabled or not command:
             return None

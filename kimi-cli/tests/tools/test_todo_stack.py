@@ -1,18 +1,20 @@
-"""Tests for todo_write Stack & Tree Structure (todo_push / todo_pop / todo_update).
+"""Tests for the simplified todo tree tools (todo_write + todo_update).
 
-Phase 10 of the "todo_write Stack & Tree Structure" plan:
+The todo toolset was consolidated from four tools (todo_write, todo_push,
+todo_pop, todo_update) down to two:
 
-- todo_push: push a parent onto the stack scope (breadcrumb), depth limits.
-- todo_update(parent=...): add / update / rename children under an explicit parent.
-- todo_pop: pop the focus subtree (errors when unfinished unless complete=True).
-- Stack persistence (root + subagent), auto-heal of broken stacks.
-- format_todo_injection stack breadcrumb + tree indentation.
-- TodoReminderProvider signature sensitivity to stack / child changes.
-- Native-gated recursive status counts.
-- Cross-tool "Next:" / corrective-hint output contracts.
+- ``todo_write``: read / write / clear the whole tree.
+- ``todo_update``: targeted single/batch edits, child creation via
+  ``parent=...``, and one-call subtree completion via ``complete=True``.
 
-Mirrors ``test_todo.py`` style: ``async def`` tests with the ``runtime``
-fixture; tools are instantiated directly as ``todo_push(runtime)`` etc.
+The stack-based ``todo_push``/``todo_pop`` tools and the persisted
+``todo_stack`` breadcrumb were removed: trees are addressed purely by title
+(+ ``parent`` scope), which removes scope-state mistakes and reduces the
+number of calls needed for hierarchical work.
+
+Also covers ``format_todo_injection`` (session_state) and
+``TodoReminderProvider`` signature behavior, and native-gated recursive
+status counts.
 """
 
 from __future__ import annotations
@@ -21,11 +23,9 @@ from types import SimpleNamespace
 
 import orjson
 import pytest
-from kosong.tooling import ToolReturnValue
 
 from kimi_cli.session_state import (
     TODO_INJECTION_HEADER,
-    TODO_INJECTION_TRUNCATION_MARKER,
     TodoItemState,
     format_todo_injection,
     load_session_state,
@@ -37,34 +37,9 @@ from kimi_cli.tools.todo import (
     Params,
     Todo,
     TodoList,
-    todo_pop,
-    TodoPopParams,
-    todo_push,
-    TodoPushParams,
-    todo_update,
     TodoUpdateParams,
+    todo_update,
 )
-
-
-# Compatibility wrapper: the removed todo_sub tool is emulated by todo_update
-# with the current stack top as the explicit parent.
-class TodoSubParams(TodoUpdateParams):
-    pass
-
-
-class todo_sub:
-    def __init__(self, runtime: Runtime) -> None:
-        self._update = todo_update(runtime)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._update, name)
-
-    async def __call__(self, params: TodoSubParams) -> ToolReturnValue:
-        stack = self._update._load_stack()
-        parent = stack[-1] if stack else ""
-        data = params.model_dump(by_alias=True)
-        data["parent"] = parent
-        return await self._update(TodoUpdateParams(**data))
 
 
 def _read_root_todo(tool: TodoList, title: str) -> Todo:
@@ -75,215 +50,65 @@ def _read_root_todo(tool: TodoList, title: str) -> Todo:
     raise AssertionError(f"todo {title!r} not found")
 
 
+def _find_todo(tool: todo_update, title: str) -> Todo:
+    """Return the first todo with ``title`` from persisted state."""
+    for t in tool._load_todos():
+        if t.content == title:
+            return t
+    raise AssertionError(f"todo {title!r} not found")
+
+
 # ---------------------------------------------------------------------------
-# 1. todo_push — root append, breadcrumb, descending depth
+# 1. Tree creation — todo_update(parent=...) replaces todo_push/todo_sub
 # ---------------------------------------------------------------------------
 
 
-class Testtodo_pushRootAndDepth:
-    async def test_push_at_root_appends_parent(self, runtime: Runtime) -> None:
-        tool = todo_push(runtime)
-        res = await tool(TodoPushParams(title="Parent A", notes="notes A"))
+class TestTreeCreation:
+    async def test_create_root_item_with_empty_parent(self, runtime: Runtime) -> None:
+        update = todo_update(runtime)
+        res = await update(TodoUpdateParams(parent="", title="Root item", notes="notes"))
         assert not res.is_error
-        assert 'Pushed "Parent A" (depth 1/4).' in res.output
-        assert "Stack: Parent A" in res.output
-        assert "todo_update(parent=" in res.output
-        assert res.message == 'Pushed "Parent A".'
+        assert 'Created "Root item" under "root".' in res.output
+        assert res.message == 'Created "Root item" under "root".'
 
-        # Breadcrumb persisted and reloadable.
-        assert tool._load_stack() == ["Parent A"]
-        todos = tool._load_todos()
+        todos = update._load_todos()
         assert len(todos) == 1
-        assert todos[0].content == "Parent A"
+        assert todos[0].content == "Root item"
         assert todos[0].status == "pending"
-        assert todos[0].notes == "notes A"
+        assert todos[0].notes == "notes"
 
-    async def test_second_push_descends_into_child(self, runtime: Runtime) -> None:
-        tool = todo_push(runtime)
-        await tool(TodoPushParams(title="Parent"))
-        res = await tool(TodoPushParams(title="Child"))
-        assert not res.is_error
-        assert 'Pushed "Child" (depth 2/4).' in res.output
-        assert tool._load_stack() == ["Parent", "Child"]
+    async def test_create_children_under_parent(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
 
-        todos = tool._load_todos()
-        assert todos[0].content == "Parent"
-        assert todos[0].children[0].content == "Child"
-        assert todos[0].children[0].status == "pending"
-
-        # Display block carries depth (root = 0).
-        assert len(res.display) == 1
-        block = res.display[0]
-        assert isinstance(block, TodoDisplayBlock)
-        assert [(i.title, i.depth) for i in block.items] == [("Parent", 0), ("Child", 1)]
-
-    async def test_push_duplicate_title_in_scope_errors(self, runtime: Runtime) -> None:
-        tool = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await tool(TodoPushParams(title="A"))
-        await sub(TodoSubParams(title="B"))  # B is now a child of A (current scope)
-        res = await tool(TodoPushParams(title="B"))
-        assert res.is_error
-        assert 'Error: Duplicate todo title "B" in this scope.' in res.output
-        assert 'Use todo_update(parent=..., title="B") to update the existing item.' in res.brief
-
-    async def test_push_duplicate_title_checks_scope_not_whole_tree(
-        self, runtime: Runtime
-    ) -> None:
-        """The same title is allowed at different scopes (only the current
-        scope's children are checked, not the whole tree)."""
-        tool = todo_push(runtime)
-        await tool(TodoPushParams(title="A"))
-        await tool(TodoPushParams(title="B"))
-        # Root list already contains "A", but the current scope (B's children)
-        # is empty, so pushing "A" again descends instead of erroring.
-        res = await tool(TodoPushParams(title="A"))
-        assert not res.is_error
-        assert tool._load_stack() == ["A", "B", "A"]
-        todos = tool._load_todos()
-        assert todos[0].content == "A"
-        assert todos[0].children[0].content == "B"
-        assert todos[0].children[0].children[0].content == "A"
-
-
-# ---------------------------------------------------------------------------
-# 2. todo_sub — children, same-title updates, rename, verification
-# ---------------------------------------------------------------------------
-
-
-class TestTodoUpdateChildren:
-    async def test_sub_adds_children_under_scope(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
-
-        r1 = await sub(TodoSubParams(title="child one"))
+        r1 = await update(TodoUpdateParams(parent="Parent", title="child one"))
         assert not r1.is_error
         assert 'Created "child one" under "Parent".' in r1.output
         assert "  - [pending] child one" in r1.output
-        assert "todo_update(parent=" in r1.output and "todo_pop" in r1.output
         assert r1.message == 'Created "child one" under "Parent".'
 
-        r2 = await sub(TodoSubParams(title="child two"))
+        r2 = await update(TodoUpdateParams(parent="Parent", title="child two"))
         assert not r2.is_error
 
-        todos = sub._load_todos()
-        parent = todos[0]
+        parent = _read_root_todo(update, "Parent")
         assert [c.content for c in parent.children] == ["child one", "child two"]
         assert all(c.status == "pending" for c in parent.children)
-        # Stack is unchanged by todo_sub.
-        assert sub._load_stack() == ["Parent"]
 
-    async def test_sub_at_root_scope_with_empty_stack(self, runtime: Runtime) -> None:
-        """With an empty stack, todo_sub operates on the root list."""
-        sub = todo_sub(runtime)
-        res = await sub(TodoSubParams(title="root item"))
-        assert not res.is_error
-        assert 'Created "root item" under "root".' in res.output
-        todos = sub._load_todos()
-        assert len(todos) == 1
-        assert todos[0].content == "root item"
-
-    async def test_same_title_update_keeps_old_notes_when_empty(
-        self, runtime: Runtime
-    ) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child", notes="keep me"))
-
-        res = await sub(TodoSubParams(title="child", status="in_progress"))
-        assert not res.is_error
-        assert 'Updated "child" (status=in_progress' in res.output
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.status == "in_progress"
-        assert child.notes == "keep me"
-
-    async def test_same_title_update_replaces_nonempty_notes(
-        self, runtime: Runtime
-    ) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="child", notes="old"))
-
-        res = await sub(
-            TodoSubParams(title="child", status="in_progress", notes="new")
-        )
-        assert not res.is_error
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.notes == "new"
-        assert child.status == "in_progress"
-
-    async def test_rename_edits_title(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="old name"))
-
-        res = await sub(TodoSubParams(title="old name", rename_to="new name"))
-        assert not res.is_error
-        child = _read_root_todo(sub, "Parent").children[0]
-        assert child.content == "new name"
-        assert len(_read_root_todo(sub, "Parent").children) == 1
-
-    async def test_rename_heals_stack_top(self, runtime: Runtime) -> None:
-        """Renaming a child whose title equals the stack top updates the breadcrumb."""
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="P"))
-        # Give root P a child also named P (titles may repeat across scopes).
-        await lst(
-            Params(
-                todos=[
-                    Todo(
-                        content="P",
-                        status="pending",
-                        children=[Todo(content="P", status="pending")],
-                    )
-                ]
-            )
-        )
-        assert sub._load_stack() == ["P"]
-        res = await sub(TodoSubParams(title="P", rename_to="P2"))
-        assert not res.is_error
-        # Stack top healed to the renamed child.
-        assert sub._load_stack() == ["P2"]
-        child = _read_root_todo(sub, "P").children[0]
-        assert child.content == "P2"
-
-    async def test_rename_collision_errors(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="a"))
-        await sub(TodoSubParams(title="b"))
-
-        res = await sub(TodoSubParams(title="a", rename_to="b"))
-        assert res.is_error
-        assert 'Cannot rename "a" to "b"' in res.output
-        assert 'Use todo_update "b" to update the existing item instead of renaming.' in res.brief
-        # Nothing changed.
-        children = [c.content for c in _read_root_todo(sub, "Parent").children]
-        assert children == ["a", "b"]
-
-
-class TestMultipleSubTodos:
     async def test_many_children_under_one_parent(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="Parent"))
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
         for i in range(5):
-            res = await sub(TodoSubParams(title=f"child {i}"))
+            res = await update(TodoUpdateParams(parent="Parent", title=f"child {i}"))
             assert not res.is_error
 
-        parent = _read_root_todo(sub, "Parent")
+        parent = _read_root_todo(update, "Parent")
         assert [c.content for c in parent.children] == [f"child {i}" for i in range(5)]
-        assert sub._count_all(sub._load_todos()) == 6
+        assert update._count_all(update._load_todos()) == 6
 
         # Display block flattens depth-first: parent (0), then children (1).
-        res = await sub(TodoSubParams(title="child 5"))
+        res = await update(TodoUpdateParams(parent="Parent", title="child 5"))
         assert not res.is_error
         block = res.display[0]
         assert [(i.title, i.depth) for i in block.items] == [
@@ -291,332 +116,487 @@ class TestMultipleSubTodos:
             *[(f"child {i}", 1) for i in range(6)],
         ]
 
-    async def test_deeper_nesting_via_push_after_sub(self, runtime: Runtime) -> None:
-        """Push after Sub descends from the last sub-todo's scope? No — Push
-        always descends from the current stack top (the parent), so a push adds
-        a sibling-of-subs parent; todo_sub then nests under it."""
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="P"))
-        await sub(TodoSubParams(title="c1"))
-        await push(TodoPushParams(title="P2"))
-        await sub(TodoSubParams(title="c2"))
+    async def test_deeper_nesting_via_nested_parents(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="P", status="pending")]))
+        await update(TodoUpdateParams(parent="P", title="P2"))
+        await update(TodoUpdateParams(parent="P2", title="c1"))
+        await update(TodoUpdateParams(parent="P2", title="c2"))
 
-        todos = push._load_todos()
-        assert [c.content for c in todos[0].children] == ["c1", "P2"]
-        assert todos[0].children[1].children[0].content == "c2"
-        assert push._load_stack() == ["P", "P2"]
+        todos = update._load_todos()
+        assert [c.content for c in todos[0].children] == ["P2"]
+        assert [c.content for c in todos[0].children[0].children] == ["c1", "c2"]
+
+    async def test_batch_create_root_children_when_empty(self, runtime: Runtime) -> None:
+        update = todo_update(runtime)
+        res = await update(TodoUpdateParams(parent="", updates=[{"title": "A"}, {"title": "B"}]))
+        assert not res.is_error
+        todos = update._load_todos()
+        assert [t.content for t in todos] == ["A", "B"]
 
 
 # ---------------------------------------------------------------------------
-# 4. todo_pop — mark subtree done, ascend, empty-stack error
+# 2. Tree edits — same-title updates, rename, parent-scoped lookup
 # ---------------------------------------------------------------------------
 
 
-class Testtodo_pop:
-    async def test_pop_marks_all_descendants_done_and_ascends(
+class TestTreeEdits:
+    async def test_same_title_update_keeps_old_notes_when_empty(
         self, runtime: Runtime
     ) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        pop = todo_pop(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="c1"))
-        await sub(TodoSubParams(title="c2", status="in_progress"))
-        await push(TodoPushParams(title="Child"))
-        await sub(TodoSubParams(title="grand"))
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
+        await update(TodoUpdateParams(parent="Parent", title="child", notes="keep me"))
 
-        res = await pop(TodoPopParams(complete=True))
+        res = await update(TodoUpdateParams(parent="Parent", title="child", status="in_progress"))
         assert not res.is_error
-        assert 'Popped "Child" — 2 sub-todo(s) marked done.' in res.output
-        assert "Next: todo_push to start the next parent, or todo_write to read the tree." in res.output
-        assert res.message == 'Popped "Child".'
-        # Ascended to the parent scope.
-        assert pop._load_stack() == ["Parent"]
+        assert 'Updated "child" (status=in_progress' in res.output
+        child = _read_root_todo(update, "Parent").children[0]
+        assert child.status == "in_progress"
+        assert child.notes == "keep me"
 
-        parent = _read_root_todo(pop, "Parent")
-        assert parent.status == "pending"  # parent itself untouched yet
-        child = next(c for c in parent.children if c.content == "Child")
-        assert child.status == "done"  # even the in-progress c2 got marked done
-        assert child.children[0].status == "done"
-        # Sibling sub-todos under Parent are untouched by popping Child.
+    async def test_same_title_update_replaces_nonempty_notes(
+        self, runtime: Runtime
+    ) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
+        await update(TodoUpdateParams(parent="Parent", title="child", notes="old"))
+
+        res = await update(
+            TodoUpdateParams(parent="Parent", title="child", status="in_progress", notes="new")
+        )
+        assert not res.is_error
+        child = _read_root_todo(update, "Parent").children[0]
+        assert child.notes == "new"
+        assert child.status == "in_progress"
+
+    async def test_rename_edits_title(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
+        await update(TodoUpdateParams(parent="Parent", title="old name"))
+
+        res = await update(TodoUpdateParams(parent="Parent", title="old name", rename_to="new name"))
+        assert not res.is_error
+        child = _read_root_todo(update, "Parent").children[0]
+        assert child.content == "new name"
+        assert len(_read_root_todo(update, "Parent").children) == 1
+
+    async def test_rename_collision_errors(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Parent", status="pending")]))
+        await update(TodoUpdateParams(parent="Parent", title="a"))
+        await update(TodoUpdateParams(parent="Parent", title="b"))
+
+        res = await update(TodoUpdateParams(parent="Parent", title="a", rename_to="b"))
+        assert res.is_error
+        assert 'Cannot rename "a" to "b"' in res.output
+        assert 'Use todo_update "b" to update the existing item instead of renaming.' in res.brief
+        # Nothing changed.
+        children = [c.content for c in _read_root_todo(update, "Parent").children]
+        assert children == ["a", "b"]
+
+    async def test_parent_scoped_lookup_does_not_match_outside_parent(
+        self, runtime: Runtime
+    ) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="P1",
+                        status="pending",
+                        children=[Todo(content="Child", status="pending")],
+                    ),
+                    Todo(
+                        content="P2",
+                        status="pending",
+                        children=[Todo(content="Child", status="pending")],
+                    ),
+                ]
+            )
+        )
+
+        res = await update(TodoUpdateParams(parent="P2", title="Child", status="done"))
+        assert not res.is_error
+        p1 = _find_todo(update, "P1")
+        p2 = _find_todo(update, "P2")
+        assert p1.children[0].status == "pending"
+        assert p2.children[0].status == "done"
+
+    async def test_missing_parent_errors(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
+
+        res = await update(TodoUpdateParams(parent="Missing", title="Child"))
+        assert res.is_error
+        assert 'No parent todo matching "Missing" found' in res.output
+
+
+# ---------------------------------------------------------------------------
+# 3. complete=True — one-call subtree finish (replaces todo_pop)
+# ---------------------------------------------------------------------------
+
+
+class TestCompleteSubtree:
+    async def test_complete_marks_all_descendants_done(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="Parent",
+                        status="pending",
+                        children=[
+                            Todo(content="c1", status="pending"),
+                            Todo(
+                                content="c2",
+                                status="in_progress",
+                                children=[Todo(content="grand", status="pending")],
+                            ),
+                        ],
+                    )
+                ]
+            )
+        )
+
+        res = await update(TodoUpdateParams(title="Parent", complete=True))
+        assert not res.is_error
+        assert "completed with 4 sub-todos marked done" in res.output
+        assert res.message == 'Updated "Parent".'
+
+        parent = _read_root_todo(update, "Parent")
+        assert parent.status == "done"
+        assert all(c.status == "done" for c in parent.children)
+        assert parent.children[1].children[0].status == "done"
+
+    async def test_complete_child_leaves_siblings_untouched(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="Parent",
+                        status="pending",
+                        children=[
+                            Todo(content="c1", status="pending"),
+                            Todo(
+                                content="c2",
+                                status="in_progress",
+                                children=[Todo(content="grand", status="pending")],
+                            ),
+                            Todo(content="c3", status="pending"),
+                        ],
+                    )
+                ]
+            )
+        )
+
+        res = await update(TodoUpdateParams(parent="Parent", title="c2", complete=True))
+        assert not res.is_error
+        parent = _read_root_todo(update, "Parent")
+        c2 = next(c for c in parent.children if c.content == "c2")
+        assert c2.status == "done"
+        assert c2.children[0].status == "done"
+        # Siblings untouched.
         c1 = next(c for c in parent.children if c.content == "c1")
+        c3 = next(c for c in parent.children if c.content == "c3")
         assert c1.status == "pending"
-        assert len(parent.children) == 3  # c1, c2, Child
+        assert c3.status == "pending"
 
-    async def test_pop_finishes_parent_subtree(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        pop = todo_pop(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="c1"))
-        await sub(TodoSubParams(title="c2"))
-
-        res = await pop(TodoPopParams(complete=True))
-        assert not res.is_error
-        assert 'Popped "Parent" — 3 sub-todo(s) marked done.' in res.output
-        assert pop._load_stack() == []
-        todos = pop._load_todos()
-        assert todos[0].status == "done"
-        assert all(c.status == "done" for c in todos[0].children)
-
-    async def test_pop_empty_stack_errors(self, runtime: Runtime) -> None:
-        pop = todo_pop(runtime)
-        res = await pop(TodoPopParams())
-        assert res.is_error
-        assert "No parent todo to pop" in res.output
-        assert "Use todo_push to create one, or todo_write to read the tree." in res.brief
-        assert res.message == "No parent todo to pop."
-
-    async def test_pop_broken_stack_errors(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        pop = todo_pop(runtime)
+    async def test_complete_on_missing_title_errors(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await lst(Params(todos=[Todo(content="Z", status="pending")], mode="replace", force=True))
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
 
-        res = await pop(TodoPopParams())
+        res = await update(TodoUpdateParams(title="ghost", complete=True))
         assert res.is_error
-        assert "Todo stack is broken" in res.output
-        assert "todo_write" in res.brief and "todo_push" in res.brief
+        assert "found" in res.output  # fuzzy path: 'No todo matching "ghost" found.'
+
+    async def test_complete_with_status_pending_errors(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
+
+        res = await update(TodoUpdateParams(title="A", status="pending", complete=True))
+        assert res.is_error
+        assert "complete=True cannot be combined with status=" in res.output
+        assert _find_todo(update, "A").status == "pending"
 
 
 # ---------------------------------------------------------------------------
-# 5. Max layers
+# 4. Max tree depth
 # ---------------------------------------------------------------------------
 
 
-class TestMaxLayers:
-    async def test_default_max_layers_4(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        for title in ("L1", "L2", "L3", "L4"):
-            res = await push(TodoPushParams(title=title))
-            assert not res.is_error, title
-        # Depth 3 push succeeded (L4) — pushing at depth 4 now errors.
-        res = await push(TodoPushParams(title="L5"))
-        assert res.is_error
-        assert "Cannot push deeper than 4 layers" in res.output
-        assert "todo_update(parent=" in res.brief
-        assert res.message == "Cannot push deeper than 4 layers."
-        # Stack is unchanged after the failed push.
-        assert push._load_stack() == ["L1", "L2", "L3", "L4"]
-
-    async def test_override_max_layers_2(self, runtime: Runtime) -> None:
-        runtime.config.loop_control.todo_max_layers = 2
-        push = todo_push(runtime)
-        res = await push(TodoPushParams(title="L1"))
+class TestMaxDepth:
+    async def test_default_max_depth_5_allowed(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        # max_depth = max_layers(4) + one todo_update(parent=...) level.
+        deep = Todo(
+            content="L1",
+            status="pending",
+            children=[
+                Todo(
+                    content="L2",
+                    status="pending",
+                    children=[
+                        Todo(
+                            content="L3",
+                            status="pending",
+                            children=[
+                                Todo(
+                                    content="L4",
+                                    status="pending",
+                                    children=[Todo(content="L5", status="pending")],
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        res = await lst(Params(todos=[deep]))
         assert not res.is_error
-        res = await push(TodoPushParams(title="L2"))
-        assert not res.is_error
-        res = await push(TodoPushParams(title="L3"))
-        assert res.is_error
-        assert "Cannot push deeper than 2 layers" in res.output
-        assert push._load_stack() == ["L1", "L2"]
 
-    async def test_error_output_has_hint_and_breadcrumb(self, runtime: Runtime) -> None:
+    async def test_depth_6_rejected(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        deep = Todo(
+            content="L1",
+            status="pending",
+            children=[
+                Todo(
+                    content="L2",
+                    status="pending",
+                    children=[
+                        Todo(
+                            content="L3",
+                            status="pending",
+                            children=[
+                                Todo(
+                                    content="L4",
+                                    status="pending",
+                                    children=[
+                                        Todo(
+                                            content="L5",
+                                            status="pending",
+                                            children=[Todo(content="L6", status="pending")],
+                                        )
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        res = await lst(Params(todos=[deep]))
+        assert res.is_error
+        assert "maximum nesting depth" in res.output
+        assert "5 levels" in res.output
+        # Nothing persisted.
+        read = await lst(Params(todos=None))
+        assert "empty" in read.output.lower()
+
+    async def test_depth_cap_honors_config(self, runtime: Runtime) -> None:
         runtime.config.loop_control.todo_max_layers = 1
-        push = todo_push(runtime)
-        await push(TodoPushParams(title="A"))
-        res = await push(TodoPushParams(title="B"))
+        lst = TodoList(runtime)
+        deep = Todo(
+            content="L1",
+            status="pending",
+            children=[
+                Todo(
+                    content="L2",
+                    status="pending",
+                    children=[Todo(content="L3", status="pending")],
+                )
+            ],
+        )
+        res = await lst(Params(todos=[deep]))
         assert res.is_error
-        assert "Hint:" in res.output
-        assert "Use todo_update(parent=...) to add sub-todos at this level instead of pushing deeper." in res.output
+        assert "maximum nesting depth of 2 levels" in res.output
+
+    async def test_depth_cap_applies_to_replace_with_force(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        deep = Todo(
+            content="L1",
+            status="pending",
+            children=[
+                Todo(
+                    content="L2",
+                    status="pending",
+                    children=[
+                        Todo(
+                            content="L3",
+                            status="pending",
+                            children=[
+                                Todo(
+                                    content="L4",
+                                    status="pending",
+                                    children=[
+                                        Todo(
+                                            content="L5",
+                                            status="pending",
+                                            children=[Todo(content="L6", status="pending")],
+                                        )
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        res = await lst(Params(todos=[deep], mode="replace", force=True))
+        assert res.is_error
+        assert "maximum nesting depth" in res.output
+
+    async def test_update_depth_guard_with_limited_layers(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
+        # max_layers=0 means children may not be added below the root level.
+        runtime.config.loop_control.todo_max_layers = 0
+        res = await update(TodoUpdateParams(parent="A", title="child"))
+        assert res.is_error
+        assert "Cannot add children deeper than 1 layers" in res.output
+
+    async def test_update_depth_guard_allows_at_limit(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        # Build depth 4 via nested todo_write tree.
+        deep = Todo(
+            content="A",
+            status="pending",
+            children=[
+                Todo(
+                    content="B",
+                    status="pending",
+                    children=[
+                        Todo(
+                            content="C",
+                            status="pending",
+                            children=[Todo(content="D", status="pending")],
+                        )
+                    ],
+                )
+            ],
+        )
+        await lst(Params(todos=[deep]))
+        # todo_update(parent=...) may still add one level under the deepest parent.
+        res = await update(TodoUpdateParams(parent="D", title="leaf"))
+        assert not res.is_error
+        node = _read_root_todo(lst, "A").children[0].children[0].children[0]
+        assert [c.content for c in node.children] == ["leaf"]
 
 
 # ---------------------------------------------------------------------------
-# 6. Auto-heal of broken stacks
-# ---------------------------------------------------------------------------
-
-
-class TestAutoHeal:
-    async def test_partial_breakage_truncates_stack_and_warns(
-        self, runtime: Runtime
-    ) -> None:
-        push = todo_push(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await push(TodoPushParams(title="B"))
-        # Remove B (a child of A) via replace+force — A becomes a leaf.
-        await lst(
-            Params(todos=[Todo(content="A", status="pending")], mode="replace", force=True)
-        )
-
-        res = await push(TodoPushParams(title="C"))
-        assert not res.is_error
-        assert "Todo stack healed" in res.output
-        assert "'B' no longer exists" in res.output
-        # Stack was truncated to the longest valid prefix, then C pushed on top.
-        assert push._load_stack() == ["A", "C"]
-        assert [c.content for c in _read_root_todo(push, "A").children] == ["C"]
-
-    async def test_sub_auto_heals_after_ancestor_removed(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await push(TodoPushParams(title="B"))
-        await lst(
-            Params(todos=[Todo(content="A", status="pending")], mode="replace", force=True)
-        )
-
-        res = await sub(TodoSubParams(title="new child"))
-        assert not res.is_error
-        assert "Todo stack healed" in res.output
-        assert sub._load_stack() == ["A"]
-        assert [c.content for c in _read_root_todo(sub, "A").children] == ["new child"]
-
-    async def test_pop_auto_heals(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        pop = todo_pop(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await push(TodoPushParams(title="B"))
-        await lst(
-            Params(todos=[Todo(content="A", status="pending")], mode="replace", force=True)
-        )
-
-        res = await pop(TodoPopParams(complete=True))
-        assert not res.is_error
-        assert "Todo stack healed" in res.output
-        assert 'Popped "A" — 1 sub-todo(s) marked done.' in res.output
-        assert pop._load_stack() == []
-        assert _read_root_todo(pop, "A").status == "done"
-
-    async def test_completely_broken_stack_errors(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        # Replace the entire root list, dropping A entirely.
-        await lst(
-            Params(todos=[Todo(content="Z", status="pending")], mode="replace", force=True)
-        )
-
-        res = await push(TodoPushParams(title="B"))
-        assert res.is_error
-        assert "Todo stack is broken" in res.output
-        assert "Use todo_write to read the tree and todo_push to re-enter a parent." in res.brief
-
-    async def test_broken_stack_does_not_mutate_tree(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await lst(
-            Params(todos=[Todo(content="Z", status="pending")], mode="replace", force=True)
-        )
-
-        res = await push(TodoPushParams(title="B"))
-        assert res.is_error
-        # The failed push must not have created anything.
-        assert [t.content for t in push._load_todos()] == ["Z"]
-
-
-# ---------------------------------------------------------------------------
-# 7. Persistence round-trip (root + subagent)
+# 5. Persistence round-trip (root + subagent)
 # ---------------------------------------------------------------------------
 
 
 class TestPersistenceRoundTrip:
-    async def test_root_persists_todos_and_stack(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="P"))
-        await sub(TodoSubParams(title="c1"))
+    async def test_root_persists_todos(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await update(TodoUpdateParams(parent="", title="P"))
+        await update(TodoUpdateParams(parent="P", title="c1"))
 
         disk = load_session_state(runtime.session.dir)
-        assert disk.todo_stack == ["P"]
         assert len(disk.todos) == 1
         assert disk.todos[0].title == "P"
         assert disk.todos[0].children[0].title == "c1"
         # In-memory session state agrees with disk.
-        assert runtime.session.state.todo_stack == ["P"]
+        assert runtime.session.state.todos == disk.todos
 
-    async def test_subagent_persists_todos_and_stack(self, runtime: Runtime) -> None:
+    async def test_subagent_persists_todos(self, runtime: Runtime) -> None:
         sub_runtime = runtime.copy_for_subagent(
             agent_id="sub-persist", subagent_type="coder"
         )
         assert sub_runtime.subagent_store is not None
         sub_runtime.subagent_store.instance_dir("sub-persist", create=True)
 
-        push = todo_push(sub_runtime)
-        sub = todo_sub(sub_runtime)
-        await push(TodoPushParams(title="S"))
-        await sub(TodoSubParams(title="c"))
+        lst = TodoList(sub_runtime)
+        update = todo_update(sub_runtime)
+        await update(TodoUpdateParams(parent="", title="S"))
+        await update(TodoUpdateParams(parent="S", title="c"))
 
         state_file = sub_runtime.subagent_store.instance_dir("sub-persist") / "state.json"
         data = orjson.loads(state_file.read_bytes())
-        assert data["todo_stack"] == ["S"]
         assert data["todos"][0]["title"] == "S"
         assert data["todos"][0]["children"][0]["title"] == "c"
         # Root scope is untouched by subagent writes.
-        assert runtime.session.state.todo_stack == []
+        assert runtime.session.state.todos == []
 
-    async def test_subagent_stack_isolated_from_root(self, runtime: Runtime) -> None:
-        root_push = todo_push(runtime)
-        await root_push(TodoPushParams(title="RootP"))
+    async def test_subagent_state_isolated_from_root(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        await lst(Params(todos=[Todo(content="RootP", status="pending")]))
 
         sub_runtime = runtime.copy_for_subagent(
             agent_id="sub-iso", subagent_type="coder"
         )
         assert sub_runtime.subagent_store is not None
         sub_runtime.subagent_store.instance_dir("sub-iso", create=True)
-        sub_push = todo_push(sub_runtime)
-        await sub_push(TodoPushParams(title="SubP"))
+        sub_update = todo_update(sub_runtime)
+        await sub_update(TodoUpdateParams(parent="", title="SubP"))
 
-        assert sub_push._load_stack() == ["SubP"]
-        assert root_push._load_stack() == ["RootP"]
+        assert [t.content for t in sub_update._load_todos()] == ["SubP"]
+        assert [t.content for t in lst._load_todos()] == ["RootP"]
 
-    async def test_subagent_pop_persists_stack_and_subtree(self, runtime: Runtime) -> None:
+    async def test_subagent_complete_persists_subtree(self, runtime: Runtime) -> None:
         sub_runtime = runtime.copy_for_subagent(
-            agent_id="sub-pop", subagent_type="coder"
+            agent_id="sub-complete", subagent_type="coder"
         )
         assert sub_runtime.subagent_store is not None
-        sub_runtime.subagent_store.instance_dir("sub-pop", create=True)
+        sub_runtime.subagent_store.instance_dir("sub-complete", create=True)
 
-        push = todo_push(sub_runtime)
-        sub = todo_sub(sub_runtime)
-        pop = todo_pop(sub_runtime)
-        await push(TodoPushParams(title="S"))
-        await sub(TodoSubParams(title="c1"))
-        await sub(TodoSubParams(title="c2", status="in_progress"))
+        lst = TodoList(sub_runtime)
+        update = todo_update(sub_runtime)
+        await update(TodoUpdateParams(parent="", title="S"))
+        await update(TodoUpdateParams(parent="S", title="c1"))
+        await update(TodoUpdateParams(parent="S", title="c2", status="in_progress"))
 
-        res = await pop(TodoPopParams(complete=True))
+        res = await update(TodoUpdateParams(title="S", complete=True))
         assert not res.is_error
-        assert 'Popped "S" — 3 sub-todo(s) marked done.' in res.output
-        assert pop._load_stack() == []
+        assert "completed with 3 sub-todos marked done" in res.output
 
-        state_file = sub_runtime.subagent_store.instance_dir("sub-pop") / "state.json"
+        state_file = sub_runtime.subagent_store.instance_dir("sub-complete") / "state.json"
         data = orjson.loads(state_file.read_bytes())
-        assert data["todo_stack"] == []
         assert data["todos"][0]["status"] == "done"
         assert all(c["status"] == "done" for c in data["todos"][0]["children"])
         # Root session is untouched.
-        assert runtime.session.state.todo_stack == []
+        assert runtime.session.state.todos == []
 
-    async def test_push_persists_notes_field(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        res = await push(TodoPushParams(title="P", notes="hello"))
+    async def test_create_persists_notes_field(self, runtime: Runtime) -> None:
+        update = todo_update(runtime)
+        res = await update(TodoUpdateParams(parent="", title="P", notes="hello"))
         assert not res.is_error
-        assert _read_root_todo(push, "P").notes == "hello"
+        assert _read_root_todo(update, "P").notes == "hello"
 
     async def test_todolist_same_title_update_keeps_children(self, runtime: Runtime) -> None:
         """todo_write append on the same root title must not destroy the tree."""
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
         lst = TodoList(runtime)
-        await push(TodoPushParams(title="P"))
-        await sub(TodoSubParams(title="c1"))
+        update = todo_update(runtime)
+        await update(TodoUpdateParams(parent="", title="P"))
+        await update(TodoUpdateParams(parent="P", title="c1"))
 
         res = await lst(Params(todos=[Todo(content="P", status="in_progress")]))
         assert not res.is_error
         todos = lst._load_todos()
         assert todos[0].status == "in_progress"
         assert [c.content for c in todos[0].children] == ["c1"]
-        # Stack is untouched by a todo_write write.
-        assert lst._load_stack() == ["P"]
 
 
 # ---------------------------------------------------------------------------
-# 8. format_todo_injection with stack + tree
+# 6. format_todo_injection with stack + tree (session_state still supports it)
 # ---------------------------------------------------------------------------
 
 
@@ -658,27 +638,9 @@ class TestFormatTodoInjectionStack:
         assert "Parent (done)" not in text
         assert "  - [ ] child (pending)" in text
 
-    def test_max_items_truncation_counts_stack_line(self) -> None:
-        todos = [TodoItemState(title=f"Task {i}", status="pending") for i in range(20)]
-        text = format_todo_injection(todos, stack=["A"], max_items=5)
-        assert text is not None
-        lines = text.splitlines()
-        assert "- (stack: A)" in lines
-        assert any(line.startswith("- … and ") for line in lines)
-        # header + (stack + 4 items) + overflow line = 7 total lines.
-        assert len(lines) == 7
-
-    def test_max_chars_truncation_appends_marker(self) -> None:
-        todos = [TodoItemState(title=f"Task {i}", status="pending") for i in range(30)]
-        text = format_todo_injection(todos, stack=["A"], max_chars=200)
-        assert text is not None
-        assert len(text) <= 200
-        assert text.startswith(TODO_INJECTION_HEADER)
-        assert text.endswith(TODO_INJECTION_TRUNCATION_MARKER)
-
 
 # ---------------------------------------------------------------------------
-# 9. TodoReminderProvider signature / stack sensitivity
+# 7. TodoReminderProvider signature sensitivity
 # ---------------------------------------------------------------------------
 
 
@@ -740,7 +702,7 @@ class TestReminderSignature:
 
 
 # ---------------------------------------------------------------------------
-# 11. Native-gated recursive status counts
+# 8. Native-gated recursive status counts
 # ---------------------------------------------------------------------------
 
 
@@ -824,7 +786,7 @@ class TestNativeGating:
 
 
 # ---------------------------------------------------------------------------
-# 12. Cross-tool Next:/Hint output contracts
+# 9. Cross-tool Next:/Hint output contracts
 # ---------------------------------------------------------------------------
 
 
@@ -834,7 +796,7 @@ class TestCrossToolHints:
         res = await tool(Params(todos=[Todo(content="A", status="pending")]))
         assert not res.is_error
         assert res.output.endswith(
-            "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree."
+            "Next: todo_update to edit one or more items, or todo_write to read the tree."
         )
         # Hint is output-only, never in message.
         assert "Next:" not in res.message
@@ -844,7 +806,7 @@ class TestCrossToolHints:
         await tool(Params(todos=[Todo(content="A", status="pending")]))
         res = await tool(Params(todos=None))
         assert not res.is_error
-        assert "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree." in res.output
+        assert "Next: todo_update to edit one or more items, or todo_write to read the tree." in res.output
         assert res.message == "Current todo list displayed."
 
     async def test_todolist_zero_total_write_suppresses_hint(self, runtime: Runtime) -> None:
@@ -855,104 +817,86 @@ class TestCrossToolHints:
         assert res.output == "Todo list cleared (0 total: 0 done, 0 in progress, 0 pending)"
         assert "Next:" not in res.output
 
-    async def test_push_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        res = await push(TodoPushParams(title="A"))
+    async def test_create_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="P", status="pending")]))
+        res = await update(TodoUpdateParams(parent="P", title="c"))
         assert not res.is_error
         assert "todo_update(parent=" in res.output
-        assert "todo_pop" in res.output
+        assert "todo_write" in res.output
 
-    async def test_sub_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="P"))
-        res = await sub(TodoSubParams(title="c"))
+    async def test_update_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="P", status="pending")]))
+        res = await update(TodoUpdateParams(title="P", status="done"))
         assert not res.is_error
-        assert "todo_update(parent=" in res.output
-        assert "todo_pop" in res.output
+        assert "todo_update" in res.output
+        assert "todo_write" in res.output
 
-    async def test_pop_success_hint_names_sibling_tools(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        pop = todo_pop(runtime)
-        await push(TodoPushParams(title="A"))
-        res = await pop(TodoPopParams(complete=True))
-        assert not res.is_error
-        assert "Next: todo_push to start the next parent, or todo_write to read the tree." in res.output
-
-    async def test_pop_empty_error_names_corrective_tool(self, runtime: Runtime) -> None:
-        pop = todo_pop(runtime)
-        res = await pop(TodoPopParams())
+    async def test_no_todos_error_names_creation_path(self, runtime: Runtime) -> None:
+        update = todo_update(runtime)
+        res = await update(TodoUpdateParams(title="A", status="done"))
         assert res.is_error
-        assert "todo_push" in res.brief
+        assert "No todos exist" in res.output
+        assert 'todo_update(parent="", title="...")' in res.brief
         assert "todo_write" in res.brief
-        assert "todo_push" in res.output and "todo_write" in res.output
 
-    async def test_max_layer_error_names_todo_update(self, runtime: Runtime) -> None:
+    async def test_max_depth_error_names_todo_update(self, runtime: Runtime) -> None:
         runtime.config.loop_control.todo_max_layers = 1
-        push = todo_push(runtime)
-        await push(TodoPushParams(title="A"))
-        res = await push(TodoPushParams(title="B"))
+        lst = TodoList(runtime)
+        deep = Todo(
+            content="A",
+            status="pending",
+            children=[
+                Todo(
+                    content="B",
+                    status="pending",
+                    children=[Todo(content="C", status="pending")],
+                )
+            ],
+        )
+        res = await lst(Params(todos=[deep]))
         assert res.is_error
-        assert "todo_update(parent=" in res.brief
         assert "todo_update(parent=" in res.output
-
-    async def test_duplicate_push_error_names_todo_update(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="A"))
-        await sub(TodoSubParams(title="B"))
-        res = await push(TodoPushParams(title="B"))
-        assert res.is_error
-        assert 'Use todo_update(parent=..., title="B") to update the existing item.' in res.brief
 
     async def test_rename_collision_error_names_update_path(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
-        await push(TodoPushParams(title="P"))
-        await sub(TodoSubParams(title="a"))
-        await sub(TodoSubParams(title="b"))
-        res = await sub(TodoSubParams(title="a", rename_to="b"))
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="P", status="pending")]))
+        await update(TodoUpdateParams(parent="P", title="a"))
+        await update(TodoUpdateParams(parent="P", title="b"))
+        res = await update(TodoUpdateParams(parent="P", title="a", rename_to="b"))
         assert res.is_error
         assert 'Use todo_update "b" to update the existing item instead of renaming.' in res.brief
 
-    async def test_broken_stack_error_names_todolist_and_push(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        lst = TodoList(runtime)
-        await push(TodoPushParams(title="A"))
-        await lst(
-            Params(todos=[Todo(content="Z", status="pending")], mode="replace", force=True)
-        )
-        res = await push(TodoPushParams(title="B"))
-        assert res.is_error
-        assert "todo_write" in res.brief
-        assert "todo_push" in res.brief
-
 
 class TestTodoListReadTreeRendering:
-    """Read mode renders the tree with a stack breadcrumb and indented children."""
+    """Read mode renders the tree with indented children (no stack breadcrumb)."""
 
-    async def test_read_shows_breadcrumb_and_indented_children(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
+    async def test_read_shows_indented_children(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
-        await push(TodoPushParams(title="Parent"))
-        await sub(TodoSubParams(title="Child A"))
-        await sub(TodoSubParams(title="Child B"))
+        update = todo_update(runtime)
+        await update(TodoUpdateParams(parent="", title="Parent"))
+        await update(TodoUpdateParams(parent="Parent", title="Child A"))
+        await update(TodoUpdateParams(parent="Parent", title="Child B"))
         res = await lst(Params(todos=None))
         assert not res.is_error
-        assert "Stack: Parent" in res.output
+        assert "Stack:" not in res.output
+        assert "- [pending] Parent" in res.output
         assert "  - [pending] Child A" in res.output
         assert "  - [pending] Child B" in res.output
 
     async def test_read_nested_children_indent_deeper(self, runtime: Runtime) -> None:
-        push = todo_push(runtime)
-        sub = todo_sub(runtime)
         lst = TodoList(runtime)
-        await push(TodoPushParams(title="P1"))
-        await push(TodoPushParams(title="P2"))
-        await sub(TodoSubParams(title="grandchild"))
+        update = todo_update(runtime)
+        await update(TodoUpdateParams(parent="", title="P1"))
+        await update(TodoUpdateParams(parent="P1", title="P2"))
+        await update(TodoUpdateParams(parent="P2", title="grandchild"))
         res = await lst(Params(todos=None))
-        assert "Stack: P1 > P2" in res.output
+        assert "Stack:" not in res.output
+        assert "- [pending] P1" in res.output
         assert "  - [pending] P2" in res.output
         assert "    - [pending] grandchild" in res.output
 
@@ -982,7 +926,7 @@ class TestTodoListErrorHints:
         assert "Hint: " in res.output
         assert "todo_update(parent=" in res.output
 
-    async def test_clear_error_names_todolist_and_push(self, runtime: Runtime) -> None:
+    async def test_clear_error_names_todolist_and_update(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         await lst(Params(todos=[Todo(content="A", status="pending")]))
         res = await lst(Params(todos=[], mode="clear"))
@@ -990,11 +934,11 @@ class TestTodoListErrorHints:
         assert "Cannot clear todos" in res.output
         assert "Hint: " in res.output
         assert "todo_write" in res.output
-        assert "todo_push" in res.output
+        assert "todo_update" in res.output
 
     async def test_empty_read_carries_next_hint(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)
         res = await lst(Params(todos=None))
         assert not res.is_error
         assert "Todo list is empty." in res.output
-        assert "Next: todo_push to start a parent todo, todo_update to edit one or more, or todo_write to read the tree." in res.output
+        assert "Next: todo_update to edit one or more items, or todo_write to read the tree." in res.output

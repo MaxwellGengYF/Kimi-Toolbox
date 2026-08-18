@@ -122,7 +122,7 @@ The `KimiSoul` core loop actively keeps long runs on track — no manual babysit
 ### todo_write
 The `todo_write` tool tracks multi-step plans:
 - Incremental updates with append/overwrite modes, fuzzy title matching, and per-todo notes.
-- Nested sub-todos via `todo_push`/`todo_pop` with `todo_update(parent=...)`, showing a `Stack:` breadcrumb.
+- Nested sub-todos via `todo_write` (send the full tree) or `todo_update(parent=...)`; `todo_update(complete=True)` finishes a subtree in one call.
 
 ### Best-of-N Sampling
 

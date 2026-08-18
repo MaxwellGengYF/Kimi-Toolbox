@@ -17,8 +17,6 @@
       "kimix.tools.agent:interrupt_agent",
       "kimix.tools.swarm:workflow",
       "kimi_cli.tools.todo:todo_write",
-      "kimi_cli.tools.todo:todo_push",
-      "kimi_cli.tools.todo:todo_pop",
       "kimi_cli.tools.todo:todo_update",
       "kimi_cli.tools.memory:retrieve",
       "kimix.tools.context:compact"

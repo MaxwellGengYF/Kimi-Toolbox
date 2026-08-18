@@ -149,7 +149,7 @@ REPORT_TOOLS: dict[str, dict[str, Any]] = {
         "class": "TodoList",
         "canonical": ["todos"],
         "aliases": {"items": "todos"},
-        "desc_lead": "Bulk read/replace/clear of the whole todo tree.",
+        "desc_lead": "Read or write the whole todo tree.",
         "param_desc": {"todos": "The COMPLETE task list, replacing any previous list."},
     },
     "workflow": {
@@ -304,7 +304,7 @@ def test_legacy_tool_names_resolve_via_redirects() -> None:
     from kimi_cli.soul.toolset import _PLATFORM_REDIRECTS_NORM
 
     valid = set(REPORT_TOOLS) | {
-        "bash", "Run", "python", "todo_push", "todo_pop",
+        "bash", "Run", "python", "todo_update",
         "retrieve", "fetch_url", "compact",
     }
     legacy_map = {

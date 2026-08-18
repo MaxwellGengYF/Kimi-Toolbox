@@ -205,19 +205,127 @@ class TestTodoUpdateTreeSearch:
         assert "No todos exist" in res.output
 
 
-class TestTodoUpdateStack:
-    async def test_rename_heals_stack_breadcrumb(self, runtime: Runtime) -> None:
-        from kimi_cli.tools.todo import TodoPushParams, todo_push
+class TestTodoUpdateComplete:
+    """complete=True marks a todo and all its sub-todos done in one call."""
 
-        await todo_push(runtime)(TodoPushParams(title="Parent"))
-        await todo_push(runtime)(TodoPushParams(title="Child"))
-
+    async def test_complete_marks_subtree_done(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
         update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="Parent",
+                        status="pending",
+                        children=[
+                            Todo(content="c1", status="pending"),
+                            Todo(
+                                content="c2",
+                                status="in_progress",
+                                children=[Todo(content="g", status="pending")],
+                            ),
+                        ],
+                    )
+                ]
+            )
+        )
+
+        res = await update(TodoUpdateParams(title="Parent", complete=True))
+        assert not res.is_error
+        assert "completed with 4 sub-todos marked done" in res.output
+        assert res.message == 'Updated "Parent".'
+
+        parent = _find_todo(update, "Parent")
+        assert parent.status == "done"
+        assert parent.children[0].status == "done"
+        assert parent.children[1].status == "done"
+        assert parent.children[1].children[0].status == "done"
+
+    async def test_complete_single_item(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="in_progress")]))
+
+        res = await update(TodoUpdateParams(title="A", complete=True))
+        assert not res.is_error
+        assert "completed with 1 sub-todo marked done" in res.output
+        assert _find_todo(update, "A").status == "done"
+
+    async def test_complete_with_status_done_ok(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="P",
+                        status="pending",
+                        children=[Todo(content="c", status="pending")],
+                    )
+                ]
+            )
+        )
+
+        res = await update(TodoUpdateParams(title="P", status="done", complete=True))
+        assert not res.is_error
+        parent = _find_todo(update, "P")
+        assert parent.status == "done"
+        assert parent.children[0].status == "done"
+
+    async def test_complete_with_pending_status_errors(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
+
+        res = await update(TodoUpdateParams(title="A", status="pending", complete=True))
+        assert res.is_error
+        assert "complete=True cannot be combined with status=\"pending\"" in res.output
+        assert _find_todo(update, "A").status == "pending"
+
+    async def test_complete_missing_title_errors(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="P", status="pending")]))
+
         res = await update(
-            TodoUpdateParams(title="Child", rename_to="Renamed Child")
+            TodoUpdateParams(parent="P", title="ghost", complete=True)
+        )
+        assert res.is_error
+        assert "complete=True requires an existing todo" in res.output
+        assert _find_todo(update, "P").children == []
+
+    async def test_complete_in_batch(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(
+                        content="P",
+                        status="pending",
+                        children=[Todo(content="c", status="in_progress")],
+                    ),
+                    Todo(content="Q", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "P", "complete": True},
+                    {"title": "Q", "status": "done"},
+                ]
+            )
         )
         assert not res.is_error
-        assert update._load_stack() == ["Parent", "Renamed Child"]
+        p = _find_todo(update, "P")
+        q = _find_todo(update, "Q")
+        assert p.status == "done"
+        assert p.children[0].status == "done"
+        assert q.status == "done"
+        assert "completed with 2 sub-todos marked done" in res.output
+        assert 'Updated "Q" (status=done)' in res.output
 
 
 class TestTodoUpdateDisplay:

@@ -399,7 +399,6 @@ class KimiSoul:
                 else [TodoReminderProvider(
                     self._load_todo_states_for_reminder,
                     interval_steps=self._loop_control.todo_reminder_interval_steps,
-                    stack_loader=self._load_todo_stack_for_reminder,
                 )]
             ),
             *(
@@ -561,19 +560,6 @@ class KimiSoul:
             return [TodoItemState(**todo.model_dump()) for todo in todos]
         except Exception:
             logger.debug("Failed to load todos for reminder", exc_info=True)
-            return []
-
-    def _load_todo_stack_for_reminder(self) -> list[str]:
-        """Load the current todo stack breadcrumb for the todo reminder.
-
-        Reuses the TodoList tool's stack loading so the reminder always agrees
-        with what the tool would report. Never raises — a broken state file
-        falls back to an empty (root) stack.
-        """
-        try:
-            return TodoList(self._runtime)._load_stack()
-        except Exception:
-            logger.debug("Failed to load todo stack for reminder", exc_info=True)
             return []
 
     def add_injection_provider(self, provider: DynamicInjectionProvider) -> None:
@@ -1995,11 +1981,6 @@ class KimiSoul:
                 recorder=self._llm_request_recorder,
                 todos_loader=(
                     self._load_todo_states_for_reminder
-                    if self._loop_control.todo_compact_injection_enabled
-                    else None
-                ),
-                todos_stack_loader=(
-                    self._load_todo_stack_for_reminder
                     if self._loop_control.todo_compact_injection_enabled
                     else None
                 ),

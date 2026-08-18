@@ -14,7 +14,11 @@ accidentally terminating the very process hosting the agent: kill-style
 commands (``kill``/``tskill``/``taskkill``/``Stop-Process``/``pkill``/
 ``killall``/``wmic ... delete``) whose target PID is the agent process or
 one of its ancestors, or whose image-name/pattern target matches the
-agent's own image name or command line.
+agent's own image name or command line.  PID targets reached through a
+shell loop variable — ``for pid in 4100 5000; do taskkill /PID $pid; done``
+(bash) and ``foreach ($pid in 4100,5000) { Stop-Process -Id $pid }``
+(PowerShell) — are resolved against the loop's literal PID list, so a
+batch kill that includes the agent's own PID is still blocked.
 """
 
 import os
@@ -456,6 +460,84 @@ def _numeric_pid_targets(tokens: list[str]) -> list[int]:
     return pids
 
 
+# Loop-headers that bind a variable to a literal PID list.  The bash form is
+# ``for pid in 4100 5000; do ...``, the PowerShell form is
+# ``foreach ($pid in 4100,5000) { ... }``.  Only *literal* numeric list
+# entries can be resolved statically; unresolvable sources (command
+# substitution, globs, other variables) never feed the guard so unknown
+# data is never assumed to be the agent.
+_LOOP_PID_HEADERS = (
+    # bash/POSIX: ``for pid in 4100 5000; do`` (list ends at the first ``;``)
+    r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;]+)",
+    # PowerShell: ``foreach ($pid in 4100,5000) {`` (list ends at ``)``)
+    r"\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^)]+)\)",
+)
+
+
+# Characters that mark a loop source as not statically resolvable
+# (``$(pgrep ...)``, ``${list}``, globs, backticks, tilde expansion).
+_UNRESOLVABLE_LOOP_SOURCE_CHARS = frozenset("$*?[`~")
+
+
+def _loop_pid_sources(text: str) -> dict[str, list[int]]:
+    """Map loop-variable names (lowercased) to their literal numeric PID lists.
+
+    Detects bash ``for pid in 4100 5000; do ...`` and PowerShell
+    ``foreach ($pid in 4100,5000) { ... }`` headers.  Comma-separated and
+    space-separated lists are both accepted.  Entries that are not plain
+    integers (substitutions, globs, word lists) are skipped, so the returned
+    map only contains PIDs the command provably iterates over.
+    """
+    sources: dict[str, list[int]] = {}
+    for pattern in _LOOP_PID_HEADERS:
+        for match in re.finditer(pattern, text):
+            var = match.group(1).lower()
+            pids = sources.setdefault(var, [])
+            for token in match.group(2).split():
+                if _UNRESOLVABLE_LOOP_SOURCE_CHARS.intersection(token):
+                    continue
+                for part in token.split(","):
+                    part = part.strip().strip("\"'")
+                    if part.isdigit():
+                        pid = int(part)
+                        if pid not in pids:
+                            pids.append(pid)
+    return sources
+
+
+def _variable_pid_hit(
+    tokens: list[str],
+    loop_sources: dict[str, list[int]],
+    protected_pids: set[int],
+    via: str,
+) -> str | None:
+    """Return a description when *tokens* pass a protected PID via a loop var.
+
+    Kill targets written as ``$pid`` / ``${pid}`` (optionally quoted) inside
+    e.g. ``for pid in 4100 5000; do taskkill /PID $pid; done`` are resolved
+    through *loop_sources* (see :func:`_loop_pid_sources`); when any bound
+    PID is protected the kill is described.  Returns ``None`` when no token
+    names a loop variable bound to a protected PID.
+    """
+    for token in tokens:
+        stripped = token.strip().strip("\"'")
+        match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", stripped)
+        if not match:
+            continue
+        pids = loop_sources.get(match.group(1).lower())
+        if not pids:
+            continue
+        pid_list = ", ".join(str(pid) for pid in pids)
+        for pid in pids:
+            if pid in protected_pids:
+                return (
+                    f"kills PID {pid} via `{via}` through loop variable "
+                    f"`${match.group(1)}` (bound to PIDs {pid_list}), which "
+                    "is the agent process or one of its parent processes"
+                )
+    return None
+
+
 def _name_kill_hit(token: str, image_names: set[str]) -> str | None:
     """Return the matched agent image name when *token* names the agent process.
 
@@ -545,6 +627,10 @@ def detect_self_kill(
         return None
     image_names = {n.lower() for n in image_names if n}
     text = " ".join(command.split()).lower()
+    # PID lists bound to shell loop variables (``for pid in 4100 ...`` /
+    # ``foreach ($pid in 4100,...)``) so ``taskkill /PID $pid`` inside a
+    # batch loop that includes the agent's PID is still caught.
+    loop_sources = _loop_pid_sources(text)
 
     def _pid_hit(tokens: list[str], via: str) -> str | None:
         for pid in _numeric_pid_targets(tokens):
@@ -562,7 +648,11 @@ def detect_self_kill(
             prev = text[: match.start()].rstrip().split()
             if prev and prev[-1] in _KILL_PRECEDING_SKIP:
                 continue  # docker/podman/kubectl kill: container, not a host PID
-        hit = _pid_hit(_segment_tokens(text, match.end()), f"`{word}`")
+        tokens = _segment_tokens(text, match.end())
+        hit = _pid_hit(tokens, f"`{word}`")
+        if hit is not None:
+            return hit
+        hit = _variable_pid_hit(tokens, loop_sources, protected_pids, f"`{word}`")
         if hit is not None:
             return hit
 
@@ -570,6 +660,9 @@ def detect_self_kill(
     for match in re.finditer(r"\btaskkill(?:\.exe)?\b", text):
         tokens = _segment_text(text, match.end()).split()
         hit = _pid_hit(tokens, "`taskkill`")
+        if hit is not None:
+            return hit
+        hit = _variable_pid_hit(tokens, loop_sources, protected_pids, "`taskkill`")
         if hit is not None:
             return hit
         for index, token in enumerate(tokens[:-1]):
@@ -587,6 +680,9 @@ def detect_self_kill(
         hit = _pid_hit(tokens, "`Stop-Process`")
         if hit is not None:
             return hit
+        hit = _variable_pid_hit(tokens, loop_sources, protected_pids, "`Stop-Process`")
+        if hit is not None:
+            return hit
         for token in tokens:
             if _looks_like_flag(token):
                 continue
@@ -600,6 +696,11 @@ def detect_self_kill(
         for match in re.finditer(r"\bget-process\b", text):
             tokens = _segment_tokens(text, match.end())
             hit = _pid_hit(tokens, "`Get-Process` piped to a kill")
+            if hit is not None:
+                return hit
+            hit = _variable_pid_hit(
+                tokens, loop_sources, protected_pids, "`Get-Process` piped to a kill"
+            )
             if hit is not None:
                 return hit
             for token in tokens:
@@ -651,6 +752,20 @@ def detect_self_kill(
                 f"targets PID {pid_match.group(1)} via `wmic`, which is the "
                 "agent process or one of its parent processes"
             )
+        var_match = re.search(
+            r"processid\s*=\s*\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", segment
+        )
+        if var_match:
+            pids = loop_sources.get(var_match.group(1).lower(), [])
+            for pid in pids:
+                if pid in protected_pids:
+                    pid_list = ", ".join(str(p) for p in pids)
+                    return (
+                        f"targets PID {pid} via `wmic` through loop variable "
+                        f"`${var_match.group(1)}` (bound to PIDs {pid_list}), "
+                        "which is the agent process or one of its parent "
+                        "processes"
+                    )
 
     return None
 

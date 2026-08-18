@@ -8,8 +8,6 @@
       "kimix.tools.py:python",
       "kimix.tools.background:job_output",
       "kimi_cli.tools.todo:todo_write",
-      "kimi_cli.tools.todo:todo_push",
-      "kimi_cli.tools.todo:todo_pop",
       "kimi_cli.tools.todo:todo_update",
       "kimi_cli.tools.memory:retrieve",
       "kimi_cli.tools.file:read",

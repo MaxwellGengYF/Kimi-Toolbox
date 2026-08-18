@@ -5,8 +5,6 @@ agent:
     - "kimi_cli.tools.agent:Agent"
     - "kimi_cli.tools.ask_user:AskUserQuestion"
     - "kimi_cli.tools.todo:TodoList"
-    - "kimi_cli.tools.todo:todo_push"
-    - "kimi_cli.tools.todo:todo_pop"
     - "kimi_cli.tools.todo:todo_update"
     - "kimi_cli.tools.memory:retrieve"
     - "kimi_cli.tools.file:ReadFile"

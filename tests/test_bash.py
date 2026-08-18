@@ -4588,6 +4588,31 @@ class TestShellSafetyWiring:
         assert result.brief == "Blocked (self-kill guard)"
         mock_pt.assert_not_called()
 
+    async def test_self_kill_guard_blocks_loop_pid_target(
+        self, bash_instance: Bash
+    ) -> None:
+        # PID reached only through a shell loop variable (the shape that used
+        # to slip through: ``for pid in ...; do taskkill /PID $pid ...``).
+        cmd = f"for pid in {os.getpid()} 99999; do taskkill /PID $pid /T /F 2>/dev/null; done; echo done"
+        with patch("kimix.tools.file.bash.bash_tool.ProcessTask") as mock_pt:
+            result = await bash_instance(BashParams(cmd=cmd))
+        assert isinstance(result, ToolError)
+        assert result.brief == "Blocked (self-kill guard)"
+        assert str(os.getpid()) in result.message
+        mock_pt.assert_not_called()
+
+    async def test_self_kill_guard_allows_unrelated_loop(
+        self, bash_instance: Bash
+    ) -> None:
+        process_task = self._completed_process_task()
+        cmd = "for pid in 999999999 888888888; do taskkill /PID $pid /F; done"
+        with patch(
+            "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
+        ) as mock_pt:
+            result = await bash_instance(BashParams(cmd=cmd))
+        assert isinstance(result, ToolOk)
+        mock_pt.assert_called_once()
+
     async def test_self_kill_guard_allows_unrelated_pid(
         self, bash_instance: Bash
     ) -> None:

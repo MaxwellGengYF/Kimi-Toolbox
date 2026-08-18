@@ -308,6 +308,17 @@ class TestDetectSelfKill:
             # wmic process delete / terminate
             "wmic process where ProcessId=4100 delete",
             'wmic process where "ProcessId=2100" call terminate',
+            # PID targets reached through shell loop variables (bash ``for``)
+            "for pid in 4100 5000; do taskkill /PID $pid /T /F 2>/dev/null; done",
+            "for pid in 4100,5000; do kill -9 $pid; done",
+            "for pid in 900 1234; do taskkill /PID $pid /F; done",
+            "for p in 2100 1234; do kill -9 \"$p\"; done",
+            "for pid in 5000 4100 6000; do kill ${pid}; done; echo done",
+            # PID targets reached through shell loop variables (PowerShell ``foreach``)
+            "foreach ($pid in 4100,5000) { Stop-Process -Id $pid }",
+            "foreach ($p in 900,1234) { Stop-Process -Id $p -Force }",
+            "foreach ($pid in 4100) { Get-Process -Id $pid | Stop-Process }",
+            "foreach ($pid in 2100,5000) { wmic process where ProcessId=$pid delete }",
         ],
     )
     def test_self_kill_detected(self, command: str) -> None:
@@ -340,6 +351,20 @@ class TestDetectSelfKill:
             # container kills are not host PID kills
             "docker kill 4100",
             "docker compose kill 4100",
+            # unrelated loops (no protected PID in the loop list)
+            "for pid in 12345 67890; do taskkill /PID $pid /F; done",
+            "for p in 1111 2222; do kill -9 $p; done",
+            "foreach ($pid in 12345,67890) { Stop-Process -Id $pid }",
+            # loops that echo/print PIDs but never kill
+            "for pid in 4100 5000; do echo $pid; done",
+            # unresolvable loop sources are never assumed to be the agent
+            "for pid in $(pgrep python); do taskkill /PID $pid /F; done",
+            "for pid in ${list}; do taskkill /PID $pid /F; done",
+            "for pid in *; do kill $pid; done",
+            # kill on a variable that is not bound to any PID list
+            "taskkill /PID $pid /F",
+            "kill -9 $pid",
+            "Stop-Process -Id $p",
             # bare Get-Process queries are read-only
             "Get-Process -Id 4100",
             "Get-Process python",
@@ -362,6 +387,17 @@ class TestDetectSelfKill:
         assert desc is not None
         assert "4100" in desc
         assert "kill" in desc
+
+    def test_loop_variable_detection_mentions_pid_and_var(self) -> None:
+        desc = self.detect("for pid in 4100 5000; do taskkill /PID $pid /F; done")
+        assert desc is not None
+        assert "4100" in desc
+        assert "taskkill" in desc
+        assert "$pid" in desc
+
+    def test_loop_variable_detection_works_with_extra_whitespace(self) -> None:
+        desc = self.detect("for  pid   in   4100   5000 ; do  kill  -9  $pid ; done")
+        assert desc is not None
 
     def test_none_command(self) -> None:
         assert detect_self_kill(None) is None
@@ -388,6 +424,16 @@ class TestSelfKillHint:
 
     def test_stop_process_own_pid(self) -> None:
         assert self_kill_hint(f"Stop-Process -Id {os.getpid()}") is not None
+
+    def test_loop_kill_own_pid(self) -> None:
+        cmd = f"for pid in {os.getpid()} 99999; do taskkill /PID $pid /F; done"
+        hint = self_kill_hint(cmd)
+        assert hint is not None
+        assert str(os.getpid()) in hint
+
+    def test_unrelated_loop_allowed(self) -> None:
+        cmd = "for pid in 999999999 888888888; do taskkill /PID $pid /F; done"
+        assert self_kill_hint(cmd) is None
 
     def test_taskkill_own_image_name(self) -> None:
         image = os.path.basename(sys.executable)

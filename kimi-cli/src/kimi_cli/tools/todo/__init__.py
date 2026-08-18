@@ -27,9 +27,9 @@ from kimi_cli.tools.display import TodoDisplayBlock, TodoDisplayItem
 from kimi_cli.tools.utils import repair_json_string
 
 _TODOLIST_DESCRIPTION = (
-    "Bulk read/replace/clear of the whole todo tree. "
-    "For single- or multi-item edits use todo_update; "
-    "for hierarchical work use todo_push and todo_pop.\n\n"
+    "Read or write the whole todo tree. Omit `todos` to read the current tree; "
+    "send the complete list to set the plan. For targeted single/batch edits "
+    "(status, notes, rename, or children via parent=...) use todo_update.\n\n"
     "Write modes:\n"
     "- append (default): merges root-level todos by exact title; new titles are appended.\n"
     "- replace: replaces the whole list; only allowed when all existing todos are done (use force=True to override).\n"
@@ -77,8 +77,7 @@ def _hint_error(text: str) -> str:
     return "\nHint: " + text
 
 _TODOLIST_SUCCESS_HINT = (
-    "todo_push to start a parent todo, todo_update to edit one or more, "
-    "or todo_write to read the tree."
+    "todo_update to edit one or more items, or todo_write to read the tree."
 )
 
 # Mode map — only canonical values accepted
@@ -203,13 +202,6 @@ class Params(BaseModel):
             "When True, mode='replace' and mode='clear' bypass the all-done guard "
             "(and skip regression and single-in_progress checks). "
             "Legacy 'force_overwrite' mode maps to mode='replace' with force=True."
-        ),
-    )
-    match_mode: Literal["exact", "fuzzy"] = Field(
-        default="exact",
-        description=(
-            "'exact' (default): Match titles exactly. "
-            "'fuzzy': Use fuzzy matching for near-miss titles when appending/updating."
         ),
     )
     auto_fix: bool = Field(
@@ -468,14 +460,14 @@ class TodoList(CallableTool2[Params]):
             warnings.extend(result.warnings)
 
         # 3b. Enforce maximum tree nesting depth (all modes) so created trees
-# stay reachable via todo_push/todo_update stack navigation: the deepest
-# pushable level is max_layers, plus one todo_update level under it.
+        # stay reachable via todo_write/todo_update(parent=...): the deepest
+        # explicit-parent level is max_layers, plus one todo_update level under it.
         max_layers = self._max_layers()
         max_depth = max_layers + 1
         if self._max_tree_depth(final_todos) > max_depth:
             return self._error(
                 f"Error: Todo tree exceeds maximum nesting depth of {max_depth} levels "
-                f"(todo_max_layers={max_layers}). Flatten the tree, or build it with todo_push/todo_update(parent=...).",
+                f"(todo_max_layers={max_layers}). Flatten the tree, or build it with todo_write/todo_update(parent=...).",
                 f"Todo tree exceeds maximum nesting depth of {max_depth} levels.",
                 display=[self._build_display_block(final_todos)],
             )
@@ -550,7 +542,7 @@ class TodoList(CallableTool2[Params]):
         model's tool inventory stays consistent after a failure.
         """
         if hint is None:
-            hint = "todo_write to read the tree, todo_update to edit one, or todo_push to start a parent."
+            hint = "todo_write to read the tree, or todo_update to edit one or more items."
         return ToolReturnValue(
             is_error=True,
             output=output + _hint_error(hint),
@@ -1031,7 +1023,6 @@ class TodoList(CallableTool2[Params]):
     def _read_todos(self) -> ToolReturnValue:
         todos = self._load_todos()
         archived = self._load_archived_todos()
-        stack = self._load_stack()
 
         if not todos:
             empty_lines = ["Todo list is empty."]
@@ -1049,13 +1040,9 @@ class TodoList(CallableTool2[Params]):
         total = self._count_all(todos)
         all_done = total > 0 and counts["pending"] == 0 and counts["in_progress"] == 0
 
-        # Breadcrumb (tree navigation): always echo where the model is.
-        output_lines = ["Current todo list:"]
-        if stack:
-            output_lines.append(f"Stack: {' > '.join(stack)}")
-
         # Render the tree (children indented 2 spaces per depth), truncating
         # the flattened line list to _MAX_READ_ITEMS.
+        output_lines = ["Current todo list:"]
         formatted = self._render_read_tree(todos, max_lines=_MAX_READ_ITEMS)
         if formatted:
             output_lines.append(formatted)
@@ -1088,133 +1075,6 @@ class TodoList(CallableTool2[Params]):
             display=[],
         )
 
-    # ---- Stack scope (tree navigation) -------------------------------------
-
-    def _load_stack(self) -> list[str]:
-        """Load the current todo stack (breadcrumb of ancestor titles).
-
-        Root scope reads ``SessionState.todo_stack`` (reloaded from disk so it
-        agrees with the persisted state); subagent scope reads the
-        ``todo_stack`` key of the subagent state.json. Never raises — broken
-        or missing state falls back to an empty stack.
-        """
-        if self._runtime.role == "root":
-            from kimi_cli.session_state import load_session_state
-
-            session = self._runtime.session
-            fresh = load_session_state(session.dir)
-            session.state.todo_stack = fresh.todo_stack
-            return list(fresh.todo_stack)
-        state_file = self._subagent_state_file()
-        if state_file is None:
-            return []
-        data = self._read_subagent_state(state_file)
-        raw = data.get("todo_stack")
-        return [str(t) for t in raw] if isinstance(raw, list) else []
-
-    def _save_stack(self, stack: list[str]) -> str | None:
-        """Persist the todo stack. Returns an error message on failure."""
-        clean = [str(t) for t in stack]
-        if self._runtime.role == "root":
-            try:
-                session = self._runtime.session
-                session.state.todo_stack = clean
-                session.save_state()
-                return None
-            except Exception as exc:
-                return f"Error: Failed to save todo stack: {exc}"
-        state_file = self._subagent_state_file()
-        if state_file is None:
-            return "Error: Unable to save todo stack: state file is not available."
-        data = self._read_subagent_state(state_file)
-        data["todo_stack"] = clean
-        try:
-            self._write_subagent_state(state_file, data)
-        except Exception as exc:
-            return f"Error: Failed to save todo stack: {exc}"
-        return None
-
-    def _resolve_scope(
-        self, todos: list[Todo]
-    ) -> tuple[Todo | None, int, list[str], list[str]]:
-        """Resolve the current stack scope against the todo tree.
-
-        Walks the stack titles top-down through ``children``. When a title is
-        missing (broken stack — e.g. the parent was force-overwritten), the
-        stack is auto-healed: truncated to the longest existing prefix and a
-        non-blocking warning is returned.
-
-        Returns:
-            ``(node, depth, healed_stack, warnings)`` — ``node`` is the
-            current focus parent (``None`` when the stack is empty → root
-            scope), ``depth`` is the node's layer (number of matched stack
-            titles; 0 = root), ``healed_stack`` is the stack to persist (may
-            be truncated), and ``warnings`` are non-blocking heal notices.
-        """
-        stack = self._load_stack()
-        if not stack:
-            return None, 0, [], []
-        warnings: list[str] = []
-        node: Todo | None = None
-        scope = todos
-        depth = 0
-        for title in stack:
-            child = next((t for t in scope if t.content == title), None)
-            if child is None:
-                healed = stack[:depth]
-                warnings.append(
-                    f"Todo stack healed: '{title}' no longer exists in the tree; "
-                    f"stack truncated to {(' > '.join(healed)) if healed else 'root'}."
-                )
-                return node, depth, healed, warnings
-            node = child
-            scope = child.children
-            depth += 1
-        return node, depth, list(stack), warnings
-
-    def _max_layers(self) -> int:
-        """Maximum todo_write tree/stack depth (layers). Default 4."""
-        try:
-            value = self._runtime.config.loop_control.todo_max_layers
-        except Exception:
-            return 4
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        return 4
-
-    def _render_scope(self, todos: list[Todo], stack: list[str]) -> str:
-        """Render the current stack scope: breadcrumb + scope children.
-
-        Shows only the children of the current focus node (root list when the
-        stack is empty), in ``_format_todos`` style with a 2-space indent per
-        depth. Deeper unfinished descendants are collapsed into a per-item
-        ``… N sub-tasks`` count so the output stays short.
-        """
-        scope = todos
-        for title in stack:
-            child = next((t for t in scope if t.content == title), None)
-            if child is None:
-                break
-            scope = child.children
-
-        lines: list[str] = []
-        if stack:
-            lines.append(f"Stack: {' > '.join(stack)}")
-        if not scope:
-            return "\n".join(lines) if lines else "(no todos in this scope)"
-
-        labels = {"pending": "pending", "in_progress": "in progress", "done": "done"}
-        base_indent = "  " * len(stack)
-        for child in scope:
-            if child.status == "done":
-                continue  # keep the scope view short: unfinished items only
-            line = f"{base_indent}- [{labels[child.status]}] {child.content}"
-            deeper = self._count_unfinished_descendants(child)
-            if deeper:
-                line += f" … {deeper} sub-task{'s' if deeper != 1 else ''}"
-            lines.append(line)
-        return "\n".join(lines)
-
     # ---- Persistence -------------------------------------------------------
 
     def _save_todos(self, active: list[Todo], archived: list[TodoItemState]) -> str | None:
@@ -1236,6 +1096,21 @@ class TodoList(CallableTool2[Params]):
         if self._runtime.role == "root":
             return list(self._runtime.session.state.archived_todos)
         return self._load_subagent_archived_todos()
+
+    def _max_layers(self) -> int:
+        """Maximum todo tree depth (layers). Default 4.
+
+        Used to cap how deep a tree can be built with todo_write or
+        ``todo_update(parent=...)``: the deepest explicit-parent level is
+        ``max_layers``, plus one todo_update level under it.
+        """
+        try:
+            value = self._runtime.config.loop_control.todo_max_layers
+        except Exception:
+            return 4
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return 4
 
     def _save_root_todos(
         self, items: list[TodoItemState], archived: list[TodoItemState]
@@ -1353,253 +1228,6 @@ class TodoList(CallableTool2[Params]):
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(data, path)
 
-# ── Stack/tree tools: todo_push / todo_pop ──────────────────────────────────────
-# These operate on the same persisted todo tree as todo_write but navigate a
-# ``todo_stack`` breadcrumb (root → current focus parent) instead of replacing
-# the whole list. See plan: todo_write Stack & Tree Structure.
-
-
-class TodoPushParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    title: str = Field(description="Title", min_length=1, max_length=65536)
-    notes: str | None = Field(
-        default=None,
-        description="Notes. MUST write, be comprehensively, detailed.",
-        max_length=65536,
-    )
-
-    @field_validator("title")
-    @classmethod
-    def _validate_title(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("Title cannot be empty or contain only whitespace")
-        return stripped
-
-
-class todo_push(TodoList):
-    name: str = "todo_push"
-    description: str = (
-        "Push a new parent todo onto the current stack scope, making it the focus "
-        "parent. Add sub-todos under it with todo_update(parent=...) and finish it with todo_pop. "
-        "Pushing deeper than the configured max layers errors."
-    )
-    params: type[TodoPushParams] = TodoPushParams
-
-    def __init__(self, runtime: Runtime) -> None:
-        # Subclass todo_write so all persistence/scope helpers are shared, but
-        # bypass TodoList.__init__ (it bakes the TodoList description) and let
-        # CallableTool2.__init__ read this class's own name/description/params
-        # attrs.
-        CallableTool2.__init__(self)
-        self._runtime = runtime
-
-    @override
-    async def __call__(self, params: TodoPushParams) -> ToolReturnValue:
-        title = params.title
-        todos = self._load_todos()
-        stack = self._load_stack()
-        node, depth, healed_stack, warnings = self._resolve_scope(todos)
-
-        # Completely broken stack (non-empty original, nothing resolved): do not
-        # silently fall back to root scope.
-        if stack and node is None:
-            hint = "Use todo_write to read the tree and todo_push to re-enter a parent."
-            return ToolError(
-                message="Todo stack is broken.",
-                brief=hint,
-                output=(
-                    "Error: Todo stack is broken; cannot resolve the current scope."
-                    + _hint_error(hint)
-                ),
-            )
-
-        max_layers = self._max_layers()
-        if depth >= max_layers:
-            hint = "Use todo_update(parent=...) to add sub-todos at this level instead of pushing deeper."
-            breadcrumb = f"Stack: {' > '.join(healed_stack)}" if healed_stack else "Stack: (root)"
-            return ToolError(
-                message=f"Cannot push deeper than {max_layers} layers.",
-                brief=hint,
-                output=(
-                    f"Error: Cannot push deeper than {max_layers} layers "
-                    f"(current depth {depth}).\n{breadcrumb}"
-                    + _hint_error(hint)
-                ),
-            )
-
-        scope = node.children if node is not None else todos
-        if any(t.content == title for t in scope):
-            hint = f'Use todo_update(parent=..., title="{title}") to update the existing item.'
-            return ToolError(
-                message=f'Duplicate todo title "{title}" in this scope.',
-                brief=hint,
-                output=(
-                    f'Error: Duplicate todo title "{title}" in this scope.'
-                    + _hint_error(hint)
-                ),
-            )
-
-        scope.append(Todo(content=title, status="pending", notes=params.notes))
-        save_error = self._save_todos(todos, self._load_archived_todos())
-        if save_error:
-            hint = "Use todo_write to read the tree and retry todo_push."
-            return ToolError(
-                message="Failed to save todos.",
-                brief=hint,
-                output=save_error + _hint_error(hint),
-            )
-        new_stack = [*healed_stack, title]
-        stack_error = self._save_stack(new_stack)
-        if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_push."
-            return ToolError(
-                message="Failed to save todo stack.",
-                brief=hint,
-                output=stack_error + _hint_error(hint),
-            )
-
-        render = self._render_scope(todos, new_stack)
-        output = (
-            render
-            + "\n"
-            + f'Pushed "{title}" (depth {depth + 1}/{max_layers}).'
-            + _hint_next(
-                f'todo_update(parent="{title}", title="<sub>") to add sub-todos under "{title}"; todo_pop to finish it.'
-            )
-        )
-        if warnings:
-            output += "\n" + "\n".join(warnings)
-        return ToolReturnValue(
-            is_error=False,
-            output=output,
-            message=f'Pushed "{title}".',
-            display=[self._build_display_block(todos)],
-        )
-
-
-class TodoPopParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    complete: bool = Field(
-        default=False,
-        description=(
-            "When True, mark the current focus parent and all its sub-todos done "
-            "before popping. Default False: pop succeeds only when everything under "
-            "the focus parent is already done; otherwise it errors."
-        ),
-    )
-
-
-class todo_pop(TodoList):
-    name: str = "todo_pop"
-    description: str = (
-        "Pop the current focus parent and return to the parent scope. "
-        "Errors when the focus parent or any sub-todo is unfinished, unless "
-        "complete=True (marks them all done first)."
-    )
-    params: type[TodoPopParams] = TodoPopParams
-
-    def __init__(self, runtime: Runtime) -> None:
-        # See todo_push.__init__: subclass todo_write for shared helpers, bypass
-        # TodoList.__init__ and use this class's own name/description/params.
-        CallableTool2.__init__(self)
-        self._runtime = runtime
-
-    @override
-    async def __call__(self, params: TodoPopParams) -> ToolReturnValue:
-        _ = params
-        todos = self._load_todos()
-        stack = self._load_stack()
-        if not stack:
-            hint = "No parent to pop — use todo_push to create one, or todo_write to read the tree."
-            return ToolError(
-                message="No parent todo to pop.",
-                brief="Use todo_push to create one, or todo_write to read the tree.",
-                output="Error: No parent todo to pop (stack is empty)." + _hint_error(hint),
-            )
-
-        node, _depth, healed_stack, warnings = self._resolve_scope(todos)
-        if node is None:
-            hint = "Use todo_write to read the tree and todo_push to re-enter a parent."
-            return ToolError(
-                message="Todo stack is broken.",
-                brief=hint,
-                output=(
-                    "Error: Todo stack is broken; cannot resolve the current scope."
-                    + _hint_error(hint)
-                ),
-            )
-
-        popped_title = node.content
-        unfinished = self._count_unfinished_descendants(node)
-        if node.status != "done":
-            unfinished += 1
-
-        # Pure scope-exit guard: popping must not silently complete unfinished work.
-        if unfinished and not params.complete:
-            hint = (
-                f'"{popped_title}" has {unfinished} unfinished item(s). '
-                "Finish them with todo_update, or call todo_pop with complete=True "
-                "to mark them done and pop."
-            )
-            return ToolError(
-                message=f'Cannot pop "{popped_title}": {unfinished} unfinished item(s).',
-                brief="Finish them or pass complete=True.",
-                output=(
-                    f'Error: Cannot pop "{popped_title}" — {unfinished} unfinished item(s).\n'
-                    f"Stack: {' > '.join(healed_stack)}"
-                    + _hint_error(hint)
-                ),
-            )
-
-        self._mark_subtree_done(node)
-        n = self._count_all([node])
-        new_stack = healed_stack[:-1]
-
-        save_error = self._save_todos(todos, self._load_archived_todos())
-        if save_error:
-            hint = "Use todo_write to read the tree and retry todo_pop."
-            return ToolError(
-                message="Failed to save todos.",
-                brief=hint,
-                output=save_error + _hint_error(hint),
-            )
-        stack_error = self._save_stack(new_stack)
-        if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_pop."
-            return ToolError(
-                message="Failed to save todo stack.",
-                brief=hint,
-                output=stack_error + _hint_error(hint),
-            )
-
-        render = self._render_scope(todos, new_stack)
-        if params.complete:
-            output = (
-                render
-                + "\n"
-                + f'Popped "{popped_title}" — {n} sub-todo(s) marked done.'
-            )
-        else:
-            output = render + "\n" + f'Popped "{popped_title}".'
-        if unfinished:
-            output += (
-                f'\nNote: "{popped_title}" had {unfinished} unfinished item(s) — '
-                "all marked done. Use todo_update with force=True or todo_write "
-                "mode='replace' with force=True to reopen if that was a mistake."
-            )
-        output += _hint_next("todo_push to start the next parent, or todo_write to read the tree.")
-        if warnings:
-            output += "\n" + "\n".join(warnings)
-        return ToolReturnValue(
-            is_error=False,
-            output=output,
-            message=f'Popped "{popped_title}".',
-            display=[self._build_display_block(todos)],
-        )
-
 
 
 class TodoUpdateItem(BaseModel):
@@ -1641,6 +1269,14 @@ class TodoUpdateItem(BaseModel):
     force: bool = Field(
         default=False,
         description="Allow regressing a 'done' item back to pending/in_progress, or allow renaming that would collide with a done item.",
+    )
+    complete: bool = Field(
+        default=False,
+        description=(
+            "When True, mark the matched todo and all of its sub-todos done "
+            "(one-call subtree finish; replaces the old todo_pop). "
+            "Cannot be combined with status='pending'/'in_progress'."
+        ),
     )
 
     @field_validator("status", mode="before")
@@ -1720,14 +1356,21 @@ class TodoUpdateParams(BaseModel):
             "Ignored when `updates` is provided."
         ),
     )
+    complete: bool = Field(
+        default=False,
+        description=(
+            "When True, mark the matched todo and all of its sub-todos done. "
+            "Ignored when `updates` is provided."
+        ),
+    )
     updates: list[TodoUpdateItem] | TodoUpdateItem | None = Field(
         default=None,
         validation_alias=AliasChoices("updates", "todos"),
         description=(
             "One or more update operations. Each item has the same shape as a single "
-            "todo_update call (title, status, notes, rename_to, parent, fuzzy, force). "
+            "todo_update call (title, status, notes, rename_to, parent, fuzzy, force, complete). "
             "Use this to batch multiple lightweight edits in one call. When provided, "
-            "top-level title/status/notes/rename_to must not be used."
+            "top-level title/status/notes/rename_to/complete must not be used."
         ),
     )
 
@@ -1787,7 +1430,7 @@ class TodoUpdateParams(BaseModel):
     @model_validator(mode="after")
     def _check_no_mixed_fields(self) -> TodoUpdateParams:
         if self.updates is not None:
-            mixed = {"title", "status", "notes", "rename_to"} & self.model_fields_set
+            mixed = {"title", "status", "notes", "rename_to", "complete"} & self.model_fields_set
             if mixed:
                 raise ValueError(
                     "Cannot mix top-level "
@@ -1801,12 +1444,18 @@ class todo_update(TodoList):
 
     name: str = "todo_update"
     description: str = (
-        "Update one or more existing todos by title, or create children under explicit parents. "
-        "Use this for lightweight edits such as marking items done, setting them in_progress, "
-        "editing notes, renaming, or adding sub-todos via parent=... . "
-        "For a single edit, pass the update fields directly; for multiple edits, pass an "
-        "`updates` (alias `todos`) list. Searches the whole tree unless parent is provided; "
-        "exact match is tried first, then fuzzy matching if enabled."
+        "Create, update, rename, or complete one or more todos by title — no need to "
+        "resend the whole tree. Pass a single edit directly (title=..., status=...), or "
+        "pass updates=[...] (alias todos=[...]) to batch several edits in one call.\n"
+        "- title: the todo to update or create.\n"
+        "- parent: scope the lookup/creation — omit to search the whole tree (update only), "
+        "  \"\" for the root scope, or a parent title to create/update a child under it.\n"
+        "- status: pending/in_progress/done; omit keeps the current status (new items default to pending).\n"
+        "- notes: replace notes (\"\" clears, omit keeps).\n"
+        "- rename_to: rename the matched todo.\n"
+        "- complete: True marks the matched todo and all its sub-todos done (one call finishes a subtree).\n"
+        "- force: allow reopening a done item or renaming over a done item.\n"
+        "- fuzzy: default True — match near-miss titles when the exact title is not found."
     )
     params: type[TodoUpdateParams] = TodoUpdateParams
 
@@ -1824,18 +1473,15 @@ class todo_update(TodoList):
         todos = self._load_todos()
         warnings: list[str] = []
         summaries: list[str] = []
-        renames: list[tuple[str, str]] = []
 
         messages: list[str] = []
         for item in items:
             result = self._apply_one_update(todos, item, warnings)
             if isinstance(result, ToolReturnValue):
                 return result
-            todos, summary, message, rename_pair = result
+            todos, summary, message, _ = result
             summaries.append(summary)
             messages.append(message)
-            if rename_pair is not None:
-                renames.append(rename_pair)
 
             conflicts = self._enforce_single_in_progress(todos)
             if conflicts:
@@ -1851,39 +1497,16 @@ class todo_update(TodoList):
                 output=save_error + _hint_error(hint),
             )
 
-        # Heal the stack if any renamed title is part of the breadcrumb.
-        stack = self._load_stack()
-        updated_stack = stack
-        for old, new in renames:
-            if old in updated_stack:
-                updated_stack = [new if t == old else t for t in updated_stack]
-        stack_error = self._save_stack(updated_stack)
-        if stack_error:
-            hint = "Use todo_write to read the tree and retry todo_update."
-            return ToolError(
-                message="Failed to save todo stack.",
-                brief=hint,
-                output=stack_error + _hint_error(hint),
-            )
-
         output_lines: list[str] = ["Current todo list:"]
-        if updated_stack:
-            output_lines.append(f"Stack: {' > '.join(updated_stack)}")
         tree = self._render_read_tree(todos, max_lines=_MAX_READ_ITEMS)
         if tree:
             output_lines.append(tree)
 
         output = "\n".join(output_lines) + "\n" + "\n".join(summaries)
-        if len(items) == 1 and updated_stack and summaries and summaries[0].startswith('Created "'):
-            next_hint = (
-                "todo_update to edit another item, todo_update(parent=...) to add a child, "
-                "todo_pop to finish the parent, or todo_write to read the tree."
-            )
-        else:
-            next_hint = (
-                "todo_update to edit another item, todo_update(parent=...) to add a child, "
-                "or todo_write to read the tree."
-            )
+        next_hint = (
+            "todo_update to edit another item, todo_update(parent=...) to add a child, "
+            "or todo_write to read the tree."
+        )
         output += _hint_next(next_hint)
         if warnings:
             output += "\n" + "\n".join(warnings)
@@ -1916,8 +1539,8 @@ class todo_update(TodoList):
         # Single top-level update mode.
         if params.title is None:
             hint = (
-            "Provide a title for a single update, or pass updates=[...] for multiple updates."
-        )
+                "Provide a title for a single update, or pass updates=[...] for multiple updates."
+            )
             return [], ToolError(
                 message="No todo title provided.",
                 brief=hint,
@@ -1931,6 +1554,7 @@ class todo_update(TodoList):
             parent=params.parent,
             fuzzy=params.fuzzy,
             force=params.force,
+            complete=params.complete,
         )
         return [single], None
 
@@ -1951,7 +1575,10 @@ class todo_update(TodoList):
 
         if parent_raw is None:
             if not todos:
-                hint = "Use todo_push or todo_write to create todos first."
+                hint = (
+                    'Use todo_update(parent="", title="...") to create a root todo, '
+                    "or todo_write to set the whole list."
+                )
                 return ToolError(
                     message="No todos to update.",
                     brief=hint,
@@ -2015,58 +1642,33 @@ class todo_update(TodoList):
         else:
             parent_path = self._find_path(todos, parent_title)
             if parent_path is None:
-                stack = self._load_stack()
-                # Auto-heal when the missing parent is the current stack top.
-                if stack and stack[-1] == parent_title:
-                    _node, _depth, healed_stack, heal_warnings = self._resolve_scope(todos)
-                    warnings.extend(heal_warnings)
-                    if healed_stack != stack:
-                        stack_error = self._save_stack(healed_stack)
-                        if stack_error:
-                            hint = "Use todo_write to read the tree and retry todo_update."
-                            return ToolError(
-                                message="Failed to save todo stack.",
-                                brief=hint,
-                                output=stack_error + _hint_error(hint),
-                            )
-                    if healed_stack:
-                        parent_title = healed_stack[-1]
-                        parent_path = self._find_path(todos, parent_title)
-                        assert parent_path is not None
-                        parent_node = self._node_at_path(todos, parent_path)
-                        resolved_parent_title = parent_node.content
-                    else:
-                        parent_path = []
-                        parent_node = None
-                        resolved_parent_title = "root"
-                elif not params.fuzzy:
+                if not params.fuzzy:
                     hint = 'Use todo_write to read the tree, or set fuzzy=True to search by similarity.'
                     return ToolError(
                         message=f'Parent todo "{parent_title}" not found.',
                         brief=hint,
                         output=f'Error: No parent todo titled "{parent_title}" found.' + _hint_error(hint),
                     )
-                else:
-                    nearest = self._find_nearest_titles(
-                        [parent_title],
-                        self._collect_titles(todos),
-                        top_k=1,
-                        score_cutoff=TodoList._FUZZY_TITLE_CUTOFF,
-                        processor=str.lower,
+                nearest = self._find_nearest_titles(
+                    [parent_title],
+                    self._collect_titles(todos),
+                    top_k=1,
+                    score_cutoff=TodoList._FUZZY_TITLE_CUTOFF,
+                    processor=str.lower,
+                )
+                hits = nearest.get(parent_title, [])
+                if not hits:
+                    hint = "Use todo_write to read the tree."
+                    return ToolError(
+                        message=f'No parent todo matching "{parent_title}" found.',
+                        brief=hint,
+                        output=f'Error: No parent todo matching "{parent_title}" found.' + _hint_error(hint),
                     )
-                    hits = nearest.get(parent_title, [])
-                    if not hits:
-                        hint = "Use todo_write to read the tree."
-                        return ToolError(
-                            message=f'No parent todo matching "{parent_title}" found.',
-                            brief=hint,
-                            output=f'Error: No parent todo matching "{parent_title}" found.' + _hint_error(hint),
-                        )
-                    resolved_parent_title = hits[0].choice
-                    parent_path = self._find_path(todos, resolved_parent_title)
-                    warnings.append(f'Fuzzy matched parent "{parent_title}" to "{resolved_parent_title}".')
-                    assert parent_path is not None
-                    parent_node = self._node_at_path(todos, parent_path)
+                resolved_parent_title = hits[0].choice
+                parent_path = self._find_path(todos, resolved_parent_title)
+                warnings.append(f'Fuzzy matched parent "{parent_title}" to "{resolved_parent_title}".')
+                assert parent_path is not None
+                parent_node = self._node_at_path(todos, parent_path)
             else:
                 parent_node = self._node_at_path(todos, parent_path)
                 resolved_parent_title = parent_node.content
@@ -2088,7 +1690,18 @@ class todo_update(TodoList):
                 output=f'Error: "{target_title}" does not exist under "{resolved_parent_title}".' + _hint_error(hint),
             )
 
-        parent_depth = len(parent_path) if parent_path is not None else 0
+        if params.complete:
+            hint = (
+                f'complete=True requires an existing todo; "{target_title}" does not exist '
+                f'under "{resolved_parent_title}". Create it first or use status="done".'
+            )
+            return ToolError(
+                message=f'Cannot complete non-existent todo "{target_title}".',
+                brief=hint,
+                output=f'Error: "{target_title}" does not exist under "{resolved_parent_title}".' + _hint_error(hint),
+            )
+
+        parent_depth = len(parent_path)
         max_layers = self._max_layers()
         if parent_depth > max_layers:
             hint = f"Cannot add children deeper than {max_layers + 1} layers."
@@ -2122,6 +1735,20 @@ class todo_update(TodoList):
     ) -> tuple[list[Todo], str, str, tuple[str, str] | None] | ToolReturnValue:
         old_node = self._node_at_path(todos, path)
         new_status = params.status if params.status is not None else old_node.status
+
+        # complete=True marks the subtree done — it cannot be combined with a
+        # pending/in_progress status (ambiguous intent).
+        if params.complete and params.status in ("pending", "in_progress"):
+            hint = f'Use todo_update "{matched_title}" with status="done" instead of complete=True, or omit status.'
+            return ToolError(
+                message=f'complete=True cannot be combined with status="{params.status}".',
+                brief=hint,
+                output=(
+                    f'Error: complete=True cannot be combined with status="{params.status}" '
+                    f'for "{matched_title}". complete=True always marks everything done.'
+                    + _hint_error(hint)
+                ),
+            )
 
         # Regression guard: done -> pending/in_progress is blocked unless force=True.
         if not params.force and old_node.status == "done" and new_status != "done":
@@ -2177,6 +1804,13 @@ class todo_update(TodoList):
         )
 
         change_parts: list[str] = []
+        if params.complete:
+            # Mark the matched node and every descendant done (in-place on the
+            # fresh copies produced by _update_at_path — safe to mutate).
+            node = self._node_at_path(final_todos, path)
+            self._mark_subtree_done(node)
+            n = self._count_all([node])
+            change_parts.append(f"completed with {n} sub-todo{'s' if n != 1 else ''} marked done")
         if params.status is not None:
             change_parts.append(f"status={new_status}")
         if params.notes is not None:
