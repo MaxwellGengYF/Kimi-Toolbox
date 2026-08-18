@@ -116,3 +116,28 @@ class TestSystemPromptBudget:
         prompt = prompt_func(runtime)
         from kimi_cli.utils.tokens import count_tokens
         assert count_tokens(prompt) <= 4_000
+
+
+class TestSubAgentCoverageReport:
+    """Sub-agents must report coverage so the parent can trust or re-check."""
+
+    def test_trivial_subagent_prompt_requires_coverage_report(self, tmp_path: Path):
+        prompt_func = get_system_prompt(
+            work_dir=tmp_path,
+            agent_role=SystemPromptType.TrivialSubAgent,
+            max_system_prompt_tokens=10_000,
+        )
+        runtime = _make_runtime(tmp_path)
+        prompt = prompt_func(runtime)
+        assert "Report coverage" in prompt
+        assert "sampled/approximated" in prompt
+
+    def test_worker_prompt_has_no_coverage_clause(self, tmp_path: Path):
+        prompt_func = get_system_prompt(
+            work_dir=tmp_path,
+            agent_role=SystemPromptType.Worker,
+            max_system_prompt_tokens=10_000,
+        )
+        runtime = _make_runtime(tmp_path)
+        prompt = prompt_func(runtime)
+        assert "Report coverage" not in prompt

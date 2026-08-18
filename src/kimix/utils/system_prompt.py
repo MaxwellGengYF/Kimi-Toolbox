@@ -75,11 +75,14 @@ Do not implement tasks yourself; only dispatch and summarize the aggregated resu
 _WORKER_OPTIONAL_CLAUSES: dict[str, str] = {
     'YOLO': 'Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.',
     'RETRIEVE': 'Use `retrieve` whenever unsure about past conversation history.',
-    'SUBAGENT': (
-        'Sub-Agent: deliver a self-contained final result — the agent that started you '
-        'sees only your result, not your transcript, tool output, or reasoning.\n'
-        'If any option, output the question and stop.'
-    ),
+ 'SUBAGENT': (
+     'Sub-Agent: deliver a self-contained final result — the agent that started you '
+     'sees only your result, not your transcript, tool output, or reasoning.\n'
+     'If any option, output the question and stop.\n'
+     'Report coverage: name what you completed, what you only sampled/approximated '
+     '(e.g. read partially or grepped instead of reading fully), and anything you '
+     'could not verify, so the parent can trust or re-check your result.'
+ ),
     'TRIVIAL': 'If you need clarification from the parent agent, call the `send_message` tool with your question, then stop.',
 }
 

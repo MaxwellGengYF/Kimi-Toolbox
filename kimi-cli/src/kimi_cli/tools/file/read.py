@@ -206,6 +206,43 @@ def _broadcast_option(value: int | list[int], n: int) -> list[int]:
     return value if isinstance(value, list) else [value] * n
 
 
+def _apply_char_window(
+    result: ToolReturnValue,
+    char_offset: int,
+    max_char: int,
+) -> ToolReturnValue:
+    """Apply the ``char_offset``/``max_char`` window to a read result.
+
+    The line/byte budgets inside ``_render_result`` already surface in
+    ``message`` ("Max N bytes reached", "End of file reached"), but the char
+    window is applied afterwards and would otherwise hide content *silently*
+    while the message claims the whole file was shown. When the window hides
+    any rendered content, append an explicit notice so the agent knows the
+    read was partial and how to continue it.
+    """
+    if not isinstance(result, ToolOk) or not isinstance(result.output, str):
+        return result
+    original = result.output
+    result.output = original[char_offset : char_offset + max_char]
+    total = len(original)
+    end = char_offset + max_char
+    if end < total or char_offset > 0:
+        if char_offset > 0 and end < total:
+            where = f"middle chars {char_offset}..{end} of {total}"
+            hidden = "content before and after is hidden"
+        elif char_offset > 0:
+            where = f"tail chars {char_offset}..{total} of {total}"
+            hidden = "content before is hidden"
+        else:
+            where = f"head chars 0..{end} of {total}"
+            hidden = "content after is hidden"
+        result.message = (result.message or "") + (
+            f" NOTE: output window shows {where} ({hidden}); max_char={max_char}. "
+            "Raise max_char / adjust char_offset to read the rest."
+        )
+    return result
+
+
 def _similar_names(
     parent: Path,
     requested: str,
@@ -726,9 +763,7 @@ class ReadFile(CallableTool2[Params]):
                 )
 
             if isinstance(result, ToolOk):
-                if isinstance(result.output, str):
-                    # char_offset = start position; max_char = MAX chars to RETURN.
-                    result.output = result.output[char_offset : char_offset + max_char]
+                result = _apply_char_window(result, char_offset, max_char)
                 self._session.file_mtime.clean_file(raw_path)
             return result
         except Exception as e:
@@ -787,9 +822,7 @@ class ReadFile(CallableTool2[Params]):
             show_line_numbers=show_line_numbers,
             note=note,
         )
-        if isinstance(result, ToolOk) and isinstance(result.output, str):
-            result.output = result.output[char_offset : char_offset + max_char]
-        return result
+        return _apply_char_window(result, char_offset, max_char)
 
     async def _render_lines(
         self,
