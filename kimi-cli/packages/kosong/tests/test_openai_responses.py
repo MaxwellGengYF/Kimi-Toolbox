@@ -590,3 +590,66 @@ def test_deepseek_backend_detection() -> None:
         is True
     )
     assert OpenAIResponses(model="gpt-5-codex", api_key="k")._is_deepseek_backend() is False
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort request payload: extra_body + include handling
+# ---------------------------------------------------------------------------
+
+
+async def _capture_create_kwargs(provider: OpenAIResponses, **gen_kwargs: Any) -> dict[str, Any]:
+    """Run ``generate`` with a mocked ``responses.create`` and return its kwargs."""
+    provider._stream = False  # return a plain (non-stream) Response from the mock
+    provider = provider.with_generation_kwargs(**gen_kwargs)
+    captured: dict[str, Any] = {}
+
+    async def fake_create(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _empty_stream()
+
+    provider.client.responses.create = fake_create  # type: ignore[method-assign]
+    await kosong.generate(provider, "You are helpful.", [], [Message(role="user", content="hi")])
+    return captured
+
+
+async def _empty_stream() -> Any:
+    """A minimal async event stream: one text delta, no usage."""
+    yield SimpleNamespace(type="response.output_text.delta", delta="ok")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_adds_include_for_standard_backends() -> None:
+    """With reasoning enabled, the request must ask for encrypted reasoning
+    content so the reasoning items can round-trip through history."""
+    provider = _make_provider(stream=False)
+    captured = await _capture_create_kwargs(provider, reasoning_effort="high")
+    assert captured["extra_body"]["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert captured["include"] == ["reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_merges_caller_provided_include() -> None:
+    """A caller-provided ``include`` must be preserved and merged, not
+    overwritten by the auto-added ``reasoning.encrypted_content``."""
+    provider = _make_provider(stream=False).with_generation_kwargs(include=["code_interpreter_call.outputs"])
+    captured: dict[str, Any] = {}
+
+    async def fake_create(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _empty_stream()
+
+    provider.client.responses.create = fake_create  # type: ignore[method-assign]
+    provider = provider.with_generation_kwargs(reasoning_effort="high")
+    await kosong.generate(provider, "You are helpful.", [], [Message(role="user", content="hi")])
+    assert captured["include"] == ["code_interpreter_call.outputs", "reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_does_not_request_encrypted_content_for_deepseek() -> None:
+    """DeepSeek backends do not support ``encrypted_content``; the request must
+    not include it (strictly OpenAI-compatible gateways would 400 on the
+    unknown ``include`` value)."""
+    provider = OpenAIResponses(model="deepseek-v4-flash", api_key="sk-test", stream=False)
+    captured = await _capture_create_kwargs(provider, reasoning_effort="high")
+    assert captured["extra_body"]["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert "include" not in captured

@@ -206,7 +206,15 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
             # values such as "max" can be forwarded to backends that accept them.
             extra_body = generation_kwargs.setdefault("extra_body", {})
             extra_body["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-            generation_kwargs["include"] = ["reasoning.encrypted_content"]
+            # Merge with any caller-provided ``include`` instead of overwriting it.
+            # Backends documented as not supporting ``encrypted_content`` (e.g.
+            # DeepSeek, see ``_is_deepseek_backend``) must not be asked for it:
+            # strictly OpenAI-compatible gateways (per the OpenAI Responses API
+            # standard) may 400 on an ``include`` value they do not implement.
+            if not self._is_deepseek_backend():
+                include = generation_kwargs.setdefault("include", [])
+                if "reasoning.encrypted_content" not in include:
+                    include.append("reasoning.encrypted_content")
 
         create_kwargs: dict[str, Any] = {
             "stream": self._stream,
