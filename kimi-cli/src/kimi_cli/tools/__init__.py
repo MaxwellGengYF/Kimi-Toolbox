@@ -16,6 +16,26 @@ class SkipThisTool(Exception):
     pass
 
 
+def _first_web_extract_url(args: JsonType) -> str | None:
+    """Return the first usable URL from a ``web_extract`` arguments dict.
+
+    Accepts URL strings or dict items with a ``url``/``href`` field (search
+    results forwarded by the model). Returns None when no usable URL is found.
+    """
+    if not isinstance(args, dict) or not isinstance(args.get("urls"), list):
+        return None
+    for item in args["urls"]:
+        if isinstance(item, str):
+            candidate = item.strip()
+            if candidate:
+                return candidate
+        if isinstance(item, dict):
+            candidate = item.get("url") or item.get("href")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    return None
+
+
 def extract_key_argument(
     json_content: str | streamingjson.Lexer,
     tool_name: str,
@@ -71,6 +91,16 @@ def extract_key_argument(
             if not isinstance(curr_args, dict) or not curr_args.get("url"):
                 return None
             key_argument = str(curr_args["url"])
+        case "web_extract":
+            first_url = _first_web_extract_url(curr_args)
+            if first_url is None:
+                if isinstance(json_content, streamingjson.Lexer):
+                    content: list[str] = cast(list[str], json_content.json_content)  # type: ignore[reportUnknownMemberType]
+                    key_argument = "".join(content)
+                else:
+                    key_argument = json_content
+            else:
+                key_argument = first_url
         case _:
             if isinstance(json_content, streamingjson.Lexer):
                 # lexer.json_content is list[str] based on streamingjson source code

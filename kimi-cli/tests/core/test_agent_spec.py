@@ -37,6 +37,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:fetch_url",
+            "kimi_cli.tools.web:WebExtract",
         ]
     )
     subagents = {
@@ -75,6 +76,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:fetch_url",
+            "kimi_cli.tools.web:WebExtract",
         ]
     )
     assert subagent_specs["coder"].exclude_tools == snapshot(
@@ -97,6 +99,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:EditFile",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:fetch_url",
+            "kimi_cli.tools.web:WebExtract",
         ]
     )
     sub_subagents = {
@@ -147,6 +150,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:fetch_url",
+            "kimi_cli.tools.web:WebExtract",
         ]
     )
     assert subagent_specs["explore"].exclude_tools == snapshot(
@@ -171,6 +175,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.file:EditFile",
             'kimi_cli.tools.web:SearchWeb',
             'kimi_cli.tools.web:fetch_url',
+            'kimi_cli.tools.web:WebExtract',
         ]
     )
     sub_subagents = {
@@ -261,6 +266,7 @@ agent:
                 "kimi_cli.tools.file:EditFile",
                 "kimi_cli.tools.web:SearchWeb",
                 "kimi_cli.tools.web:fetch_url",
+                "kimi_cli.tools.web:WebExtract",
             ]
         )
         assert spec.exclude_tools == snapshot(

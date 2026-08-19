@@ -16,6 +16,28 @@ from kosong.tooling import ToolReturnValue
 from kimi_cli.tools.web.fetch import fetch_url, Params
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _bypass_url_safety(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Bypass the SSRF check so the original HTTP/network-path tests run.
+
+    ``fetch._check_url_safety`` imports ``async_is_safe_url`` lazily from
+    ``kimi_cli.tools.web.url_safety`` inside the function, so the patch target
+    is the ``url_safety`` module attribute (patching
+    ``kimi_cli.tools.web.fetch.async_is_safe_url`` would be a no-op). The
+    URLs under test carry no secrets and the sensitive-query-param / secret
+    checks still run; the real SSRF behavior is covered by
+    ``tests/tools/test_url_safety.py`` and ``tests/tools/test_web_extract.py``.
+    """
+
+    async def _safe(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "kimi_cli.tools.web.url_safety.async_is_safe_url", _safe
+    )
+    yield
+
+
 class MockServerFactory(Protocol):
     async def __call__(
         self,

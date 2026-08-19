@@ -44,6 +44,44 @@ class Params(BaseModel):
     )
 
 
+async def _check_url_safety(url: str) -> tuple[str | None, str]:
+    """Return ``(block_message, normalized_url)`` for a user-supplied URL.
+
+    Block messages are returned when the URL carries an embedded secret, a
+    credential-like query parameter, or targets a private/internal network
+    address (SSRF). ``None`` message means the URL is safe to request. The
+    normalized URL is returned for the caller to use as the actual request
+    target. Helpers are imported lazily to keep this module light.
+    """
+    from kimi_cli.tools.web.url_safety import (
+        async_is_safe_url,
+        normalize_url_for_request,
+        sensitive_query_param_name,
+        url_contains_secret,
+    )
+
+    normalized_url = normalize_url_for_request(url)
+    # ``url_contains_secret`` checks the raw URL, the unquoted URL, and the
+    # normalized URL, so percent-encoded secrets are caught too.
+    if url_contains_secret(url):
+        return (
+            "Blocked: URL contains what appears to be an API key or token. "
+            "Secrets must not be sent in URLs.",
+            normalized_url,
+        )
+    sensitive_key = sensitive_query_param_name(normalized_url)
+    if sensitive_key:
+        return (
+            "Blocked: URL contains a credential-like query parameter "
+            f"({sensitive_key}). Remove the sensitive query parameter or use a "
+            "local browser session when this access is explicitly required.",
+            normalized_url,
+        )
+    if not await async_is_safe_url(normalized_url):
+        return "Blocked: URL targets a private or internal network address", normalized_url
+    return None, normalized_url
+
+
 class fetch_url(CallableTool2[Params]):
     name: str = "fetch_url"
     description: str = "Fetch a URL and extract main text."
@@ -71,6 +109,9 @@ class fetch_url(CallableTool2[Params]):
         from kimi_cli.utils.aiohttp import new_client_session
 
         builder = ToolResultBuilder(max_line_length=None)
+        block_msg, normalized_url = await _check_url_safety(params.url)
+        if block_msg:
+            return builder.error(block_msg, brief="Blocked: unsafe URL")
         try:
             # Build request headers
             req_headers = {
@@ -95,7 +136,7 @@ class fetch_url(CallableTool2[Params]):
             async with new_client_session(timeout=fetch_timeout) as session:
                 if params.method == "POST":
                     req = session.post(
-                        params.url,
+                        normalized_url,
                         headers=req_headers,
                         data=params.body,
                         allow_redirects=params.follow_redirects,
@@ -103,7 +144,7 @@ class fetch_url(CallableTool2[Params]):
                     )
                 else:
                     req = session.get(
-                        params.url,
+                        normalized_url,
                         headers=req_headers,
                         allow_redirects=params.follow_redirects,
                         max_redirects=max_redirects,
@@ -114,12 +155,13 @@ class fetch_url(CallableTool2[Params]):
                         logger.warning(
                             "fetch_url HTTP error: status={status}, url={url}",
                             status=response.status,
-                            url=params.url,
+                            url=normalized_url,
                         )
                         return builder.error(
                             (
                                 f"Failed to fetch URL. Status: {response.status}. "
-                                f"This may indicate the page is not accessible or the server is down."
+                                "This may indicate the page is not accessible or "
+                                "the server is down."
                             ),
                             brief=f"HTTP {response.status} error",
                         )
@@ -131,13 +173,17 @@ class fetch_url(CallableTool2[Params]):
                         builder.write(resp_text)
                         return builder.ok("The returned content is the full content of the page.")
         except TimeoutError:
-            logger.warning("fetch_url timed out: url={url}", url=params.url)
+            logger.warning("fetch_url timed out: url={url}", url=normalized_url)
             return builder.error(
                 "Failed to fetch URL: request timed out. The server may be slow or unreachable.",
                 brief="Request timed out",
             )
         except aiohttp.ClientError as e:
-            logger.warning("fetch_url network error: {error}, url={url}", error=e, url=params.url)
+            logger.warning(
+                "fetch_url network error: {error}, url={url}",
+                error=e,
+                url=normalized_url,
+            )
             return builder.error(
                 (
                     f"Failed to fetch URL due to network error: {e}. "
@@ -181,6 +227,9 @@ class fetch_url(CallableTool2[Params]):
         assert tool_call is not None, "Tool call is expected to be set"
 
         builder = ToolResultBuilder(max_line_length=None)
+        block_msg, normalized_url = await _check_url_safety(params.url)
+        if block_msg:
+            return builder.error(block_msg, brief="Blocked: unsafe URL")
         api_key = self._runtime.oauth.resolve_api_key(
             self._service_config.api_key, self._service_config.oauth
         )
@@ -208,14 +257,14 @@ class fetch_url(CallableTool2[Params]):
                 session.post(
                     self._service_config.base_url,
                     headers=headers,
-                    json={"url": params.url},
+                    json={"url": normalized_url},
                 ) as response,
             ):
                 if response.status != 200:
                     logger.warning(
                         "fetch_url service HTTP error: status={status}, url={url}",
                         status=response.status,
-                        url=params.url,
+                        url=normalized_url,
                     )
                     return builder.error(
                         f"Failed to fetch URL via service. Status: {response.status}.",
@@ -228,14 +277,14 @@ class fetch_url(CallableTool2[Params]):
                     "The returned content is the main content extracted from the page."
                 )
         except TimeoutError:
-            logger.warning("fetch_url service timed out: url={url}", url=params.url)
+            logger.warning("fetch_url service timed out: url={url}", url=normalized_url)
             return builder.error(
                 "Failed to fetch URL via service: request timed out.",
                 brief="Service request timed out",
             )
         except aiohttp.ClientError as e:
             logger.warning(
-                "fetch_url service network error: {error}, url={url}", error=e, url=params.url
+                "fetch_url service network error: {error}, url={url}", error=e, url=normalized_url
             )
             return builder.error(
                 (

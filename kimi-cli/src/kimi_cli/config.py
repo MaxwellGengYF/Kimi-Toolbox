@@ -636,6 +636,20 @@ class FetchConfig(BaseModel):
         return v.get_secret_value()
 
 
+class WebConfig(BaseModel):
+    """Web tools (search/extract) configuration."""
+
+    backend: str | None = Field(default=None, description="Default web backend/provider name")
+    search_backend: str | None = Field(default=None, description="Web search provider name")
+    extract_backend: str | None = Field(default=None, description="Web extract provider name")
+    extract_char_limit: int | None = Field(
+        default=None,
+        ge=2000,
+        le=500_000,
+        description="Per-page char budget for web_extract (default 15000)",
+    )
+
+
 class Services(BaseModel):
     """Services configuration."""
 
@@ -707,6 +721,7 @@ class Config(BaseModel):
         default_factory=NotificationConfig, description="Notification configuration"
     )
     services: Services = Field(default_factory=Services, description="Services configuration")
+    web: WebConfig = Field(default_factory=WebConfig, description="Web tools configuration")
     mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP configuration")
     hooks: list[HookDef] = Field(default_factory=list, description="Hook definitions")  # pyright: ignore[reportUnknownVariableType]
     merge_all_available_skills: bool = Field(

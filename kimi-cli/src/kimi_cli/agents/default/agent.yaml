@@ -18,6 +18,7 @@ agent:
     - "kimi_cli.tools.file:EditFile"
     - "kimi_cli.tools.web:SearchWeb"
     - "kimi_cli.tools.web:fetch_url"
+    - "kimi_cli.tools.web:WebExtract"
   subagents:
     coder:
       path: ./coder.yaml
