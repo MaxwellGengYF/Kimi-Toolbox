@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -43,6 +44,15 @@ from kimi_cli.tools.web.fetch import fetch_url
 from kimi_cli.tools.web.search import SearchWeb
 from kimi_cli.utils.environment import Environment
 from kimi_cli.wire.file import WireFile
+
+
+def pytest_configure(config: Any) -> None:
+    """Register custom markers used across the kimi-cli test suite."""
+    config.addinivalue_line(
+        "markers",
+        "benchmark: performance smoke tests for the FTS5 adoption plan "
+        "(skip by default with '-m \"not benchmark\"')",
+    )
 
 
 @pytest.fixture

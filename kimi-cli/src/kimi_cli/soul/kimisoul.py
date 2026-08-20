@@ -292,11 +292,18 @@ class KimiSoul:
         from kimi_cli.soul.history_index import HistoryIndex
         from kimi_cli.tools.context_prune import context_prune
 
-        history_index_path = (
+        history_db_path = agent.runtime.session.dir / "history.db"
+        legacy_json_path = (
             agent.runtime.session.dir / "history_index" / f"{agent.runtime.session.id}.json"
         )
-        self._history_index = HistoryIndex(persist_path=history_index_path)
+        self._history_index = HistoryIndex(
+            db_path=history_db_path,
+            legacy_json_path=legacy_json_path,
+        )
         self._history_index.load()
+        # Expose the index to the Session so delete/rename/copy can close the
+        # apsw handle before moving/deleting the session directory on Windows.
+        agent.runtime.session._history_index = self._history_index
 
         # Wire context appends into the history indexer
         def _on_append(msgs: Sequence[Message]) -> None:
@@ -2248,6 +2255,13 @@ class KimiSoul:
             self._history_index.save()
         except Exception:
             logger.exception("Failed to save history index")
+
+        # Close the FTS5-backed history index (apsw connection) so the
+        # session directory can be moved/deleted on Windows without a lock.
+        try:
+            self._history_index.close()
+        except Exception:
+            logger.exception("Failed to close history index")
 
         # Break the soul <-> context reference cycle so the object can be
         # reclaimed promptly without waiting for cyclic GC.

@@ -11,6 +11,15 @@ import pytest
 from kaos.path import KaosPath
 
 
+def pytest_configure(config: Any) -> None:
+    """Register custom markers used across the test suite."""
+    config.addinivalue_line(
+        "markers",
+        "benchmark: performance smoke tests for the FTS5 adoption plan "
+        "(skip by default with '-m \"not benchmark\"')",
+    )
+
+
 # ── Temporary file fixtures ──────────────────────────────────────────────
 
 

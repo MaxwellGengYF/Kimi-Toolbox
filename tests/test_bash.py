@@ -864,6 +864,118 @@ class TestBashFixCommandPositions:
         assert len(result.replacements) >= 2
 
 
+class TestBashFixShellWrappers:
+    """Redundant leading ``bash``/``sh`` invocations are unwrapped for Git Bash.
+
+    Agents commonly emit ``bash cd /c/dev/x && ...`` or ``bash -c '...'`` as a
+    habit; the Bash tool already runs the whole string via bash, so keeping the
+    wrapper makes bash try to open ``cd`` (or the inline script) as a script
+    file and fail on Windows.  The scanner removes the redundant wrapper and,
+    for the ``-c`` form, scans the inline script so fallback commands and
+    Windows paths inside it are fixed too.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash cd /c/dev/x && echo ok",
+            "sh cd /c/dev/x && echo ok",
+            "bash cd /c/dev/x && ls",
+            "bash grep -rn kimix src tests --include=*.h | head -40",
+            "bash cd /c/dev/hermes-native && grep -rn \"kimix\" src tests "
+            "--include=*.h --include=*.cpp --include=*.lua | grep -v \"src/ext\" "
+            "| head -40",
+        ],
+    )
+    def test_redundant_shell_prefix_is_unwrapped(self, command: str) -> None:
+        result = _fix_for_windows(command)
+        assert not result.command.startswith("bash ")
+        assert not result.command.startswith("sh ")
+        assert result.command.split("\n")[-1] == command.split(" ", 1)[1]
+        assert result.shell_wrappers == (command.split(" ", 1)[0],)
+        assert result.changed
+        assert "Removed redundant shell wrapper" in result.warning
+
+    @pytest.mark.parametrize(
+        ("source", "expected_tail", "shell"),
+        [
+            ("bash -c 'rev'", "rev", "bash -c"),
+            ("bash -c \"rev\"", "rev", "bash -c"),
+            ("bash -lc 'rev'", "rev", "bash -c"),
+            ("bash -cl 'rev'", "rev", "bash -c"),
+            ("bash -l -c 'rev'", "rev", "bash -c"),
+            ("sh -c 'rev'", "rev", "sh -c"),
+            ("dash -c 'rev'", "rev", "dash -c"),
+            ("bash -c 'rev' && echo done", "rev && echo done", "bash -c"),
+            ("echo $(bash -c 'rev')", "echo $(rev)", "bash -c"),
+            ("bash -c 'echo $HOME'", "echo $HOME", "bash -c"),
+        ],
+    )
+    def test_inline_script_replaces_dash_c_wrapper(
+        self, source: str, expected_tail: str, shell: str
+    ) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.split("\n")[-1] == expected_tail
+        assert result.shell_wrappers == (shell,)
+        assert result.replacements == ("rev",) or "rev" not in source
+
+    def test_inline_script_fixes_inner_windows_path_and_fallback(self) -> None:
+        result = _fix_for_windows(r"bash -c 'cd C:\x && rev'")
+        assert result.command.split("\n")[-1] == r"cd C:/x && rev"
+        assert result.replacements == ("rev",)
+        assert result.path_changes == (r"C:\x",)
+        assert result.shell_wrappers == ("bash -c",)
+
+    def test_redundant_prefix_keeps_inner_fallback_rewrite(self) -> None:
+        result = _fix_for_windows("bash cd /c/dev/x && rev")
+        assert result.command.split("\n")[-1] == "cd /c/dev/x && rev"
+        assert result.replacements == ("rev",)
+        assert result.shell_wrappers == ("bash",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "'bash' cd /c/dev/x && echo ok",
+            '"bash" cd /c/dev/x && echo ok',
+            r"\bash cd /c/dev/x && echo ok",
+        ],
+    )
+    def test_quoted_shell_words_are_unwrapped(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.command.split("\n")[-1] == "cd /c/dev/x && echo ok"
+        assert result.shell_wrappers == ("bash",)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash script.sh",
+            "bash ./script.sh",
+            "bash ../tools/run",
+            "bash scripts/deploy.sh",
+            "sh build.sh --release",
+            "bash -c 'echo hi' arg1",
+            'bash -e -c "rev"',
+            'bash -ec "rev"',
+            'bash -x "rev"',
+            "bash -s",
+            "bash --",
+            "bash",
+            "echo bash",
+            "ls sh",
+            "bash -c",
+        ],
+    )
+    def test_legitimate_shell_invocations_are_preserved(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin"])
+    def test_non_windows_keeps_shell_wrapper(self, platform: str) -> None:
+        command = "bash cd /c/dev/x && echo ok"
+        result = _fix_for_platform(command, platform)
+        assert result == BashFix(command)
+        assert not result.changed
+
+
 class TestBashFixFalsePositives:
     @pytest.mark.parametrize(
         "command",

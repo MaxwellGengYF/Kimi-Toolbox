@@ -149,6 +149,15 @@ class Session:
                     close_sync()
                 except Exception:
                     pass
+            # Close the FTS5 history index (apsw connection) so history.db is
+            # not locked during the synchronous session-dir removal.
+            history_index = getattr(soul, "_history_index", None)
+            close_index = getattr(history_index, "close", None)
+            if close_index is not None:
+                try:
+                    close_index()
+                except Exception:
+                    pass
         try:
             cli.session.delete_sync()
         except Exception:

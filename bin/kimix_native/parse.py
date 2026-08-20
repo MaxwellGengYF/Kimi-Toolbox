@@ -13,7 +13,8 @@ Public API (mirrors the reference consumers):
       reference (kind strings "line"/"block"/"doc").
   - comment_spans(lang, data: bytes) -> list[(start, end, kind)]
       low-level span access (native kernel; kind int 0/1/2).
-  - fix_bash_command(cmd) -> BashFix{command, replacements, path_changes}
+  - fix_bash_command(cmd) -> BashFix{command, replacements, path_changes,
+      shell_wrappers}
   - _process_unquoted(cmd) -> str       (bash_tool._process_unquoted)
   - fix_pwsh_command(cmd) -> PwshFix | None
   - pwsh_transform(code) -> (str, warnings)
@@ -58,6 +59,19 @@ _POST_KERNEL_FALLBACKS = frozenset({
 _POST_KERNEL_RE = re.compile(
     r"(?:^|[\s;|&(){}!\n])"
     r"(?:" + "|".join(map(re.escape, _POST_KERNEL_FALLBACKS)) + r")"
+    r"(?=[\s;|&(){}<>\n]|$)"
+)
+
+# Redundant shell-wrapper repairs (``bash cd ...`` unwrapping and ``bash -c
+# '...'`` inline-script scanning) were added after the compiled PARSE kernel
+# was built.  The kernel treats ``bash``/``sh`` as ordinary command words, so
+# any command that invokes a shell at a command boundary is routed to the
+# pure-Python reference (``_shell_compat`` mirrors ``bash_fix.py``) to keep
+# behaviour bit-identical.  Matching is deliberately broad (a command-boundary
+# word plus optional quotes) — routing ``echo bash`` to the reference is a
+# harmless perf cost, never a behaviour change.
+_SHELL_WRAPPER_RE = re.compile(
+    r"(?:^|[\s;|&(){}!\n])['\"]?(?:bash|sh|dash|ash)['\"]?"
     r"(?=[\s;|&(){}<>\n]|$)"
 )
 
@@ -444,6 +458,10 @@ def fix_bash_command(cmd: str) -> BashFix:
     # newer aliases through the pure-Python reference so behaviour stays
     # bit-identical with ``bash_fix.py`` until the kernel is rebuilt.
     if _POST_KERNEL_RE.search(cmd):
+        return _shell.fix_bash_command(cmd)
+    # Same for the shell-wrapper repairs (redundant ``bash``/``sh`` prefix and
+    # ``bash -c`` inline scripts), which the compiled kernel predates.
+    if _SHELL_WRAPPER_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)

@@ -572,3 +572,178 @@ class TestContextDB:
         await conn.close()
         assert row is not None
         assert row[0] == "idx_messages_created_at"
+
+
+class TestContextDBFts:
+    """Phase B: content_text column + messages_fts full-text search."""
+
+    async def test_content_text_populated_on_append(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "Hello world"}]),
+            Message(role="assistant", content=[{"type": "text", "text": "Hi there!"}]),
+        ])
+        import apsw
+
+        conn = apsw.Connection(str(db.db_path))
+        cursor = conn.execute("SELECT role, content_text FROM messages ORDER BY rowid")
+        rows = list(cursor)
+        conn.close()
+        assert rows == [("user", "Hello world"), ("assistant", "Hi there!")]
+
+    async def test_content_text_populated_on_jsonl_import(self, db: ContextDB) -> None:
+        await db.import_jsonl_line({"role": "user", "content": [{"type": "text", "text": "Migrated msg"}]})
+        # import_jsonl_line relies on the caller's transaction; commit so a
+        # separate reader connection can observe the row.
+        conn = await db._ensure_open()
+        await conn.commit()
+        import apsw
+
+        conn = apsw.Connection(str(db.db_path))
+        row = conn.execute("SELECT content_text FROM messages").fetchone()
+        conn.close()
+        assert row[0] == "Migrated msg"
+
+    async def test_search_messages_basic(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "How do I compile Python?"}]),
+            Message(role="assistant", content=[{"type": "text", "text": "Use pyinstaller or cx_Freeze."}]),
+        ])
+        results = await db.search_messages("python", limit=5)
+        assert len(results) == 1
+        assert results[0]["role"] == "user"
+        assert "snippet" in results[0]
+        assert "score" in results[0]
+        assert results[0]["score"] > 0
+
+    async def test_search_messages_role_filter(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "user asks about sqlite"}]),
+            Message(role="assistant", content=[{"type": "text", "text": "assistant answers about sqlite"}]),
+        ])
+        results = await db.search_messages("sqlite", role="assistant", limit=5)
+        assert len(results) == 1
+        assert results[0]["role"] == "assistant"
+
+    async def test_search_messages_sort(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "first sqlite doc"}]),
+            Message(role="user", content=[{"type": "text", "text": "second sqlite doc"}]),
+        ])
+        newest = await db.search_messages("sqlite", sort="newest", limit=5)
+        oldest = await db.search_messages("sqlite", sort="oldest", limit=5)
+        assert newest[0]["rowid"] == 2
+        assert oldest[0]["rowid"] == 1
+
+    async def test_search_messages_cjk(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "关于Python安装和配置"}]),
+            Message(role="assistant", content=[{"type": "text", "text": "日本語の検索テストです"}]),
+        ])
+        assert len(await db.search_messages("日本語", limit=5)) >= 1
+        assert len(await db.search_messages("配置", limit=5)) >= 1
+        # lone single CJK char → LIKE fallback
+        assert len(await db.search_messages("日", limit=5)) >= 1
+
+    async def test_search_messages_empty_query(self, db: ContextDB) -> None:
+        await db.append_messages([Message(role="user", content=[{"type": "text", "text": "hello"}])])
+        assert await db.search_messages("") == []
+        assert await db.search_messages("   ") == []
+
+    async def test_fts_stays_in_sync_after_append_and_revert(self, db: ContextDB) -> None:
+        import apsw
+
+        def fts_counts() -> tuple[int, int]:
+            conn = apsw.Connection(str(db.db_path))
+            n = conn.execute("SELECT COUNT(*) FROM messages_fts_docsize").fetchone()[0]
+            m = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            conn.close()
+            return n, m
+
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "one"}]),
+            Message(role="user", content=[{"type": "text", "text": "two"}]),
+        ])
+        assert fts_counts() == (2, 2)
+        await db.create_checkpoint(0)
+        await db.append_messages([Message(role="user", content=[{"type": "text", "text": "three"}] )])
+        assert fts_counts() == (3, 3)
+        await db.revert_to_checkpoint(0)
+        assert fts_counts() == (2, 2)
+        assert len(await db.search_messages("three", limit=5)) == 0
+        assert len(await db.search_messages("one", limit=5)) == 1
+
+    async def test_backfill_migration_from_pre_fts_db(self, tmp_path: Path) -> None:
+        """A DB created with the old schema (no content_text / FTS) is upgraded
+        on initialize(): content_text is backfilled and search works."""
+        db_path = tmp_path / "legacy.db"
+        import apsw
+
+        conn = apsw.Connection(str(db_path))
+        conn.execute(
+            "CREATE TABLE messages (rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "role TEXT NOT NULL, content TEXT NOT NULL, "
+            "created_at REAL NOT NULL DEFAULT (unixepoch()))"
+        )
+        conn.execute("CREATE TABLE system_prompt (id INTEGER PRIMARY KEY CHECK (id = 1), content TEXT NOT NULL, updated_at REAL NOT NULL DEFAULT (unixepoch()))")
+        conn.execute("CREATE TABLE checkpoints (id INTEGER NOT NULL, message_rowid INTEGER, created_at REAL NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (id))")
+        conn.execute("CREATE TABLE usage_snapshots (rowid INTEGER PRIMARY KEY AUTOINCREMENT, token_count INTEGER NOT NULL, created_at REAL NOT NULL DEFAULT (unixepoch()))")
+        import orjson
+
+        payload = orjson.dumps({"role": "user", "content": [{"type": "text", "text": "Legacy content about sqlite"}]}).decode()
+        conn.execute("INSERT INTO messages (role, content) VALUES ('user', ?)", (payload,))
+        conn.execute("INSERT INTO messages (role, content) VALUES ('assistant', ?)", (orjson.dumps({"role": "assistant", "content": [{"type": "text", "text": "old answer"}]}).decode(),))
+        conn.close()
+
+        db = ContextDB(db_path)
+        await db.initialize()
+        try:
+            import apsw as _apsw
+            c = _apsw.Connection(str(db_path))
+            rows = list(c.execute("SELECT content_text FROM messages ORDER BY rowid"))
+            c.close()
+            assert rows[0][0] == "Legacy content about sqlite"
+            results = await db.search_messages("sqlite", limit=5)
+            assert len(results) == 1
+            assert results[0]["content_text"] == "Legacy content about sqlite"
+        finally:
+            await db.close()
+
+
+class TestContextDBPhaseC:
+    """Phase C Hermes parity: stale breadcrumbs, rebuild status, rebuild_fts."""
+
+    async def test_fts_rebuild_status_none_when_clean(self, db: ContextDB) -> None:
+        await db.append_messages([Message(role="user", content=[{"type": "text", "text": "hello"}])])
+        assert await db.fts_rebuild_status() is None
+
+    async def test_rebuild_fts_recovers_corrupt_index(self, db: ContextDB) -> None:
+        await db.append_messages([
+            Message(role="user", content=[{"type": "text", "text": "sqlite full text"}]),
+            Message(role="assistant", content=[{"type": "text", "text": "关于Python配置"}]),
+        ])
+        conn = await db._ensure_open()
+        await conn.execute("DROP TABLE messages_fts")
+        await conn.commit()
+
+        # Corrupt index → LIKE fallback + stale marker
+        results = await db.search_messages("sqlite", limit=5)
+        assert len(results) == 1
+        assert await db._get_meta(conn, "fts_stale") == "1"
+
+        # Stale marker makes subsequent searches skip FTS entirely
+        await db.rebuild_fts()
+        assert await db._get_meta(conn, "fts_stale") is None
+        results = await db.search_messages("sqlite", limit=5)
+        assert len(results) == 1
+        results = await db.search_messages("配置", limit=5)
+        assert len(results) == 1
+
+    async def test_rebuild_fts_fresh_db(self, db: ContextDB) -> None:
+        """rebuild_fts on a healthy DB is idempotent and keeps FTS in sync."""
+        await db.append_messages([Message(role="user", content=[{"type": "text", "text": "idempotent sqlite"}] )])
+        await db.rebuild_fts()
+        results = await db.search_messages("sqlite", limit=5)
+        assert len(results) == 1
+        await db.append_messages([Message(role="user", content=[{"type": "text", "text": "another sqlite doc"}] )])
+        results = await db.search_messages("sqlite", limit=5)
+        assert len(results) == 2

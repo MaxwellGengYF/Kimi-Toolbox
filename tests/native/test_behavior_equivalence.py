@@ -231,6 +231,12 @@ BASH_FIX_CASES = [
     "python3 -m pip install x",
     "printf '%s\\n' 'a b'",
     "x=$(rev <<< 'hello')",
+    "bash cd /c/dev/x && echo ok",
+    "bash -c 'rev'",
+    r"bash -c 'cd C:\x && rev'",
+    "sh -c 'rev'",
+    "'bash' cd /c/dev/x && echo ok",
+    "bash script.sh",
 ]
 
 

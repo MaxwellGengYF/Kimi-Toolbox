@@ -407,6 +407,51 @@ class SessionManager:
         entry.sdk_session = restored
         return restored
 
+    async def search_messages(
+        self,
+        session_id: str,
+        query: str,
+        *,
+        role: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        sort: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """FTS5 full-text search over a persisted session's ``context.db``.
+
+        Returns the ``ContextDB.search_messages`` result shape
+        (``{rowid, role, content, content_text, created_at, snippet, score}``)
+        or ``[]`` when the session is unknown / unsearchable.
+        """
+        entry = self._sessions.get(session_id)
+        if entry is None or not entry.work_dir:
+            return []
+        try:
+            from kimi_cli.session import Session as CliSession
+            from kimi_cli.soul.context_db import ContextDB
+
+            work_dir = KaosPath.unsafe_from_local_path(Path(entry.work_dir))
+            disk_session = await CliSession.find(work_dir, session_id)
+            if disk_session is None:
+                return []
+            db = ContextDB(disk_session.context_db_file)
+            try:
+                await db.initialize()
+                return await db.search_messages(
+                    query,
+                    role=role,
+                    limit=limit,
+                    offset=offset,
+                    sort=sort,
+                )
+            finally:
+                await db.close()
+        except Exception:
+            logger.exception(
+                "Failed to search session {session_id} messages", session_id=session_id
+            )
+            return []
+
     def _load_context_messages(self, session_id: str, context_file: Path) -> List[MessageWithParts]:
         messages: List[MessageWithParts] = []
         created = self._mtime_ms(context_file)

@@ -520,6 +520,21 @@ _LIST_KEYWORDS = frozenset({"for", "select", "case"})
 _COMMAND_WRAPPERS = frozenset(
     {"command", "coproc", "env", "exec", "nohup", "sudo", "time"}
 )
+
+# Shell executables that agents frequently put in front of a command the Bash
+# tool is already going to run (``bash cd /c/dev/x && ...``).  Git Bash can
+# stand in for these POSIX-family shells, so a redundant leading invocation is
+# unwrapped instead of letting bash try to open ``cd`` as a script file.  Only
+# shells whose syntax is a subset of bash are listed; ``zsh``/``ksh``/``csh``
+# scripts may use incompatible syntax and are deliberately left untouched.
+_SHELL_WRAPPERS = frozenset({"bash", "sh", "dash", "ash"})
+
+# Short-option clusters of the shell wrappers that take the next argument as
+# an inline command string.  ``bash -c '...'`` is the canonical form;
+# ``-lc``/``-cl`` add the (harmless here) login flag.  Clusters such as
+# ``-ec``/``-ce``/``-xc`` that change errexit/xtrace semantics are left for
+# bash to handle so unwrapping cannot alter the script's meaning.
+_SHELL_C_OPTIONS = re.compile(r"^-c$|^-lc$|^-cl$")
 _WRAPPER_OPTIONS_WITH_VALUE = {
     "env": frozenset(
         {
@@ -619,17 +634,25 @@ class BashFix:
     ``replacements`` records each original command name in source order and
     ``path_changes`` each original argument or command word whose
     Windows-style backslashes (or cmd.exe ``/d`` flag) were rewritten for Git
-    Bash.  Empty tuples mean the command was returned byte-for-byte unchanged.
+    Bash.  ``shell_wrappers`` records each redundant ``bash``/``sh``
+    invocation that was unwrapped (``bash <cmd> ...`` or ``bash -c <script>``)
+    so the command runs directly in the Bash tool.  Empty tuples mean the
+    command was returned byte-for-byte unchanged.
     """
 
     command: str
     replacements: tuple[str, ...] = ()
     path_changes: tuple[str, ...] = ()
+    shell_wrappers: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
         """Return whether any compatibility replacement was made."""
-        return bool(self.replacements) or bool(self.path_changes)
+        return (
+            bool(self.replacements)
+            or bool(self.path_changes)
+            or bool(self.shell_wrappers)
+        )
 
     @property
     def warning(self) -> str:
@@ -645,6 +668,11 @@ class BashFix:
             parts.append(
                 "Rewrote Windows path(s) for Git Bash (backslashes to forward "
                 f"slashes): {words}."
+            )
+        if self.shell_wrappers:
+            names = ", ".join(f"`{name}`" for name in self.shell_wrappers)
+            parts.append(
+                f"Removed redundant shell wrapper(s): {names}."
             )
         return " ".join(parts)
 
@@ -667,7 +695,7 @@ class _BashHereDoc:
 class _BashFixScanner:
     """Conservative scanner for Bash executable command positions."""
 
-    __slots__ = ("s", "n", "edits", "names", "path_notes", "heredoc_events", "nest_depth")
+    __slots__ = ("s", "n", "edits", "names", "path_notes", "shell_notes", "heredoc_events", "nest_depth")
 
     def __init__(self, command: str) -> None:
         self.s = command
@@ -675,6 +703,7 @@ class _BashFixScanner:
         self.edits: list[tuple[int, int, str]] = []
         self.names: list[str] = []
         self.path_notes: list[str] = []
+        self.shell_notes: list[str] = []
         self.heredoc_events: list[tuple[int, int]] = []
         self.nest_depth = 0
 
@@ -685,33 +714,41 @@ class _BashFixScanner:
             # Malformed or adversarial nesting must never make the Bash tool
             # fail before Bash itself can report the syntax error.
             return BashFix(self.s)
-        if not self.names and not self.edits:
+        if not self.names and not self.edits and not self.shell_notes:
             return BashFix(self.s)
         definitions = "\n".join(
             _FALLBACKS[name] for name in dict.fromkeys(self.names)
         )
-        if self.edits:
-            pieces: list[str] = []
-            previous = 0
-            for start, end, replacement in sorted(self.edits):
-                pieces.extend((self.s[previous:start], replacement))
-                previous = end
-            pieces.append(self.s[previous:])
-            source = "".join(pieces)
-        else:
-            source = self.s
+        source = self._build_source()
         source = _fix_heredoc_trailing_operators(source)
         prefix = definitions + "\n" if definitions else ""
-        return BashFix(prefix + source, tuple(self.names), tuple(self.path_notes))
+        return BashFix(
+            prefix + source,
+            tuple(self.names),
+            tuple(self.path_notes),
+            tuple(self.shell_notes),
+        )
+
+    def _build_source(self) -> str:
+        """Return the source with all recorded edits applied."""
+        if not self.edits:
+            return self.s
+        pieces: list[str] = []
+        previous = 0
+        for start, end, replacement in sorted(self.edits):
+            pieces.extend((self.s[previous:start], replacement))
+            previous = end
+        pieces.append(self.s[previous:])
+        return "".join(pieces)
 
     @staticmethod
-    def _literal_command_name(raw: str) -> str | None:
-        """Return the command name produced solely by Bash quote removal.
+    def _literal_word_value(raw: str) -> str | None:
+        """Return the word value produced solely by Bash quote removal.
 
-        Bash permits literal command words such as ``'rev'``, ``\rev`` and
-        ``r\"\"ev``.  Only words whose value can be determined without any
-        expansion are accepted; parameter/command/arithmetic expansions,
-        globbing, and malformed quotes remain untouched for Bash to handle.
+        Bash permits literal words such as ``'rev'``, ``\rev`` and ``r""ev``.
+        Only words whose value can be determined without any expansion are
+        accepted; parameter/command/arithmetic expansions, globbing, and
+        malformed quotes return ``None`` so the caller leaves them untouched.
         """
         value: list[str] = []
         i = 0
@@ -756,8 +793,152 @@ class _BashFixScanner:
                 return None
             value.append(ch)
             i += 1
-        name = "".join(value)
-        return name if name in _FALLBACKS else None
+        return "".join(value)
+
+    @staticmethod
+    def _literal_command_name(raw: str) -> str | None:
+        """Return the fallback command name produced by Bash quote removal."""
+        name = _BashFixScanner._literal_word_value(raw)
+        return name if name is not None and name in _FALLBACKS else None
+
+    @staticmethod
+    def _shell_wrapper_name(raw: str) -> str | None:
+        """Return the shell name when *raw* is a literal ``bash``/``sh`` word."""
+        name = _BashFixScanner._literal_word_value(raw)
+        return name if name is not None and name in _SHELL_WRAPPERS else None
+
+    @staticmethod
+    def _plausible_script_file(raw: str) -> bool:
+        """Return True when *raw* looks like a script path, not a command word.
+
+        ``bash cd /c/dev/x`` and ``bash grep ...`` are redundant-wrapper
+        mistakes (bash would try to open ``cd``/``grep`` as a script file);
+        ``bash scripts/deploy.sh``, ``bash ./tool`` and ``bash app.sh`` are
+        legitimate script invocations that must keep the wrapper.  A word with
+        a directory separator, a leading ``.`` path segment, or a shell-script
+        extension is treated as a script path; a bare command word is not.
+        """
+        if raw.startswith("./") or raw.startswith("../"):
+            return True
+        if raw.startswith(".\\") or raw.startswith("..\\"):
+            return True
+        if "/" in raw or "\\" in raw:
+            return True
+        lower = raw.lower()
+        return any(
+            lower.endswith(ext)
+            for ext in (".sh", ".bash", ".zsh", ".ksh", ".dash", ".ash", ".bats")
+        )
+
+    def _handle_shell_wrapper(
+        self,
+        shell_name: str,
+        word_start: int,
+        i: int,
+        end: int,
+        *,
+        assignment_prefix: bool = False,
+    ) -> int | None:
+        """Repair a redundant ``bash``/``sh`` invocation at command position.
+
+        Returns the scan index to continue from when the wrapper was rewritten,
+        or ``None`` when the wrapper is left untouched (legitimate
+        ``bash script.sh``, semantic options such as ``-e``/``-x``, stdin
+        forms, scripts with trailing argv that ``$0``/``$1`` depend on, or an
+        assignment prefix such as ``VAR=x bash ...`` whose scoping the rewrite
+        could not preserve).
+
+        Two shapes are repaired:
+        * ``bash <command> ...`` — the shell word is redundant because the Bash
+          tool already runs the whole string via bash, so it is removed
+          (``bash cd /c/dev/x && grep ...`` becomes
+          ``cd /c/dev/x && grep ...``).
+        * ``bash [-l] -c <script>`` — the inline script replaces the wrapper
+          (``bash -c 'cd C:\\x && rev'`` becomes ``cd C:/x && rev``) and is
+          scanned as its own command context so fallback commands and Windows
+          paths inside it are fixed too.  Only the ``-c``/``-lc``/``-cl`` forms
+          with the script as the final word of the segment are unwrapped;
+          trailing argv, ``-ec``-style clusters and expansions are preserved
+          for bash to handle.
+        """
+        if assignment_prefix:
+            # ``VAR=x bash -c 'echo $VAR'``: the assignment is scoped to the
+            # shell *process*, so unwrapping would make the outer shell expand
+            # ``$VAR`` before the assignment takes effect.  Keep the wrapper.
+            return None
+        s = self.s
+        j = i
+        while j < end and s[j] in " \t\r":
+            j += 1
+        if j >= end or s[j] in _OPERATOR_CHARS or s[j] == "#":
+            # Bare ``bash`` (or ``bash && ...`` / ``bash`` at EOF): bash would
+            # start a nested shell; that is not a compatibility problem.
+            return None
+        next_end = self._read_word(j, end, scan_substitutions=False)
+        if next_end <= j:
+            return None
+        next_raw = s[j:next_end]
+
+        if next_raw.startswith("-"):
+            # Optional leading login flag, then the ``-c`` family.  Any other
+            # option (``-e``, ``-x``, ``-i``, ``--norc``, ...) changes shell
+            # behaviour and is left for bash to handle.
+            opt_end = next_end
+            opt = next_raw
+            if opt in ("-l", "-L", "--login"):
+                cursor = opt_end
+                while cursor < end and s[cursor] in " \t\r":
+                    cursor += 1
+                if cursor >= end or s[cursor] in _OPERATOR_CHARS or s[cursor] == "#":
+                    return None
+                opt_end = self._read_word(cursor, end, scan_substitutions=False)
+                if opt_end <= cursor:
+                    return None
+                opt = s[cursor:opt_end]
+            if not _SHELL_C_OPTIONS.match(opt):
+                return None
+            # The word after ``-c`` is the inline script.
+            k = opt_end
+            while k < end and s[k] in " \t\r":
+                k += 1
+            if k >= end or s[k] in _OPERATOR_CHARS or s[k] == "#":
+                return None  # ``bash -c`` with no script
+            script_end = self._read_word(k, end, scan_substitutions=False)
+            if script_end <= k:
+                return None
+            m = script_end
+            while m < end and s[m] in " \t\r":
+                m += 1
+            if m < end and s[m] not in _OPERATOR_CHARS and s[m] != "#":
+                return None  # trailing script argv: ``$0``/``$1`` semantics
+            script_raw = s[k:script_end]
+            script = self._literal_word_value(script_raw)
+            if script is None:
+                return None  # expansions inside the script: leave for bash
+            try:
+                inner = _BashFixScanner(script)
+                inner._scan_range(0, len(script))
+            except RecursionError:
+                return None
+            fixed = _fix_heredoc_trailing_operators(inner._build_source())
+            self.names.extend(n for n in inner.names if n not in self.names)
+            self.path_notes.extend(inner.path_notes)
+            self.shell_notes.extend(
+                n for n in inner.shell_notes if n not in self.shell_notes
+            )
+            self.edits.append((word_start, script_end, fixed))
+            self.shell_notes.append(f"{shell_name} -c")
+            return script_end
+
+        if self._plausible_script_file(next_raw):
+            return None
+        # ``bash <command> ...``: drop the redundant shell word itself.  The
+        # edit covers the shell word plus the whitespace that separated it from
+        # the real command (``bash cd ...`` -> ``cd ...``).
+        self.edits.append((word_start, j, ""))
+        self.shell_notes.append(shell_name)
+        return j
+
 
     def _scan_range(self, start: int, end: int) -> None:
         """Scan *start..end* as a command context, bounding recursion depth.
@@ -787,6 +968,10 @@ class _BashFixScanner:
         case_stack: list[str] = []
         function_name_expected = False
         function_body_expected = False
+        # Set when an assignment prefix (``VAR=x``) precedes the command word on
+        # this line; a following ``bash`` wrapper must keep its shell-process
+        # scoping, so it is not unwrapped (``VAR=x bash -c 'echo $VAR'``).
+        assignment_prefix = False
 
         while i < end:
             ch = s[i]
@@ -807,6 +992,7 @@ class _BashFixScanner:
                 heredoc_operator = None
                 herestring_flag = False
                 wrapper = None
+                assignment_prefix = False
                 continue
             if ch == "#" and self._comment_starts(i, start):
                 newline = s.find("\n", i + 1, end)
@@ -939,6 +1125,7 @@ class _BashFixScanner:
                 redirect_expected = False
                 heredoc_operator = None
                 wrapper = None
+                assignment_prefix = False
                 continue
 
             word_start = i
@@ -1033,6 +1220,7 @@ class _BashFixScanner:
                     self._scan_array_words(i + 1, close if close < end else end)
                     i = close + 1 if close < end else end
                 command_expected = True
+                assignment_prefix = True
                 continue
 
             if raw == "cd":
@@ -1087,6 +1275,28 @@ class _BashFixScanner:
                 wrapper = _BashWrapper(raw)
                 command_expected = True
                 continue
+
+            # Redundant shell invocation (``bash cd ...``, ``bash -c '...'``):
+            # only at a plain command position — after ``command``/``env``/
+            # ``sudo`` the shell word is the wrapped command itself and is
+            # consumed by the wrapper logic above, so it is left untouched.
+            shell_name = self._shell_wrapper_name(raw)
+            if shell_name is not None:
+                handled_i = self._handle_shell_wrapper(
+                    shell_name,
+                    word_start,
+                    i,
+                    end,
+                    assignment_prefix=assignment_prefix,
+                )
+                if handled_i is not None:
+                    i = handled_i
+                    command_expected = True
+                    redirect_expected = False
+                    heredoc_operator = None
+                    wrapper = None
+                    assignment_prefix = False
+                    continue
 
             fallback_name = self._literal_command_name(raw)
             if fallback_name is not None:
@@ -2133,7 +2343,12 @@ def fix_bash_command(command: str) -> BashFix:
     # linear and exits without allocating generated shell code when unchanged.
     result = _BashFixScanner(command).fix()
     fixed = _fix_heredoc_trailing_operators(result.command)
-    return BashFix(fixed, result.replacements, result.path_changes)
+    return BashFix(
+        fixed,
+        result.replacements,
+        result.path_changes,
+        result.shell_wrappers,
+    )
 
 
 # ======================================================================

@@ -62,6 +62,10 @@ class Session:
     # Internal: lazy-loaded ContextDB for this session
     _context_db: ContextDB | None = field(default=None, repr=False, compare=False)
 
+    # Internal: optional HistoryIndex attached by KimiSoul (FTS5 backend).
+    # Closed before session-dir operations so Windows file locks are released.
+    _history_index: Any | None = field(default=None, repr=False, compare=False)
+
     @property
     def dir(self) -> Path:
         """The absolute path of the session directory."""
@@ -92,6 +96,22 @@ class Session:
         if self._context_db is not None:
             await self._context_db.close()
             self._context_db = None
+
+    def close_history_index(self) -> None:
+        """Close the attached HistoryIndex connection if any (best-effort).
+
+        The FTS5 ``history.db`` is held open by an apsw connection; on Windows
+        that handle keeps the session directory locked until closed, so
+        delete/rename/copy paths release it first.
+        """
+        idx = getattr(self, "_history_index", None)
+        if idx is not None:
+            close = getattr(idx, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def is_empty(self) -> bool:
         """Whether the session has any context history or a custom title."""
@@ -153,6 +173,7 @@ class Session:
     async def delete(self) -> None:
         """Delete the session directory."""
         await self.close_context_db()
+        self.close_history_index()
         session_dir = self.work_dir_meta.sessions_dir / self.id
         if not session_dir.exists():
             return
@@ -172,6 +193,7 @@ class Session:
         db = self._context_db
         if db is not None:
             db.stop_sync()
+        self.close_history_index()
         deadline = time.monotonic() + 2.0
         while True:
             shutil.rmtree(session_dir, True)

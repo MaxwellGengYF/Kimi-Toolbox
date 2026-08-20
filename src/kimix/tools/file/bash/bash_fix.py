@@ -11,7 +11,12 @@ Windows-style backslash paths (``D:\\repo\\src``, ``\\\\server\\share``,
 or as the command word itself (``C:\\tools\\rg.exe``) — are rewritten to the
 forward-slash spellings Git Bash understands, and the cmd.exe-only
 ``cd /d <path>`` form loses its flag
-(``cd`` accepts a single argument in Bash).  Rewrites are conservative: the
+(``cd`` accepts a single argument in Bash).  A redundant leading shell
+invocation — ``bash cd /c/dev/x && ...`` or ``bash -c 'cd C:\\x && rev'`` —
+is unwrapped (and the ``-c`` inline script is scanned for fallbacks and
+paths) because the Bash tool already runs the whole string via bash, so
+``bash cd ...`` would otherwise try to open ``cd`` as a script file and fail.
+Rewrites are conservative: the
 unquoted word must look unambiguously like a Windows path, so quoted data,
 tool-level escape sequences, short ambiguous words such as ``a\\nb``, and
 single-segment relative paths such as ``foo\\bar`` are preserved byte-for-byte.
@@ -97,6 +102,7 @@ def fix_bash_command(command: str) -> BashFix:
             command=fixed,
             replacements=tuple(result.replacements),
             path_changes=tuple(result.path_changes),
+            shell_wrappers=tuple(getattr(result, "shell_wrappers", ())),
         )
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
@@ -108,4 +114,5 @@ def fix_bash_command(command: str) -> BashFix:
         command=result.command,
         replacements=tuple(result.replacements),
         path_changes=tuple(result.path_changes),
+        shell_wrappers=tuple(getattr(result, "shell_wrappers", ())),
     )
