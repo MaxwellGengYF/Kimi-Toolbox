@@ -208,6 +208,16 @@ _LOCKFILE_NAMES: set[str] = {
 }
 _LOCKFILE_EXTS: set[str] = {".lock"}
 
+#: Longest common prefix/indent we ever fold (Stage 3/4) and longest repeating
+#: unit we scan for (Stage 7). These caps keep the helpers linear in the total
+#: characters actually compared instead of O(n²) when the first line is
+#: pathologically long (e.g. a 3MB single-line data file matched by Grep). A
+#: shared prefix/indent/unit longer than this is never worth folding for token
+#: reduction, so truncating the scan is lossless in practice.
+_MAX_PREFIX_SCAN = 8192
+_MAX_INDENT_SCAN = 8192
+_MAX_INTRA_LINE_UNIT = 2048
+
 
 # ---------------------------------------------------------------------------
 # Stage 1 — normalize_encoding  (Class E, lossless)
@@ -330,12 +340,19 @@ def _factor_common_indent(
     if len(non_blank) < 2:
         return lines
 
-    common = non_blank[0]
+    # Linear scan, capped: ``common[:-1]`` in a while-loop is O(n²) when the
+    # first line is huge and the next line has no matching prefix (a 3MB
+    # single-line match would stall Grep for minutes). A common indent longer
+    # than _MAX_INDENT_SCAN chars is meaningless for folding.
+    common = non_blank[0][:_MAX_INDENT_SCAN]
     for ln in non_blank[1:]:
         stripped = ln.lstrip(" \t")
-        indent = ln[: len(ln) - len(stripped)]
-        while common and not indent.startswith(common):
-            common = common[:-1]
+        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
+        n = min(len(common), len(indent))
+        i = 0
+        while i < n and common[i] == indent[i]:
+            i += 1
+        common = common[:i]
         if not common:
             break
 
@@ -457,10 +474,19 @@ def _longest_common_prefix(strings: list[str]) -> str:
     """Return the longest string that is a prefix of *all* inputs."""
     if not strings:
         return ""
-    prefix = strings[0]
+    # Linear scan, capped: the previous ``prefix = prefix[:-1]`` loop is O(n²)
+    # when the first string is huge (e.g. a 3MB single-line Grep match) and the
+    # next string shares little of it. A shared prefix longer than
+    # _MAX_PREFIX_SCAN chars is never worth folding for token reduction, and a
+    # truncated common prefix is still a valid (shorter) common prefix.
+    prefix = strings[0][:_MAX_PREFIX_SCAN]
     for s in strings[1:]:
-        while prefix and not s.startswith(prefix):
-            prefix = prefix[:-1]
+        s = s[:_MAX_PREFIX_SCAN]
+        n = min(len(prefix), len(s))
+        i = 0
+        while i < n and prefix[i] == s[i]:
+            i += 1
+        prefix = prefix[:i]
         if not prefix:
             break
     return prefix
@@ -587,7 +613,12 @@ def _compress_repeating_unit(line: str) -> str:
     n = len(line)
     if n < 6:
         return line
-    for p in range(1, n // 3 + 1):
+    # Cap the unit length: only *short* repeating units are worth this marker,
+    # and scanning every divisor of a 3MB+ line (and doing an O(n) equality per
+    # divisor) is wasteful. _MAX_INTRA_LINE_UNIT bounds both the loop and the
+    # number of O(n) equality checks.
+    max_unit = min(n // 3, _MAX_INTRA_LINE_UNIT)
+    for p in range(1, max_unit + 1):
         if n % p != 0:
             continue
         unit = line[:p]

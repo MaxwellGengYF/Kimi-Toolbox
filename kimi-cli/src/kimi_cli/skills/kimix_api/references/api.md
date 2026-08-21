@@ -981,9 +981,9 @@ All tools are `CallableTool2` subclasses. They are organized in subpackages unde
 - `send_message` — send a message to a subagent (class `AskAgent`); params: `message`, `subagent_id` (optional for the main agent, ignored for sub-agents which always message their parent) (from `kimix.tools.agent`)
 - `list_agents` — list active sub-agent sessions (class `AgentList`); params: `scope` (from `kimix.tools.agent`)
 - `interrupt_agent` — close/interrupt a sub-agent session (class `AgentClose`); params: `agent_id` (from `kimix.tools.agent`)
-- `job_output` — get background job output (class `TaskOutput`); params: `job_id`, `wait=False`, `timeout_ms`, `output_path`, `kill=False`
+- `job_output` — get background job output (class `TaskOutput`); params: `job_id`, `wait=False`, `timeout` (seconds), `output_path`, `kill=False`
 - `BackgroundStream` — `start(function, stop_function, input_function=None)`, `wait(timeout=None)`, `stop()`, `get_output()`, `pop_output()`, `input(data)`, `success()`
-- `Bash` / `pwsh` — shell execution; params: `command`/`cmd`, `timeoutMs`, `workdir`, `run_in_background` (class `Powershell` in `kimix.tools.file.bash.pwsh_tool`)
+- `Bash` / `pwsh` — shell execution; params: `command`/`cmd`, `timeout` (seconds), `workdir`, `run_in_background` (class `Powershell` in `kimix.tools.file.bash.pwsh_tool`)
 - `Run` — run external executable; params: `command`, `timeout=10`, `output_path`, `cwd`, `env`, `run_in_background=False`
 - `FindStr` — search text in files; params: `content`, `path`, `case_sensitive=False`
 - `Mkdir` / `Rm` — create/remove directories

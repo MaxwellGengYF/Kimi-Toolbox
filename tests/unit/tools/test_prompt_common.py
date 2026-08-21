@@ -98,13 +98,13 @@ def test_shared_fragments_identical() -> None:
         }
         assert len(set(values.values())) == 1, f"{field} descs diverged: {values}"
 
-    # timeout: Bash/Python/Run keep the shared seconds field; pwsh exposes the
-    # report-canonical `timeoutMs` (legacy `timeout` alias) with ms wording.
+    # timeout: all four shell/python tools use seconds; pwsh keeps an extra
+    # executor sentence but shares the same unit/range as the shared field.
     for model in (BashParams, PyParams, RunParams):
         assert desc(model, "timeout") == "Timeout in seconds."
-    assert "Timeout in milliseconds" in desc(PowershellParams, "timeoutMs")
-    assert "timeout" not in PowershellParams.model_json_schema()["properties"]
-    assert "timeoutMs" in PowershellParams.model_json_schema()["properties"]
+    assert desc(PowershellParams, "timeout").startswith("Timeout in seconds")
+    assert "timeout" in PowershellParams.model_json_schema()["properties"]
+    assert "timeoutMs" not in PowershellParams.model_json_schema()["properties"]
 
     # task_id: Bash == Powershell (payload 'cmd'); Python uses 'code' + tail.
     assert desc(BashParams, "task_id") == desc(PowershellParams, "task_id")
@@ -232,7 +232,7 @@ def test_generic_conventions_removed_from_tool_text() -> None:
         assert "Accepts `command` or `cmd` parameter" not in desc
         # per-tool param schemas keep only the minimal, tool-specific text
         schema = tool.params.model_json_schema()
-        timeout_prop = "timeoutMs" if "timeoutMs" in schema["properties"] else "timeout"
+        timeout_prop = "timeout"
         assert schema["properties"][timeout_prop]["description"]
         assert schema["properties"]["max_lines"]["description"] == "Max lines to return. None = unlimited."
         assert schema["properties"]["wait_for_pattern"]["description"] == "Pattern to wait for in the tool output."
@@ -277,6 +277,17 @@ def test_validators_shared() -> None:
         assert model.model_validate({**payload, "mode": "run"}).mode == "execute"
         assert model.model_validate({**payload, "mode": "background"}).mode == "send"
         assert model.model_validate({**payload, "mode": "execute"}).mode == "execute"
+
+
+def test_pwsh_legacy_timeout_ms_converts_to_seconds() -> None:
+    """Legacy ``timeoutMs`` (milliseconds) converts to canonical ``timeout`` seconds."""
+    from kimix.tools.file.bash.pwsh_tool import PowershellParams
+
+    assert PowershellParams(cmd="echo hi", timeoutMs=30000).timeout == 30
+    # Canonical `timeout` wins when both spellings are supplied.
+    assert PowershellParams(cmd="echo hi", timeout=5, timeoutMs=30000).timeout == 5
+    # Sub-second legacy values floor to the 1s minimum.
+    assert PowershellParams(cmd="echo hi", timeoutMs=500).timeout == 1
 
 
 def test_shell_cmd_required_validator_shared() -> None:

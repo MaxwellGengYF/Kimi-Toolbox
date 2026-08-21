@@ -2098,7 +2098,7 @@ async def test_grep_files_mode_summary(grep_tool: Grep):
     """files_with_matches always reports Found N files in the message."""
     with tempfile.TemporaryDirectory() as temp_dir:
         for name in ("a.py", "b.py", "c.py"):
-            (Path(temp_dir) / name).write_text("def marker():\n    pass\n")
+            (Path(temp_dir) / name).write_text("def marker():\n pass\n")
         result = await grep_tool(
             Params(
                 pattern="marker",
@@ -2108,3 +2108,79 @@ async def test_grep_files_mode_summary(grep_tool: Grep):
         )
         assert not result.is_error
         assert "Found 3 files matching 'marker'." in result.message
+
+
+# ---------------------------------------------------------------------------
+# Regression: giant single-line matches must not hang post-processing
+# ---------------------------------------------------------------------------
+# A single-line data file (e.g. models_dev_snapshot.json) matched by content
+# mode used to feed a 3MB line into micro_compress, whose prefix-folding stages
+# were O(n²) on the first line. The fix truncates each line before
+# micro-compression and bounds post-processing with params.timeout.
+
+
+async def test_grep_postprocess_truncates_giant_single_line(grep_tool: Grep):
+    """_postprocess truncates a huge content line before micro-compress."""
+    giant = "C:/tmp/big.json:1:" + "x" * 500_000
+    result = await grep_tool._postprocess(
+        params=Params(pattern="x", path=".", output_mode="content", head_limit=10),
+        output=giant + "\n",
+        timed_out=False,
+        buffer_truncated=False,
+        search_path=Path("C:/tmp"),
+        rtk_path=None,
+        message="",
+    )
+    assert not result.is_error
+    assert result.output
+    for ln in result.output.splitlines():
+        assert len(ln) <= 600  # truncate_line caps at 500 chars + marker
+
+
+async def test_grep_giant_single_line_file_completes(grep_tool: Grep):
+    """End-to-end content grep on a 300KB single-line file stays bounded."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        big = Path(temp_dir) / "big.json"
+        big.write_text("x" * 300_000 + " def lint")
+        result = await grep_tool(
+            Params(
+                pattern=r"def.*lint",
+                path=temp_dir,
+                output_mode="content",
+                head_limit=10,
+            )
+        )
+        assert not result.is_error
+        assert result.output
+        for ln in result.output.splitlines():
+            assert len(ln) <= 600
+
+
+async def test_grep_postprocessing_timeout(grep_tool: Grep, monkeypatch):
+    """Post-processing is bounded by params.timeout (no infinite hang)."""
+    async def slow_postprocess(*args, **kwargs):
+        await asyncio.sleep(5)
+        return None
+
+    monkeypatch.setattr(grep_tool, "_postprocess", slow_postprocess)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        (Path(temp_dir) / "a.txt").write_text("hello world\n")
+        result = await grep_tool(
+            Params(pattern="hello", path=temp_dir, output_mode="content", timeout=1)
+        )
+    assert result.is_error
+    assert "post-processing timed out" in result.message
+
+
+async def test_grep_backup_timeout(grep_tool: Grep, monkeypatch):
+    """The pure-Python fallback is also bounded by params.timeout."""
+    async def slow_backup(*args, **kwargs):
+        await asyncio.sleep(5)
+        return None
+
+    monkeypatch.setattr(grep_tool, "_backup_grep_impl", slow_backup)
+    result = await grep_tool.backup_grep(
+        Params(pattern="x", path=".", output_mode="content", timeout=1)
+    )
+    assert result.is_error
+    assert "(fallback) timed out" in result.message

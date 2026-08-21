@@ -228,15 +228,15 @@ class PowershellParams(BaseModel):
             "voice, 5-10 words (shown in the UI)."
         ),
     )
-    timeoutMs: int = Field(
-        default=30000,
-        validation_alias=AliasChoices("timeoutMs", "timeout"),
+    timeout: int = Field(
+        default=30,
+        validation_alias=AliasChoices("timeout", "timeoutMs"),
         ge=1,
-        le=900000,
+        le=900,
         description=(
-            "Timeout in milliseconds. The executor applies its configured "
+            "Timeout in seconds. The executor applies its configured "
             "default and cap, and kills the command on expiry. "
-            + accepts_alias_text("timeoutMs", "timeout", word=False)
+            + accepts_alias_text("timeout", "timeoutMs", word=False)
         ),
     )
     workdir: str | None = Field(
@@ -277,20 +277,15 @@ class PowershellParams(BaseModel):
     wait_for_pattern: str | None = wait_for_pattern_field()
     max_lines: int | None = max_lines_field()
 
-    @property
-    def timeout(self) -> int:
-        """Legacy accessor: timeout in seconds (converted from ``timeoutMs``)."""
-        return max(1, self.timeoutMs // 1000)
-
     @model_validator(mode="before")
     @classmethod
     def _normalize_mode(cls, data: dict) -> dict:
         """Convert deprecated boolean flags and mode aliases to canonical names."""
         data = normalize_mode_validator(data)
         if isinstance(data, dict):
-            # Legacy `timeout` (seconds) -> canonical `timeoutMs` (milliseconds).
-            if "timeoutMs" not in data and data.get("timeout") is not None:
-                data = {**data, "timeoutMs": int(data["timeout"]) * 1000}
+            # Legacy `timeoutMs` (milliseconds) -> canonical `timeout` (seconds).
+            if "timeout" not in data and data.get("timeoutMs") is not None:
+                data = {**data, "timeout": max(1, int(data["timeoutMs"]) // 1000)}
             if data.get("run_in_background", False):
                 data["mode"] = "send"
         return data

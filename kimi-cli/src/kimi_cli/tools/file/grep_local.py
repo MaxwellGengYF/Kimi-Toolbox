@@ -836,7 +836,6 @@ class Grep(CallableTool2[Params]):
             rtk_path = await self._resolve_rtk_path()
 
         try:
-            builder = ToolResultBuilder()
             message = ""
 
             # Resolve search path against the session work directory.
@@ -954,215 +953,34 @@ class Grep(CallableTool2[Params]):
                 )
 
             # --- Post-processing pipeline ---
-            lines = output.splitlines()
-            if lines and lines[-1] == "":
-                lines.pop()
-
-            files_truncated_early = False
-            total_raw_files = 0
-
-            # Step 0: strip rtk protocol lines (content mode only) and keep
-            # their metadata for the summary message. Other modes pass through
-            # untouched (rtk does not emit protocol lines for them).
-            rtk_meta: dict[str, Any] = {}
-            rtk_original_path: str | None = None
-            if params.output_mode == "content":
-                lines, rtk_meta = parse_rtk_rg_output(lines)
-                # When rtk truly truncated output (per-file folds or skipped
-                # files), preserve the original stream so the model can page
-                # through the full results.
-                if rtk_meta.get("folded_files") or rtk_meta.get("skipped_files"):
-                    from kimix.tools.common import _export_to_temp_file_async
-
-                    rtk_original_path, _ = await _export_to_temp_file_async(
-                        key=None, content=output, ext=".txt"
-                    )
-
-            # Step 1: mtime sorting (files_with_matches only, skip on timeout)
-            if not timed_out and params.output_mode == "files_with_matches":
-                lines = [ln for ln in lines if ln.strip()]
-                total_raw_files = len(lines)
-                mtimes = await asyncio.gather(*[_safe_getmtime_async(p) for p in lines])
-
-                k = params.offset + (params.head_limit or 0)
-                if k and len(lines) > k:
-                    lines = [
-                        p for _, p in heapq.nlargest(
-                            k, zip(mtimes, lines, strict=True), key=lambda x: x[0]
-                        )
-                    ]
-                    files_truncated_early = True
-                else:
-                    lines = [
-                        p for _, p in sorted(
-                            zip(mtimes, lines, strict=True), key=lambda x: x[0], reverse=True
-                        )
-                    ]
-
-            # Step 2: shorten paths to relative (prefix stripping)
-            search_base = str(search_path)
-            if search_path.is_file():
-                search_base = str(search_path.parent)
-            lines = _strip_path_prefix(lines, search_base)
-
-            # Step 3: filter sensitive files from output (now on a clean
-            # stream: rtk fold markers can no longer be mistaken for paths)
-            filtered_paths: list[str] = []
-            kept_lines: list[str] = []
-            sensitive_path_set: set[str] = set()
-            for line in lines:
-                if params.output_mode == "content":
-                    # Match lines: "file.py:10:matched text"
-                    # Context lines: "file.py-10-context text"
-                    # Separator: "--"
-                    if line == "--":
-                        kept_lines.append(line)
-                        continue
-                    m = _RG_LINE_RE.match(line)
-                    file_path = m.group(1) if m else line
-                elif params.output_mode == "count_matches":
-                    # Count lines: "file.py:42"
-                    idx = line.rfind(":")
-                    file_path = line[:idx] if idx > 0 else line
-                else:
-                    # files_with_matches: pure path per line
-                    file_path = line
-
-                if file_path and _is_sensitive_cached(file_path):
-                    if file_path not in sensitive_path_set:
-                        sensitive_path_set.add(file_path)
-                        filtered_paths.append(file_path)
-                else:
-                    kept_lines.append(line)
-
-            if filtered_paths:
-                # Remove trailing "--" separators left after filtering
-                while kept_lines and kept_lines[-1] == "--":
-                    kept_lines.pop()
-                warning = sensitive_file_warning(filtered_paths)
-                message = f"{message} {warning}" if message else warning
-
-            lines = kept_lines
-
-            # Step 4: summaries (before pagination, on full results)
-            if params.output_mode == "count_matches":
-                total_matches = 0
-                total_files = 0
-                for line in lines:
-                    idx = line.rfind(":")
-                    if idx > 0:
-                        try:
-                            total_matches += int(line[idx + 1:])
-                            total_files += 1
-                        except ValueError:
-                            pass
-                count_summary = (
-                    f"Found {total_matches} total occurrences across {total_files} files."
+            # The rg subprocess is bounded by params.timeout above; the
+            # post-processing (rtk parsing, sensitive filtering, pagination and
+            # micro-compression) can also be expensive on pathological inputs,
+            # so it gets its own timeout instead of hanging the tool call.
+            try:
+                return await asyncio.wait_for(
+                    self._postprocess(
+                        params=params,
+                        output=output,
+                        timed_out=timed_out,
+                        buffer_truncated=buffer_truncated,
+                        search_path=search_path,
+                        rtk_path=rtk_path,
+                        message=message,
+                    ),
+                    timeout=params.timeout,
                 )
-                message = f"{message} {count_summary}" if message else count_summary
-
-            if (
-                params.output_mode == "content"
-                and rtk_meta.get("total_matches") is not None
-            ):
-                # rtk header reported totals for the whole search.
-                rtk_summary = (
-                    f"Found {rtk_meta['total_matches']} matches in "
-                    f"{rtk_meta['total_files']} files."
-                )
-                message = f"{message} {rtk_summary}" if message else rtk_summary
-                fold_note = _rtk_fold_note(rtk_meta, original_path=rtk_original_path)
-                if fold_note:
-                    message = f"{message} {fold_note}" if message else fold_note
-
-            if params.output_mode == "files_with_matches":
-                files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
-                message = f"{message} {files_summary}" if message else files_summary
-
-            # Step 5: local dedup fallback — only when rtk did NOT run, so
-            # repeated lines are never collapsed twice.
-            dedup_saved = 0
-            if (
-                params.output_mode == "content"
-                and params.deduplicate_output
-                and rtk_path is None
-            ):
-                lines, dedup_saved = dedup_lines(lines)
-                if dedup_saved:
-                    dedup_msg = f"Removed {dedup_saved} repeated line(s) via dedup."
-                    message = f"{message} {dedup_msg}" if message else dedup_msg
-
-            # Step 6: offset + head_limit pagination
-            if params.offset > 0:
-                lines = lines[params.offset:]
-
-            effective_limit = params.head_limit
-            if effective_limit and len(lines) > effective_limit:
-                total = len(lines) + params.offset
-                lines = lines[:effective_limit]
-                truncation_msg = (
-                    f"Results truncated to {effective_limit} lines (total: {total}). "
-                    f"Use offset={params.offset + effective_limit} to see more."
-                )
-                message = f"{message} {truncation_msg}" if message else truncation_msg
-            elif (
-                effective_limit
-                and params.output_mode == "files_with_matches"
-                and files_truncated_early
-                and len(lines) == effective_limit
-            ):
-                truncation_msg = (
-                    f"Results truncated to {effective_limit} lines (total: {total_raw_files}). "
-                    f"Use offset={params.offset + effective_limit} to see more."
-                )
-                message = f"{message} {truncation_msg}" if message else truncation_msg
-
-            # Step 7: final display fold budget (head+tail fold with marker).
-            # 0 = unlimited → the byte cap below is the only remaining limit.
-            omitted_by_fold = 0
-            if params.max_output_lines:
-                lines, omitted_by_fold = fold_lines(lines, params.max_output_lines)
-                if omitted_by_fold:
-                    fold_msg = (
-                        f"Results folded to {len(lines) - 1} lines "
-                        f"({omitted_by_fold} omitted). "
-                        "Use max_output_lines=0 or offset to see more."
-                    )
-                    message = f"{message} {fold_msg}" if message else fold_msg
-
-            # Step 7.5: micro-compress — lossless stages (1-3, 5) plus the
-            # annotated prefix fold (Stage 4) which collapses the repeated
-            # absolute-path prefix on every match.  Near-duplicate collapse
-            # (Stage 8) is disabled: every distinct match must stay visible.
-            if lines:
-                lines, _mc_saved = _mc_compress_lines(
-                    lines,
-                    kind="log",
-                    config=MicroCompressConfig(
-                        lossless_only=False, near_dup_collapse=False
+            except TimeoutError:
+                return ToolError(
+                    message=(
+                        f"Grep post-processing timed out after {params.timeout}s. "
+                        "Try a more specific path or pattern."
+                    ),
+                    brief=(
+                        f"Grep post-processing timed out | "
+                        f"{_format_cmd(params, rtk_path=rtk_path)}"
                     ),
                 )
-
-            lines = _normalize_output_lines(lines, params.output_mode)
-            # Per-line hygiene before the byte cap: no single line can hog the
-            # whole budget (mirror of the display builder's own truncation).
-            lines = [truncate_line(ln) for ln in lines]
-            output, truncated_by_bytes = _join_with_byte_limit(lines)
-
-            if not output and not buffer_truncated:
-                no_match_msg = "No matches found"
-                if message:
-                    no_match_msg = f"{no_match_msg}. {message}"
-                return builder.ok(
-                    message=no_match_msg, brief=_format_cmd(params, rtk_path=rtk_path)
-                )
-
-            if truncated_by_bytes:
-                byte_msg = f"Output truncated to {MAX_BYTES} bytes."
-                message = f"{message} {byte_msg}" if message else byte_msg
-
-            builder.write(output)
-            return builder.ok(message=message, brief=_format_cmd(params, rtk_path=rtk_path))
 
         except asyncio.CancelledError:
             raise
@@ -1178,7 +996,263 @@ class Grep(CallableTool2[Params]):
                 brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path)}",
             )
 
+    async def _postprocess(
+        self,
+        *,
+        params: Params,
+        output: str,
+        timed_out: bool,
+        buffer_truncated: bool,
+        search_path: Path,
+        rtk_path: str | None,
+        message: str,
+    ) -> ToolReturnValue:
+        """Run the post-subprocess output pipeline and build the final result.
+
+        Extracted from ``__call__`` so it can be bounded by ``params.timeout``:
+        the micro-compression stage is CPU-heavy and previously ran with no
+        timeout, so a pathological single-line match could hang the tool for
+        minutes.
+        """
+        builder = ToolResultBuilder()
+        # --- Post-processing pipeline ---
+        lines = output.splitlines()
+        if lines and lines[-1] == "":
+            lines.pop()
+
+        files_truncated_early = False
+        total_raw_files = 0
+
+        # Step 0: strip rtk protocol lines (content mode only) and keep
+        # their metadata for the summary message. Other modes pass through
+        # untouched (rtk does not emit protocol lines for them).
+        rtk_meta: dict[str, Any] = {}
+        rtk_original_path: str | None = None
+        if params.output_mode == "content":
+            lines, rtk_meta = parse_rtk_rg_output(lines)
+            # When rtk truly truncated output (per-file folds or skipped
+            # files), preserve the original stream so the model can page
+            # through the full results.
+            if rtk_meta.get("folded_files") or rtk_meta.get("skipped_files"):
+                from kimix.tools.common import _export_to_temp_file_async
+
+                rtk_original_path, _ = await _export_to_temp_file_async(
+                    key=None, content=output, ext=".txt"
+                )
+
+        # Step 1: mtime sorting (files_with_matches only, skip on timeout)
+        if not timed_out and params.output_mode == "files_with_matches":
+            lines = [ln for ln in lines if ln.strip()]
+            total_raw_files = len(lines)
+            mtimes = await asyncio.gather(*[_safe_getmtime_async(p) for p in lines])
+
+            k = params.offset + (params.head_limit or 0)
+            if k and len(lines) > k:
+                lines = [
+                    p for _, p in heapq.nlargest(
+                        k, zip(mtimes, lines, strict=True), key=lambda x: x[0]
+                    )
+                ]
+                files_truncated_early = True
+            else:
+                lines = [
+                    p for _, p in sorted(
+                        zip(mtimes, lines, strict=True), key=lambda x: x[0], reverse=True
+                    )
+                ]
+
+        # Step 2: shorten paths to relative (prefix stripping)
+        search_base = str(search_path)
+        if search_path.is_file():
+            search_base = str(search_path.parent)
+        lines = _strip_path_prefix(lines, search_base)
+
+        # Step 3: filter sensitive files from output (now on a clean
+        # stream: rtk fold markers can no longer be mistaken for paths)
+        filtered_paths: list[str] = []
+        kept_lines: list[str] = []
+        sensitive_path_set: set[str] = set()
+        for line in lines:
+            if params.output_mode == "content":
+                # Match lines: "file.py:10:matched text"
+                # Context lines: "file.py-10-context text"
+                # Separator: "--"
+                if line == "--":
+                    kept_lines.append(line)
+                    continue
+                m = _RG_LINE_RE.match(line)
+                file_path = m.group(1) if m else line
+            elif params.output_mode == "count_matches":
+                # Count lines: "file.py:42"
+                idx = line.rfind(":")
+                file_path = line[:idx] if idx > 0 else line
+            else:
+                # files_with_matches: pure path per line
+                file_path = line
+
+            if file_path and _is_sensitive_cached(file_path):
+                if file_path not in sensitive_path_set:
+                    sensitive_path_set.add(file_path)
+                    filtered_paths.append(file_path)
+            else:
+                kept_lines.append(line)
+
+        if filtered_paths:
+            # Remove trailing "--" separators left after filtering
+            while kept_lines and kept_lines[-1] == "--":
+                kept_lines.pop()
+            warning = sensitive_file_warning(filtered_paths)
+            message = f"{message} {warning}" if message else warning
+
+        lines = kept_lines
+
+        # Step 4: summaries (before pagination, on full results)
+        if params.output_mode == "count_matches":
+            total_matches = 0
+            total_files = 0
+            for line in lines:
+                idx = line.rfind(":")
+                if idx > 0:
+                    try:
+                        total_matches += int(line[idx + 1:])
+                        total_files += 1
+                    except ValueError:
+                        pass
+            count_summary = (
+                f"Found {total_matches} total occurrences across {total_files} files."
+            )
+            message = f"{message} {count_summary}" if message else count_summary
+
+        if (
+            params.output_mode == "content"
+            and rtk_meta.get("total_matches") is not None
+        ):
+            # rtk header reported totals for the whole search.
+            rtk_summary = (
+                f"Found {rtk_meta['total_matches']} matches in "
+                f"{rtk_meta['total_files']} files."
+            )
+            message = f"{message} {rtk_summary}" if message else rtk_summary
+            fold_note = _rtk_fold_note(rtk_meta, original_path=rtk_original_path)
+            if fold_note:
+                message = f"{message} {fold_note}" if message else fold_note
+
+        if params.output_mode == "files_with_matches":
+            files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
+            message = f"{message} {files_summary}" if message else files_summary
+
+        # Step 5: local dedup fallback — only when rtk did NOT run, so
+        # repeated lines are never collapsed twice.
+        dedup_saved = 0
+        if (
+            params.output_mode == "content"
+            and params.deduplicate_output
+            and rtk_path is None
+        ):
+            lines, dedup_saved = dedup_lines(lines)
+            if dedup_saved:
+                dedup_msg = f"Removed {dedup_saved} repeated line(s) via dedup."
+                message = f"{message} {dedup_msg}" if message else dedup_msg
+
+        # Step 6: offset + head_limit pagination
+        if params.offset > 0:
+            lines = lines[params.offset:]
+
+        effective_limit = params.head_limit
+        if effective_limit and len(lines) > effective_limit:
+            total = len(lines) + params.offset
+            lines = lines[:effective_limit]
+            truncation_msg = (
+                f"Results truncated to {effective_limit} lines (total: {total}). "
+                f"Use offset={params.offset + effective_limit} to see more."
+            )
+            message = f"{message} {truncation_msg}" if message else truncation_msg
+        elif (
+            effective_limit
+            and params.output_mode == "files_with_matches"
+            and files_truncated_early
+            and len(lines) == effective_limit
+        ):
+            truncation_msg = (
+                f"Results truncated to {effective_limit} lines (total: {total_raw_files}). "
+                f"Use offset={params.offset + effective_limit} to see more."
+            )
+            message = f"{message} {truncation_msg}" if message else truncation_msg
+
+        # Step 7: final display fold budget (head+tail fold with marker).
+        # 0 = unlimited → the byte cap below is the only remaining limit.
+        omitted_by_fold = 0
+        if params.max_output_lines:
+            lines, omitted_by_fold = fold_lines(lines, params.max_output_lines)
+            if omitted_by_fold:
+                fold_msg = (
+                    f"Results folded to {len(lines) - 1} lines "
+                    f"({omitted_by_fold} omitted). "
+                    "Use max_output_lines=0 or offset to see more."
+                )
+                message = f"{message} {fold_msg}" if message else fold_msg
+
+        # Step 7.5: micro-compress — lossless stages (1-3, 5) plus the
+        # annotated prefix fold (Stage 4) which collapses the repeated
+        # absolute-path prefix on every match.  Near-duplicate collapse
+        # (Stage 8) is disabled: every distinct match must stay visible.
+        if lines:
+            # Truncate each line before micro-compression so a single
+            # gigantic line (e.g. a 3MB minified/data file match) can never
+            # reach the compressor's prefix-folding stages (O(n^2) on the
+            # first line). The final per-line hygiene pass below is then a
+            # cheap no-op.
+            lines = [truncate_line(ln) for ln in lines]
+            lines, _mc_saved = _mc_compress_lines(
+                lines,
+                kind="log",
+                config=MicroCompressConfig(
+                    lossless_only=False, near_dup_collapse=False
+                ),
+            )
+
+        lines = _normalize_output_lines(lines, params.output_mode)
+        # Per-line hygiene before the byte cap: no single line can hog the
+        # whole budget (mirror of the display builder's own truncation).
+        lines = [truncate_line(ln) for ln in lines]
+        output, truncated_by_bytes = _join_with_byte_limit(lines)
+
+        if not output and not buffer_truncated:
+            no_match_msg = "No matches found"
+            if message:
+                no_match_msg = f"{no_match_msg}. {message}"
+            return builder.ok(
+                message=no_match_msg, brief=_format_cmd(params, rtk_path=rtk_path)
+            )
+
+        if truncated_by_bytes:
+            byte_msg = f"Output truncated to {MAX_BYTES} bytes."
+            message = f"{message} {byte_msg}" if message else byte_msg
+
+        builder.write(output)
+        return builder.ok(message=message, brief=_format_cmd(params, rtk_path=rtk_path))
+
+
     async def backup_grep(self, params: Params) -> ToolReturnValue:
+        """Pure-Python fallback (no ripgrep/rtk, or dirty VFS).
+
+        Bounded by ``params.timeout`` like the native path so a huge tree can't
+        hang the tool call indefinitely.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._backup_grep_impl(params), timeout=params.timeout
+            )
+        except TimeoutError:
+            return ToolError(
+                message=(
+                    f"Grep (fallback) timed out after {params.timeout}s. "
+                    "Try a more specific path or pattern."
+                ),
+                brief=f"Grep fallback timed out | {_format_cmd(params)}",
+            )
+
+    async def _backup_grep_impl(self, params: Params) -> ToolReturnValue:
         try:
             if not params.pattern:
                 return ToolError(
@@ -1271,12 +1345,19 @@ class Grep(CallableTool2[Params]):
                 # content mode
                 return self._search_content_single(file_path, text, regex, params)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Explicit shutdown(wait=False, cancel_futures=True): the context
+            # manager form waits for every worker on exit, which would defeat
+            # cancellation from asyncio.wait_for(timeout) — a slow tree must be
+            # able to abort promptly. Running workers finish in the background.
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 futures = [
                     loop.run_in_executor(executor, _process_one, f) for f in files
                 ]
                 results = await asyncio.gather(*futures)
-                raw_lines = [line for r in results for line in r]
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+            raw_lines = [line for r in results for line in r]
 
             # Filter sensitive files from output.
             filtered_paths: list[str] = []

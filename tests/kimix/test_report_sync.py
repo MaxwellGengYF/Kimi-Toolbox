@@ -84,12 +84,12 @@ REPORT_TOOLS: dict[str, dict[str, Any]] = {
     },
     "pwsh": {
         "class": "Powershell",
-        "canonical": ["command", "description", "timeoutMs", "workdir", "run_in_background", "sandbox_permissions", "justification"],
-        "aliases": {"cmd": "command", "timeout": "timeoutMs"},
+        "canonical": ["command", "description", "timeout", "workdir", "run_in_background", "sandbox_permissions", "justification"],
+        "aliases": {"cmd": "command", "timeoutMs": "timeout"},
         "desc_lead": "Execute a PowerShell command",
         "param_desc": {
             "command": "The PowerShell command to execute.",
-            "timeoutMs": "Timeout in milliseconds.",
+            "timeout": "Timeout in seconds.",
             "workdir": "Working directory for this command.",
         },
     },
@@ -136,13 +136,13 @@ REPORT_TOOLS: dict[str, dict[str, Any]] = {
     },
     "job_output": {
         "class": "TaskOutput",
-        "canonical": ["job_id", "wait", "timeout_ms"],
-        "aliases": {"task_id": "job_id", "block": "wait", "timeout": "timeout_ms"},
+        "canonical": ["job_id", "wait", "timeout"],
+        "aliases": {"task_id": "job_id", "block": "wait", "timeout_ms": "timeout"},
         "desc_lead": "Read a background job.",
         "param_desc": {
             "job_id": "Job id returned by the tool that started the background work.",
             "wait": "Block until the job reaches a terminal status",
-            "timeout_ms": "Max wait in milliseconds",
+            "timeout": "Max wait in seconds",
         },
     },
     "todo_write": {

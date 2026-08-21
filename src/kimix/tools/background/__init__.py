@@ -46,16 +46,16 @@ class TaskOutputParams(BaseModel):
             "available so far."
         ),
     )
-    timeout_ms: int = Field(
-        default=60000,
-        validation_alias=AliasChoices("timeout_ms", "timeout"),
+    timeout: int = Field(
+        default=60,
+        validation_alias=AliasChoices("timeout", "timeout_ms"),
         ge=1,
-        le=7200000,
+        le=7200,
         description=(
-            "Max wait in milliseconds (only meaningful with wait: true). "
+            "Max wait in seconds (only meaningful with wait: true). "
             "Defaults to the configured wait timeout; capped by the configured "
             "maximum. "
-            + accepts_alias_text("timeout_ms", "timeout", word=False)
+            + accepts_alias_text("timeout", "timeout_ms", word=False)
         ),
     )
     output_path: str | None = Field(
@@ -68,10 +68,13 @@ class TaskOutputParams(BaseModel):
         description="[Deprecated] Use action='kill' instead.",
     )
 
-    @property
-    def timeout(self) -> int:
-        """Legacy accessor: timeout in seconds (converted from ``timeout_ms``)."""
-        return max(1, self.timeout_ms // 1000)
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_timeout(cls, data: dict) -> dict:
+        """Convert legacy ``timeout_ms`` (milliseconds) to ``timeout`` (seconds)."""
+        if isinstance(data, dict) and "timeout" not in data and data.get("timeout_ms") is not None:
+            data = {**data, "timeout": max(1, int(data["timeout_ms"]) // 1000)}
+        return data
 
     @model_validator(mode="after")
     def _normalize_kill(self) -> "TaskOutputParams":

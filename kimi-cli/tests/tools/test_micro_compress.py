@@ -11,8 +11,14 @@ import pytest
 
 from kimi_cli.tools.file.micro_compress import (
     MicroCompressConfig,
+    _MAX_INTRA_LINE_UNIT,
+    _MAX_PREFIX_SCAN,
+    _compress_repeating_unit,
+    _factor_common_indent,
+    _longest_common_prefix,
     collapse_whitespace,
     compress,
+    compress_lines,
     drop_boilerplate,
     elide_low_value_content,
     fold_per_line_prefix,
@@ -845,3 +851,113 @@ def test_config_defaults_sensible():
     assert cfg.read_compact_code is False
     assert cfg.blank_line_collapse == 1
     assert cfg.strip_trailing_ws is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: giant first line must not trigger O(n²) prefix/indent scans
+# ---------------------------------------------------------------------------
+# A 3MB single-line data file (e.g. models_dev_snapshot.json) matched by Grep
+# used to make _factor_common_indent / _longest_common_prefix chop the prefix
+# one character at a time (``prefix[:-1]``), stalling the tool for minutes.
+# These tests pin the linear, capped behavior.
+
+
+def test_longest_common_prefix_giant_first_line_is_linear():
+    giant = "C:/big.json:1:" + "x" * 500_000
+    small = "C:/big.json:2:y"
+    # Common prefix is the short path prefix shared by both lines.
+    assert _longest_common_prefix([giant, small]) == "C:/big.json:"
+
+
+def test_longest_common_prefix_capped_at_max_scan():
+    # All lines share more than _MAX_PREFIX_SCAN chars; the helper returns a
+    # valid (shorter) common prefix instead of scanning the whole string.
+    shared = "p" * (_MAX_PREFIX_SCAN + 10_000)
+    lines = [shared + "A", shared + "B"]
+    result = _longest_common_prefix(lines)
+    assert result == shared[:_MAX_PREFIX_SCAN]
+    assert all(ln.startswith(result) for ln in lines)
+
+
+def test_longest_common_prefix_empty_and_single():
+    assert _longest_common_prefix([]) == ""
+    assert _longest_common_prefix(["abc"]) == "abc"
+
+
+def test_factor_common_indent_giant_first_line_no_bogus_indent():
+    giant = "C:/big.json:1:" + "x" * 500_000
+    small = "C:/big.json:2:y"
+    lines = [giant, small]
+    result = _factor_common_indent(lines, lines)
+    # No shared whitespace indent → unchanged, and must not hang.
+    assert result == lines
+
+
+def test_factor_common_indent_real_indent_still_factored():
+    giant = "    " + "x" * 500_000
+    small = "    y"
+    lines = [giant, small]
+    result = _factor_common_indent(lines, lines)
+    assert result[0].startswith("[common-indent:")
+    # The 4-space indent is removed from both lines (giant content first, then
+    # the small line).
+    assert result[1] == "x" * 500_000
+    assert result[2] == "y"
+
+
+def test_collapse_whitespace_giant_first_line_fast():
+    giant = "C:/big.json:1:" + "x" * 500_000
+    small = "C:/big.json:2:y"
+    text = "\n".join([giant, small])
+    result = collapse_whitespace(text, kind="log")
+    assert "[common-indent:" not in result
+    assert len(result.split("\n")) == 2
+
+
+def test_fold_per_line_prefix_giant_first_line_still_folds_short_prefix():
+    prefix = "C:/dev/Hermes-CN-Core/"
+    giant = prefix + "agent/big.json:1:" + "x" * 500_000
+    smalls = [f"{prefix}tools/f{i}.py:1:x" for i in range(30)]
+    text = "\n".join([giant] + smalls)
+    result = fold_per_line_prefix(text, kind="log")
+    assert '[prefix: "' in result
+    # Body no longer carries the folded prefix on every line.
+    body = result.split("\n", 1)[1]
+    assert not body.startswith(prefix)
+
+
+def test_compress_lines_giant_line_completes():
+    giant = "C:/big.json:1:" + "x" * 300_000
+    lines = [giant] + ["C:/big.json:2:y"] * 25
+    out, saved = compress_lines(
+        lines,
+        kind="log",
+        config=MicroCompressConfig(lossless_only=False, near_dup_collapse=False),
+    )
+    assert isinstance(out, list)
+    assert saved >= 0
+    assert any(ln for ln in out)
+
+
+def test_compress_repeating_unit_capped_for_huge_lines():
+    # Huge non-repeating line: unit scan must stop at _MAX_INTRA_LINE_UNIT, so
+    # this returns unchanged without building O(n) strings for every divisor.
+    line = "a" * 200_000 + "b" * 100
+    assert _compress_repeating_unit(line) == line
+
+
+def test_compress_repeating_unit_detects_unit_at_cap_boundary():
+    # 2048-char non-periodic unit (sequential ids) so only the full unit
+    # matches, not a smaller divisor of the total length.
+    unit = "".join(f"{i:04d}" for i in range(512))
+    assert len(unit) == _MAX_INTRA_LINE_UNIT
+    line = unit * 3
+    result = _compress_repeating_unit(line)
+    assert "×3" in result
+    assert "+4096 chars elided" in result
+
+
+def test_compress_repeating_unit_detects_short_unit_on_huge_line():
+    line = "AB" * 100_000
+    result = _compress_repeating_unit(line)
+    assert "×100000" in result
