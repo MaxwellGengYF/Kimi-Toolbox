@@ -1,9 +1,12 @@
 """Common test cases and utilities for snapshot tests."""
 
+import inspect
 import json
 from collections.abc import Sequence
 from typing import Any, TypedDict
 
+import httpx
+import httpx2
 import respx
 
 from kosong.chat_provider import ChatProvider
@@ -18,6 +21,7 @@ __all__ = [
     "capture_request",
     "make_anthropic_response",
     "make_chat_completion_response",
+    "make_httpx2_client",
     "run_test_cases",
 ]
 
@@ -214,6 +218,34 @@ COMMON_CASES: dict[str, Case] = {
         ],
     },
 }
+
+
+def make_httpx2_client(mock: respx.MockRouter) -> httpx2.AsyncClient:
+    """Build an ``httpx2.AsyncClient`` routed through a respx router.
+
+    The anthropic SDK 1.0+ is built on httpx2, but respx only mocks the
+    legacy ``httpx`` package.  This bridge forwards httpx2 requests to the
+    active respx router and translates the resulting ``httpx.Response`` into
+    an ``httpx2.Response`` so anthropic-family providers (Anthropic, Bedrock,
+    MiniMaxAnthropic) can keep using respx for request matching/recording.
+
+    Pass the returned client as ``http_client=...`` when constructing the
+    provider.
+    """
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        response = mock.handler(request)
+        if inspect.isawaitable(response):
+            response = await response
+        assert isinstance(response, httpx.Response), type(response)
+        return httpx2.Response(
+            response.status_code,
+            headers=response.headers,
+            content=response.content,
+            request=request,
+        )
+
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
 async def capture_request(

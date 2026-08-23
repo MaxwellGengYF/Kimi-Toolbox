@@ -1,7 +1,12 @@
 """Tests for the MiniMax chat providers (Anthropic + OpenAI routes)."""
 
 import respx
-from common import capture_request, make_anthropic_response, make_chat_completion_response
+from common import (
+    capture_request,
+    make_anthropic_response,
+    make_chat_completion_response,
+    make_httpx2_client,
+)
 from httpx import Response
 
 from kosong.contrib.chat_provider.minimax import MiniMaxAnthropic, MiniMaxOpenAI
@@ -18,7 +23,9 @@ async def test_minimax_anthropic_identity():
 async def test_minimax_anthropic_generate():
     with respx.mock(base_url="https://api.minimax.io/anthropic") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
-        provider = MiniMaxAnthropic(model="MiniMax-M2.7", api_key="test", stream=False)
+        provider = MiniMaxAnthropic(
+            model="MiniMax-M2.7", api_key="test", stream=False, http_client=make_httpx2_client(mock)
+        )
         stream = await provider.generate("", [], [Message(role="user", content="Hello!")])
         parts = [part async for part in stream]
         assert parts[0].text == "Hello"

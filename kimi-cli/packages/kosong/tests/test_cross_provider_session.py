@@ -12,6 +12,8 @@ mapping, multimodal degradation, token-limit key portability).
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from typing import Any
 
 import respx
@@ -29,6 +31,11 @@ from kosong.message import (
     ToolCall,
     VideoURLPart,
 )
+
+# ``api_snapshot_tests.common`` lives in a sibling directory; make it importable
+# regardless of pytest's import mode.
+sys.path.insert(0, str(Path(__file__).parent / "api_snapshot_tests"))
+from common import make_httpx2_client  # noqa: E402
 
 LONG_TOOL_CALL_ID = "a" * 70
 EXPECTED_LONG_TOOL_CALL_ID = "a" * 64  # truncated to the 64-char id budget
@@ -142,6 +149,7 @@ async def _capture_anthropic(
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,

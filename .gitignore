@@ -5,7 +5,6 @@ requirements.txt
 .*cache
 *cache
 .kimix_cache/
-uv.lock
 clone_submodule.py
 sse_log_*
 src/kimix/default_config.json

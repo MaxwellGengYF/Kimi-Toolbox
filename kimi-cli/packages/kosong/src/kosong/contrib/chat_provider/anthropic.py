@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict, Unpack, cast
 
 import httpx
+import httpx2
 import orjson
 import regex as re
 from anthropic import (
@@ -133,8 +134,8 @@ async def _drain_awaitable(awaitable: Awaitable[object]) -> None:
         # Swallow silently — the OS will reclaim the sockets.
         return
     except RuntimeError as exc:
-        # On Windows/Python 3.14, closing an httpx.AsyncClient whose
-        # underlying transports were bound to a now-closed ProactorEventLoop
+    # On Windows/Python 3.14, closing an httpx2.AsyncClient whose
+    # underlying transports were bound to a now-closed ProactorEventLoop
         # raises RuntimeError('Event loop is closed').  Swallow it silently —
         # the OS will reclaim the socket.
         if "Event loop is closed" in str(exc):
@@ -295,19 +296,21 @@ class Anthropic:
             if supported_efforts is not None
             else self._DEFAULT_SUPPORTED_EFFORTS
         )
-        # Provide our own httpx.AsyncClient so the Anthropic SDK does not create
+        # Provide our own httpx2.AsyncClient so the Anthropic SDK does not create
         # its default ``AsyncHttpxClientWrapper``. That wrapper's ``__del__``
         # schedules ``self.aclose()`` as a task on the running loop; on
         # Windows/Python 3.14, if the loop is torn down before the task finishes,
         # the unretrieved exception surfaces as a noisy
-        # ``RuntimeError: Event loop is closed`` traceback.
+        # ``RuntimeError: Event loop is closed`` traceback.  The anthropic SDK
+        # 1.0+ is built on httpx2, so the injected client must be an
+        # ``httpx2.AsyncClient`` (a plain ``httpx.AsyncClient`` is rejected).
         client_kwargs = dict(client_kwargs)
         # Apply a default SDK-level retry budget for transient errors such as
         # 429 Rate Limit and 5xx server errors.  Callers may override this by
         # passing ``max_retries`` explicitly in ``client_kwargs``.
         client_kwargs.setdefault("max_retries", DEFAULT_MAX_RETRIES)
         if "http_client" not in client_kwargs:
-            client_kwargs["http_client"] = httpx.AsyncClient()
+            client_kwargs["http_client"] = httpx2.AsyncClient()
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, **client_kwargs)
         self._tool_message_conversion: ToolMessageConversion | None = tool_message_conversion
         self._metadata = metadata
@@ -316,7 +319,7 @@ class Anthropic:
             "beta_features": ["interleaved-thinking-2025-05-14"],
         }
         # Remember the event loop this provider was created on.  Closing the
-        # underlying httpx client from a different (or already-closed) loop on
+        # underlying httpx2 client from a different (or already-closed) loop on
         # Windows/Python 3.14 raises a noisy RuntimeError; when the loop has
         # changed, we simply abandon the client and let the OS reclaim sockets.
         try:
@@ -432,6 +435,16 @@ class Anthropic:
         generation_kwargs.pop("max_output_tokens", None)
         generation_kwargs.pop("max_completion_tokens", None)
 
+        # The anthropic SDK 1.0+ dropped ``temperature`` / ``top_k`` / ``top_p``
+        # from the ``messages.create`` signature (the API still accepts them for
+        # models that support sampling controls).  Route them through
+        # ``extra_body`` so callers using ``with_generation_kwargs`` keep working.
+        extra_body = generation_kwargs.pop("extra_body", None)
+        extra_body = dict(extra_body) if extra_body else {}
+        for legacy_sampling_param in ("temperature", "top_k", "top_p"):
+            if legacy_sampling_param in generation_kwargs:
+                extra_body[legacy_sampling_param] = generation_kwargs.pop(legacy_sampling_param)
+
         betas = generation_kwargs.pop("beta_features", []) or []
         extra_headers = generation_kwargs.pop("extra_headers", {}) or {}
         extra_headers = {
@@ -450,11 +463,12 @@ class Anthropic:
                 tools=tools_,
                 stream=self._stream,
                 extra_headers=extra_headers,
+                extra_body=extra_body,
                 metadata=self._metadata if self._metadata is not None else omit,
                 **generation_kwargs,
             )
             return AnthropicStreamedMessage(response)
-        except (AnthropicError, httpx.HTTPError) as e:
+        except (AnthropicError, httpx.HTTPError, httpx2.HTTPError) as e:
             raise _convert_error(e) from e
 
     def with_thinking(self, effort: ThinkingEffort) -> Self:
@@ -828,7 +842,7 @@ class AnthropicStreamedMessage(BaseStreamedMessage):
                             self._update_usage(event.usage)
                     elif isinstance(event, MessageStopEvent):
                         continue
-        except (AnthropicError, httpx.HTTPError) as exc:
+        except (AnthropicError, httpx.HTTPError, httpx2.HTTPError) as exc:
             raise _convert_error(exc) from exc
 
 
@@ -923,10 +937,12 @@ def _response_headers(error: AnthropicError) -> Mapping[str, str] | None:
     return getattr(response, "headers", None) if response is not None else None
 
 
-def _convert_error(error: AnthropicError | httpx.HTTPError) -> ChatProviderError:
-    # httpx errors may leak through the Anthropic SDK during streaming;
+def _convert_error(
+    error: AnthropicError | httpx.HTTPError | httpx2.HTTPError,
+) -> ChatProviderError:
+    # httpx/httpx2 errors may leak through the Anthropic SDK during streaming;
     # delegate to the shared converter.
-    if isinstance(error, httpx.HTTPError):
+    if isinstance(error, (httpx.HTTPError, httpx2.HTTPError)):
         return convert_httpx_error(error)
     # Anthropic SDK errors — check subclasses before parents to avoid
     # misclassification (e.g. APITimeoutError inherits APIConnectionError).

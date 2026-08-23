@@ -18,7 +18,7 @@ import os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import httpx2
 
 from kosong.chat_provider import (
     DEFAULT_MAX_RETRIES,
@@ -118,10 +118,17 @@ class Bedrock(Anthropic):
                 )
 
         region = _resolve_region(aws_region)
+        # Provide our own httpx2.AsyncClient so the anthropic SDK 1.0+ (which
+        # backs AsyncAnthropicBedrock) does not create its default
+        # ``AsyncHttpxClientWrapper`` — that wrapper's ``__del__`` schedules
+        # ``self.aclose()`` on the running loop and can surface a noisy
+        # ``RuntimeError: Event loop is closed`` traceback on Windows/Python
+        # 3.14.  The SDK validates that ``http_client`` is an
+        # ``httpx2.AsyncClient``, so a plain ``httpx.AsyncClient`` is rejected.
         client_kwargs = dict(client_kwargs)
         client_kwargs.setdefault("max_retries", DEFAULT_MAX_RETRIES)
         if "http_client" not in client_kwargs:
-            client_kwargs["http_client"] = httpx.AsyncClient()
+            client_kwargs["http_client"] = httpx2.AsyncClient()
 
         self._model = model
         self._stream = stream

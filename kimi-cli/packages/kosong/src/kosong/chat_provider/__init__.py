@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, Protocol, Self, runtime_checkable
+from typing import Literal, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel
 
 from kosong.message import ContentPart, Message, ToolCall, ToolCallPart
 from kosong.tooling import Tool
-
-if TYPE_CHECKING:
-    import httpx
 
 
 @runtime_checkable
@@ -207,26 +204,40 @@ class APIEmptyResponseError(ChatProviderError):
     """The error raised when the API returns an empty response."""
 
 
-def convert_httpx_error(error: httpx.HTTPError) -> ChatProviderError:
-    """Convert an httpx transport error to the corresponding ChatProviderError.
+def convert_httpx_error(error: object) -> ChatProviderError:
+    """Convert an httpx / httpx2 transport error to the corresponding ChatProviderError.
 
     This is a shared utility for all chat providers. SDK-specific exceptions
     (e.g. AnthropicError, OpenAIError) should be handled by each provider's
-    own conversion logic; only raw httpx exceptions that leak through
+    own conversion logic; only raw httpx/httpx2 exceptions that leak through
     (typically during streaming) should be routed here.
+
+    Both families are accepted because the anthropic SDK 1.0+ (and openai
+    SDK 3.x) are built on httpx2, whose exception classes are distinct from
+    the legacy httpx ones.
     """
     import httpx
+    import httpx2
 
-    if isinstance(error, httpx.TimeoutException):
+    if isinstance(error, (httpx.TimeoutException, httpx2.TimeoutException)):
         return APITimeoutError(str(error))
-    if isinstance(error, (httpx.NetworkError, httpx.RemoteProtocolError)):
+    if isinstance(
+        error,
+        (
+            httpx.NetworkError,
+            httpx2.NetworkError,
+            httpx.RemoteProtocolError,
+            httpx2.RemoteProtocolError,
+        ),
+    ):
         return APIConnectionError(str(error))
-    if isinstance(error, httpx.HTTPStatusError):
-        req_id = error.response.headers.get("x-request-id")
+    if isinstance(error, (httpx.HTTPStatusError, httpx2.HTTPStatusError)):
+        response = error.response
+        req_id = response.headers.get("x-request-id")
         return APIStatusError(
-            error.response.status_code,
+            response.status_code,
             str(error),
             request_id=req_id,
-            headers=error.response.headers,
+            headers=response.headers,
         )
     return ChatProviderError(f"HTTP error: {error}")

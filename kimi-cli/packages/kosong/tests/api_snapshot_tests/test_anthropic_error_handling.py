@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import httpx2
 import pytest
 
 pytest.importorskip("anthropic", reason="Optional contrib dependency not installed")
@@ -60,6 +61,14 @@ class TestConvertHttpxError:
             (httpx.RemoteProtocolError("remote protocol error"), APIConnectionError),
             (httpx.LocalProtocolError("local protocol error"), ChatProviderError),
             (httpx.DecodingError("decode failed"), ChatProviderError),
+            (httpx2.ReadTimeout("read timed out"), APITimeoutError),
+            (httpx2.ConnectTimeout("connect timed out"), APITimeoutError),
+            (httpx2.WriteTimeout("write timed out"), APITimeoutError),
+            (httpx2.PoolTimeout("pool timed out"), APITimeoutError),
+            (httpx2.NetworkError("connection reset"), APIConnectionError),
+            (httpx2.RemoteProtocolError("remote protocol error"), APIConnectionError),
+            (httpx2.LocalProtocolError("local protocol error"), ChatProviderError),
+            (httpx2.DecodingError("decode failed"), ChatProviderError),
         ],
         ids=[
             "ReadTimeout",
@@ -70,12 +79,34 @@ class TestConvertHttpxError:
             "RemoteProtocolError",
             "LocalProtocolError",
             "DecodingError",
+            "httpx2.ReadTimeout",
+            "httpx2.ConnectTimeout",
+            "httpx2.WriteTimeout",
+            "httpx2.PoolTimeout",
+            "httpx2.NetworkError",
+            "httpx2.RemoteProtocolError",
+            "httpx2.LocalProtocolError",
+            "httpx2.DecodingError",
         ],
     )
     def test_httpx_error_mapping(
-        self, exc: httpx.HTTPError, expected_type: type[ChatProviderError]
+        self, exc: httpx.HTTPError | httpx2.HTTPError, expected_type: type[ChatProviderError]
     ) -> None:
         assert isinstance(convert_httpx_error(exc), expected_type)
+
+    def test_httpx2_http_status_error(self) -> None:
+        response = httpx2.Response(
+            502,
+            request=httpx2.Request("POST", "https://api.test"),
+            headers={"retry-after": "10", "x-request-id": "req-httpx2"},
+        )
+        exc = httpx2.HTTPStatusError("bad gateway", request=response.request, response=response)
+        err = convert_httpx_error(exc)
+        assert isinstance(err, APIStatusError)
+        assert err.status_code == 502
+        assert err.headers == response.headers
+        assert err.request_id == "req-httpx2"
+        assert err.retry_after == 10
 
     def test_http_status_error(self) -> None:
         response = httpx.Response(
@@ -112,11 +143,17 @@ class TestAnthropicConvertError:
         assert isinstance(err, APIConnectionError)
 
     def test_delegates_httpx_to_shared_converter(self) -> None:
-        """httpx errors should be delegated to convert_httpx_error."""
+        """httpx/httpx2 errors should be delegated to convert_httpx_error."""
         err = _convert_error(httpx.ReadTimeout("stream timed out"))
         assert isinstance(err, APITimeoutError)
 
         err = _convert_error(httpx.NetworkError("connection reset"))
+        assert isinstance(err, APIConnectionError)
+
+        err = _convert_error(httpx2.ReadTimeout("stream timed out"))
+        assert isinstance(err, APITimeoutError)
+
+        err = _convert_error(httpx2.NetworkError("connection reset"))
         assert isinstance(err, APIConnectionError)
 
     def test_api_status_error_preserves_response_headers(self) -> None:
@@ -179,6 +216,18 @@ class TestStreamingErrorPropagation:
     async def test_connect_timeout(self) -> None:
         msg = _make_failing_stream(httpx.ConnectTimeout("connect timed out"))
         with pytest.raises(APITimeoutError, match="connect timed out"):
+            async for _ in msg:
+                pass
+
+    async def test_httpx2_read_timeout(self) -> None:
+        msg = _make_failing_stream(httpx2.ReadTimeout("stream timed out after 600s"))
+        with pytest.raises(APITimeoutError, match="stream timed out"):
+            async for _ in msg:
+                pass
+
+    async def test_httpx2_network_error(self) -> None:
+        msg = _make_failing_stream(httpx2.NetworkError("connection reset by peer"))
+        with pytest.raises(APIConnectionError, match="connection reset"):
             async for _ in msg:
                 pass
 

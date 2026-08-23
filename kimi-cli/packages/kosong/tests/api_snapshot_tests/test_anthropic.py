@@ -5,7 +5,14 @@ import json
 
 import pytest
 import respx
-from common import B64_PNG, COMMON_CASES, Case, make_anthropic_response, run_test_cases
+from common import (
+    B64_PNG,
+    COMMON_CASES,
+    Case,
+    make_anthropic_response,
+    make_httpx2_client,
+    run_test_cases,
+)
 from httpx import Response
 from inline_snapshot import snapshot
 
@@ -72,6 +79,7 @@ async def test_anthropic_message_conversion():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -471,6 +479,7 @@ async def test_anthropic_generation_kwargs():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -490,6 +499,7 @@ async def test_anthropic_generation_kwargs_none_extras():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -507,6 +517,7 @@ async def test_anthropic_max_tokens_clamped():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -536,6 +547,7 @@ async def test_anthropic_with_thinking():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -553,6 +565,7 @@ async def test_anthropic_opus_46_adaptive_thinking():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-6-20260205",
             api_key="test-key",
             default_max_tokens=1024,
@@ -574,6 +587,7 @@ async def test_anthropic_opus_46_thinking_off():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-6-20260205",
             api_key="test-key",
             default_max_tokens=1024,
@@ -592,6 +606,7 @@ async def test_anthropic_opus_47_adaptive_thinking():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -610,6 +625,7 @@ async def test_anthropic_opus_47_effort_low_passthrough():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -626,6 +642,7 @@ async def test_anthropic_opus_47_effort_medium_passthrough():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -643,6 +660,7 @@ async def test_anthropic_future_opus_48_uses_adaptive():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-8",
             api_key="test-key",
             default_max_tokens=1024,
@@ -665,6 +683,7 @@ async def test_anthropic_sonnet_4_legacy_thinking_preserved():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -685,6 +704,7 @@ async def test_anthropic_claude_3_legacy_no_output_config():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-3-5-sonnet-20240620",
             api_key="test-key",
             default_max_tokens=1024,
@@ -703,6 +723,7 @@ async def test_anthropic_haiku_45_legacy_no_output_config():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-haiku-4-5-20251001",
             api_key="test-key",
             default_max_tokens=1024,
@@ -723,6 +744,7 @@ async def test_anthropic_opus_45_legacy_xhigh_clamps_to_high():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-5",
             api_key="test-key",
             default_max_tokens=1024,
@@ -742,6 +764,7 @@ async def test_anthropic_opus_47_xhigh():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -760,6 +783,7 @@ async def test_anthropic_opus_47_max():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -777,6 +801,7 @@ async def test_anthropic_opus_46_max():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-6",
             api_key="test-key",
             default_max_tokens=1024,
@@ -796,6 +821,7 @@ async def test_anthropic_opus_46_xhigh_clamps_to_high():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-6",
             api_key="test-key",
             default_max_tokens=1024,
@@ -815,6 +841,7 @@ async def test_anthropic_switching_from_adaptive_to_off_clears_output_config():
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = (
             Anthropic(
+                http_client=make_httpx2_client(mock),
                 model="claude-opus-4-7",
                 api_key="test-key",
                 default_max_tokens=1024,
@@ -836,6 +863,7 @@ async def test_anthropic_metadata():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -854,6 +882,7 @@ async def test_anthropic_metadata_omitted_when_none():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -911,6 +940,7 @@ async def test_anthropic_supported_efforts_clamps_max_to_high():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -929,6 +959,7 @@ async def test_anthropic_supported_efforts_passes_max():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-opus-4-7",
             api_key="test-key",
             default_max_tokens=1024,
@@ -979,6 +1010,7 @@ async def test_anthropic_parallel_tool_results_merged_into_single_user_message()
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1030,6 +1062,7 @@ async def test_anthropic_normalizes_invalid_tool_call_ids():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1071,6 +1104,7 @@ async def test_anthropic_valid_tool_call_ids_pass_through_unchanged():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1105,12 +1139,6 @@ async def test_anthropic_malformed_tool_call_arguments_in_request(
     """Malformed tool-call arguments in history must be surfaced to the LLM, not crash."""
     from common import capture_request
 
-    provider = Anthropic(
-        model="claude-sonnet-4-20250514",
-        api_key="test-key",
-        default_max_tokens=1024,
-        stream=False,
-    )
     history = [
         Message(
             role="assistant",
@@ -1126,6 +1154,13 @@ async def test_anthropic_malformed_tool_call_arguments_in_request(
 
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
+        provider = Anthropic(
+            http_client=make_httpx2_client(mock),
+            model="claude-sonnet-4-20250514",
+            api_key="test-key",
+            default_max_tokens=1024,
+            stream=False,
+        )
         body = await capture_request(mock, provider, "", [], history)
 
     messages = body["messages"]
@@ -1152,12 +1187,6 @@ async def test_anthropic_empty_tool_call_arguments_in_request():
     """Empty string arguments should produce an empty tool_use input, not an error."""
     from common import capture_request
 
-    provider = Anthropic(
-        model="claude-sonnet-4-20250514",
-        api_key="test-key",
-        default_max_tokens=1024,
-        stream=False,
-    )
     history = [
         Message(
             role="assistant",
@@ -1173,6 +1202,13 @@ async def test_anthropic_empty_tool_call_arguments_in_request():
 
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
+        provider = Anthropic(
+            http_client=make_httpx2_client(mock),
+            model="claude-sonnet-4-20250514",
+            api_key="test-key",
+            default_max_tokens=1024,
+            stream=False,
+        )
         body = await capture_request(mock, provider, "", [], history)
 
     messages = body["messages"]
@@ -1204,12 +1240,6 @@ async def test_anthropic_malformed_tool_use_in_response(
     input_value: object, expected_type: str, expected_content: str
 ):
     """Backend returning tool_use with unexpected input types must not crash."""
-    provider = Anthropic(
-        model="claude-sonnet-4-20250514",
-        api_key="test-key",
-        default_max_tokens=1024,
-        stream=False,
-    )
 
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(
@@ -1233,6 +1263,13 @@ async def test_anthropic_malformed_tool_use_in_response(
                 },
             )
         )
+        provider = Anthropic(
+            http_client=make_httpx2_client(mock),
+            model="claude-sonnet-4-20250514",
+            api_key="test-key",
+            default_max_tokens=1024,
+            stream=False,
+        )
         stream = await provider.generate("", [], [Message(role="user", content="Hi")])
         parts = [p async for p in stream]
 
@@ -1254,6 +1291,7 @@ async def test_anthropic_with_parallel_tool_calls_disabled():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1275,6 +1313,7 @@ async def test_anthropic_session_id_metadata_user_id_in_body():
             return_value=Response(200, json=make_anthropic_response())
         )
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1295,6 +1334,7 @@ async def test_anthropic_without_metadata_omits_field():
             return_value=Response(200, json=make_anthropic_response())
         )
         provider = Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1322,6 +1362,7 @@ async def test_anthropic_async_context_manager_closes_client():
     with respx.mock(base_url="https://api.anthropic.com") as mock:
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         async with Anthropic(
+            http_client=make_httpx2_client(mock),
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             default_max_tokens=1024,
@@ -1339,6 +1380,7 @@ async def test_anthropic_with_parallel_tool_calls_enabled():
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = (
             Anthropic(
+                http_client=make_httpx2_client(mock),
                 model="claude-sonnet-4-20250514",
                 api_key="test-key",
                 default_max_tokens=1024,
@@ -1394,6 +1436,7 @@ async def test_anthropic_parallel_tool_calls_last_call_wins():
         mock.post("/v1/messages").mock(return_value=Response(200, json=make_anthropic_response()))
         provider = (
             Anthropic(
+                http_client=make_httpx2_client(mock),
                 model="claude-sonnet-4-20250514",
                 api_key="test-key",
                 default_max_tokens=1024,

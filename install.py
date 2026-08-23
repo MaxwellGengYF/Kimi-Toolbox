@@ -705,20 +705,7 @@ def main(argv: list[str] | None = None) -> int:
             "   so that the updated PATH environment variable is loaded."
         )
 
-    # 3. Delete uv.lock file
-    lock_file = Path("uv.lock")
-    if lock_file.exists():
-        if _ask_yes_no(f"Remove {lock_file}?"):
-            print(f"\n🗑️  Removing {lock_file} ...")
-            try:
-                lock_file.unlink()
-                print(f"✅ Removed {lock_file}.")
-            except OSError as e:
-                print(f"⚠️  Could not remove {lock_file}: {e}")
-        else:
-            print(f"⏭️  Keeping {lock_file}.")
-
-    # 4. Run uv sync
+    # 3. Run uv sync
     if _ask_yes_no("Sync dependencies with uv?"):
         if not run_command(["uv", "sync"], "Syncing dependencies with uv"):
             print(
@@ -730,14 +717,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("⏭️  Skipping uv sync. Dependencies may be out of date.")
 
-    # 5. Keep the runtime version config in sync with KIMIX_BASE_VERSION so
+    # 4. Keep the runtime version config in sync with KIMIX_BASE_VERSION so
     #    the Python fallback reports the same version as the compiled runtime.
     _sync_kimix_native_version(KIMIX_BASE_VERSION)
 
-    # 6. Install the kimix_base native runtime (download + unpack into bin/)
+    # 5. Install the kimix_base native runtime (download + unpack into bin/)
     _install_kimix_native()
 
-    # 7. Run uv tool install -e .
+    # 6. Run uv tool install -e .
     if _ask_yes_no("Install tool in editable mode?"):
         if not run_command(["uv", "tool", "install", "-e", "."], "Installing tool in editable mode"):
             print(

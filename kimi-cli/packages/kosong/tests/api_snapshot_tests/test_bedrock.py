@@ -2,7 +2,7 @@
 
 import pytest
 import respx
-from common import make_anthropic_response
+from common import make_anthropic_response, make_httpx2_client
 from httpx import Response
 
 from kosong.chat_provider import ChatProviderError
@@ -43,7 +43,7 @@ async def test_bedrock_generate():
         mock.post(f"/model/{MODEL}/invoke").mock(
             return_value=Response(200, json=make_anthropic_response(MODEL))
         )
-        provider = make_provider()
+        provider = make_provider(http_client=make_httpx2_client(mock))
         stream = await provider.generate("", [], [Message(role="user", content="Hello!")])
         parts = [part async for part in stream]
         assert parts[0].text == "Hello"
