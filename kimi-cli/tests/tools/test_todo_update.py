@@ -508,6 +508,110 @@ class TestTodoUpdateMultiple:
             TodoUpdateParams(title="A", updates=[{"title": "B"}])
 
 
+class TestTodoUpdateContentAlias:
+    """`content` is accepted as an alias for `title` so todo_write-style items
+    ({content, status, notes}) can be reused in todo_update — single and batch."""
+
+    async def test_single_top_level_content_alias(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="in_progress")]))
+
+        res = await update(
+            TodoUpdateParams.model_validate({"content": "Task A", "status": "done"})
+        )
+        assert not res.is_error
+        assert 'Updated "Task A" (status=done)' in res.output
+        assert _find_todo(update, "Task A").status == "done"
+
+    async def test_single_top_level_content_alias_with_notes(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="pending")]))
+
+        res = await update(
+            TodoUpdateParams.model_validate(
+                {"content": "Task A", "notes": "from content-shape"}
+            )
+        )
+        assert not res.is_error
+        todo = _find_todo(update, "Task A")
+        assert todo.notes == "from content-shape"
+        assert todo.status == "pending"
+
+    async def test_updates_accept_content_shape_items(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"content": "A", "status": "done"},
+                    {"content": "B", "status": "in_progress"},
+                ]
+            )
+        )
+        assert not res.is_error
+        assert _find_todo(update, "A").status == "done"
+        assert _find_todo(update, "B").status == "in_progress"
+        assert 'Updated "A" (status=done)' in res.output
+        assert 'Updated "B" (status=in_progress)' in res.output
+
+    async def test_mixed_title_and_content_items_in_one_batch(
+        self, runtime: Runtime
+    ) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(
+            Params(
+                todos=[
+                    Todo(content="A", status="pending"),
+                    Todo(content="B", status="pending"),
+                ]
+            )
+        )
+
+        res = await update(
+            TodoUpdateParams(
+                updates=[
+                    {"title": "A", "status": "done"},
+                    {"content": "B", "status": "done"},
+                ]
+            )
+        )
+        assert not res.is_error
+        assert _find_todo(update, "A").status == "done"
+        assert _find_todo(update, "B").status == "done"
+        assert res.message == 'Updated "A".; Updated "B".'
+
+    async def test_todos_alias_accepts_content_shape(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="A", status="pending")]))
+
+        res = await update(
+            TodoUpdateParams.model_validate(
+                {"todos": [{"content": "A", "status": "done"}]}
+            )
+        )
+        assert not res.is_error
+        assert _find_todo(update, "A").status == "done"
+
+    async def test_content_cannot_mix_with_updates(self, runtime: Runtime) -> None:
+        with pytest.raises(ValidationError):
+            TodoUpdateParams.model_validate(
+                {"content": "A", "updates": [{"title": "B"}]}
+            )
+
+
 class TestTodoUpdateParent:
     async def test_creates_child_under_parent(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)

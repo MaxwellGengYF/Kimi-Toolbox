@@ -1236,7 +1236,12 @@ class TodoUpdateItem(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     title: str = Field(
-        description="Title of the todo to update or create. Exact match is tried first; fuzzy match is used when enabled and exact match fails.",
+        validation_alias=AliasChoices("title", "content"),
+        description=(
+            "Title of the todo to update or create. Exact match is tried first; "
+            "fuzzy match is used when enabled and exact match fails. "
+            "Alias `content` is accepted for compatibility with todo_write items."
+        ),
         min_length=1,
         max_length=65536,
     )
@@ -1309,9 +1314,11 @@ class TodoUpdateParams(BaseModel):
 
     title: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("title", "content"),
         description=(
             "Title of the todo to update or create when using a single top-level "
-            "update. Use `updates` to batch multiple edits."
+            "update. Use `updates` to batch multiple edits. `content` is accepted as "
+            "an alias for compatibility with todo_write items."
         ),
         min_length=1,
         max_length=65536,
@@ -1447,7 +1454,8 @@ class todo_update(TodoList):
         "Create, update, rename, or complete one or more todos by title — no need to "
         "resend the whole tree. Pass a single edit directly (title=..., status=...), or "
         "pass updates=[...] (alias todos=[...]) to batch several edits in one call.\n"
-        "- title: the todo to update or create.\n"
+        "- title: the todo to update or create. `content` is accepted as an alias for "
+        "title, so todo_write-style items ({content, status, notes}) may be reused here.\n"
         "- parent: scope the lookup/creation — omit to search the whole tree (update only), "
         "  \"\" for the root scope, or a parent title to create/update a child under it.\n"
         "- status: pending/in_progress/done; omit keeps the current status (new items default to pending).\n"
