@@ -432,7 +432,7 @@ _FALLBACK_BODIES = {
         "-*) printf '%s\\n' \"watch: unsupported option: $1\" >&2; return 1;; "
         "*) break;; esac; done; "
         "if [[ $# -eq 0 ]]; then printf '%s\\n' 'watch: missing command' >&2; return 1; fi; "
-        "while true; do clear; \"$@\"; sleep \"$__kimix_interval\"; done"
+        "while true; do clear; eval \"$*\"; sleep \"$__kimix_interval\"; done"
     ),
     "killall": (
         "if [[ $# -eq 0 ]]; then printf '%s\\n' 'killall: missing process name' >&2; return 1; fi; "
@@ -518,8 +518,29 @@ _COMMAND_END_KEYWORDS = frozenset({"fi", "done", "esac"})
 _LIST_KEYWORDS = frozenset({"for", "select", "case"})
 
 _COMMAND_WRAPPERS = frozenset(
-    {"command", "coproc", "env", "exec", "nohup", "sudo", "time"}
+    {"command", "coproc", "env", "exec", "nohup", "sudo", "time",
+     "timeout", "stdbuf", "nice", "xargs"}
 )
+
+# Fallback names that behave like command wrappers too: the word itself needs
+# its fallback definition recorded AND its first non-option operand is a
+# command the wrapper executes.  ``gtimeout`` runs ``timeout "$@"`` (an
+# executable that execs argv, so its command operand needs the standalone
+# runner), while ``watch`` runs its command inside the same shell (its body
+# uses ``eval "$*"``, so a same-shell function call suffices).
+_FALLBACK_COMMAND_WRAPPERS = {"gtimeout": "timeout", "watch": "watch"}
+
+# Wrappers that require a fixed number of plain operands (options excluded)
+# before the command word.  GNU ``timeout`` takes exactly one DURATION operand
+# (``timeout 5 rev``, ``timeout -s KILL 5s rev``) before COMMAND, so the
+# duration is consumed without being mistaken for the wrapped command.
+_WRAPPER_OPERAND_COUNTS = {"timeout": 1}
+
+# Wrapper kinds whose command operand runs inside the current shell rather
+# than being exec'd as a new process: the fallback function defined by the
+# prefix is directly callable, so the source word is kept (no standalone
+# runner rewrite is needed or possible).
+_SAME_SHELL_WRAPPERS = frozenset({"coproc", "time", "watch"})
 
 # Shell executables that agents frequently put in front of a command the Bash
 # tool is already going to run (``bash cd /c/dev/x && ...``).  Git Bash can
@@ -572,6 +593,47 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
         }
     ),
     "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "timeout": frozenset(
+        {
+            "-k",
+            "--kill-after",
+            "-s",
+            "--signal",
+        }
+    ),
+    "stdbuf": frozenset(
+        {
+            "-o",
+            "-e",
+            "-i",
+            "--output",
+            "--error",
+            "--input",
+        }
+    ),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "xargs": frozenset(
+        {
+            "-I",
+            "-n",
+            "-L",
+            "-P",
+            "-s",
+            "-S",
+            "-a",
+            "-d",
+            "-E",
+            "--arg-file",
+            "--max-args",
+            "--max-chars",
+            "--max-procs",
+            "--max-lines",
+            "--replace",
+            "--eof",
+            "--delimiter",
+        }
+    ),
+    "watch": frozenset({"-n", "--interval"}),
 }
 
 # Wrapper options whose value is a filesystem path rather than a name or
@@ -582,8 +644,9 @@ _WRAPPER_PATH_OPTIONS = {
     "env": frozenset({"-C", "--chdir"}),
     "sudo": frozenset({"-D", "--chdir"}),
     "time": frozenset({"-o", "--output"}),
+    "xargs": frozenset({"-a", "--arg-file"}),
 }
-_WRAPPER_PATH_OPTION_LONG = frozenset({"--chdir", "--output"})
+_WRAPPER_PATH_OPTION_LONG = frozenset({"--chdir", "--output", "--arg-file"})
 
 _OPERATOR_CHARS = frozenset(";&|()<>\n")
 _REDIRECTION_START = frozenset("<>")
@@ -683,6 +746,7 @@ class _BashWrapper:
     skip_next: bool = False
     opaque: bool = False
     path_value: bool = False
+    operands: int = 0
 
 
 @dataclass
@@ -716,12 +780,17 @@ class _BashFixScanner:
             return BashFix(self.s)
         if not self.names and not self.edits and not self.shell_notes:
             return BashFix(self.s)
-        definitions = "\n".join(
-            _FALLBACKS[name] for name in dict.fromkeys(self.names)
-        )
+        unique_names = list(dict.fromkeys(self.names))
+        definitions = "\n".join(_FALLBACKS[name] for name in unique_names)
+        # Exported fallbacks are inherited by every nested bash (a ``bash -c``
+        # operand of a command wrapper, the standalone runner scripts), where
+        # the definitions above are not otherwise visible: ``env bash -c
+        # 'rev <<< abc'`` keeps ``bash -c`` but the child shell still needs
+        # ``rev`` to resolve to the function.
+        exports = "\n".join(f"export -f {name}" for name in unique_names)
         source = self._build_source()
         source = _fix_heredoc_trailing_operators(source)
-        prefix = definitions + "\n" if definitions else ""
+        prefix = definitions + "\n" + exports + "\n" if definitions else ""
         return BashFix(
             prefix + source,
             tuple(self.names),
@@ -838,15 +907,18 @@ class _BashFixScanner:
         end: int,
         *,
         assignment_prefix: bool = False,
-    ) -> int | None:
+        wrapped: bool = False,
+    ) -> tuple[int, bool] | None:
         """Repair a redundant ``bash``/``sh`` invocation at command position.
 
-        Returns the scan index to continue from when the wrapper was rewritten,
+        Returns ``(scan index, keep_wrapper)`` when the wrapper was rewritten,
         or ``None`` when the wrapper is left untouched (legitimate
         ``bash script.sh``, semantic options such as ``-e``/``-x``, stdin
         forms, scripts with trailing argv that ``$0``/``$1`` depend on, or an
         assignment prefix such as ``VAR=x bash ...`` whose scoping the rewrite
-        could not preserve).
+        could not preserve).  ``keep_wrapper`` asks the caller to leave any
+        active command wrapper in place so the wrapped command keeps its
+        executable context.
 
         Two shapes are repaired:
         * ``bash <command> ...`` — the shell word is redundant because the Bash
@@ -860,6 +932,16 @@ class _BashFixScanner:
           with the script as the final word of the segment are unwrapped;
           trailing argv, ``-ec``-style clusters and expansions are preserved
           for bash to handle.
+
+        Under an active command wrapper (``env``/``nohup``/``timeout``/``sudo``
+        ...) the shell word is an *operand* of that wrapper, so the repair
+        must not move text out of its argv (``timeout 5 bash -c 'a && b'``
+        unwrapped to ``timeout 5 a && b`` would let ``&&`` split the list):
+        the ``-c`` form keeps ``bash -c`` and only fixes the inline script in
+        place — the wrapper runs bash natively and the nested bash inherits
+        the exported fallback functions — while the prefix form only drops
+        the shell word and leaves the wrapper active so the command that
+        follows keeps its executable (standalone-runner) context.
         """
         if assignment_prefix:
             # ``VAR=x bash -c 'echo $VAR'``: the assignment is scoped to the
@@ -926,9 +1008,16 @@ class _BashFixScanner:
             self.shell_notes.extend(
                 n for n in inner.shell_notes if n not in self.shell_notes
             )
+            if wrapped:
+                # Keep ``<wrapper> bash -c '<script>'`` and fix the script in
+                # place: the wrapper runs bash natively and the nested bash
+                # inherits the exported fallback functions.
+                if inner.edits:
+                    self.edits.append((k, script_end, _single_quote(fixed)))
+                return script_end, True
             self.edits.append((word_start, script_end, fixed))
             self.shell_notes.append(f"{shell_name} -c")
-            return script_end
+            return script_end, False
 
         if self._plausible_script_file(next_raw):
             return None
@@ -937,7 +1026,42 @@ class _BashFixScanner:
         # the real command (``bash cd ...`` -> ``cd ...``).
         self.edits.append((word_start, j, ""))
         self.shell_notes.append(shell_name)
-        return j
+        # Under a command wrapper the wrapped command must keep its executable
+        # context (``env bash rev`` -> ``env <runner>``), so the caller leaves
+        # the active wrapper in place.
+        return j, wrapped
+
+    def _watch_command_operand(
+        self, word_start: int, word_end: int, raw: str
+    ) -> None:
+        """Fix the inline script of a quoted ``watch`` command operand.
+
+        procps ``watch`` executes its command line through ``sh -c``, and the
+        Git Bash fallback mirrors that with ``eval "$*"`` in the current
+        shell.  A quoted operand (``watch -n1 'rev <<< abc'``) is therefore an
+        inline script: its literal value is scanned as its own command context
+        and re-emitted with the inner fixes applied, so fallback names and
+        Windows paths inside it work.  Unquoted operands need no special
+        handling here — they flow through the normal command-word rules.
+        """
+        if not (raw.startswith("'") or raw.startswith('"')):
+            return
+        script = self._literal_word_value(raw)
+        if script is None:
+            return  # expansions inside the script: leave for bash
+        try:
+            inner = _BashFixScanner(script)
+            inner._scan_range(0, len(script))
+        except RecursionError:
+            return
+        fixed = _fix_heredoc_trailing_operators(inner._build_source())
+        self.names.extend(n for n in inner.names if n not in self.names)
+        self.path_notes.extend(inner.path_notes)
+        self.shell_notes.extend(
+            n for n in inner.shell_notes if n not in self.shell_notes
+        )
+        if inner.edits:
+            self.edits.append((word_start, word_end, _single_quote(fixed)))
 
 
     def _scan_range(self, start: int, end: int) -> None:
@@ -1227,7 +1351,7 @@ class _BashFixScanner:
                 self._drop_cmd_cd_flag(i, end)
 
             executable_wrapper = (
-                wrapper is not None and wrapper.kind not in {"coproc", "time"}
+                wrapper is not None and wrapper.kind not in _SAME_SHELL_WRAPPERS
             )
             if wrapper is not None and wrapper.kind == "coproc":
                 if self._coproc_name_before_compound(raw, i, end):
@@ -1270,9 +1394,45 @@ class _BashFixScanner:
                     command_expected = False
                     wrapper = None
                     continue
+                if wrapper is not None and wrapper.kind == "watch":
+                    # ``watch`` re-executes its command in the current shell
+                    # (``eval "$*"``, matching procps ``watch``'s ``sh -c``),
+                    # so a quoted operand is an inline script: scan its
+                    # literal value as its own command context so fallback
+                    # names and Windows paths inside it are fixed too.  An
+                    # unquoted operand falls through to the plain command-word
+                    # rules below (``watch`` is a same-shell wrapper, so the
+                    # source word resolves against the prefix functions).
+                    self._watch_command_operand(word_start, word_end, raw)
+                    wrapper = None
 
             if raw in _COMMAND_WRAPPERS:
-                wrapper = _BashWrapper(raw)
+                wrapper = _BashWrapper(
+                    raw, operands=_WRAPPER_OPERAND_COUNTS.get(raw, 0)
+                )
+                command_expected = True
+                continue
+            fallback_wrapper = _FALLBACK_COMMAND_WRAPPERS.get(raw)
+            if fallback_wrapper is not None:
+                # ``gtimeout 5 rev``/``watch -n1 rev``: the wrapper word is
+                # itself a fallback (its definition is recorded) and the
+                # command that follows its options/operands is scanned like a
+                # wrapped command word.
+                self.names.append(raw)
+                if executable_wrapper:
+                    # The wrapping executable (``xargs gtimeout ...``) cannot
+                    # invoke shell functions: swap the word for the standalone
+                    # runner.  The operand scan continues through the wrapper
+                    # state so the names the wrapped command uses are still
+                    # recorded; the prefix exports them, which the runner's
+                    # nested bash inherits.
+                    self.edits.append(
+                        (word_start, word_end, _wrapper_runner(raw))
+                    )
+                wrapper = _BashWrapper(
+                    fallback_wrapper,
+                    operands=_WRAPPER_OPERAND_COUNTS.get(fallback_wrapper, 0),
+                )
                 command_expected = True
                 continue
 
@@ -1282,19 +1442,21 @@ class _BashFixScanner:
             # consumed by the wrapper logic above, so it is left untouched.
             shell_name = self._shell_wrapper_name(raw)
             if shell_name is not None:
-                handled_i = self._handle_shell_wrapper(
+                handled = self._handle_shell_wrapper(
                     shell_name,
                     word_start,
                     i,
                     end,
                     assignment_prefix=assignment_prefix,
+                    wrapped=wrapper is not None,
                 )
-                if handled_i is not None:
-                    i = handled_i
+                if handled is not None:
+                    i, keep_wrapper = handled
                     command_expected = True
                     redirect_expected = False
                     heredoc_operator = None
-                    wrapper = None
+                    if not keep_wrapper:
+                        wrapper = None
                     assignment_prefix = False
                     continue
 
@@ -1802,6 +1964,12 @@ class _BashFixScanner:
             return "skip"
         if wrapper.opaque:
             return "inspect"
+        if wrapper.operands > 0 and not raw.startswith("-"):
+            # A plain operand before the command word (GNU ``timeout`` takes
+            # exactly one DURATION operand) is wrapper data, not the wrapped
+            # command; consume it without ending the wrapper.
+            wrapper.operands -= 1
+            return "skip"
         if wrapper.kind == "command" and raw in {"-v", "-V"}:
             return "inspect"
         if wrapper.kind == "command" and (

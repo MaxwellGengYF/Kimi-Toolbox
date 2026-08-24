@@ -5274,4 +5274,300 @@ class TestCommandParamAcceptsScriptFile:
         assert "executed via PowerShell" in desc
 
 
+# ============================================================================
+# Command-operand wrappers (timeout/stdbuf/nice/xargs/gtimeout/watch)
+# ============================================================================
+
+
+class TestBashFixCommandOperandWrappers:
+    """Wrappers whose COMMAND operand is scanned as a command context.
+
+    ``timeout``/``stdbuf``/``nice``/``xargs`` are bundled Git Bash executables
+    that exec their operand, and ``gtimeout``/``watch`` are fallback names
+    with the same shape.  Without operand scanning, ``timeout 5 rev <<< abc``
+    fails on Git Bash with ``timeout: failed to run command 'rev'`` even
+    though the plain ``rev <<< abc`` form is fixed — a command that works on
+    native POSIX bash but not on Windows.
+    """
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "timeout 5 rev <<< abc",
+            "timeout 5s rev <<< abc",
+            "timeout --foreground 5 rev <<< abc",
+            "timeout -s KILL 5 rev <<< abc",
+            "timeout --signal KILL 5 rev <<< abc",
+            "timeout --kill-after 1 5 rev <<< abc",
+            "timeout -- 5 rev <<< abc",
+            "stdbuf -oL rev <<< abc",
+            "stdbuf --output=L rev <<< abc",
+            "stdbuf -o L -e L rev <<< abc",
+            "nice -n 5 rev <<< abc",
+            "nice --adjustment 5 rev <<< abc",
+            "nice rev <<< abc",
+            "xargs rev",
+            "xargs -0 rev",
+            "xargs -n 2 rev",
+            "xargs -I {} rev",
+            "printf x | xargs rev",
+            "time timeout 5 rev <<< abc",
+            "nohup timeout 5 rev <<< abc",
+            "env timeout 5 rev <<< abc",
+            "timeout 5 python3 --version",
+        ],
+    )
+    def test_operand_fallback_is_recorded(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        expected = "python3" if "python3" in source else "rev"
+        assert result.replacements == (expected,)
+        assert result.changed
+        assert "/usr/bin/bash -c" in result.command
+
+    def test_timeout_operand_gets_standalone_runner(self) -> None:
+        # ``timeout`` execs its operand, so the fallback word must become the
+        # self-contained runner, not a function call.
+        result = _fix_for_windows("timeout 5 rev <<< abc")
+        source = result.command.split("\n")[-1]
+        assert source.startswith("timeout 5 /usr/bin/bash -c ")
+        assert source.endswith(" -- <<< abc")
+
+    def test_gtimeout_records_both_names_and_runners(self) -> None:
+        result = _fix_for_windows("gtimeout 5 rev <<< abc")
+        assert result.replacements == ("gtimeout", "rev")
+        source = result.command.split("\n")[-1]
+        assert source.startswith("gtimeout 5 /usr/bin/bash -c ")
+        assert source.endswith(" -- <<< abc")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "timeout 5 make test",
+            "timeout 5 true",
+            "nice -n 5 true",
+            "stdbuf -oL echo ok",
+            "xargs echo",
+            "find . -name '*.py' | xargs grep foo",
+            "timeout 5 bash -c 'a && b'",
+        ],
+    )
+    def test_bundled_operands_are_not_rewritten(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo timeout 5 rev",
+            "run=timeout",
+            "echo watch date",
+            "echo 'watch rev'",
+            "echo xargs rev",
+            "case x in timeout) echo no;; esac",
+            "alias watch='tail -f log'",
+            "function timeout { :; }",
+            "timeout() { :; }",
+            "echo hi # timeout 5 rev",
+        ],
+    )
+    def test_wrapper_names_in_data_positions_unchanged(self, command: str) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_xargs_path_valued_option_is_rewritten(self) -> None:
+        result = _fix_for_windows(r"xargs -a C:\in.txt rev")
+        assert result.replacements == ("rev",)
+        assert result.path_changes == (r"C:\in.txt",)
+        source = result.command.split("\n")[-1]
+        assert source.startswith(r"xargs -a C:/in.txt /usr/bin/bash -c ")
+
+    def test_xargs_inline_path_option_is_rewritten(self) -> None:
+        result = _fix_for_windows(r"xargs --arg-file=C:\in.txt rev")
+        assert result.path_changes == (r"--arg-file=C:\in.txt",)
+        source = result.command.split("\n")[-1]
+        assert source.startswith(r"xargs --arg-file=C:/in.txt /usr/bin/bash -c ")
+
+    def test_watch_records_command_operand_names(self) -> None:
+        # ``watch`` re-runs its command inside the same shell, so the operand
+        # stays a plain word and both fallbacks are defined + exported.
+        result = _fix_for_windows("watch -n 1 rev <<< abc")
+        assert result.replacements == ("watch", "rev")
+        assert result.command.split("\n")[-1] == "watch -n 1 rev <<< abc"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "watch 'rev <<< abc'",
+            "watch \"rev <<< abc\"",
+            "watch -n 1 'rev <<< abc'",
+        ],
+    )
+    def test_watch_quoted_script_is_scanned(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.replacements == ("watch", "rev")
+        assert result.command.split("\n")[-1] == source
+
+    def test_watch_quoted_script_inner_path_is_fixed(self) -> None:
+        result = _fix_for_windows(r"watch 'cd C:\x && rev'")
+        assert result.replacements == ("watch", "rev")
+        assert result.path_changes == (r"C:\x",)
+        assert result.command.split("\n")[-1] == "watch 'cd C:/x && rev'"
+
+    def test_watch_body_runs_command_through_eval(self) -> None:
+        # procps ``watch`` executes its command line via ``sh -c``; the
+        # fallback mirrors that with ``eval "$*"`` so quoted command strings
+        # and same-shell fallback functions both work.
+        result = _fix_for_windows("watch rev")
+        assert 'clear; eval "$*"' in result.command
+
+    def test_watch_operand_options_are_consumed(self) -> None:
+        # ``-n 1`` is watch's interval, not its command; ``rev`` is.
+        result = _fix_for_windows("watch -t -d -n 1 rev <<< abc")
+        assert result.replacements == ("watch", "rev")
+        assert result.command.split("\n")[-1] == "watch -t -d -n 1 rev <<< abc"
+
+    def test_fallbacks_are_exported_for_nested_shells(self) -> None:
+        result = _fix_for_windows("rev <<< abc")
+        assert "\nexport -f rev\n" in result.command
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "freebsd"])
+    def test_operand_wrappers_noop_on_non_windows(self, platform: str) -> None:
+        source = "timeout 5 rev <<< abc; watch -n 1 xargs rev"
+        assert _fix_for_platform(source, platform) == BashFix(source)
+
+
+class TestBashFixShellWrapperUnderCommandWrapper:
+    """``bash -c`` operands of command wrappers stay in place.
+
+    Unwrapping ``env bash -c 'a && b'`` would move ``&&`` out of the wrapper's
+    argv and break the command, and the wrapper executable cannot invoke the
+    shell functions the plain unwrap relies on.  Under an active wrapper the
+    inline script is fixed in place and the nested bash inherits the exported
+    fallback functions instead.
+    """
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "env bash -c 'rev <<< abc'",
+            "sudo bash -c 'rev <<< abc'",
+            "timeout 5 bash -c 'rev <<< abc'",
+            "nohup bash -c 'rev <<< abc'",
+        ],
+    )
+    def test_dash_c_script_is_fixed_in_place(self, source: str) -> None:
+        result = _fix_for_windows(source)
+        assert result.replacements == ("rev",)
+        assert result.command.split("\n")[-1] == source
+        assert "\nexport -f rev\n" in result.command
+
+    def test_dash_c_script_inner_path_is_fixed_in_place(self) -> None:
+        result = _fix_for_windows(r"nohup bash -c 'cd C:\x && rev'")
+        assert result.replacements == ("rev",)
+        assert result.path_changes == (r"C:\x",)
+        assert result.command.split("\n")[-1] == "nohup bash -c 'cd C:/x && rev'"
+
+    def test_assignment_scoped_bash_c_is_untouched(self) -> None:
+        # ``FOO=1`` is scoped to the wrapped shell process; unwrapping would
+        # make the outer shell expand ``$FOO`` too early.
+        source = 'env FOO=1 bash -c \'printf %s "$FOO"\''
+        assert _fix_for_windows(source) == BashFix(source)
+
+    def test_bare_shell_prefix_under_wrapper_gets_runner(self) -> None:
+        result = _fix_for_windows("env bash rev <<< abc")
+        assert result.replacements == ("rev",)
+        assert result.shell_wrappers == ("bash",)
+        source = result.command.split("\n")[-1]
+        assert source.startswith("env /usr/bin/bash -c ")
+        assert source.endswith(" -- <<< abc")
+
+    def test_operators_stay_inside_bash_c(self) -> None:
+        source = "timeout 5 bash -c 'rev <<< abc && rev <<< xyz'"
+        result = _fix_for_windows(source)
+        assert result.replacements == ("rev",)
+        assert result.command.split("\n")[-1] == source
+
+
+class TestBashFixRealGitBashOperands:
+    """Execution tests: wrapper operands run the fallback on real Git Bash."""
+
+    @staticmethod
+    def _run(command: str, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+        bash = find_bash()
+        assert bash is not None
+        fixed = _fix_for_windows(command)
+        for attempt in range(2):
+            try:
+                return subprocess.run(
+                    [bash, "-lc", fixed.command],
+                    input=stdin,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                if attempt == 1:
+                    raise
+                time.sleep(1)
+        raise AssertionError("unreachable")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "timeout 5 rev <<< abc",
+            "gtimeout 5 rev <<< abc",
+            "stdbuf -oL rev <<< abc",
+            "nice -n 5 rev <<< abc",
+            "nice rev <<< abc",
+        ],
+    )
+    def test_wrapper_operand_runs_fallback(self, command: str) -> None:
+        result = self._run(command)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    def test_xargs_operand_runs_fallback(self, tmp_path: Path) -> None:
+        posix = str(tmp_path).replace("\\", "/")
+        result = self._run(
+            f"cd {posix} && echo cba > f1 && printf 'f1\\n' | xargs -n 1 rev"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "abc\n"
+
+    def test_xargs_gtimeout_operand_runs_fallback(self, tmp_path: Path) -> None:
+        posix = str(tmp_path).replace("\\", "/")
+        result = self._run(
+            f"cd {posix} && echo cba > f1 && printf 'f1\\n' | xargs -n 1 gtimeout 2 rev"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "abc\n"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "timeout 3 watch -n 1 rev <<< abc",
+            "timeout 3 watch -n 1 'rev <<< abc'",
+        ],
+    )
+    def test_watch_operand_runs_until_killed(self, command: str) -> None:
+        result = self._run(command)
+        assert "cba" in result.stdout
+        assert "command not found" not in result.stderr
+
+    def test_nested_bash_c_inherits_exported_fallback(self) -> None:
+        result = self._run("env bash -c 'rev <<< abc'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    def test_nohup_bash_c_inherits_exported_fallback(self) -> None:
+        result = self._run("nohup bash -c 'rev <<< abc'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "cba\n"
+
+    def test_timeout_bash_c_script_fixed_in_place(self, tmp_path: Path) -> None:
+        backslash = str(tmp_path).replace("/", "\\").replace(" ", "\\ ")
+        result = self._run(f"timeout 5 bash -c 'cd {backslash} && rev <<< yz'")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "zy\n"
+
+
 

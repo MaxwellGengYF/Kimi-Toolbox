@@ -16,6 +16,20 @@ invocation — ``bash cd /c/dev/x && ...`` or ``bash -c 'cd C:\\x && rev'`` —
 is unwrapped (and the ``-c`` inline script is scanned for fallbacks and
 paths) because the Bash tool already runs the whole string via bash, so
 ``bash cd ...`` would otherwise try to open ``cd`` as a script file and fail.
+Under an active command wrapper (``env``/``nohup``/``timeout``/...) the shell
+word is an operand of that wrapper, so ``bash -c '<script>'`` keeps its shape
+and only the inline script is fixed in place.
+
+Command wrappers whose operand is itself a command are scanned as command
+contexts so missing POSIX commands behind them get their Git Bash fallback:
+``timeout`` (its one DURATION operand is consumed first), ``stdbuf``, ``nice``,
+and ``xargs`` (bundled Git Bash executables that exec their operand), plus the
+fallback wrappers ``gtimeout`` and ``watch`` (which also record their own
+fallback definition; ``watch`` re-runs its command through ``eval "$*"`` in
+the same shell, matching procps ``watch``'s ``sh -c`` behavior).  Fallback
+definitions are exported (``export -f``) so nested shells — the standalone
+runner scripts and ``bash -c`` operands — inherit them.
+
 Rewrites are conservative: the
 unquoted word must look unambiguously like a Windows path, so quoted data,
 tool-level escape sequences, short ambiguous words such as ``a\\nb``, and
@@ -80,6 +94,14 @@ _apply_heredoc_operator_move = _shell._apply_heredoc_operator_move
 _Wrapper = _shell._BashWrapper
 _HereDoc = _shell._BashHereDoc
 _Scanner = _shell._BashFixScanner
+
+# New-rule tables (also part of the scanner's public surface): wrappers whose
+# command operand is scanned as a command context.  ``timeout``/``stdbuf``/
+# ``nice``/``xargs`` are bundled Git Bash executables that exec their operand;
+# ``gtimeout``/``watch`` are fallback names with the same operand shape.
+_FALLBACK_COMMAND_WRAPPERS = _shell._FALLBACK_COMMAND_WRAPPERS
+_WRAPPER_OPERAND_COUNTS = _shell._WRAPPER_OPERAND_COUNTS
+_SAME_SHELL_WRAPPERS = _shell._SAME_SHELL_WRAPPERS
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_PARSE = _native_get_module("parse")

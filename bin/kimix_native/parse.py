@@ -70,10 +70,29 @@ _POST_KERNEL_RE = re.compile(
 # behaviour bit-identical.  Matching is deliberately broad (a command-boundary
 # word plus optional quotes) — routing ``echo bash`` to the reference is a
 # harmless perf cost, never a behaviour change.
-_SHELL_WRAPPER_RE = re.compile(
-    r"(?:^|[\s;|&(){}!\n])['\"]?(?:bash|sh|dash|ash)['\"]?"
-    r"(?=[\s;|&(){}<>\n]|$)"
+_SHELL_WRAPPER_WORDS = "bash|sh|dash|ash"
+
+# Command-operand wrappers (``timeout``/``stdbuf``/``nice``/``xargs`` consume
+# options plus a mandatory-or-eventual COMMAND operand, and the fallback
+# wrappers ``gtimeout``/``watch`` do the same while also being fallback names)
+# were likewise added after the kernel was built: the kernel neither scans the
+# wrapped command word nor knows the ``timeout`` DURATION-operand rule, so any
+# command containing these words at a command boundary is routed to the
+# reference implementation.
+_OPERAND_WRAPPER_WORDS = "timeout|stdbuf|nice|xargs|gtimeout|watch"
+
+_WRAPPER_BOUNDARY = r"[\s;|&(){}!<>\n]"
+_WRAPPER_RE = re.compile(
+    r"(?:^|" + _WRAPPER_BOUNDARY + r")['\"]?(?:"
+    + _SHELL_WRAPPER_WORDS
+    + "|"
+    + _OPERAND_WRAPPER_WORDS
+    + r")['\"]?(?="
+    + _WRAPPER_BOUNDARY
+    + r"|$)"
 )
+# Backwards-compatible alias for the original shell-wrapper-only pattern.
+_SHELL_WRAPPER_RE = _WRAPPER_RE
 
 _COMPAT_PARSERS = {
     "c": _compat.CParser,
@@ -475,8 +494,12 @@ def fix_bash_command(cmd: str) -> BashFix:
     # this rewrite, but the shim repeats it so older kernels and the compat path
     # behave identically.
     source = _shell._fix_heredoc_trailing_operators(source)
-    definitions = "\n".join(_shell._FALLBACKS[n] for n in dict.fromkeys(names))
-    prefix = definitions + "\n" if definitions else ""
+    unique_names = list(dict.fromkeys(names))
+    definitions = "\n".join(_shell._FALLBACKS[n] for n in unique_names)
+    # Mirror the reference scanner's prefix: exported fallbacks are inherited
+    # by nested bash processes (``bash -c`` operands, standalone runners).
+    exports = "\n".join(f"export -f {n}" for n in unique_names)
+    prefix = definitions + "\n" + exports + "\n" if definitions else ""
     path_changes = tuple(n.decode("utf-8", "surrogatepass") for n in notes_bytes)
     return BashFix(prefix + source, tuple(names), path_changes)
 
