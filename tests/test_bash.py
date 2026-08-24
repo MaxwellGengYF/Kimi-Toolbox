@@ -17,7 +17,7 @@ from kimi_cli.session import Session
 from kimi_cli.tools import SkipThisTool
 
 from kimi_agent_sdk import ToolError, ToolOk
-from kimix.tools.background.utils import TaskData, _pop_task_data
+from kimix.tools.background.utils import TaskData, _pop_task_data, get_all_tasks
 from kimix.tools.common import _env_with_rg_bin_path
 from kimix.tools.file.bash import (
     Bash,
@@ -3163,7 +3163,7 @@ class TestEdgeCases:
     reason="Bash tool is not available on this platform",
 )
 class TestBashInactivityTimeout:
-    async def test_bash_inactivity_timeout_returns_background_error(
+    async def test_bash_inactivity_timeout_kills_and_reports_timeout(
         self, mock_session: MagicMock
     ) -> None:
         with patch(
@@ -3174,8 +3174,10 @@ class TestBashInactivityTimeout:
             result = await bash(params)
             assert isinstance(result, ToolError)
             assert result.brief == "Timeout"
-            assert "Running in background" in result.message
-            assert "task_id" in result.message
+            assert "timed out" in result.message
+            assert "task_id" not in result.message
+            # The foreground timeout must not leave a zombie background task.
+            assert get_all_tasks(mock_session) == {}
 
     async def test_bash_short_timeout_unchanged(self, mock_session: MagicMock) -> None:
         bash = Bash(session=mock_session)
@@ -3208,7 +3210,7 @@ class TestPowershellInactivityTimeout:
         ):
             yield
 
-    async def test_pwsh_inactivity_timeout_returns_background_error(
+    async def test_pwsh_inactivity_timeout_kills_and_reports_timeout(
         self, mock_session: MagicMock
     ) -> None:
         with patch(
@@ -3219,8 +3221,10 @@ class TestPowershellInactivityTimeout:
             result = await pwsh(params)
             assert isinstance(result, ToolError)
             assert result.brief == "Timeout"
-            assert "Running in background" in result.message
-            assert "task_id" in result.message
+            assert "timed out" in result.message
+            assert "task_id" not in result.message
+            # The foreground timeout must not leave a zombie background task.
+            assert get_all_tasks(mock_session) == {}
 
     async def test_pwsh_short_timeout_unchanged(self, mock_session: MagicMock) -> None:
         pwsh = Powershell(session=mock_session)
@@ -4833,13 +4837,18 @@ class TestShellSafetyWiring:
         process_task = self._completed_process_task()
         process_task.thread_is_alive = AsyncMock(return_value=True)
         process_task.stream.pop_output = AsyncMock(return_value="")
+        process_task.stop = AsyncMock()
         with patch(
             "kimix.tools.file.bash.bash_tool.ProcessTask", return_value=process_task
         ):
             result = await bash_instance(BashParams(cmd="sleep 5", timeout=1))
         assert isinstance(result, ToolError)
         assert result.brief == "Timeout"
+        assert "timed out" in result.message
         assert "Long-running process detected" not in result.message
+        # The process tree is stopped and the task is removed on timeout.
+        process_task.stop.assert_awaited_once()
+        assert get_all_tasks(bash_instance._session) == {}
 
     # -- secret redaction (config-gated) ------------------------------------
 

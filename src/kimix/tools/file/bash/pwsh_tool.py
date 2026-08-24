@@ -619,11 +619,33 @@ class Powershell(CallableTool2[PowershellParams]):
                     inactivity_timeout=inactivity_timeout,
                 )
                 if await process_task.thread_is_alive():
-                    return await self._format_session_result(
-                        task_id, process_task.stream, params, output, "running",
-                        wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
-                        message="Matched pattern, still running" + transform_warning,
-                        brief="Pattern matched",
+                    if wait_matched:
+                        return await self._format_session_result(
+                            task_id, process_task.stream, params, output, "running",
+                            wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
+                            message="Matched pattern, still running" + transform_warning,
+                            brief="Pattern matched",
+                        )
+                    # The pattern never matched within the timeout.  Keep the
+                    # task running only for long-running commands; otherwise
+                    # kill the tree like the plain-timeout branch so no zombie
+                    # background task is left behind.
+                    guidance = foreground_background_guidance(params.command)
+                    if guidance is not None:
+                        return await self._format_session_result(
+                            task_id, process_task.stream, params, output, "running",
+                            wait_matched=wait_matched, elapsed_seconds=elapsed_seconds,
+                            message=(
+                                f"Running in background. task_id: `{task_id}`. "
+                                f"use `job_output` {guidance}" + transform_warning
+                            ),
+                            brief="Pattern matched",
+                        )
+                    return await self._stop_after_timeout(
+                        process_task,
+                        task_id,
+                        output,
+                        f"Command timed out after {params.timeout}s without matching pattern" + transform_warning,
                     )
             else:
                 await process_task.wait_with_monitor(params.timeout)
@@ -646,15 +668,28 @@ class Powershell(CallableTool2[PowershellParams]):
 
         if await process_task.thread_is_alive():
             output = await process_task.stream.pop_output() if process_task.stream else ""
-            output = await _maybe_export_output_async(output)
             guidance = foreground_background_guidance(params.command)
-            message = f"Running in background. task_id: `{task_id}`. use `job_output`."
-            if guidance:
-                message += f" {guidance}"
-            return ToolError(
-                output=output,
-                message=message + transform_warning,
-                brief="Timeout",
+            if guidance is not None:
+                # Long-running command (server/watcher/trailing `&`): keep the
+                # process running and hand the task id to the model so it can
+                # poll or kill the job with ``job_output``.
+                output = await _maybe_export_output_async(output)
+                message = (
+                    f"Running in background. task_id: `{task_id}`. "
+                    f"use `job_output` {guidance}" + transform_warning
+                )
+                return ToolError(
+                    output=output,
+                    message=message,
+                    brief="Timeout",
+                )
+            # Ordinary command exceeded the foreground timeout: kill the tree
+            # and report a definitive timeout instead of leaving a zombie task.
+            return await self._stop_after_timeout(
+                process_task,
+                task_id,
+                output,
+                f"Command timed out after {params.timeout}s" + transform_warning,
             )
 
         from kimix.tools.background.utils import remove_task_id
@@ -779,6 +814,34 @@ class Powershell(CallableTool2[PowershellParams]):
                 message=f"Invalid wait_for_pattern: {e}",
                 brief="Invalid pattern",
             )
+
+    async def _stop_after_timeout(
+        self,
+        process_task: ProcessTask,
+        task_id: str,
+        output: str,
+        message: str,
+    ) -> ToolError:
+        """Kill a foreground command that exceeded its timeout and clean up.
+
+        Stops the whole process tree, removes the background-task registration
+        and returns a definitive timeout ``ToolError`` carrying the partial
+        output.  Long-running commands (servers/watchers/trailing ``&``) are
+        NOT routed here — they keep running so the model can poll them with
+        ``job_output``; this path is for ordinary commands whose subprocess
+        would otherwise linger as a never-completing zombie task.
+        """
+        await process_task.stop()
+        from kimix.tools.background.utils import remove_task_id
+        remove_task_id(self._session, task_id)
+        output = await _maybe_export_output_async(output)
+        if output:
+            message += "; partial output above"
+        return ToolError(
+            output=output,
+            message=message,
+            brief="Timeout",
+        )
 
     async def _execute_background(self, params: PowershellParams) -> ToolReturnValue:
         """Execute a PowerShell command in background and return immediately with task_id."""
