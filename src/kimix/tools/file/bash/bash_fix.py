@@ -11,7 +11,13 @@ Windows-style backslash paths (``D:\\repo\\src``, ``\\\\server\\share``,
 or as the command word itself (``C:\\tools\\rg.exe``) — are rewritten to the
 forward-slash spellings Git Bash understands, and the cmd.exe-only
 ``cd /d <path>`` form loses its flag
-(``cd`` accepts a single argument in Bash).  A redundant leading shell
+(``cd`` accepts a single argument in Bash).  Git Bash virtual POSIX absolute
+paths are rewritten to the native spellings native Windows executables can
+resolve: ``/tmp/x`` becomes the real Windows temp directory (``/tmp`` in Git
+Bash is a virtual mount, so a native tool would otherwise read it as
+``<current-drive>:\\tmp\\x``) and ``/c/x``/``/d/x`` become ``C:/x``/``D:/x``.
+This makes a POSIX-style command behave the same under Git Bash and native
+POSIX bash.  A redundant leading shell
 invocation — ``bash cd /c/dev/x && ...`` or ``bash -c 'cd C:\\x && rev'`` —
 is unwrapped (and the ``-c`` inline script is scanned for fallbacks and
 paths) because the Bash tool already runs the whole string via bash, so

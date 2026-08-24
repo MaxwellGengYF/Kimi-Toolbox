@@ -876,22 +876,32 @@ class TestBashFixShellWrappers:
     """
 
     @pytest.mark.parametrize(
-        "command",
+        ("command", "expected_tail"),
         [
-            "bash cd /c/dev/x && echo ok",
-            "sh cd /c/dev/x && echo ok",
-            "bash cd /c/dev/x && ls",
-            "bash grep -rn kimix src tests --include=*.h | head -40",
-            "bash cd /c/dev/hermes-native && grep -rn \"kimix\" src tests "
-            "--include=*.h --include=*.cpp --include=*.lua | grep -v \"src/ext\" "
-            "| head -40",
+            ("bash cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok"),
+            ("sh cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok"),
+            ("bash cd /c/dev/x && ls", "cd C:/dev/x && ls"),
+            (
+                "bash grep -rn kimix src tests --include=*.h | head -40",
+                "grep -rn kimix src tests --include=*.h | head -40",
+            ),
+            (
+                "bash cd /c/dev/hermes-native && grep -rn \"kimix\" src tests "
+                "--include=*.h --include=*.cpp --include=*.lua | grep -v \"src/ext\" "
+                "| head -40",
+                "cd C:/dev/hermes-native && grep -rn \"kimix\" src tests "
+                "--include=*.h --include=*.cpp --include=*.lua | grep -v \"src/ext\" "
+                "| head -40",
+            ),
         ],
     )
-    def test_redundant_shell_prefix_is_unwrapped(self, command: str) -> None:
+    def test_redundant_shell_prefix_is_unwrapped(
+        self, command: str, expected_tail: str
+    ) -> None:
         result = _fix_for_windows(command)
         assert not result.command.startswith("bash ")
         assert not result.command.startswith("sh ")
-        assert result.command.split("\n")[-1] == command.split(" ", 1)[1]
+        assert result.command.split("\n")[-1] == expected_tail
         assert result.shell_wrappers == (command.split(" ", 1)[0],)
         assert result.changed
         assert "Removed redundant shell wrapper" in result.warning
@@ -928,7 +938,7 @@ class TestBashFixShellWrappers:
 
     def test_redundant_prefix_keeps_inner_fallback_rewrite(self) -> None:
         result = _fix_for_windows("bash cd /c/dev/x && rev")
-        assert result.command.split("\n")[-1] == "cd /c/dev/x && rev"
+        assert result.command.split("\n")[-1] == "cd C:/dev/x && rev"
         assert result.replacements == ("rev",)
         assert result.shell_wrappers == ("bash",)
 
@@ -942,7 +952,7 @@ class TestBashFixShellWrappers:
     )
     def test_quoted_shell_words_are_unwrapped(self, source: str) -> None:
         result = _fix_for_windows(source)
-        assert result.command.split("\n")[-1] == "cd /c/dev/x && echo ok"
+        assert result.command.split("\n")[-1] == "cd C:/dev/x && echo ok"
         assert result.shell_wrappers == ("bash",)
 
     @pytest.mark.parametrize(
@@ -1021,9 +1031,16 @@ class TestBashFixFalsePositives:
         assert _fix_for_windows(command) == BashFix(command)
 
     @pytest.mark.parametrize("operator", ["&>", "&>>"])
-    def test_combined_output_redirection_argument_is_data(self, operator: str) -> None:
+    def test_combined_output_redirection_target_rewritten(
+        self, operator: str
+    ) -> None:
+        import tempfile
+
+        tmp = tempfile.gettempdir().replace("\\", "/")
         command = f"printf '%s' {operator}/tmp/kimix-output rev"
-        assert _fix_for_windows(command) == BashFix(command)
+        result = _fix_for_windows(command)
+        assert result.command == f"printf '%s' {operator}{tmp}/kimix-output rev"
+        assert result.path_changes == ("/tmp/kimix-output",)
 
     def test_heredoc_delimiter_substitution_is_literal(self) -> None:
         command = "cat <<$(rev)\nbody\n$(rev)\ntype -t rev"
@@ -1397,7 +1414,7 @@ class TestBashFixNewFallbacks:
             "rename a b",
             "rd d",
             "md d",
-            "chdir /tmp",
+            "chdir .",
             "cls",
             "xcopy a b",
             "mklink /D link target",
@@ -1688,6 +1705,109 @@ class TestBashFixWindowsPaths:
     def test_non_windows_platform_is_noop(self) -> None:
         result = _fix_for_platform("cd D:\\x", "linux")
         assert result == BashFix("cd D:\\x")
+        assert not result.changed
+
+
+class TestBashFixGitBashPosixPaths:
+    """Git Bash virtual POSIX absolute paths rewritten for native tools.
+
+    Git Bash accepts POSIX-style absolute paths that native Windows
+    executables cannot resolve: ``/tmp`` is a virtual mount mapped to the
+    real Windows temp directory (``cygpath -w /tmp``), and ``/c/...`` means
+    ``C:/...``.  Rewriting them makes the same POSIX-style command behave
+    identically under Git Bash and native POSIX bash.
+    """
+
+    @staticmethod
+    def _tmp() -> str:
+        import tempfile
+
+        return tempfile.gettempdir().replace("\\", "/")
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("echo /tmp/x.txt", "echo {tmp}/x.txt"),
+            ("cat > /tmp/out.txt", "cat > {tmp}/out.txt"),
+            ("cd /tmp", "cd {tmp}"),
+            ("rm -f /tmp/a /tmp/b", "rm -f {tmp}/a {tmp}/b"),
+            ("echo /c/dev/file.cpp", "echo C:/dev/file.cpp"),
+            ("echo /C/Dev/file.cpp", "echo C:/Dev/file.cpp"),
+            ("cd /d/foo", "cd D:/foo"),
+            (
+                "/c/Windows/System32/where.exe cmd",
+                "C:/Windows/System32/where.exe cmd",
+            ),
+            (
+                "cd /c/dev/RoboCute && cat > /tmp/test_util.cpp <<'EOF'\nx\nEOF",
+                "cd C:/dev/RoboCute && cat > {tmp}/test_util.cpp <<'EOF'\nx\nEOF",
+            ),
+            ("echo $(cat /tmp/x)", "echo $(cat {tmp}/x)"),
+            ("env --chdir=/tmp cmd", "env --chdir={tmp} cmd"),
+            ("arr=(/tmp/a.txt /c/b.txt)", "arr=({tmp}/a.txt C:/b.txt)"),
+        ],
+    )
+    def test_git_bash_posix_paths_rewritten(
+        self, source: str, expected: str
+    ) -> None:
+        expected = expected.format(tmp=self._tmp())
+        result = _fix_for_windows(source)
+        assert result.command == expected
+        assert result.changed
+        assert result.replacements == ()
+        assert result.path_changes
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo '/tmp/x'",  # single-quoted text is literal data
+            'echo "/tmp/x"',  # double-quoted text is literal data
+            "cat <<'EOF'\n/tmp/x\nEOF",  # heredoc body is data
+            "cat <<< /tmp/x",  # here-string body is data
+            "echo /tmpfile",  # not the /tmp mount
+            "echo /d",  # bare single-letter mount: ambiguous (cd /d flag)
+            "echo /c",  # bare single-letter mount stays
+            "x=/tmp/x",  # assignment values untouched
+            "alias cd=/c/x",
+            "echo ok # cd /tmp/x",
+        ],
+    )
+    def test_git_bash_posix_path_data_and_ambiguous_untouched(
+        self, command: str
+    ) -> None:
+        assert _fix_for_windows(command) == BashFix(command)
+
+    def test_cd_d_flag_is_not_mistaken_for_drive_path(self) -> None:
+        # ``cd /d`` is cmd.exe's flag form and must keep working; only
+        # ``/d/...`` (a Git Bash drive mount with a segment) is rewritten.
+        result = _fix_for_windows("cd /d D:\\x && echo /d && cd /d/foo")
+        assert result.command == "cd  D:/x && echo /d && cd D:/foo"
+        assert result.path_changes == ("cd /d", "D:\\x", "/d/foo")
+
+    def test_tmp_path_with_spaces_is_quoted(
+        self, monkeypatch: Any
+    ) -> None:
+        import kimix.tools.file.bash.bash_fix as bash_fix_module
+
+        monkeypatch.setattr(
+            bash_fix_module._shell,
+            "_windows_temp_dir",
+            lambda: "C:/Users/John Doe/AppData/Local/Temp",
+        )
+        result = _fix_for_windows("echo /tmp/x")
+        assert result.command == 'echo "C:/Users/John Doe/AppData/Local/Temp/x"'
+
+    def test_fallback_command_with_tmp_path(self) -> None:
+        # Fallback definitions are prepended as a prefix; the rewritten source
+        # (``chdir /tmp`` -> ``chdir <tmp>``) is the final line.
+        result = _fix_for_windows("chdir /tmp")
+        assert result.command.split("\n")[-1] == f"chdir {self._tmp()}"
+        assert "chdir" in result.replacements
+        assert result.path_changes == ("/tmp",)
+
+    def test_non_windows_is_noop(self) -> None:
+        result = _fix_for_platform("cat /tmp/x && echo /c/y", "linux")
+        assert result == BashFix("cat /tmp/x && echo /c/y")
         assert not result.changed
 
 

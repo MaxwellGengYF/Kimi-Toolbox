@@ -94,6 +94,16 @@ _WRAPPER_RE = re.compile(
 # Backwards-compatible alias for the original shell-wrapper-only pattern.
 _SHELL_WRAPPER_RE = _WRAPPER_RE
 
+# Git Bash virtual POSIX absolute paths (``/tmp/x``, ``/c/x``) were added
+# after the compiled PARSE kernel was built: the kernel neither knows the
+# mount table nor resolves ``/tmp`` to the real Windows temp directory, so
+# any command containing such a path is routed to the pure-Python reference
+# (``_shell_compat`` mirrors ``bash_fix.py``) to keep behaviour
+# bit-identical.  Matching is deliberately broad (``echo /tmp`` and
+# ``--chdir=/tmp`` route too, as do paths inside quoted data) — a harmless
+# perf cost, never a behaviour change.
+_GIT_BASH_ABS_PATH_RE = re.compile(r"/(?:tmp\b|[A-Za-z]/)")
+
 _COMPAT_PARSERS = {
     "c": _compat.CParser,
     "python": _compat.PythonParser,
@@ -481,6 +491,10 @@ def fix_bash_command(cmd: str) -> BashFix:
     # Same for the shell-wrapper repairs (redundant ``bash``/``sh`` prefix and
     # ``bash -c`` inline scripts), which the compiled kernel predates.
     if _SHELL_WRAPPER_RE.search(cmd):
+        return _shell.fix_bash_command(cmd)
+    # Same for Git Bash virtual POSIX absolute paths (``/tmp/x``, ``/c/x``),
+    # which the compiled kernel also predates.
+    if _GIT_BASH_ABS_PATH_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)

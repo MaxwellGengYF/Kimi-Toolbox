@@ -14,6 +14,7 @@ from __future__ import annotations
 # bash_fix.py (kimi-agent) - Windows Git Bash compatibility scanner
 # ======================================================================
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Callable
 
@@ -690,14 +691,31 @@ normalizing it to ``/ `` would invent a directory level that does not exist.
 The backslash is dropped and the character kept inside its segment.
 """
 
+
+def _windows_temp_dir() -> str:
+    """Return the real Windows temp directory as a forward-slash path.
+
+    Git Bash's ``/tmp`` maps to this directory (``cygpath -w /tmp`` reports
+    the same value), but Git Bash's ``TMP``/``TEMP`` environment variables are
+    MSYS-style ``/tmp`` inside the shell, so they cannot be used to translate
+    ``/tmp`` paths for native Windows executables.  The parent (kimi-agent)
+    process environment holds the Windows-style spelling, which is what
+    ``tempfile.gettempdir()`` returns.  On POSIX hosts this returns ``/tmp``
+    (the identity for the rewrite), which keeps the scanner's platform gate
+    the single source of truth for when the rewrite applies.
+    """
+    return tempfile.gettempdir().replace("\\", "/")
+
+
 @dataclass(frozen=True)
 class BashFix:
     """Result of :func:`fix_bash_command`.
 
     ``replacements`` records each original command name in source order and
     ``path_changes`` each original argument or command word whose
-    Windows-style backslashes (or cmd.exe ``/d`` flag) were rewritten for Git
-    Bash.  ``shell_wrappers`` records each redundant ``bash``/``sh``
+    Windows-style backslashes, Git Bash virtual absolute path (``/tmp/x``,
+    ``/c/x``), or cmd.exe ``/d`` flag were rewritten for Git Bash.
+    ``shell_wrappers`` records each redundant ``bash``/``sh``
     invocation that was unwrapped (``bash <cmd> ...`` or ``bash -c <script>``)
     so the command runs directly in the Bash tool.  Empty tuples mean the
     command was returned byte-for-byte unchanged.
@@ -730,7 +748,7 @@ class BashFix:
             words = ", ".join(f"`{word}`" for word in self.path_changes)
             parts.append(
                 "Rewrote Windows path(s) for Git Bash (backslashes to forward "
-                f"slashes): {words}."
+                f"slashes; Git Bash virtual paths to native spellings): {words}."
             )
         if self.shell_wrappers:
             names = ", ".join(f"`{name}`" for name in self.shell_wrappers)
@@ -1173,7 +1191,7 @@ class _BashFixScanner:
                         )
                 elif not herestring_flag:
                     raw_word = s[i:word_end]
-                    replacement = self._windows_path_replacement(raw_word)
+                    replacement = self._path_replacement(raw_word)
                     if replacement is not None:
                         self.edits.append((i, word_end, replacement))
                         self.path_notes.append(raw_word)
@@ -1296,7 +1314,7 @@ class _BashFixScanner:
                 elif raw == "esac" and case_stack:
                     case_stack.pop()
                 else:
-                    replacement = self._windows_path_replacement(raw)
+                    replacement = self._path_replacement(raw)
                     if replacement is not None:
                         self.edits.append((word_start, word_end, replacement))
                         self.path_notes.append(raw)
@@ -1363,7 +1381,7 @@ class _BashFixScanner:
                 for option in _WRAPPER_PATH_OPTION_LONG:
                     if raw.startswith(option + "="):
                         value = raw[len(option) + 1 :]
-                        replacement = self._windows_path_replacement(value)
+                        replacement = self._path_replacement(value)
                         if replacement is not None:
                             self.edits.append(
                                 (word_start, word_end, option + "=" + replacement)
@@ -1384,7 +1402,7 @@ class _BashFixScanner:
                 action = self._consume_wrapper_word(wrapper, raw)
                 if action == "skip":
                     if path_option_value:
-                        replacement = self._windows_path_replacement(raw)
+                        replacement = self._path_replacement(raw)
                         if replacement is not None:
                             self.edits.append((word_start, word_end, replacement))
                             self.path_notes.append(raw)
@@ -1469,10 +1487,11 @@ class _BashFixScanner:
                     )
             else:
                 # A command word can itself be a Windows executable path
-                # (``C:\tools\rg.exe``); Bash quote removal would eat the
+                # (``C:\tools\rg.exe``) or a Git Bash virtual absolute path
+                # (``/c/tools/rg.exe``); Bash quote removal would eat the
                 # backslashes and lose the command, so rewrite it like an
                 # argument path.
-                replacement = self._windows_path_replacement(raw)
+                replacement = self._path_replacement(raw)
                 if replacement is not None:
                     self.edits.append((word_start, word_end, replacement))
                     self.path_notes.append(raw)
@@ -1595,7 +1614,7 @@ class _BashFixScanner:
                 i += 1
                 continue
             raw = s[i:word_end]
-            replacement = self._windows_path_replacement(raw)
+            replacement = self._path_replacement(raw)
             if replacement is not None:
                 self.edits.append((i, word_end, replacement))
                 self.path_notes.append(raw)
@@ -2255,6 +2274,46 @@ class _BashFixScanner:
         else:
             return None
         return self._quote_path_word(self._normalize_windows_path(raw))
+
+    def _git_bash_abs_path_replacement(self, raw: str) -> str | None:
+        """Return the native Windows spelling of a Git Bash virtual absolute path.
+
+        Git Bash accepts POSIX-style absolute paths that native Windows
+        executables cannot resolve.  ``/tmp/x`` maps to the user's Windows temp
+        directory (``cygpath -w /tmp``), while a native tool would read it as
+        ``<current-drive>:\\tmp\\x``; ``/c/x`` means ``C:/x``, but a native
+        tool would read it as ``<current-drive>:\\c\\x``.  Rewriting these
+        words to their real Windows spellings makes the same command behave
+        identically under Git Bash and native POSIX bash: ``/tmp`` is the
+        system temp directory in both, and ``/c/...``/``/d/...`` resolve to
+        the same files whether the consumer is an MSYS tool or a native
+        executable.  Only unquoted words are considered; quoted text is
+        literal data.  A bare single-letter mount (``/c``, ``/d``) is left
+        untouched so cmd.exe's ``cd /d <path>`` flag is never mistaken for a
+        drive path.
+        """
+        if not raw:
+            return None
+        if raw.startswith("/tmp"):
+            if raw != "/tmp" and not raw.startswith("/tmp/"):
+                return None
+            return self._quote_path_word(_windows_temp_dir() + raw[4:])
+        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == "/":
+            return self._quote_path_word(raw[1].upper() + ":" + raw[2:])
+        return None
+
+    def _path_replacement(self, raw: str) -> str | None:
+        """Return the Git Bash spelling for a Windows path word.
+
+        Covers both spellings agents use on Windows: native backslash paths
+        (``D:\\repo\\src``) and Git Bash virtual POSIX absolute paths
+        (``/tmp/x``, ``/c/x``).  Returns ``None`` when *raw* is not an
+        unambiguous path word.
+        """
+        replacement = self._windows_path_replacement(raw)
+        if replacement is not None:
+            return replacement
+        return self._git_bash_abs_path_replacement(raw)
 
     @staticmethod
     def _plausible_path_segments(raw: str) -> bool:

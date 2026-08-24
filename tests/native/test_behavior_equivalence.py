@@ -237,6 +237,12 @@ BASH_FIX_CASES = [
     "sh -c 'rev'",
     "'bash' cd /c/dev/x && echo ok",
     "bash script.sh",
+    "cat /tmp/x.txt",
+    "echo /c/dev && echo /tmp/y",
+    "env --chdir=/tmp cmd",
+    "bash -c 'cat /tmp/x'",
+    "cd /d/foo",
+    "echo '/tmp/x'",
 ]
 
 
