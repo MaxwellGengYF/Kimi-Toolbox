@@ -59,6 +59,15 @@ class Session:
 
     file_mtime: FileMTime = field(default_factory=FileMTime)
 
+    # Internal: lazy-loaded ConflictHistory (plan 24) attached by
+    # kimi_cli.tools.file.conflict_detect.get_conflict_history on first use.
+    # Typed ``Any`` to avoid an import cycle with the file tools package.
+    conflict_history: Any | None = field(default=None, repr=False, compare=False)
+    # Internal: lazy-loaded versioned InMemorySnapshotStore (plan 25) attached
+    # by kimi_cli.tools.file.snapshot_store.get_file_snapshot_store on first
+    # use.  Typed ``Any`` to avoid an import cycle with the file tools package.
+    file_snapshot_store: Any | None = field(default=None, repr=False, compare=False)
+
     # Internal: lazy-loaded ContextDB for this session
     _context_db: ContextDB | None = field(default=None, repr=False, compare=False)
 

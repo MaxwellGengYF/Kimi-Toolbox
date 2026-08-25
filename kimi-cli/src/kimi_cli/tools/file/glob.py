@@ -386,6 +386,37 @@ def _get_gitignore_rules(root: Path) -> list[_GitignoreRule]:
     return cache.rules
 
 
+def invalidate_gitignore_cache(path: str) -> None:
+    """Drop cached gitignore rule sets affected by a change at *path*.
+
+    Called by ``fs_cache`` after a ``.gitignore`` is written/created/deleted.
+    Every cache entry whose search root contains *path* (i.e. the root is an
+    ancestor of the file's directory, so its walk would have discovered the
+    changed ``.gitignore``) is dropped; the mtime self-refresh inside
+    ``_get_gitignore_rules`` remains the backstop.
+    """
+    try:
+        target = Path(path)
+    except (TypeError, ValueError):
+        return
+    try:
+        resolved = target.resolve(strict=False)
+        candidates = {str(resolved.parent), str(resolved)}
+    except (OSError, ValueError):
+        candidates = {str(target)}
+    stale_roots = []
+    for root_str in _GITIGNORE_CACHE:
+        for cand in candidates:
+            try:
+                if Path(cand).is_relative_to(root_str) or root_str == cand:
+                    stale_roots.append(root_str)
+                    break
+            except (TypeError, ValueError):
+                continue
+    for root_str in stale_roots:
+        _GITIGNORE_CACHE.pop(root_str, None)
+
+
 class Params(BaseModel):
     model_config = {"populate_by_name": True}
 

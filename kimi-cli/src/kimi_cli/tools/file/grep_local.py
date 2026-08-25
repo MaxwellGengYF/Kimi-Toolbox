@@ -14,6 +14,7 @@ import regex as re
 import shlex
 import stat
 import tempfile
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, override
@@ -47,6 +48,24 @@ from kimi_cli._rtk_common import _rtk_binary_name
 from kimi_cli.install import _RTK_DOWNLOAD_LOCK, _download_and_install_rtk
 from kimi_cli.share import get_share_dir
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.file.grep_archive import (
+    materialize_archive_members,
+    parse_archive_path_candidates,
+)
+from kimi_cli.tools.file.grep_output import (
+    format_grouped_output,
+    group_lines_by_file,
+    should_group,
+)
+from kimi_cli.tools.file.grep_recorder import record_grep_files
+from kimi_cli.tools.file.grep_selectors import (
+    GrepPathSpec,
+    LineRange,
+    expand_path_entries,
+    is_line_in_ranges,
+    selector_line_ranges,
+    split_path_and_sel,
+)
 from kimi_cli.tools.file.micro_compress import (
     MicroCompressConfig,
     compress_lines as _mc_compress_lines,
@@ -125,12 +144,34 @@ class Params(BaseModel):
     pattern: str = Field(
         description="Regular expression to search for (ripgrep syntax)."
     )
-    path: str = Field(
+    path: str | list[str] = Field(
         description=(
             "File or directory to search. Defaults to the session workspace; "
-            "a relative path resolves against it."
+            "a relative path resolves against it. Also accepts embedded "
+            "line-range selectors (`file.py:50-100`, `file.py:50+10`, "
+            "`file.py:301-`, `file.py:5-16,960-973`, `..` alias), archive "
+            "members (`bundle.zip:src/foo.ts`, combined "
+            "`bundle.zip:src/foo.ts:50-100`), and multi-entry strings "
+            "(`\"src; tests\"`) or lists."
         ),
         default=".",
+    )
+    grouped: bool | None = Field(
+        description=(
+            "Group content-mode results by file with `# path` headers and "
+            "`*N|`/` N|` match/context markers. None = auto: grouped only "
+            "when a line-range selector or archive member is used; True "
+            "force grouped; False force legacy `path:line:text` output."
+        ),
+        default=None,
+    )
+    record: bool = Field(
+        description=(
+            "Persist the deduplicated matched-file list (relative paths) in "
+            "the session so a follow-up read/edit pass can operate on "
+            "exactly the files this grep surfaced."
+        ),
+        default=True,
     )
     include: str | None = Field(
         validation_alias=AliasChoices("include", "glob"),
@@ -234,8 +275,31 @@ RG_MAX_BUFFER = 20_000_000  # 20MB stdout/stderr buffer limit
 RG_KILL_GRACE = 5  # seconds: SIGTERM -> SIGKILL
 MAX_BYTES = 100 << 10  # 100KB
 _RG_HEAD_LIMIT_MARGIN = 1000  # extra matches for content-mode --max-count
+RG_RANGE_FETCH_CAP = 200_000  # per-file fetch cap when line ranges are used
 _RG_DOWNLOAD_LOCK = asyncio.Lock()
 _RG_CMD = "rg"
+
+# rg content-line grammar with explicit match/context delimiter semantics:
+#   match:   "path:LN:text"   context: "path-LN-text"   separator: "--"
+_RG_CONTENT_LINE_RE = re.compile(r"^(.*?)([:\-])(\d+)\2(.*)$", re.DOTALL)
+
+
+def parse_content_line(line: str) -> tuple[str, int, str, bool] | None:
+    """Parse one rg content-mode line.
+
+    Returns ``(path, line_no, text, is_match)`` or ``None`` for separators
+    (``--``) and anything that does not parse. Match lines use ``:`` as the
+    delimiter (``path:LN:text``); context lines use ``-`` (``path-LN-text``).
+    """
+    if line == "--":
+        return None
+    m = _RG_CONTENT_LINE_RE.match(line)
+    if m is None:
+        return None
+    path, sep, line_no, text = m.group(1), m.group(2), m.group(3), m.group(4)
+    if not path:
+        return None
+    return path, int(line_no), text, sep == ":"
 
 
 def _env_with_shared_bin_path(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -362,6 +426,8 @@ def _build_rg_args(
     single_threaded: bool = False,
     resolved_path: str | None = None,
     rtk_path: str | None = None,
+    max_count_override: int | None = None,
+    path_input: str | None = None,
 ) -> list[str]:
     """Build ripgrep command-line arguments from Params.
 
@@ -418,7 +484,11 @@ def _build_rg_args(
         # NB: when rtk wraps rg (content mode, deduplicate_output=True) it
         # caps per-file output at 25 lines anyway, so this margin is
         # pointless there — kept as-is for the plain-rg path (harmless).
-        if params.head_limit:
+        if max_count_override:
+            # Ranged selectors widen the fetch budget so in-range hits are
+            # not starved by out-of-range matches preceding them.
+            args.extend(["--max-count", str(max_count_override)])
+        elif params.head_limit:
             max_count = (params.offset or 0) + params.head_limit + _RG_HEAD_LIMIT_MARGIN
             args.extend(["--max-count", str(max_count)])
 
@@ -440,7 +510,15 @@ def _build_rg_args(
     # Use the resolved path when available so ripgrep's output matches the
     # search_base used for prefix stripping (fixes Windows short/long path
     # mismatches with tempfile directories).
-    args.append(resolved_path or os.path.expanduser(normalize_user_path(params.path)))
+    if resolved_path:
+        args.append(resolved_path)
+    else:
+        fallback = path_input if path_input is not None else (
+            params.path if isinstance(params.path, str) else (
+                params.path[0] if params.path else "."
+            )
+        )
+        args.append(os.path.expanduser(normalize_user_path(fallback)))
 
     if rtk_path is not None:
         args = [rtk_path, *args]
@@ -448,9 +526,15 @@ def _build_rg_args(
     return args
 
 
-def _format_cmd(params: Params, *, rg_cmd: str = _RG_CMD, rtk_path: str | None = None) -> str:
+def _format_cmd(
+    params: Params,
+    *,
+    rg_cmd: str = _RG_CMD,
+    rtk_path: str | None = None,
+    path_input: str | None = None,
+) -> str:
     """Format the equivalent ripgrep command string for display."""
-    args = _build_rg_args(rg_cmd, params, rtk_path=rtk_path)
+    args = _build_rg_args(rg_cmd, params, rtk_path=rtk_path, path_input=path_input)
     if rtk_path is not None and args and args[0] == rtk_path:
         args[0] = "rtk"
     return shlex.join(args)
@@ -736,6 +820,317 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(m[0], m[1]) for m in merged]
 
 
+@dataclass
+class _GrepCtx:
+    """Per-call selector/archive context threaded through post-processing."""
+
+    prefix_base: str
+    prefix_base_is_file: bool
+    grouped: bool
+    ranges: dict[str, list[LineRange]] = field(default_factory=dict)
+    display_map: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+_BARE_CONTENT_RE = re.compile(r"^(\d+)([:\-])")
+
+
+def _reattach_single_file_prefix(lines: list[str], prefix: str) -> list[str]:
+    """Re-attach the file path when rg searches a single file.
+
+    Bare rg omits the path prefix for single-file targets (``2:text`` instead
+    of ``path:2:text``); the line-stream pipeline needs full ``path:LN:text``
+    lines for range filtering, grouping, and the recorder.
+    """
+    if not prefix:
+        return lines
+    out: list[str] = []
+    for line in lines:
+        m = _BARE_CONTENT_RE.match(line)
+        if m is not None:
+            sep = m.group(2)
+            out.append(f"{prefix}{sep}{line}")
+        else:
+            out.append(line)
+    return out
+
+
+def _plain_ctx(search_path: Path) -> _GrepCtx:
+    """Context for legacy (selector-free) searches: byte-identical pipeline."""
+    return _GrepCtx(
+        prefix_base=str(search_path),
+        prefix_base_is_file=search_path.is_file(),
+        grouped=False,
+    )
+
+
+def _glob_chars(s: str) -> bool:
+    return any(ch in s for ch in "*?[")
+
+
+def _display_path_for(abs_path: Path, cwd: Path) -> str:
+    """Workspace-relative forward-slash display path (name when at root)."""
+    try:
+        rel = abs_path.relative_to(cwd)
+        rel_str = str(rel).replace("\\", "/")
+        return rel_str if rel_str != "." else abs_path.name
+    except ValueError:
+        return abs_path.name
+
+
+async def _resolve_selector_specs(
+    entries: list[str],
+    work_dir,
+    additional_dirs: list,
+    scratch_dir: Path | None,
+) -> tuple[_GrepCtx | None, list[str], list[GrepPathSpec], ToolError | None]:
+    """Resolve path entries (possibly with selectors/archives) to search targets.
+
+    Returns ``(ctx, resolved_paths, specs, error)``; ``ctx`` is None on error.
+    ``resolved_paths[i]`` corresponds to ``specs[i]`` (scratch path for
+    materialized archive members, absolute resolved path otherwise).
+    """
+    cwd = local_path_for_cwd(work_dir)
+    specs: list[GrepPathSpec] = []
+    for entry in entries:
+        path_part, sel = split_path_and_sel(entry)
+        try:
+            ranges = selector_line_ranges(sel)
+        except ValueError as exc:
+            return None, [], [], ToolError(
+                message=f"Invalid line-range selector `{entry}`: {exc}",
+                brief="Invalid selector",
+            )
+        has_ranges = ranges is not None
+        has_archive = bool(parse_archive_path_candidates(path_part))
+        if has_ranges or has_archive:
+            if _glob_chars(path_part):
+                return None, [], [], ToolError(
+                    message=(
+                        "Line-range selector/archive member requires a single "
+                        f"file, not a glob: `{entry}`."
+                    ),
+                    brief="Selector requires a file",
+                )
+            if not has_archive:
+                probe = Path(
+                    cwd / Path(normalize_user_path(path_part)).expanduser()
+                )
+                if probe.is_dir():
+                    return None, [], [], ToolError(
+                        message=(
+                            "Line-range selector requires a single file, not a "
+                            f"directory: `{entry}`."
+                        ),
+                        brief="Selector requires a file",
+                    )
+        specs.append(GrepPathSpec(original=entry, clean=path_part, ranges=ranges))
+
+    notes: list[str] = []
+    display_map: dict[str, str] = {}
+    if any(parse_archive_path_candidates(s.clean) for s in specs):
+        if scratch_dir is None:
+            return None, [], [], ToolError(
+                message="Internal error: archive search without scratch dir.",
+                brief="Archive search error",
+            )
+        specs, display_map, unreadable = await materialize_archive_members(
+            specs, cwd, scratch_dir
+        )
+        notes.extend(unreadable)
+        if not specs:
+            entries_str = ", ".join(f"`{e}`" for e in entries)
+            detail = "; ".join(unreadable) if unreadable else "no readable members"
+            return None, [], [], ToolError(
+                message=(
+                    f"Cannot search archive member(s): {entries_str} \u2014 read the "
+                    f"member with `read <archive>:<member>`. Details: {detail}"
+                ),
+                brief="Unreadable archive members",
+            )
+
+    resolved: list[str] = []
+    for spec in specs:
+        raw = spec.clean
+        if raw in display_map:  # already a scratch path
+            resolved.append(raw)
+            continue
+        p = (cwd / Path(normalize_user_path(raw)).expanduser()).resolve()
+        logical = KaosPath(str(p)).canonical()
+        original_is_absolute = kaos_path_from_user_input(raw).is_absolute()
+        if (
+            not is_within_workspace(logical, work_dir, additional_dirs)
+            and not original_is_absolute
+        ):
+            return None, [], [], ToolError(
+                message=f"`{raw.replace(chr(92), '/')}` is outside the workspace.",
+                brief="Path outside workspace",
+            )
+        resolved.append(str(p))
+    ctx = _GrepCtx(
+        prefix_base=str(cwd),
+        prefix_base_is_file=False,
+        grouped=False,
+        display_map=display_map,
+        notes=notes,
+    )
+    return ctx, resolved, specs, None
+
+
+def _strip_key_for(path_arg: str, prefix_base: str) -> str:
+    """Exactly mirror ``_strip_path_prefix`` for one path → display key."""
+    norm = path_arg.replace("\\", "/")
+    pb = prefix_base.replace("\\", "/").rstrip("/")
+    if pb and norm.startswith(pb + "/"):
+        return norm[len(pb) + 1 :]
+    return norm
+
+
+def _build_ranges_map(
+    ctx: _GrepCtx,
+    resolved: list[str],
+    specs: list[GrepPathSpec],
+    *,
+    absolute_keys: bool,
+) -> None:
+    """Populate ``ctx.ranges`` keyed to how paths appear in the output stream.
+
+    ``absolute_keys=False`` keys on the post-strip display path (native
+    pipeline); ``absolute_keys=True`` keys on the absolute path (backup
+    pipeline, before prefix stripping). Archive scratch entries are keyed on
+    their ``archive:member`` display form in both cases.
+    """
+    for spec, path_arg in zip(specs, resolved, strict=True):
+        if not spec.ranges:
+            continue
+        if path_arg in ctx.display_map:
+            ctx.ranges[ctx.display_map[path_arg]] = list(spec.ranges)
+        elif absolute_keys:
+            ctx.ranges[path_arg] = list(spec.ranges)
+        else:
+            ctx.ranges[_strip_key_for(path_arg, ctx.prefix_base)] = list(spec.ranges)
+
+
+def _remap_display(lines: list[str], display_map: dict[str, str]) -> list[str]:
+    """Rewrite scratch-path prefixes to their original archive:member form."""
+    if not display_map:
+        return lines
+    pairs = [
+        (scratch.replace("\\", "/"), display)
+        for scratch, display in display_map.items()
+    ]
+    out: list[str] = []
+    for line in lines:
+        norm = line.replace("\\", "/")
+        for scratch_fwd, display in pairs:
+            if norm.startswith(scratch_fwd):
+                out.append(display + norm[len(scratch_fwd):])
+                break
+        else:
+            out.append(line)
+    return out
+
+
+def _normalize_slashes_content(lines: list[str], output_mode: str) -> list[str]:
+    """Normalize backslashes to forward slashes in the path prefix of rich
+    output lines so range keys / display keys match on Windows."""
+    if os.sep != "\\":
+        return lines
+    out: list[str] = []
+    for line in lines:
+        parsed = parse_content_line(line)
+        if parsed is not None:
+            path, line_no, text, is_match = parsed
+            sep = ":" if is_match else "-"
+            out.append(f"{path.replace(chr(92), '/')}{sep}{line_no}{sep}{text}")
+        elif output_mode != "content":
+            out.append(line.replace("\\", "/"))
+        else:
+            out.append(line)
+    return out
+
+
+def _range_filter_lines(
+    lines: list[str], ranges_map: dict[str, list[LineRange]]
+) -> list[str]:
+    """Drop content matches/context outside the per-file ranges; prune orphan `--`."""
+    if not ranges_map:
+        return lines
+    kept: list[str] = []
+    for line in lines:
+        parsed = parse_content_line(line)
+        if parsed is None:
+            kept.append(line)
+            continue
+        path, line_no, _text, _is_match = parsed
+        spec_ranges = ranges_map.get(path)
+        if spec_ranges is not None and not is_line_in_ranges(line_no, spec_ranges):
+            continue
+        kept.append(line)
+    swept: list[str] = []
+    for line in kept:
+        if line == "--":
+            if not swept or swept[-1] == "--":
+                continue
+        swept.append(line)
+    while swept and swept[-1] == "--":
+        swept.pop()
+    return swept
+
+
+def _collect_record_files(lines: list[str], output_mode: str) -> list[str]:
+    """Distinct file paths (in stream order) from a post-strip output stream."""
+    seen: dict[str, None] = {}
+    if output_mode == "content":
+        for line in lines:
+            parsed = parse_content_line(line)
+            if parsed is not None:
+                seen[parsed[0]] = None
+    else:
+        for line in lines:
+            idx = line.rfind(":") if output_mode == "count_matches" else -1
+            seen[line[:idx] if idx > 0 else line] = None
+    return list(seen)
+
+
+def _text_in_ranges(text: str, ranges: list[LineRange]) -> str:
+    """Extract the text of the in-range lines only (backup range windows)."""
+    lines = text.split("\n")
+    kept = [ln for i, ln in enumerate(lines, 1) if is_line_in_ranges(i, ranges)]
+    return "\n".join(kept)
+
+
+def _backup_extract_path(line: str, output_mode: str) -> str | None:
+    """Extract the file path from a rich backup output line (display-aware).
+
+    Unlike ``_extract_path`` this understands archive ``archive:member``
+    display paths in content lines: it splits on the first ``:N:`` /
+    ``-N-`` delimiter via ``parse_content_line``.
+    """
+    if output_mode == "content":
+        if line == "--":
+            return None
+        parsed = parse_content_line(line)
+        if parsed is not None:
+            return parsed[0]
+        # line_number=False emits "path:text" / "path-text" without numbers.
+        for i, ch in enumerate(line):
+            if ch in (":", "-"):
+                return line[:i]
+        return line
+    return None
+
+
+def _entries_are_rich(entries: list[str]) -> bool:
+    """True when any entry needs the rich pipeline (selector/archive/multi)."""
+    if len(entries) != 1:
+        return True
+    path_part, sel = split_path_and_sel(entries[0])
+    if sel is not None:
+        return True
+    return bool(parse_archive_path_candidates(path_part))
+
+
 class Grep(CallableTool2[Params]):
     name: str = "grep"
     description: str = (
@@ -751,6 +1146,7 @@ class Grep(CallableTool2[Params]):
         **FIELD_ALIASES_GENERAL,
         **FIELD_ALIASES_FILE,
         **FIELD_ALIASES_WEB,
+        "paths": "path",
         "glob": "include",
         "filter": "include",
         "file_pattern": "include",
@@ -835,38 +1231,45 @@ class Grep(CallableTool2[Params]):
         if params.deduplicate_output:
             rtk_path = await self._resolve_rtk_path()
 
+        # Selector/archive/multi-entry searches route through the rich
+        # pipeline; a single plain entry keeps the legacy byte-identical path.
+        entries = expand_path_entries(params.path) or ["."]
+        if _entries_are_rich(entries):
+            return await self._rich_call(params, entries, rtk_path, _retry=_retry)
+        path_input = entries[0]
+
         try:
             message = ""
 
             # Resolve search path against the session work directory.
             search_path = (
                 local_path_for_cwd(self._work_dir)
-                / Path(normalize_user_path(params.path)).expanduser()
+                / Path(normalize_user_path(path_input)).expanduser()
             ).resolve()
 
             # Windows reserved device names (NUL, CON, etc.) cause os error 1.
             if _is_windows_reserved_name(str(search_path)):
                 return ToolError(
                     message=(
-                        f"`{params.path}` is a reserved device name on Windows "
+                        f"`{path_input}` is a reserved device name on Windows "
                         f"and cannot be searched."
                     ),
-                    brief=f"Reserved device name | {_format_cmd(params, rtk_path=rtk_path)}",
+                    brief=f"Reserved device name | {_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}",
                 )
 
             # Validate workspace using the work-dir-resolved path.
             logical_search_path = KaosPath(str(search_path)).canonical()
-            original_is_absolute = kaos_path_from_user_input(params.path).is_absolute()
+            original_is_absolute = kaos_path_from_user_input(path_input).is_absolute()
             if (
                 not is_within_workspace(
                     logical_search_path, self._work_dir, self._additional_dirs
                 )
                 and not original_is_absolute
             ):
-                display_path = params.path.replace("\\", "/")
+                display_path = path_input.replace("\\", "/")
                 return ToolError(
                     message=f"`{display_path}` is outside the workspace.",
-                    brief=f"Path outside workspace | {_format_cmd(params, rtk_path=rtk_path)}",
+                    brief=f"Path outside workspace | {_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}",
                 )
 
             logger.debug("Using ripgrep binary: {rg_bin}", rg_bin=rg_path)
@@ -880,47 +1283,9 @@ class Grep(CallableTool2[Params]):
                 rtk_path=rtk_path,
             )
 
-            # Execute search as async subprocess (non-blocking, cancellable)
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self._work_dir),
-                env=_env_with_shared_bin_path(),
+            output, stderr_str, returncode, timed_out, buffer_truncated = (
+                await self._run_rg_subprocess(args, params.timeout)
             )
-
-            # Stream stdout/stderr incrementally with buffer limit
-            stdout_buf = bytearray()
-            stderr_buf = bytearray()
-            timed_out = False
-            stdout_truncated_flag: list[bool] = [False]
-
-            try:
-                assert process.stdout is not None
-                assert process.stderr is not None
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        _read_stream(
-                            process.stdout, stdout_buf, RG_MAX_BUFFER, stdout_truncated_flag
-                        ),
-                        _read_stream(process.stderr, stderr_buf, RG_MAX_BUFFER),
-                    ),
-                    timeout=params.timeout,
-                )
-                await process.wait()
-            except asyncio.CancelledError:
-                await _kill_process(process)
-                raise
-            except TimeoutError:
-                await _kill_process(process)
-                timed_out = True
-
-            output = stdout_buf.decode("utf-8", errors="replace")
-            stderr_str = stderr_buf.decode("utf-8", errors="replace")
-
-            # truncated_flag is set synchronously inside _read_stream at the
-            # moment of truncation, so it's available even after timeout.
-            buffer_truncated = stdout_truncated_flag[0]
 
             # Drop last incomplete line if buffer was truncated
             if buffer_truncated:
@@ -936,21 +1301,28 @@ class Grep(CallableTool2[Params]):
                             f"Grep timed out after {params.timeout}s. "
                             "Try a more specific path or pattern."
                         ),
-                        brief=f"Grep timed out | {_format_cmd(params, rtk_path=rtk_path)}",
+                        brief=f"Grep timed out | {_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}",
                     )
-                timeout_msg = f"Grep timed out after {params.timeout}s. Partial results returned."
-                message = f"{message} {timeout_msg}" if message else timeout_msg
+                message = (
+                    f"{message} Grep timed out after {params.timeout}s. "
+                    "Partial results returned."
+                    if message
+                    else f"Grep timed out after {params.timeout}s. Partial results returned."
+                )
 
             # rg exit codes: 0=matches found, 1=no matches, 2+=error
-            if not timed_out and process.returncode not in (0, 1):
+            if not timed_out and returncode not in (0, 1):
                 # EAGAIN: retry once with single-threaded mode
                 if not _retry and _is_eagain(stderr_str):
                     logger.warning("rg EAGAIN error, retrying with -j 1")
                     return await self.__call__(params, _retry=True)
                 return ToolError(
                     message=f"Failed to grep. Error: {stderr_str}",
-                    brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path)}",
+                    brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}",
                 )
+
+            ctx = _plain_ctx(search_path)
+            ctx.grouped = bool(params.grouped) if params.grouped is not None else False
 
             # --- Post-processing pipeline ---
             # The rg subprocess is bounded by params.timeout above; the
@@ -964,9 +1336,9 @@ class Grep(CallableTool2[Params]):
                         output=output,
                         timed_out=timed_out,
                         buffer_truncated=buffer_truncated,
-                        search_path=search_path,
                         rtk_path=rtk_path,
                         message=message,
+                        ctx=ctx,
                     ),
                     timeout=params.timeout,
                 )
@@ -978,7 +1350,7 @@ class Grep(CallableTool2[Params]):
                     ),
                     brief=(
                         f"Grep post-processing timed out | "
-                        f"{_format_cmd(params, rtk_path=rtk_path)}"
+                        f"{_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}"
                     ),
                 )
 
@@ -988,13 +1360,211 @@ class Grep(CallableTool2[Params]):
             logger.warning(
                 "Grep failed: pattern={pattern}, path={path}: {error}",
                 pattern=params.pattern,
-                path=params.path,
+                path=path_input,
                 error=e,
             )
             return ToolError(
                 message=f"Failed to grep. Error: {str(e)}",
-                brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path)}",
+                brief=f"Failed to grep | {_format_cmd(params, rtk_path=rtk_path, path_input=path_input)}",
             )
+
+    async def _run_rg_subprocess(
+        self, args: list[str], timeout: int
+    ) -> tuple[str, str, int | None, bool, bool]:
+        """Run rg (optionally rtk-wrapped) and collect bounded output.
+
+        Returns ``(output, stderr_str, returncode, timed_out, buffer_truncated)``.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self._work_dir),
+            env=_env_with_shared_bin_path(),
+        )
+
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+        timed_out = False
+        stdout_truncated_flag: list[bool] = [False]
+
+        try:
+            assert process.stdout is not None
+            assert process.stderr is not None
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _read_stream(
+                        process.stdout, stdout_buf, RG_MAX_BUFFER, stdout_truncated_flag
+                    ),
+                    _read_stream(process.stderr, stderr_buf, RG_MAX_BUFFER),
+                ),
+                timeout=timeout,
+            )
+            await process.wait()
+        except asyncio.CancelledError:
+            await _kill_process(process)
+            raise
+        except TimeoutError:
+            await _kill_process(process)
+            timed_out = True
+
+        output = stdout_buf.decode("utf-8", errors="replace")
+        stderr_str = stderr_buf.decode("utf-8", errors="replace")
+        return (
+            output,
+            stderr_str,
+            process.returncode,
+            timed_out,
+            stdout_truncated_flag[0],
+        )
+
+    async def _rich_call(
+        self,
+        params: Params,
+        entries: list[str],
+        rtk_path: str | None,
+        *,
+        _retry: bool = False,
+    ) -> ToolReturnValue:
+        """Native rg pipeline for selector/archive/multi-entry searches."""
+        brief_cmd = _format_cmd(params, rtk_path=rtk_path, path_input=entries[0])
+        has_archive = any(
+            parse_archive_path_candidates(split_path_and_sel(e)[0]) for e in entries
+        )
+        tmp_dir: tempfile.TemporaryDirectory | None = None
+        try:
+            scratch_dir: Path | None = None
+            if has_archive:
+                tmp_dir = tempfile.TemporaryDirectory(prefix="kimi-grep-")
+                scratch_dir = Path(tmp_dir.name)
+
+            ctx, resolved, specs, err = await _resolve_selector_specs(
+                entries, self._work_dir, self._additional_dirs, scratch_dir
+            )
+            if err is not None or ctx is None:
+                return err if err is not None else ToolError(
+                    message="Failed to resolve search paths.",
+                    brief="Failed to resolve paths",
+                )
+
+            ranged = [s for s in specs if s.ranges]
+            if ranged and params.output_mode != "content":
+                return ToolError(
+                    message=(
+                        "Line-range selector requires output_mode='content' "
+                        "(files_with_matches/count_matches have no per-line stream)."
+                    ),
+                    brief="Selector requires content mode",
+                )
+
+            max_count_override: int | None = None
+            if ranged:
+                max_end = max(
+                    (r.end_line or 1) for s in ranged for r in (s.ranges or [])
+                )
+                base = (params.offset or 0) + (params.head_limit or 0) + _RG_HEAD_LIMIT_MARGIN
+                max_count_override = min(RG_RANGE_FETCH_CAP, max(base, max_end))
+
+            _build_ranges_map(ctx, resolved, specs, absolute_keys=False)
+            # rtk's near-duplicate folding would silently drop in-range lines
+            # of repetitive files BEFORE range filtering can keep them (plan
+            # 23 §9.3) — run ranged searches through plain rg.
+            effective_rtk = None if ranged else rtk_path
+            ctx.grouped = (
+                params.output_mode == "content"
+                and should_group(params, has_rich_entries=True)
+            )
+
+            # Fan out one rg invocation per resolved target and concatenate.
+            outputs: list[str] = []
+            message = ""
+            timed_out_any = False
+            buffer_truncated_any = False
+            for path_arg in resolved:
+                args = _build_rg_args(
+                    _RG_CMD,
+                    params,
+                    single_threaded=_retry,
+                    resolved_path=path_arg,
+                    rtk_path=effective_rtk,
+                    max_count_override=max_count_override,
+                )
+                output, stderr_str, returncode, timed_out, buffer_truncated = (
+                    await self._run_rg_subprocess(args, params.timeout)
+                )
+                if buffer_truncated:
+                    last_nl = output.rfind("\n")
+                    output = output[:last_nl] if last_nl >= 0 else ""
+                    buffer_truncated_any = True
+                    message = (
+                        f"{message} Output exceeded buffer limit. Some results omitted."
+                        if message
+                        else "Output exceeded buffer limit. Some results omitted."
+                    )
+                if timed_out:
+                    timed_out_any = True
+                    if not output.strip():
+                        return ToolError(
+                            message=(
+                                f"Grep timed out after {params.timeout}s. "
+                                "Try a more specific path or pattern."
+                            ),
+                            brief=f"Grep timed out | {brief_cmd}",
+                        )
+                if not timed_out and returncode not in (0, 1):
+                    if not _retry and _is_eagain(stderr_str):
+                        logger.warning("rg EAGAIN error, retrying with -j 1")
+                        return await self._rich_call(
+                            params, entries, rtk_path, _retry=True
+                        )
+                    return ToolError(
+                        message=f"Failed to grep. Error: {stderr_str}",
+                        brief=f"Failed to grep | {brief_cmd}",
+                    )
+                if output.strip():
+                    # Bare rg omits the path prefix for single-file targets;
+                    # re-attach this target's display key so the shared
+                    # line-stream pipeline sees full `path:LN:text` lines.
+                    display_key = ctx.display_map.get(
+                        path_arg, _strip_key_for(path_arg, ctx.prefix_base)
+                    )
+                    reattached = _reattach_single_file_prefix(
+                        output.splitlines(), display_key
+                    )
+                    outputs.append("\n".join(reattached))
+
+            if timed_out_any:
+                timeout_msg = (
+                    f"Grep timed out after {params.timeout}s. Partial results returned."
+                )
+                message = f"{message} {timeout_msg}" if message else timeout_msg
+
+            combined = "\n".join(outputs)
+            try:
+                return await asyncio.wait_for(
+                    self._postprocess(
+                        params=params,
+                        output=combined,
+                        timed_out=timed_out_any,
+                        buffer_truncated=buffer_truncated_any,
+                        rtk_path=rtk_path,
+                        message=message,
+                        ctx=ctx,
+                    ),
+                    timeout=params.timeout,
+                )
+            except TimeoutError:
+                return ToolError(
+                    message=(
+                        f"Grep post-processing timed out after {params.timeout}s. "
+                        "Try a more specific path or pattern."
+                    ),
+                    brief=f"Grep post-processing timed out | {brief_cmd}",
+                )
+        finally:
+            if tmp_dir is not None:
+                with contextlib.suppress(OSError):
+                    tmp_dir.cleanup()
 
     async def _postprocess(
         self,
@@ -1003,9 +1573,10 @@ class Grep(CallableTool2[Params]):
         output: str,
         timed_out: bool,
         buffer_truncated: bool,
-        search_path: Path,
         rtk_path: str | None,
         message: str,
+        ctx: _GrepCtx | None = None,
+        search_path: Path | None = None,
     ) -> ToolReturnValue:
         """Run the post-subprocess output pipeline and build the final result.
 
@@ -1014,6 +1585,10 @@ class Grep(CallableTool2[Params]):
         timeout, so a pathological single-line match could hang the tool for
         minutes.
         """
+        if ctx is None:
+            # Back-compat: callers passing only ``search_path`` get the
+            # legacy (selector-free) context.
+            ctx = _plain_ctx(search_path if search_path is not None else Path("."))
         builder = ToolResultBuilder()
         # --- Post-processing pipeline ---
         lines = output.splitlines()
@@ -1062,10 +1637,19 @@ class Grep(CallableTool2[Params]):
                 ]
 
         # Step 2: shorten paths to relative (prefix stripping)
-        search_base = str(search_path)
-        if search_path.is_file():
-            search_base = str(search_path.parent)
+        search_base = ctx.prefix_base
+        if ctx.prefix_base_is_file:
+            search_base = str(Path(ctx.prefix_base).parent)
         lines = _strip_path_prefix(lines, search_base)
+
+        # Rich searches (selectors/archives): normalize separators, remap
+        # archive scratch paths to their ``archive:member`` display form.
+        # Both happen BEFORE sensitive filtering and range filtering so the
+        # keys match (plan 23 §9.9 ordering).
+        is_rich = bool(ctx.display_map) or bool(ctx.ranges)
+        if is_rich:
+            lines = _normalize_slashes_content(lines, params.output_mode)
+            lines = _remap_display(lines, ctx.display_map)
 
         # Step 3: filter sensitive files from output (now on a clean
         # stream: rtk fold markers can no longer be mistaken for paths)
@@ -1106,6 +1690,32 @@ class Grep(CallableTool2[Params]):
 
         lines = kept_lines
 
+        # Line-range post-filter (rich searches): drop out-of-range matches
+        # and context, then prune orphan separators.
+        if ctx.ranges and params.output_mode == "content":
+            lines = _range_filter_lines(lines, ctx.ranges)
+
+        # File recorder: persist deduplicated matched files on the session.
+        # The note is appended EARLY (before summaries/fold notes) so
+        # existing tests that parse the message tail (e.g. "Original
+        # output: <path>") still find their anchor as the last token.
+        record_note = ""
+        if params.record and lines:
+            record_files = _collect_record_files(lines, params.output_mode)
+            if record_files:
+                record_grep_files(
+                    self._runtime.session,
+                    record_files,
+                    cwd=str(local_path_for_cwd(self._work_dir)),
+                )
+                record_note = (
+                    f"Recorded {len(record_files)} matched file(s) in session "
+                    "(use `read`/`edit` on them)."
+                )
+                message = (
+                    f"{message} {record_note}" if message else record_note
+                )
+
         # Step 4: summaries (before pagination, on full results)
         if params.output_mode == "count_matches":
             total_matches = 0
@@ -1141,13 +1751,22 @@ class Grep(CallableTool2[Params]):
             files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
             message = f"{message} {files_summary}" if message else files_summary
 
+        if ctx.notes:
+            skip_note = (
+                "Skipped archive entries (text members only): "
+                + "; ".join(ctx.notes) + "."
+            )
+            message = f"{message} {skip_note}" if message else skip_note
+
         # Step 5: local dedup fallback — only when rtk did NOT run, so
-        # repeated lines are never collapsed twice.
+        # repeated lines are never collapsed twice. Skipped for grouped
+        # output (headers make cross-file dedup undesirable).
         dedup_saved = 0
         if (
             params.output_mode == "content"
             and params.deduplicate_output
             and rtk_path is None
+            and not ctx.grouped
         ):
             lines, dedup_saved = dedup_lines(lines)
             if dedup_saved:
@@ -1179,6 +1798,16 @@ class Grep(CallableTool2[Params]):
             )
             message = f"{message} {truncation_msg}" if message else truncation_msg
 
+        # Grouped rendering (rich searches or explicit grouped=True), after
+        # pagination: `# path` headers with `*N|` / ` N|` body markers.
+        if (
+            ctx.grouped
+            and params.output_mode == "content"
+            and lines
+        ):
+            groups = group_lines_by_file(lines, parse_content_line)
+            lines = format_grouped_output(groups)
+
         # Step 7: final display fold budget (head+tail fold with marker).
         # 0 = unlimited → the byte cap below is the only remaining limit.
         omitted_by_fold = 0
@@ -1207,7 +1836,11 @@ class Grep(CallableTool2[Params]):
                 lines,
                 kind="log",
                 config=MicroCompressConfig(
-                    lossless_only=False, near_dup_collapse=False
+                    lossless_only=False,
+                    near_dup_collapse=False,
+                    # Stage 4 prefix fold would distort `#` headers in
+                    # grouped output — disable it there (plan 23 §9.8).
+                    prefix_fold=not ctx.grouped,
                 ),
             )
 
@@ -1276,51 +1909,159 @@ class Grep(CallableTool2[Params]):
                     brief=f"Invalid pattern | {_format_cmd(params)}",
                 )
 
-            search_path = (
-                local_path_for_cwd(self._work_dir)
-                / Path(normalize_user_path(params.path)).expanduser()
-            ).resolve()
+            search_path: Path | None = None
+            entries = expand_path_entries(params.path) or ["."]
+            rich = _entries_are_rich(entries)
+            entry_display = entries[0] if entries else "."
 
-            # Windows reserved device names (NUL, CON, etc.) cause os error 1.
-            if _is_windows_reserved_name(str(search_path)):
-                display_path = params.path.replace("\\", "/")
-                return ToolError(
-                    message=(
-                        f"`{display_path}` is a reserved device name on Windows "
-                        f"and cannot be searched."
-                    ),
-                    brief=f"Reserved device name | {_format_cmd(params)}",
+            ranges_display: dict[str, list[LineRange]] = {}
+            display_map: dict[str, str] = {}
+            rich_notes: list[str] = []
+            grouped = False
+            file_ranges: dict[Path, list[LineRange] | None] = {}
+            prefix_base: str | None = None
+            tmp_dir: tempfile.TemporaryDirectory | None = None
+
+            if not rich:
+                search_path = (
+                    local_path_for_cwd(self._work_dir)
+                    / Path(normalize_user_path(entry_display)).expanduser()
+                ).resolve()
+
+                # Windows reserved device names (NUL, CON, etc.) cause os error 1.
+                if _is_windows_reserved_name(str(search_path)):
+                    display_path = entry_display.replace("\\", "/")
+                    return ToolError(
+                        message=(
+                            f"`{display_path}` is a reserved device name on Windows "
+                            f"and cannot be searched."
+                        ),
+                        brief=f"Reserved device name | {_format_cmd(params)}",
+                    )
+
+                # Validate workspace
+                logical_search_path = KaosPath(str(search_path)).canonical()
+                original_is_absolute = kaos_path_from_user_input(entry_display).is_absolute()
+                if (
+                    not is_within_workspace(logical_search_path, self._work_dir, self._additional_dirs)
+                    and not original_is_absolute
+                ):
+                    display_path = entry_display.replace("\\", "/")
+                    return ToolError(
+                        message=f"`{display_path}` is outside the workspace.",
+                        brief=f"Path outside workspace | {_format_cmd(params)}",
+                    )
+
+                # Translate search path through VFS for I/O
+                if self._vfs is not None:
+                    with contextlib.suppress(ValueError):
+                        search_path = self._vfs.translate_path(search_path)
+
+                if not search_path.exists():
+                    display_path = entry_display.replace("\\", "/")
+                    return ToolError(
+                        message=f"`{display_path}` does not exist.",
+                        brief=f"Path not found | {_format_cmd(params)}",
+                    )
+
+                files = self._collect_files(search_path, params)
+                prefix_base = str(search_path)
+                grouped = (
+                    params.output_mode == "content" and params.grouped is True
+                )
+            else:
+                has_archive = any(
+                    parse_archive_path_candidates(split_path_and_sel(e)[0])
+                    for e in entries
+                )
+                if has_archive:
+                    tmp_dir = tempfile.TemporaryDirectory(prefix="kimi-grep-")
+                ctx, resolved, specs, err = await _resolve_selector_specs(
+                    entries,
+                    self._work_dir,
+                    self._additional_dirs,
+                    Path(tmp_dir.name) if tmp_dir is not None else None,
+                )
+                if err is not None or ctx is None:
+                    if tmp_dir is not None:
+                        tmp_dir.cleanup()
+                    return err if err is not None else ToolError(
+                        message="Failed to resolve search paths.",
+                        brief="Failed to resolve paths",
+                    )
+                # The backup scanner implements ranges for ALL output modes
+                # (files/count scan the in-range window directly).
+                display_map = ctx.display_map
+                rich_notes = list(ctx.notes)
+                _build_ranges_map(ctx, resolved, specs, absolute_keys=True)
+                cwd = local_path_for_cwd(self._work_dir)
+                files = []
+                for path_arg in resolved:
+                    p = Path(path_arg)
+                    if self._vfs is not None:
+                        with contextlib.suppress(ValueError):
+                            p = self._vfs.translate_path(p)
+                    if not p.exists():
+                        if tmp_dir is not None:
+                            tmp_dir.cleanup()
+                        return ToolError(
+                            message=f"`{p}` does not exist.",
+                            brief=f"Path not found | {_format_cmd(params)}",
+                        )
+                    for f in self._collect_files(p, params):
+                        files.append(f)
+                        file_ranges[f] = ctx.ranges.get(path_arg)
+                prefix_base = str(cwd)
+                grouped = (
+                    params.output_mode == "content"
+                    and should_group(params, has_rich_entries=True)
                 )
 
-            # Validate workspace
-            logical_search_path = KaosPath(str(search_path)).canonical()
-            original_is_absolute = kaos_path_from_user_input(params.path).is_absolute()
-            if (
-                not is_within_workspace(logical_search_path, self._work_dir, self._additional_dirs)
-                and not original_is_absolute
-            ):
-                display_path = params.path.replace("\\", "/")
-                return ToolError(
-                    message=f"`{display_path}` is outside the workspace.",
-                    brief=f"Path outside workspace | {_format_cmd(params)}",
+            try:
+                return await self._backup_grep_search(
+                    params,
+                    regex=regex,
+                    files=files,
+                    file_ranges=file_ranges,
+                    ranges_display=ranges_display,
+                    display_map=display_map,
+                    rich_notes=rich_notes,
+                    grouped=grouped,
+                    prefix_base=prefix_base or str(local_path_for_cwd(self._work_dir)),
+                    legacy_search_path=search_path,
                 )
+            finally:
+                if tmp_dir is not None:
+                    with contextlib.suppress(OSError):
+                        tmp_dir.cleanup()
+        except Exception as e:
+            logger.warning(
+                "Grep backup failed: pattern={pattern}, path={path}: {error}",
+                pattern=params.pattern,
+                path=params.path,
+                error=e,
+            )
+            return ToolError(
+                message=f"Failed to grep. Error: {str(e)}",
+                brief=f"Failed to grep | {_format_cmd(params)}",
+            )
 
-            # Translate search path through VFS for I/O
-            if self._vfs is not None:
-                with contextlib.suppress(ValueError):
-                    search_path = self._vfs.translate_path(search_path)
-
-            if not search_path.exists():
-                display_path = params.path.replace("\\", "/")
-                return ToolError(
-                    message=f"`{display_path}` does not exist.",
-                    brief=f"Path not found | {_format_cmd(params)}",
-                )
-
+    async def _backup_grep_search(
+        self,
+        params: Params,
+        *,
+        regex,
+        files: list[Path],
+        file_ranges: dict[Path, list[LineRange] | None],
+        ranges_display: dict[str, list[LineRange]],
+        display_map: dict[str, str],
+        rich_notes: list[str],
+        grouped: bool,
+        prefix_base: str,
+        legacy_search_path: Path | None,
+    ) -> ToolReturnValue:
+        try:
             output_mode = params.output_mode
-
-            # Collect candidate files.
-            files = self._collect_files(search_path, params)
 
             # Execute search in parallel across files.
             loop = asyncio.get_running_loop()
@@ -1331,19 +2072,25 @@ class Grep(CallableTool2[Params]):
                 if text is None:
                     return []
 
+                ranges = file_ranges.get(file_path)
+
                 if output_mode == "files_with_matches":
-                    if regex.search(text):
+                    window = _text_in_ranges(text, ranges) if ranges else text
+                    if regex.search(window):
                         return [str(file_path)]
                     return []
 
                 if output_mode == "count_matches":
-                    count = len(list(regex.finditer(text)))
+                    window = _text_in_ranges(text, ranges) if ranges else text
+                    count = len(list(regex.finditer(window)))
                     if count > 0:
                         return [f"{file_path}:{count}"]
                     return []
 
                 # content mode
-                return self._search_content_single(file_path, text, regex, params)
+                return self._search_content_single(
+                    file_path, text, regex, params, ranges=ranges
+                )
 
             # Explicit shutdown(wait=False, cancel_futures=True): the context
             # manager form waits for every worker on exit, which would defeat
@@ -1420,19 +2167,29 @@ class Grep(CallableTool2[Params]):
                 files_summary = f"Found {len(lines)} files matching {params.pattern!r}."
                 message = f"{message} {files_summary}" if message else files_summary
 
-            # Local dedup fallback (backup_grep never runs rtk).
+            # Local dedup fallback (backup_grep never runs rtk). Skipped for
+            # grouped output (headers make cross-file dedup undesirable).
             dedup_saved = 0
-            if output_mode == "content" and params.deduplicate_output:
+            if output_mode == "content" and params.deduplicate_output and not grouped:
                 lines, dedup_saved = dedup_lines(lines)
                 if dedup_saved:
                     dedup_msg = f"Removed {dedup_saved} repeated line(s) via dedup."
                     message = f"{message} {dedup_msg}" if message else dedup_msg
 
             # Strip search-base prefix for relative paths.
-            search_base = str(search_path)
-            if search_path.is_file():
-                search_base = str(search_path.parent)
+            if legacy_search_path is not None:
+                search_base = str(legacy_search_path)
+                if legacy_search_path.is_file():
+                    search_base = str(legacy_search_path.parent)
+            else:
+                search_base = prefix_base
             lines = _strip_path_prefix(lines, search_base)
+
+            # Rich searches: remap archive scratch paths to archive:member
+            # display form (after prefix strip, before recording/grouping).
+            if display_map:
+                lines = _normalize_slashes_content(lines, output_mode)
+                lines = _remap_display(lines, display_map)
 
             # Offset + head_limit pagination.
             if output_mode == "files_with_matches":
@@ -1471,6 +2228,28 @@ class Grep(CallableTool2[Params]):
                         f"Use offset={params.offset + effective_limit} to see more."
                     )
                     message = f"{message} {truncation_msg}" if message else truncation_msg
+
+            # File recorder: persist deduplicated matched files on the session.
+            if params.record and lines:
+                record_files = _collect_record_files(lines, output_mode)
+                if record_files:
+                    record_grep_files(
+                        self._runtime.session,
+                        record_files,
+                        cwd=str(local_path_for_cwd(self._work_dir)),
+                    )
+
+            if rich_notes:
+                skip_note = (
+                    "Skipped archive entries (text members only): "
+                    + "; ".join(rich_notes) + "."
+                )
+                message = f"{message} {skip_note}" if message else skip_note
+
+            # Grouped rendering (rich searches or explicit grouped=True).
+            if grouped and output_mode == "content" and lines:
+                groups = group_lines_by_file(lines, parse_content_line)
+                lines = format_grouped_output(groups)
 
             # Final display fold budget (head+tail fold with marker).
             omitted_by_fold = 0
@@ -1545,7 +2324,13 @@ class Grep(CallableTool2[Params]):
         return _matches_type(file_path, params.type)
 
     def _search_content_single(
-        self, file_path: Path, content: str, regex: re.Pattern[str], params: Params
+        self,
+        file_path: Path,
+        content: str,
+        regex: re.Pattern[str],
+        params: Params,
+        *,
+        ranges: list[LineRange] | None = None,
     ) -> list[str]:
         before = params.before_context or 0
         after = params.after_context or 0
@@ -1582,6 +2367,12 @@ class Grep(CallableTool2[Params]):
                 if regex.search(line):
                     match_line_nums.add(i)
 
+        # Line-range selector: only in-range lines are matches.
+        if ranges is not None:
+            match_line_nums = {
+                ln for ln in match_line_nums if is_line_in_ranges(ln, ranges)
+            }
+
         if not match_line_nums:
             return []
 
@@ -1593,6 +2384,10 @@ class Grep(CallableTool2[Params]):
             if i > 0:
                 results.append("--")
             for ln in range(max(1, start), min(len(lines), end) + 1):
+                # Context clamping: a ranged search never leaks out-of-range
+                # content — context outside the windows is dropped.
+                if ranges is not None and not is_line_in_ranges(ln, ranges):
+                    continue
                 text = lines[ln - 1]
                 if ln in match_line_nums:
                     if params.line_number:

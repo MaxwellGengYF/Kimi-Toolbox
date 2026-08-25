@@ -32,6 +32,17 @@ from kimi_cli.utils.path import (
 from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.vfs import VFS
 
+from .conflict_detect import (
+    ConflictError,
+    format_conflict_summary,
+    format_conflict_warning,
+    get_conflict_history,
+    parse_conflict_uri,
+    render_conflict_region,
+    scan_conflict_lines,
+    scan_file_for_conflicts,
+)
+from .snapshot_store import record_file_snapshot
 from .glob import (
     _get_gitignore_rules,
     _is_ignored_by_gitignore,
@@ -311,6 +322,23 @@ def _split_glob_path(raw: str) -> tuple[str, str]:
         base = "."
     pattern = raw[sep_idx + 1 :]
     return base, pattern
+
+
+def _split_conflicts_suffix(raw: str) -> tuple[str, bool]:
+    """Split a trailing ``:conflicts`` selector off a path (plan 24).
+
+    Windows drive-letter guard: a colon at index 1 (``C:\\...``) is part of
+    the drive prefix, never a selector separator. Returns
+    ``(path, selected)``.
+    """
+    suffix = ":conflicts"
+    if raw.endswith(suffix) and len(raw) > len(suffix):
+        idx = len(raw) - len(suffix)
+        if idx == 1 and raw[1] == ":":
+            # Bare drive-letter colon ("C:") — not a selector.
+            return raw, False
+        return raw[:idx], True
+    return raw, False
 
 
 def _broadcast_option(value: int | list[int], n: int) -> list[int]:
@@ -619,6 +647,18 @@ class ReadFile(CallableTool2[Params]):
         max_char_values = _broadcast_option(params.max_char, n_raw)
         char_offset_values = _broadcast_option(params.char_offset, n_raw)
 
+        # Plan 24: conflict:// URIs and :conflicts selectors use a dedicated
+        # pipeline (they never resolve through KaosPath).
+        if any("conflict://" in p or p.endswith(":conflicts") for p in raw_paths):
+            return await self._read_conflict_entries(
+                raw_paths,
+                line_offsets,
+                n_lines_values,
+                max_char_values,
+                char_offset_values,
+                params,
+            )
+
         # Expand any glob paths into concrete file entries while preserving order.
         entries: list[tuple[str, tuple[int, int, int, int], str | ToolError]] = []
         for i, raw_path in enumerate(raw_paths):
@@ -924,7 +964,7 @@ class ReadFile(CallableTool2[Params]):
             assert line_offset != 0
 
             if line_offset < 0:
-                result = await self._read_tail(
+                result, window_lines, window_start = await self._read_tail(
                     p,
                     display_path,
                     line_offset,
@@ -932,7 +972,7 @@ class ReadFile(CallableTool2[Params]):
                     show_line_numbers=show_line_numbers,
                 )
             else:
-                result = await self._read_forward(
+                result, window_lines, window_start = await self._read_forward(
                     p,
                     display_path,
                     line_offset,
@@ -940,9 +980,25 @@ class ReadFile(CallableTool2[Params]):
                     show_line_numbers=show_line_numbers,
                 )
 
-            if isinstance(result, ToolOk):
-                result = _apply_char_window(result, char_offset, max_char)
-                self._session.file_mtime.clean_file(raw_path)
+            result = _apply_char_window(result, char_offset, max_char)
+            result = await self._apply_conflict_footer(
+                result,
+                display_path,
+                str(p),
+                window_lines,
+                window_start,
+            )
+              # Plan 25 M3: record a whole-file snapshot of what the model saw
+              # (best-effort; provenance = displayed window lines).  A partial
+              # read still mints a full-file tag, mirroring oh-my-pi.
+            with suppress(Exception):
+                  seen = list(
+                      range(window_start, window_start + len(window_lines))
+                  )
+                  await record_file_snapshot(
+                      self._session, str(p), seen_lines=seen or None
+                  )
+            self._session.file_mtime.clean_file(raw_path)
             return result
         except Exception as e:
             logger.warning("read failed: {path}: {error}", path=raw_path, error=e)
@@ -950,6 +1006,222 @@ class ReadFile(CallableTool2[Params]):
                 message=f"Failed to read {display_path}. Error: {e}",
                 brief="Failed to read file",
             )
+
+    async def _apply_conflict_footer(
+        self,
+        result: ToolReturnValue,
+        display_path: str,
+        absolute_path: str,
+        window_lines: list[str],
+        window_start: int,
+    ) -> ToolReturnValue:
+        """Scan the read window for conflict markers; append a footer.
+
+        Zero extra I/O for clean files: only the already-collected lines are
+        inspected. When >=1 block is visible, a best-effort full-file scan
+        enriches the count ("N of M visible in this window").
+        """
+        if not isinstance(result, ToolOk):
+            return result
+        if not window_lines:
+            return result
+        blocks = scan_conflict_lines(window_lines, window_start)
+        if not blocks:
+            return result
+        history = get_conflict_history(self._session)
+        entries = [
+            history.register(
+                absolute_path=absolute_path,
+                display_path=display_path,
+                block=block,
+            )
+            for block in blocks
+        ]
+        total_in_file: int | None = None
+        scan_truncated = False
+        try:
+            full = await asyncio.to_thread(scan_file_for_conflicts, absolute_path)
+            total_in_file = max(len(entries), len(full.blocks))
+            scan_truncated = full.scan_truncated
+        except Exception as exc:  # best-effort, never breaks the read
+            logger.warning(
+                "conflict full-file scan failed: {path}: {error}",
+                path=absolute_path,
+                error=exc,
+            )
+        footer = format_conflict_warning(
+            entries,
+            total_in_file=total_in_file,
+            display_path=display_path,
+            scan_truncated=scan_truncated,
+        )
+        result.output = (
+            result.output + "\n\n" + footer if result.output else footer
+        )
+        result.message += (
+            f" {len(entries)} unresolved conflict(s) detected in {display_path}."
+        )
+        return result
+
+    async def _read_conflict_entries(
+        self,
+        raw_paths: list[str],
+        line_offsets: list[int],
+        n_lines_values: list[int],
+        max_char_values: list[int],
+        char_offset_values: list[int],
+        params: Params,
+    ) -> ToolReturnValue:
+        """Dedicated pipeline for conflict:// URIs and :conflicts selectors."""
+        results: list[ToolReturnValue] = []
+        display_paths: list[str] = []
+        for i, raw_path in enumerate(raw_paths):
+            display_paths.append(raw_path.replace("\\", "/"))
+            results.append(
+                await self._read_conflict_entry(
+                    raw_path, params.show_line_numbers, params.glob
+                )
+            )
+        if len(results) == 1:
+            return results[0]
+        success_count = sum(0 if r.is_error else 1 for r in results)
+        error_count = len(results) - success_count
+        if success_count == 0:
+            return ToolError(
+                message="Failed to read conflict info: "
+                + " ".join(r.message for r in results),
+                brief="Failed to read conflicts",
+            )
+        parts: list[str] = []
+        for idx, (display_path, result) in enumerate(zip(display_paths, results)):
+            parts.append(f"======== {display_path} ========")
+            parts.append(result.message if result.is_error else result.output)
+            if idx < len(results) - 1:
+                parts.append("")
+        return ToolOk(
+            output="\n".join(parts),
+            message=f"Read {success_count} conflict entries, {error_count} error(s).",
+            brief="Read conflicts",
+        )
+
+    async def _read_conflict_entry(
+        self, raw_path: str, show_line_numbers: bool, glob_mode: bool
+    ) -> ToolReturnValue:
+        if "conflict://" in raw_path:
+            return await self._read_conflict_uri(raw_path, show_line_numbers)
+        # Trailing ":conflicts" selector on a regular path.
+        path, selected = _split_conflicts_suffix(raw_path)
+        if not selected:
+            return ToolError(
+                message=f"Invalid conflict read path: `{raw_path}`.",
+                brief="Invalid path",
+            )
+        return await self._read_conflicts_selector(path, show_line_numbers, glob_mode)
+
+    async def _read_conflict_uri(
+        self, raw_path: str, show_line_numbers: bool
+    ) -> ToolReturnValue:
+        try:
+            parsed = parse_conflict_uri(raw_path)
+        except ConflictError as e:
+            return ToolError(message=e.message, brief="Invalid conflict URI")
+        if parsed is None:
+            return ToolError(
+                message=f"Invalid conflict read path: `{raw_path}`.",
+                brief="Invalid path",
+            )
+        if parsed.id == "*":
+            return ToolError(
+                message=(
+                    "Reading `conflict://*` is not supported — wildcards are write-only. "
+                    "Use `write({ path: \"conflict://*\", content })` to bulk-resolve, or "
+                    "read a specific block with `conflict://<N>`."
+                ),
+                brief="Conflict wildcard is write-only",
+            )
+        history = get_conflict_history(self._session)
+        entry = history.get(parsed.id)  # type: ignore[arg-type]
+        if entry is None:
+            return ToolError(
+                message=(
+                    f"Conflict #{parsed.id} not found. Conflict ids are registered "
+                    "when `read` surfaces a marker block; re-read the file to get a current id."
+                ),
+                brief="Conflict not found",
+            )
+        try:
+            region_lines, start_line = render_conflict_region(entry, parsed.scope)
+        except ConflictError as e:
+            return ToolError(message=e.message, brief="Invalid conflict scope")
+        rendered: list[str] = []
+        for offset, line in enumerate(region_lines):
+            line_no = start_line + offset
+            if show_line_numbers:
+                rendered.append(f"{line_no:6d}\t{line}")
+            else:
+                rendered.append(line)
+        scope_note = f"/{parsed.scope}" if parsed.scope else ""
+        prefix_note = (
+            f" Recorded from `{parsed.recovered_prefix}`."
+            if parsed.recovered_prefix
+            else ""
+        )
+        return ToolOk(
+            output="\n".join(rendered),
+            message=(
+                f"Rendered conflict #{parsed.id}{scope_note} from {entry.display_path} "
+                f"(lines L{entry.start_line}-{entry.end_line}).{prefix_note}"
+            ),
+            brief="Read conflict",
+        )
+
+    async def _read_conflicts_selector(
+        self, path: str, show_line_numbers: bool, glob_mode: bool
+    ) -> ToolReturnValue:
+        if glob_mode or _is_glob_pattern(path):
+            return ToolError(
+                message="The `:conflicts` selector cannot be combined with glob paths.",
+                brief="Selector not supported with glob",
+            )
+        try:
+            p = kaos_path_from_tool_input(path, self._work_dir)
+        except Exception as e:
+            return ToolError(
+                message=f"Invalid path `{path}`: {e}", brief="Invalid path"
+            )
+        absolute_path = str(p.canonical())
+        display_path = path.replace("\\", "/")
+        if not os.path.exists(absolute_path):
+            return ToolError(
+                message=f"`{display_path}` does not exist.",
+                brief="File not found",
+            )
+        try:
+            scan = await asyncio.to_thread(scan_file_for_conflicts, absolute_path)
+        except ConflictError as e:
+            return ToolError(message=e.message, brief="Conflict scan failed")
+        history = get_conflict_history(self._session)
+        entries = [
+            history.register(
+                absolute_path=absolute_path,
+                display_path=display_path,
+                block=block,
+            )
+            for block in scan.blocks
+        ]
+        output = format_conflict_summary(
+            entries,
+            display_path=display_path,
+            scan_truncated=scan.scan_truncated,
+        )
+        return ToolOk(
+            output=output,
+            message=(
+                f"{len(entries)} unresolved conflict(s) in {display_path} "
+                f"(conflictCount={len(entries)})."
+            ),
+            brief="Read conflicts",
+        )
 
     async def _read_rich_format(
         self,
@@ -1206,7 +1478,7 @@ class ReadFile(CallableTool2[Params]):
                 yield line
 
         note = f" (extracted from {suffix} document)" if suffix else ""
-        result = await self._render_lines(
+        rendered, _window_lines, _window_start = await self._render_lines(
             _text_lines(),
             display_path,
             line_offset,
@@ -1214,7 +1486,7 @@ class ReadFile(CallableTool2[Params]):
             show_line_numbers=show_line_numbers,
             note=note,
         )
-        return _apply_char_window(result, char_offset, max_char)
+        return _apply_char_window(rendered, char_offset, max_char)
 
     async def _render_lines(
         self,
@@ -1225,7 +1497,7 @@ class ReadFile(CallableTool2[Params]):
         *,
         show_line_numbers: bool = True,
         note: str = "",
-    ) -> ToolReturnValue:
+    ) -> tuple[ToolOk, list[str], int]:
         """Render an async iterable of lines (line endings included).
 
         Positive ``line_offset`` reads forward; negative reads the tail window.
@@ -1262,9 +1534,10 @@ class ReadFile(CallableTool2[Params]):
         *,
         show_line_numbers: bool = True,
         note: str = "",
-    ) -> ToolReturnValue:
+    ) -> tuple[ToolOk, list[str], int]:
         """Render lines forward from a positive line_offset with line/byte budgets."""
         entries: list[tuple[int, str, bool, int]] = []
+        raw_collected: list[str] = []
         n_bytes = 0
         max_lines_reached = False
         max_bytes_reached = False
@@ -1279,6 +1552,7 @@ class ReadFile(CallableTool2[Params]):
             truncated = truncate_line(line, MAX_LINE_LENGTH)
             b_len = len(truncated.encode("utf-8"))
             entries.append((current_line_no, truncated, truncated != line, b_len))
+            raw_collected.append(line.rstrip("\r\n"))
             n_bytes += b_len
             if len(entries) >= target_lines:
                 max_lines_reached = target_lines >= MAX_LINES
@@ -1289,7 +1563,7 @@ class ReadFile(CallableTool2[Params]):
                 eof_reached = False
                 break
 
-        return self._render_result(
+        result = self._render_result(
             entries,
             display_path,
             n_lines,
@@ -1301,6 +1575,7 @@ class ReadFile(CallableTool2[Params]):
             end_of_file=len(entries) < n_lines,
             note=note,
         )
+        return result, raw_collected, line_offset
 
     async def _render_tail(
         self,
@@ -1311,21 +1586,24 @@ class ReadFile(CallableTool2[Params]):
         *,
         show_line_numbers: bool = True,
         note: str = "",
-    ) -> ToolReturnValue:
+    ) -> tuple[ToolOk, list[str], int]:
         """Render the tail window (negative line_offset) with line/byte budgets."""
         tail_count = abs(line_offset)
         line_limit = min(n_lines, MAX_LINES)
 
         # Bounded list keeping the last `tail_count` lines.
         tail_buf: list[tuple[int, str, bool, int]] = []
+        tail_raw: list[tuple[int, str]] = []
         current_line_no = 0
         async for line in lines:
             current_line_no += 1
             truncated = truncate_line(line, MAX_LINE_LENGTH)
             b_len = len(truncated.encode("utf-8"))
             tail_buf.append((current_line_no, truncated, truncated != line, b_len))
+            tail_raw.append((current_line_no, line.rstrip("\r\n")))
             if len(tail_buf) > tail_count:
                 tail_buf.pop(0)
+                tail_raw.pop(0)
 
         total_lines = current_line_no
 
@@ -1353,7 +1631,7 @@ class ReadFile(CallableTool2[Params]):
             max_bytes_reached = False
 
         start_line = candidates[0][0] if candidates else total_lines + 1
-        return self._render_result(
+        result = self._render_result(
             candidates,
             display_path,
             n_lines,
@@ -1365,6 +1643,9 @@ class ReadFile(CallableTool2[Params]):
             end_of_file=len(candidates) < n_lines,
             note=note,
         )
+        raw_map = dict(tail_raw)
+        collected = [raw_map[e[0]] for e in candidates if e[0] in raw_map]
+        return result, collected, start_line
 
     def _render_result(
         self,
@@ -1429,7 +1710,7 @@ class ReadFile(CallableTool2[Params]):
         """Read an otherwise-unknown file as plain text."""
         try:
             if line_offset < 0:
-                result = await self._read_tail(
+                result, window_lines, window_start = await self._read_tail(
                     p,
                     display_path,
                     line_offset,
@@ -1437,16 +1718,22 @@ class ReadFile(CallableTool2[Params]):
                     show_line_numbers=show_line_numbers,
                 )
             else:
-                result = await self._read_forward(
+                result, window_lines, window_start = await self._read_forward(
                     p,
                     display_path,
                     line_offset,
                     n_lines,
                     show_line_numbers=show_line_numbers,
                 )
-            if isinstance(result, ToolOk):
-                result = _apply_char_window(result, char_offset, max_char)
-                self._session.file_mtime.clean_file(raw_path)
+            result = _apply_char_window(result, char_offset, max_char)
+            result = await self._apply_conflict_footer(
+                result,
+                display_path,
+                str(p),
+                window_lines,
+                window_start,
+            )
+            self._session.file_mtime.clean_file(raw_path)
             return result
         except Exception as e:
             logger.warning("read failed: {path}: {error}", path=raw_path, error=e)
@@ -1463,7 +1750,7 @@ class ReadFile(CallableTool2[Params]):
         n_lines: int,
         *,  # keyword-only
         show_line_numbers: bool = True,
-    ) -> ToolReturnValue:
+    ) -> tuple[ToolOk, list[str], int]:
         """Read file from a positive line_offset."""
         return await self._render_lines(
             p.read_lines(errors="replace"),
@@ -1481,7 +1768,7 @@ class ReadFile(CallableTool2[Params]):
         n_lines: int,
         *,  # keyword-only
         show_line_numbers: bool = True,
-    ) -> ToolReturnValue:
+    ) -> tuple[ToolOk, list[str], int]:
         """Read file from a negative line_offset (tail mode)."""
         return await self._render_lines(
             p.read_lines(errors="replace"),

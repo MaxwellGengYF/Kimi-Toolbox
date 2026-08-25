@@ -27,7 +27,13 @@ from kimi_cli.utils.path import (
 from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.vfs import VFS
 
-from .snapshot_store import record_file_snapshot
+from .auto_generated import assert_editable_file_content
+from .fs_cache import invalidate_fs_scan_after_write
+from .snapshot_store import (
+    canonical_snapshot_key,
+    get_file_snapshot_store,
+    record_content_snapshot,
+)
 from .utils import resolve_vfs
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
@@ -835,9 +841,11 @@ class HashRead(CallableTool2[HashReadParams]):
 
         builder.write("</file>")
         self._session.file_mtime.clean_file(params.path)
-        # Record snapshot for hashline-mode anchoring.
+        # Plan 25 M3: record what the model saw (in-memory content, displayed
+        # line provenance) — no double I/O.
         seen = list(range(start + 1, actual_end + 1))
-        await record_file_snapshot(self._session, str(p), seen)
+        with contextlib.suppress(Exception):
+            record_content_snapshot(self._session, str(p), content, seen_lines=seen)
         result = builder.ok(message=f"Read {display_path}", brief=f"Read {display_path}")
         # Apply char_offset / max_char slicing (like read.py)
         if isinstance(result.output, str):
@@ -853,10 +861,23 @@ class HashRead(CallableTool2[HashReadParams]):
 class HashEditParams(BaseModel):
     path: str = Field(description="File path.")
     edits: list[HashlineEdit] = Field(description="Edits to apply.")
+    allow_auto_generated: bool = Field(
+        default=False,
+        description=(
+            "When True, allow editing files that appear to be auto-generated "
+            "(opt-out of the auto-generated-file guard). Default False refuses "
+            "to modify generated files."
+        ),
+    )
 
 class HashEdit(CallableTool2[HashEditParams]):
     name: str = "HashEdit"
-    description: str = "Edit files with hash-anchored line references for robustness against concurrent changes."
+    description: str = (
+        "Edit files with hash-anchored line references for robustness against "
+        "concurrent changes. Files that appear to be auto-generated are refused "
+        "by default; pass allow_auto_generated=True to override. Stale anchors "
+        "are recovered from the session snapshot store when possible."
+    )
     params: type[HashEditParams] = HashEditParams
 
     def __init__(
@@ -921,7 +942,82 @@ class HashEdit(CallableTool2[HashEditParams]):
         except Exception as e:
             return ToolError(message=str(e), brief='Internal error.')
 
+    async def _recover_stale_anchors(
+        self,
+        params: HashEditParams,
+        live_content: str,
+        p: KaosPath | None,
+    ) -> ToolReturnValue | None:
+        """Plan 25 M4: re-apply edits against the recorded snapshot head.
+
+        Called from the HashlineMismatchError handler.  Returns a success
+        ToolReturnValue when the model's anchors validate against a recorded
+        version (the file drifted out-of-band since its read); None when no
+        recovery is possible (caller re-surfaces the mismatch).
+        """
+        if p is None:
+            return None
+        try:
+            store = get_file_snapshot_store(self._session)
+            candidates = store.versions(str(p))
+        except Exception:
+            return None
+        live_norm = live_content.replace("\r\n", "\n")
+        # Scan recorded versions newest-first; the first one whose anchors
+        # validate (and that differs from the drifted live content) wins.
+        head = None
+        recovered = None
+        for version in candidates:
+            if version.text == live_norm:
+                continue
+            try:
+                candidate, _ = apply_hashline_edits(version.text, params.edits)
+            except HashlineMismatchError:
+                continue
+            if candidate == version.text:
+                continue
+            head = version
+            recovered = candidate
+            break
+        if head is None or recovered is None:
+            return None
+
+        # Re-apply the live file's line endings before writing.
+        ending = "\r\n" if "\r\n" in live_content else "\n"
+        to_write = recovered.replace("\n", ending) if ending != "\n" else recovered
+        try:
+            await p.write_text(to_write, errors="replace")
+        except OSError:
+            return None
+        with contextlib.suppress(Exception):
+            record_content_snapshot(
+                self._session, str(p), recovered, seen_lines=None
+            )
+        with contextlib.suppress(Exception):
+            invalidate_fs_scan_after_write(str(p))
+        try:
+            self._session.file_mtime.mark_dirty(str(p))
+        except Exception:
+            pass
+        import pendulum
+
+        rec = pendulum.from_timestamp(head.recorded_at).to_iso8601_string()
+        note = (
+            "Note: file changed since read \u2014 edit applied against the "
+            f"version read at {rec}; re-read to verify."
+        )
+        return ToolReturnValue(
+            is_error=False,
+            output="",
+            message=f"Edit applied successfully (recovered from snapshot). {note}",
+            display=[
+                BriefDisplayBlock(text=f"Edited {str(p).replace(chr(92), '/')} (recovered)")
+            ],
+        )
+
     async def _do_edit(self, params: HashEditParams) -> ToolReturnValue:
+        original_content = ""
+        p: KaosPath | None = None
         try:
             p = kaos_path_from_tool_input(params.path, self._work_dir)
             logical_path = p
@@ -955,6 +1051,30 @@ class HashEdit(CallableTool2[HashEditParams]):
             content = await p.read_text(errors="replace")
             original_content = content
 
+            # Plan 25: auto-generated guard (content-based; file exists here).
+            if not params.allow_auto_generated:
+                gen_err = assert_editable_file_content(
+                    content, display_logical_path, session=self._session
+                )
+                if gen_err:
+                    return gen_err
+            # Plan 25: pre-edit snapshot (what the model is anchoring against).
+            with contextlib.suppress(Exception):
+                record_content_snapshot(
+                    self._session, str(p), content, seen_lines=None
+                )
+            # Plan 25 M2: FileMTime write baseline BEFORE the write; False
+            # means the file drifted since the last read (drift note, still
+            # proceeds - the snapshot keeps it recoverable).
+            _drift_note = ""
+            try:
+                if not self._session.file_mtime.mark_dirty(str(p)):
+                    _drift_note = (
+                        " Note: file changed since last read; snapshot recorded."
+                    )
+            except Exception:
+                pass
+
             new_content, first_changed = apply_hashline_edits(content, params.edits)
 
             if new_content == original_content:
@@ -977,6 +1097,13 @@ class HashEdit(CallableTool2[HashEditParams]):
             )
 
             await p.write_text(new_content, errors="replace")
+            # Plan 25 M2/M3: post-write snapshot + FS-cache invalidation.
+            with contextlib.suppress(Exception):
+                record_content_snapshot(
+                    self._session, str(p), new_content, seen_lines=None
+                )
+            with contextlib.suppress(Exception):
+                invalidate_fs_scan_after_write(str(p))
 
             builder = ToolResultBuilder()
             builder.display(*diff_blocks)
@@ -988,11 +1115,16 @@ class HashEdit(CallableTool2[HashEditParams]):
             builder.write("\n</diff>")
 
             return builder.ok(
-                message=f"Edit applied successfully{first_line_msg}.",
+                message=f"Edit applied successfully{first_line_msg}.{_drift_note}",
                 brief=f"Edited {display_logical_path}",
             )
 
         except HashlineMismatchError as e:
+            # Plan 25 M4: stale-anchor recovery against the recorded snapshot
+            # head - the model's anchors are honored instead of rejected.
+            recovered = await self._recover_stale_anchors(params, original_content, p)
+            if recovered is not None:
+                return recovered
             return ToolError(
                 message=f"Hash mismatch error:\n{e}",
                 brief="Hash mismatch",
