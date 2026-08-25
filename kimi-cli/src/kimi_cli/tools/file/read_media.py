@@ -32,11 +32,9 @@ channel has no kosong equivalent, so it maps to the model-facing
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, override
 
-import pybase64
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import AliasChoices, BaseModel, Field, model_validator
@@ -70,27 +68,17 @@ from kimi_cli.utils.path import (
 )
 from kimi_cli.wire.types import ImageURLPart, TextPart, VideoURLPart
 
+from .read_media_shared import (
+    ImageDelivery as _ImageDelivery,
+    build_image_delivery_limit_error,
+    build_media_note,
+    to_data_url as _to_data_url,
+)
+
 if TYPE_CHECKING:
     from kosong.chat_provider.kimi import Kimi
 
 MAX_MEDIA_MEGABYTES = 100
-
-
-def _to_data_url(mime_type: str, data: bytes) -> str:
-    encoded = pybase64.b64encode(data).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
-
-
-def _build_image_delivery_limit_error(
-    final_bytes: int, read_byte_budget: int, max_edge: int
-) -> str:
-    return (
-        f"Image is too large to send safely after compression ({final_bytes} bytes; "
-        f"limit {read_byte_budget} bytes and {max_edge}px on the longest edge). "
-        "The original image was not sent to the model. Do not retry the same file unchanged. "
-        "Use Bash or an available image-processing tool to create a smaller copy within both "
-        "limits, then call read_image on the smaller copy."
-    )
 
 
 def _build_image_decode_limit_error(final_bytes: int) -> str:
@@ -221,102 +209,6 @@ class Params(BaseModel):
         if self.full_resolution and self.info_only:
             raise ValueError("Cannot set both full_resolution=True and info_only=True.")
         return self
-
-
-@dataclass(frozen=True)
-class _ImageDelivery:
-    """How the image payload placed after the summary relates to the file on
-    disk. Reported verbatim so the model always knows when it is looking at a
-    degraded copy (and how to get the detail back) — silent downsampling
-    reads as "the image is just blurry" and quietly degrades the model's
-    work."""
-
-    kind: Literal["untouched", "downsampled", "crop", "full"]
-    # Pixel size of the payload actually sent; 0 when unknown.
-    width: int
-    height: int
-    byte_length: int
-    mime_type: str
-    # The crop actually applied (clamped), for kind "crop".
-    region: CropRegion | None = None
-    # For kind "crop": the crop was additionally downscaled to fit budgets.
-    resized: bool | None = None
-    # True when mip-map (numpy-based 2x2 bilinear averaging) was used
-    # instead of the standard Pillow downsampling path. Mip-map can
-    # cause more aggressive detail loss.
-    mipmap: bool = False
-
-
-def _build_media_note(
-    *,
-    kind: Literal["image", "video"],
-    mime_type: str,
-    byte_size: int,
-    dimensions: tuple[int, int] | None,
-    delivery: _ImageDelivery | None,
-) -> str:
-    """Build the media summary returned as the tool result's model-facing
-    message, wrapped in a ``<system>`` block.
-
-    Carries mime type, byte size and (for images) the original pixel
-    dimensions, plus the delivery note. When the dimensions are known it
-    also guides the model to derive absolute coordinates from that original
-    size (crops get offset-mapping guidance instead); it always reminds the
-    model to re-read any media it generates or edits.
-    """
-    parts = [
-        f"Read {kind} file.",
-        f"Mime type: {mime_type}.",
-        f"Size: {byte_size} bytes.",
-    ]
-    # Coordinate guidance is only emitted when the original size is actually
-    # known — sniffing fails for some image formats, and telling the model
-    # to use a size that is not in the block would mislead it.
-    if kind == "image" and dimensions:
-        parts.append(f"Original dimensions: {dimensions[0]}x{dimensions[1]} pixels.")
-    if delivery and delivery.kind == "downsampled":
-        parts.append(
-            f"The attached image was downsampled to {delivery.width}x{delivery.height} "
-            f"pixels ({delivery.mime_type}, {format_byte_size(delivery.byte_length)}) "
-            "to fit model limits; fine detail may be lost."
-        )
-        parts.append(
-            "To inspect fine detail, call read_image again with the region parameter "
-            "(original-image pixel coordinates) to view a crop at full fidelity."
-        )
-        if delivery.mipmap:
-            parts.append(
-                "Warning: Mip-map downsampling (2x2 bilinear averaging) was used "
-                "because standard compression could not meet the delivery limits; "
-                "fine detail may be significantly reduced."
-            )
-    elif delivery and delivery.kind == "crop" and delivery.region:
-        region = delivery.region
-        how = (
-            f", downsampled to {delivery.width}x{delivery.height} pixels"
-            if delivery.resized
-            else " at native resolution"
-        )
-        parts.append(
-            f"Showing region (x={region.x}, y={region.y}, width={region.width}, "
-            f"height={region.height}) of the original image{how}."
-        )
-        parts.append(
-            "To output coordinates in original-image pixels, locate them within this "
-            f"crop and add the region offset (x={region.x}, y={region.y})."
-        )
-    elif delivery and delivery.kind == "full":
-        parts.append("Shown at native resolution; no downscaling applied.")
-    if kind == "image" and dimensions and (delivery is None or delivery.kind != "crop"):
-        parts.append(
-            "If you need to output coordinates, output relative coordinates first "
-            "and compute absolute coordinates using the original image size."
-        )
-    parts.append(
-        "If you generate or edit images or videos via commands or scripts, "
-        "read the result back immediately before continuing."
-    )
-    return f"<system>{' '.join(parts)}</system>"
 
 
 class ReadMediaFile(CallableTool2[Params]):
@@ -570,7 +462,7 @@ class ReadMediaFile(CallableTool2[Params]):
                 part = VideoURLPart(video_url=VideoURLPart.VideoURL(url=data_url))
                 wrapped = wrap_media_part(part, tag="video", attrs={"path": media_path})
 
-        note = _build_media_note(
+        note = build_media_note(
             kind=kind,
             mime_type=file_type.mime_type,
             byte_size=size,

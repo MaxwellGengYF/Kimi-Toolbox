@@ -27,6 +27,7 @@ from kimi_cli.utils.path import (
 from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.vfs import VFS
 
+from .snapshot_store import record_file_snapshot
 from .utils import resolve_vfs
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
@@ -834,6 +835,9 @@ class HashRead(CallableTool2[HashReadParams]):
 
         builder.write("</file>")
         self._session.file_mtime.clean_file(params.path)
+        # Record snapshot for hashline-mode anchoring.
+        seen = list(range(start + 1, actual_end + 1))
+        await record_file_snapshot(self._session, str(p), seen)
         result = builder.ok(message=f"Read {display_path}", brief=f"Read {display_path}")
         # Apply char_offset / max_char slicing (like read.py)
         if isinstance(result.output, str):

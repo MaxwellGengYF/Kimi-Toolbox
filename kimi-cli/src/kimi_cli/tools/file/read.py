@@ -37,11 +37,34 @@ from .glob import (
     _is_ignored_by_gitignore,
     _is_unsafe_recursive_pattern,
 )
+from .read_archive import (
+    ARCHIVE_EXTENSIONS,
+    ArchiveReader,
+    format_archive_listing,
+    is_archive_path,
+    sniff_archive,
+)
 from .read_extract import (
     ExtractionError,
     extract_document_text,
     is_extractable_document,
 )
+from .read_markit import (
+    extract_document_markdown,
+    html_to_text,
+    is_html_document,
+    is_markdown_document,
+    markdown_to_text,
+)
+from .read_pdf_pages import render_pdf_page
+from .read_profiles import (
+    MAX_PROFILE_SUMMARY_BYTES,
+    is_cpuprofile_path,
+    is_sample_profile_path,
+    render_cpu_profile,
+    render_sample_profile,
+)
+from .read_sqlite import is_sqlite_path, read_sqlite, sniff_sqlite
 from .utils import resolve_vfs
 
 MAX_LINES = 5000
@@ -54,6 +77,9 @@ MAX_BYTES = _DEFAULT_READ_MAX_BYTES  # kept for backward compatibility
 
 # Documents larger than this are never extracted into text.
 MAX_EXTRACT_BYTES = 50 * 1024 * 1024
+
+# Archive listing cap.
+MAX_ARCHIVE_LIST_ENTRIES = 500
 
 # Similar-file suggestion tuning for the "does not exist" branch.
 _PARENT_LISTING_CAP = 200
@@ -125,8 +151,73 @@ class Params(BaseModel):
         default=True,
         description=(
             "When True (default), prefix each line with its line number "
-            "(e.g., '    42\\tcontent'). "
+            "(e.g., ' 42\\tcontent'). "
             "When False, return raw content without line numbers."
+        ),
+    )
+    archive_member: str | None = Field(
+        default=None,
+        description=(
+            "Archive member path to read inside an archive. "
+            "When omitted, ``read`` lists the archive root entries. "
+            "Applies to zip/tar/tar.gz/tgz/tar.bz2/tar.xz and bare gz/bz2/xz files."
+        ),
+    )
+    sql_query: str | None = Field(
+        default=None,
+        description=(
+            "Raw read-only SQL query for SQLite files. "
+            "Only SELECT statements are allowed; capped at 1000 rows. "
+            "Cannot be combined with sql_table/sql_where/sql_order/sql_limit/sql_offset."
+        ),
+    )
+    sql_table: str | None = Field(
+        default=None,
+        description="Table name to browse in a SQLite file.",
+    )
+    sql_where: str | None = Field(
+        default=None,
+        description=(
+            "WHERE fragment for sql_table (e.g. ``id > 10``). "
+            "Rejects statement terminators, comments, and LIMIT/UNION/etc."
+        ),
+    )
+    sql_order: str | None = Field(
+        default=None,
+        description="ORDER BY column for sql_table, as 'col' or 'col:asc|desc'.",
+    )
+    sql_limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Maximum rows for sql_table queries (default 20, max 500).",
+    )
+    sql_offset: int | None = Field(
+        default=None,
+        ge=0,
+        description="Offset for sql_table queries.",
+    )
+    pdf_page: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Render this PDF page as an image. "
+            "Requires a model with image_in capability; otherwise returns an error."
+        ),
+    )
+    profile_raw: bool = Field(
+        default=False,
+        description=(
+            "When True, return the raw bytes/text of .cpuprofile or .sample.txt files. "
+            "When False (default), return a compact bottleneck summary."
+        ),
+    )
+    render_markdown: bool = Field(
+        default=True,
+        description=(
+            "When True (default), extract supported documents as markdown-flavored text and convert "
+            ".md/.html files to plain text. "
+            "When False, use the legacy plain-text extractor."
         ),
     )
 
@@ -150,6 +241,27 @@ class Params(BaseModel):
                 values = [value]
             for v in values:
                 self._validate_value(name, v)
+
+        # Rich-mode mutual exclusion rules.
+        has_pdf = self.pdf_page is not None
+        has_archive = self.archive_member is not None
+        has_sql = any(
+            x is not None
+            for x in (self.sql_query, self.sql_table, self.sql_where, self.sql_order, self.sql_limit, self.sql_offset)
+        )
+        if sum((has_pdf, has_archive, has_sql)) > 1:
+            raise ValueError(
+                "pdf_page, archive_member, and sql_* parameters are mutually exclusive."
+            )
+        if self.sql_query is not None and any(
+            x is not None
+            for x in (self.sql_table, self.sql_where, self.sql_order, self.sql_limit, self.sql_offset)
+        ):
+            raise ValueError(
+                "sql_query cannot be combined with sql_table, sql_where, sql_order, sql_limit, or sql_offset."
+            )
+        if (self.sql_limit is not None or self.sql_offset is not None) and self.sql_table is None:
+            raise ValueError("sql_limit/sql_offset require sql_table.")
         return self
 
     @staticmethod
@@ -221,6 +333,8 @@ def _apply_char_window(
     read was partial and how to continue it.
     """
     if not isinstance(result, ToolOk) or not isinstance(result.output, str):
+        # PDF screenshots and other media parts carry non-string output; the
+        # char window does not apply to them.
         return result
     original = result.output
     result.output = original[char_offset : char_offset + max_char]
@@ -593,6 +707,7 @@ class ReadFile(CallableTool2[Params]):
                     n_lines,
                     char_offset,
                     max_char,
+                    params,
                     show_line_numbers=params.show_line_numbers,
                 )
                 if result.is_error:
@@ -641,6 +756,7 @@ class ReadFile(CallableTool2[Params]):
         n_lines: int,
         char_offset: int,
         max_char: int,
+        params: Params,
         *,  # keyword-only from here
         show_line_numbers: bool = True,
     ) -> ToolReturnValue:
@@ -654,6 +770,7 @@ class ReadFile(CallableTool2[Params]):
         try:
             p = kaos_path_from_tool_input(raw_path, self._work_dir)
             logical_path = p
+            path_str = str(logical_path)
             if err := await self._validate_path(p, raw_path):
                 return err
 
@@ -692,6 +809,21 @@ class ReadFile(CallableTool2[Params]):
                     brief="Unsupported file type",
                 )
 
+            rich_result = await self._read_rich_format(
+                p,
+                logical_path,
+                raw_path,
+                display_path,
+                line_offset,
+                n_lines,
+                char_offset,
+                max_char,
+                show_line_numbers,
+                params,
+            )
+            if rich_result is not None:
+                return rich_result
+
             if is_extractable_document(str(logical_path)):
                 suffix = Path(str(logical_path)).suffix.lower()
                 try:
@@ -707,7 +839,10 @@ class ReadFile(CallableTool2[Params]):
                         brief="File not readable",
                     )
                 try:
-                    extracted = await asyncio.to_thread(extract_document_text, str(p))
+                    if params.render_markdown:
+                        extracted = await asyncio.to_thread(extract_document_markdown, str(p))
+                    else:
+                        extracted = await asyncio.to_thread(extract_document_text, str(p))
                 except ExtractionError as e:
                     return ToolError(
                         message=(
@@ -730,7 +865,50 @@ class ReadFile(CallableTool2[Params]):
                     self._session.file_mtime.clean_file(raw_path)
                 return result
 
+            suffix = Path(str(logical_path)).suffix.lower()
+            if params.render_markdown and (is_markdown_document(path_str) or is_html_document(path_str)):
+                try:
+                    if is_markdown_document(path_str):
+                        text = await p.read_text(errors="replace")
+                        converted = markdown_to_text(text)
+                    else:
+                        text = await p.read_text(errors="replace")
+                        converted = html_to_text(text)
+                except Exception as e:
+                    return ToolError(
+                        message=f"Failed to convert `{display_path}`: {e}",
+                        brief="Conversion failed",
+                    )
+                result = await self._read_content(
+                    converted,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    char_offset,
+                    max_char,
+                    show_line_numbers=show_line_numbers,
+                    suffix=suffix,
+                )
+                if isinstance(result, ToolOk):
+                    self._session.file_mtime.clean_file(raw_path)
+                return result
+
             if file_type.kind == "unknown":
+                # Some extensions (e.g. .db, .sqlite, archive suffixes) are
+                # conservatively marked unknown. If the rich-format sniff/open
+                # fell through without explicit params, try reading as plain
+                # text; it may be a misnamed or empty file.
+                if is_sqlite_path(path_str) or is_archive_path(path_str):
+                    return await self._read_as_text(
+                        p,
+                        display_path,
+                        line_offset,
+                        n_lines,
+                        char_offset,
+                        max_char,
+                        show_line_numbers,
+                        raw_path,
+                    )
                 return ToolError(
                     message=(
                         f"`{display_path}` seems not readable. "
@@ -772,6 +950,220 @@ class ReadFile(CallableTool2[Params]):
                 message=f"Failed to read {display_path}. Error: {e}",
                 brief="Failed to read file",
             )
+
+    async def _read_rich_format(
+        self,
+        p: KaosPath,
+        logical_path: KaosPath,
+        raw_path: str,
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        char_offset: int,
+        max_char: int,
+        show_line_numbers: bool,
+        params: Params,
+    ) -> ToolReturnValue | None:
+        """Dispatch rich read formats (PDF page, archive, SQLite, profiles).
+
+        Returns ``None`` when the path is not a rich format and the normal
+        text/document path should take over.
+        """
+        path_str = str(logical_path)
+        suffix = Path(path_str).suffix.lower()
+
+        # 1. PDF page screenshot.
+        if params.pdf_page is not None:
+            if suffix != ".pdf" and not path_str.lower().endswith(".pdf"):
+                return ToolError(
+                    message="`pdf_page` is only valid for PDF files.",
+                    brief="Invalid pdf_page",
+                )
+            capabilities = (
+                self._runtime.llm.capabilities if self._runtime.llm else set[str]()
+            )
+            result = render_pdf_page(
+                str(p),
+                params.pdf_page,
+                capabilities=capabilities,
+            )
+            return result
+
+        # 2. Archive browsing / member read.
+        has_archive_param = params.archive_member is not None
+        looks_like_archive = is_archive_path(path_str) or sniff_archive(
+            await p.read_bytes(min(262, MEDIA_SNIFF_BYTES))
+        )
+        if has_archive_param or looks_like_archive:
+            # Office documents and notebooks are zip-backed; when the user wants
+            # markdown-flavored extraction (the default), let the normal document
+            # path handle them rather than showing a raw zip listing.  Explicit
+            # ``archive_member`` still wins so callers can peek inside the
+            # container if needed.
+            if (
+                looks_like_archive
+                and not has_archive_param
+                and params.render_markdown
+                and is_extractable_document(path_str)
+                and suffix in {".docx", ".xlsx", ".xlsm", ".pptx", ".ipynb"}
+            ):
+                pass  # fall through to document extraction
+            else:
+                try:
+                    return await self._read_archive(
+                        p,
+                        display_path,
+                        line_offset,
+                        n_lines,
+                        char_offset,
+                        max_char,
+                        show_line_numbers,
+                        params,
+                    )
+                except Exception as exc:
+                    # If the file merely looks like an archive but failed to open,
+                    # fall through to normal text/binary handling rather than
+                    # hard-failing.
+                    if has_archive_param:
+                        return ToolError(
+                            message=f"Cannot read archive `{display_path}`: {exc}",
+                            brief="Archive read failed",
+                        )
+
+        # 3. SQLite browsing / query.
+        has_sql_param = any(
+            x is not None
+            for x in (
+                params.sql_query,
+                params.sql_table,
+                params.sql_where,
+                params.sql_order,
+                params.sql_limit,
+                params.sql_offset,
+            )
+        )
+        looks_like_sqlite = is_sqlite_path(path_str) or sniff_sqlite(
+            await p.read_bytes(min(16, MEDIA_SNIFF_BYTES))
+        )
+        if has_sql_param or looks_like_sqlite:
+            try:
+                output, message, is_error = await read_sqlite(
+                    str(p),
+                    sql_query=params.sql_query,
+                    sql_table=params.sql_table,
+                    sql_where=params.sql_where,
+                    sql_order=params.sql_order,
+                    sql_limit=params.sql_limit,
+                    sql_offset=params.sql_offset,
+                )
+                if is_error:
+                    return ToolError(message=output, brief="SQLite read failed")
+                return ToolOk(output=output, message=message, brief="SQLite read")
+            except Exception as exc:
+                if has_sql_param:
+                    return ToolError(
+                        message=f"Cannot read SQLite `{display_path}`: {exc}",
+                        brief="SQLite read failed",
+                    )
+
+        # 4. CPU/sample profile summaries.
+        if (
+            not params.profile_raw
+            and (is_cpuprofile_path(path_str) or is_sample_profile_path(path_str))
+        ):
+            stat = await p.stat()
+            if stat.st_size <= MAX_PROFILE_SUMMARY_BYTES:
+                text = await p.read_text(errors="replace")
+                summary = None
+                if is_cpuprofile_path(path_str):
+                    summary = render_cpu_profile(text)
+                elif is_sample_profile_path(path_str):
+                    summary = render_sample_profile(text)
+                if summary is not None:
+                    return ToolOk(
+                        output=summary,
+                        message=f"Profile summary for `{display_path}`.",
+                        brief="Profile summary",
+                    )
+
+        return None
+
+    async def _read_archive(
+        self,
+        p: KaosPath,
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        char_offset: int,
+        max_char: int,
+        show_line_numbers: bool,
+        params: Params,
+    ) -> ToolReturnValue:
+        """Read an archive directory listing or member."""
+        with ArchiveReader(str(p)) as reader:
+            if params.archive_member is None:
+                entries = reader.list_directory(
+                    offset=line_offset,
+                    limit=min(n_lines, MAX_ARCHIVE_LIST_ENTRIES),
+                )
+                listing = format_archive_listing(entries)
+                result = await self._read_content(
+                    listing,
+                    display_path,
+                    1,
+                    n_lines,
+                    char_offset,
+                    max_char,
+                    show_line_numbers=show_line_numbers,
+                    suffix="archive",
+                )
+                if isinstance(result, ToolOk):
+                    result.message += f" Path: {display_path}"
+                return result
+
+            member = params.archive_member
+            try:
+                data = reader.read_file(member)
+            except KeyError:
+                return ToolError(
+                    message=f"Archive member `{member}` not found in `{display_path}`.",
+                    brief="Archive member not found",
+                )
+            from .read_archive import is_binary_data
+
+            if is_binary_data(data):
+                return ToolOk(
+                    output=(
+                        f"[Cannot read binary archive member '{member}' "
+                        f"({len(data)} bytes); extract it with Bash/Python to inspect further]"
+                    ),
+                    message=f"Binary archive member `{member}` skipped. Path: {display_path}",
+                    brief="Binary archive member",
+                )
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                return ToolOk(
+                    output=(
+                        f"[Cannot read binary archive member '{member}' "
+                        f"({len(data)} bytes); extract it with Bash/Python to inspect further]"
+                    ),
+                    message=f"Binary archive member `{member}` skipped. Path: {display_path}",
+                    brief="Binary archive member",
+                )
+            result = await self._read_content(
+                text,
+                display_path,
+                line_offset,
+                n_lines,
+                char_offset,
+                max_char,
+                show_line_numbers=show_line_numbers,
+                suffix="archive member",
+            )
+            if isinstance(result, ToolOk):
+                result.message += f" (extracted from archive member `{member}`). Path: {display_path}"
+            return result
 
     async def _similar_file_suggestions(
         self,
@@ -1022,6 +1414,46 @@ class ReadFile(CallableTool2[Params]):
             message=message,
             brief="Read file",
         )
+
+    async def _read_as_text(
+        self,
+        p: KaosPath,
+        display_path: str,
+        line_offset: int,
+        n_lines: int,
+        char_offset: int,
+        max_char: int,
+        show_line_numbers: bool,
+        raw_path: str,
+    ) -> ToolReturnValue:
+        """Read an otherwise-unknown file as plain text."""
+        try:
+            if line_offset < 0:
+                result = await self._read_tail(
+                    p,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    show_line_numbers=show_line_numbers,
+                )
+            else:
+                result = await self._read_forward(
+                    p,
+                    display_path,
+                    line_offset,
+                    n_lines,
+                    show_line_numbers=show_line_numbers,
+                )
+            if isinstance(result, ToolOk):
+                result = _apply_char_window(result, char_offset, max_char)
+                self._session.file_mtime.clean_file(raw_path)
+            return result
+        except Exception as e:
+            logger.warning("read failed: {path}: {error}", path=raw_path, error=e)
+            return ToolError(
+                message=f"Failed to read {display_path}. Error: {e}",
+                brief="Failed to read file",
+            )
 
     async def _read_forward(
         self,

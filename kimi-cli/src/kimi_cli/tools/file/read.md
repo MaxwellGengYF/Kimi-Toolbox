@@ -2,3 +2,10 @@ Read a UTF-8 text file and return line-numbered content.
 `file_path` may be a single path or a list of paths; `offset` and `limit` may each be a single value or one per file. Lines over ${MAX_LINE_LENGTH} chars truncated; max ${MAX_LINES} lines per file. Bytes per file scale with the model's context window (at least ${MAX_BYTES} bytes, up to 1MiB). Negative offset = tail mode.
 Each `file_path` may also be a glob pattern such as `./*.md` to read all matching files in a directory (max ${MAX_FILES} files per call).
 Prefer `glob` to find files by name, `grep` for content search, then read the paths found.
+
+Rich formats (one rich mode per call; scalar params apply to every file in a multi-file read):
+- Archives (zip/jar/war/apk/whl/cbz, tar, tar.gz/tgz, tar.bz2/tbz2, tar.xz/txz, bare gz/bz2/xz): `read data.zip` lists up to 500 root entries; `read data.zip` with `archive_member="src/main.py"` returns that member as line-numbered text. Traversal attempts (`..`, absolute, backslash) are rejected; binary members return an explicit notice.
+- SQLite (.sqlite/.sqlite3/.db/.db3): `read app.db` lists tables with exact/estimate/atLeast counts; `sql_table=users&sql_limit=20&sql_offset=0` returns paginated rows; `sql_query="SELECT * FROM users LIMIT 1000"` runs raw read-only SELECT capped at 1000 rows. `sql_where` rejects `;`, comments, LIMIT/UNION/ATTACH/etc.
+- PDF screenshots: `read doc.pdf` with `pdf_page=3` renders page 3 as a PNG image when the model supports `image_in`. On over-budget, DPI falls back (150 -> 96 -> 72) before failing; without image support it suggests text mode.
+- Document markdown: `read report.docx` with `render_markdown=True` returns markdown-flavored output (headings, code fences, pipe tables). `read notes.md` / `read page.html` with `render_markdown=True` returns clean text. `render_markdown=False` uses the legacy plain-text extractor.
+- Profiles: `read profile.cpuprofile` / `read crash.sample.txt` return a compact bottleneck summary (hot paths, top-20 self time, idle excluded). `profile_raw=True` returns the original JSON/text.

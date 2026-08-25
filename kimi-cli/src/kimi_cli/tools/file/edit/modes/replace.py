@@ -1,0 +1,362 @@
+"""Replace-mode executor for the multi-mode edit tool."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from stat import S_ISREG
+from typing import Literal
+
+from kosong.tooling import ToolError, ToolReturnValue, alias_note
+from pydantic import Field
+from rapidfuzz import fuzz, process
+
+from kimi_cli.tools.display import DisplayBlock
+from kimi_cli.tools.file import FileActions
+from kimi_cli.tools.file.edit.params import EditParams, ReplaceEditItem
+from kimi_cli.tools.file.edit_safety import create_edit_parse_guard
+from kimi_cli.utils.diff import build_diff_blocks
+from kimi_cli.utils.logging import logger
+from kimi_cli.utils.path import is_within_directory, is_within_workspace, kaos_path_from_tool_input
+
+from ..base import BaseEditTool
+from ..params import EditMode
+
+_BASE_DESCRIPTION = "Edit an existing UTF-8 text file by replacing literal text."
+
+
+class ReplaceModeExecutor:
+    """Executor for literal-replace edits with fuzzy fallback."""
+
+    mode: EditMode = "replace"
+    description: str = _BASE_DESCRIPTION
+
+    def __init__(self, tool: BaseEditTool | None = None) -> None:
+        self._tool = tool
+
+    def _normalize_line_endings(self, text: str) -> str:
+        """Normalize \\r\\n to \\n for comparison."""
+        return text.replace("\r\n", "\n")
+
+    def _find_similar(self, target: str, content: str, cutoff: float = 75.0) -> str | None:
+        """Find the most similar line or chunk in content to target."""
+        norm_target = self._normalize_line_endings(target)
+        norm_content = self._normalize_line_endings(content)
+        lines = norm_content.splitlines()
+        if not lines:
+            return None
+
+        def _best(candidates: list[str]) -> str | None:
+            result = process.extractOne(norm_target, candidates, scorer=fuzz.ratio)
+            if result and result[1] >= cutoff:
+                return result[0]
+            return None
+
+        match = _best(lines)
+        if match is not None:
+            return match
+
+        target_lines = norm_target.splitlines()
+        target_line_count = len(target_lines)
+        if target_line_count > 1 and len(lines) >= target_line_count:
+            windows = [
+                "\n".join(lines[i : i + target_line_count])
+                for i in range(len(lines) - target_line_count + 1)
+            ]
+            return _best(windows)
+
+        return None
+
+    def _try_strip_match(self, content: str, old: str, new: str) -> str | None:
+        """Try to find *old* inside any line of *content* ignoring leading/trailing whitespace."""
+        old_stripped = old.strip()
+        if not old_stripped:
+            return None
+
+        for line in content.splitlines(keepends=True):
+            line_core = line.rstrip("\n").rstrip("\r")
+            idx = line_core.find(old_stripped)
+            if idx != -1:
+                prefix = line_core[:idx]
+                suffix = line_core[idx + len(old_stripped) :]
+                ending = ""
+                if line.endswith("\r\n"):
+                    ending = "\r\n"
+                elif line.endswith("\n"):
+                    ending = "\n"
+                elif line.endswith("\r"):
+                    ending = "\r"
+                new_line = prefix + new + suffix + ending
+                return content.replace(line, new_line, 1)
+        return None
+
+    def _find_best_fuzzy_match(
+        self, target: str, content: str, cutoff: float = 75.0
+    ) -> tuple[str, float] | None:
+        """Find the best fuzzy match of target in content."""
+        norm_target = self._normalize_line_endings(target)
+        norm_content = self._normalize_line_endings(content)
+
+        best_score = 0.0
+        best_original = None
+
+        target_lines = norm_target.splitlines()
+        target_line_count = len(target_lines)
+
+        original_lines = content.splitlines()
+        norm_lines = norm_content.splitlines()
+
+        if target_line_count == 1:
+            for orig_line, norm_line in zip(original_lines, norm_lines, strict=False):
+                score = fuzz.ratio(norm_target, norm_line)
+                if score > best_score:
+                    best_score = score
+                    best_original = orig_line
+        else:
+            for i in range(len(norm_lines) - target_line_count + 1):
+                window = "\n".join(norm_lines[i : i + target_line_count])
+                score = fuzz.ratio(norm_target, window)
+                if score > best_score:
+                    best_score = score
+                    best_original = "\n".join(original_lines[i : i + target_line_count])
+
+        if best_score >= cutoff:
+            return best_original, best_score
+
+        return None
+
+    def _apply_replace_all(
+        self,
+        content: str,
+        norm_content: str,
+        norm_old: str,
+        norm_new: str,
+        edit: ReplaceEditItem,
+    ) -> tuple[str, int, str | None]:
+        """Apply a replace-all edit using exact matching only."""
+        if edit.max_replacements is not None:
+            count = 0
+            result = norm_content
+            while count < edit.max_replacements:
+                idx = result.find(norm_old)
+                if idx == -1:
+                    break
+                result = result[:idx] + norm_new + result[idx + len(norm_old) :]
+                count += 1
+            if count == 0:
+                return content, 0, self._find_similar(edit.old, content)
+            return result, count, None
+
+        count = norm_content.count(norm_old)
+        if count == 0:
+            return content, 0, self._find_similar(edit.old, content)
+        return norm_content.replace(norm_old, norm_new), count, None
+
+    def _apply_fuzzy_fallback(
+        self,
+        content: str,
+        norm_content: str,
+        norm_old: str,
+        norm_new: str,
+        edit: ReplaceEditItem,
+    ) -> tuple[str, int, str | None]:
+        """Fallback chain for fuzzy mode after an exact single match fails."""
+        strip_result = self._try_strip_match(content, edit.old, edit.new)
+        if strip_result is not None:
+            return strip_result, 1, None
+
+        fuzzy = self._find_best_fuzzy_match(edit.old, content)
+        if fuzzy is not None:
+            matched_text, score = fuzzy
+            new_content = norm_content.replace(
+                self._normalize_line_endings(matched_text), norm_new, 1
+            )
+            suggestion = f"fuzzy-matched at {score:.0f}%: '{matched_text[:80]}'"
+            return new_content, 1, suggestion
+
+        return content, 0, self._find_similar(edit.old, content)
+
+    def _apply_edit(self, content: str, edit: ReplaceEditItem) -> tuple[str, int, str | None]:
+        """Apply a single edit to the content.
+
+        Returns (new_content, replacements_made, suggestion_or_None).
+        """
+        if not edit.old or edit.old == edit.new:
+            return content, 0, None
+
+        norm_content = self._normalize_line_endings(content)
+        norm_old = self._normalize_line_endings(edit.old)
+        norm_new = self._normalize_line_endings(edit.new)
+
+        if edit.replace_all:
+            return self._apply_replace_all(
+                content, norm_content, norm_old, norm_new, edit
+            )
+
+        idx = norm_content.find(norm_old)
+        if idx != -1:
+            return norm_content.replace(norm_old, norm_new, 1), 1, None
+
+        if edit.match_mode == "exact":
+            return content, 0, self._find_similar(edit.old, content)
+
+        return self._apply_fuzzy_fallback(
+            content, norm_content, norm_old, norm_new, edit
+        )
+
+    async def execute(self, tool: BaseEditTool, params: EditParams) -> ToolReturnValue:
+        """Run the replace executor."""
+        replace_edits: list[ReplaceEditItem] = []
+        if params.edit is not None:
+            if isinstance(params.edit, list):
+                replace_edits = [
+                    e if isinstance(e, ReplaceEditItem) else ReplaceEditItem.model_validate(e)
+                    for e in params.edit
+                ]
+            elif isinstance(params.edit, ReplaceEditItem):
+                replace_edits = [params.edit]
+            else:
+                replace_edits = [ReplaceEditItem.model_validate(params.edit)]
+        file_path = params.file_path or ""
+        display_path = file_path.replace("\\", "/")
+        if not file_path:
+            return ToolError(
+                message="File path cannot be empty.",
+                brief="Empty file path",
+            )
+
+        try:
+            p = kaos_path_from_tool_input(file_path, tool._work_dir)
+            logical_path = p
+            display_logical_path = str(logical_path).replace("\\", "/")
+            _outside = not is_within_directory(logical_path.canonical(), tool._work_dir)
+            err, _ = await tool._validate_path(p, file_path)
+            if err:
+                if _outside:
+                    err.message = f"[out of work-dir] {err.message}"
+                return err
+
+            p = await tool._resolve_for_write(file_path)
+
+            try:
+                st = await p.stat()
+                if not S_ISREG(st.st_mode):
+                    return ToolError(
+                        message=f"{tool._out_prefix(_outside)}`{display_logical_path}` is not a file.",
+                        brief="Invalid path",
+                    )
+            except FileNotFoundError:
+                return ToolError(
+                    message=f"{tool._out_prefix(_outside)}`{display_logical_path}` does not exist.",
+                    brief="File not found",
+                )
+
+            content = await tool._read_text(p)
+            original_content = content
+
+            def _work() -> tuple[str, int, str | None]:
+                text = content
+                total = 0
+                last_suggestion = None
+                for edit in replace_edits:
+                    text, n, suggestion = self._apply_edit(text, edit)
+                    total += n
+                    if suggestion:
+                        last_suggestion = suggestion
+                return text, total, last_suggestion
+
+            new_content, total_replacements, suggestion = await asyncio.to_thread(_work)
+
+            if new_content == original_content:
+                msg = f"{tool._out_prefix(_outside)}No replacements were made. The old string was not found in the file."
+                if suggestion:
+                    msg += f"\n\nDid you mean:\n  {suggestion}"
+                return ToolError(
+                    message=msg,
+                    brief="No replacements made",
+                )
+
+            result_msg_parts = [
+                f"{tool._out_prefix(_outside)}File successfully edited. "
+                f"Applied {len(replace_edits)} edit(s) with {total_replacements} total replacement(s)."
+            ]
+            if suggestion and "fuzzy-matched" in suggestion:
+                result_msg_parts.append(f" ({suggestion})")
+
+            diff_blocks: list[DisplayBlock] = await build_diff_blocks(
+                str(logical_path), original_content, new_content
+            )
+
+            action = FileActions.EDIT if tool._is_within_workspace(p) else FileActions.EDIT_OUTSIDE
+            approval_result = await tool._approval.request(
+                "edit",
+                action,
+                f"Edit file `{display_logical_path}`"
+                + (f" — {params.justification}" if params.justification else ""),
+                display=diff_blocks,
+            )
+            if not approval_result:
+                return approval_result.rejection_error()
+
+            file_path_str = str(logical_path)
+            fmt_error, is_json = await tool._check_format(file_path_str, new_content)
+
+            if is_json and fmt_error:
+                repaired = await tool._try_repair_json(new_content)
+                if repaired is not None:
+                    new_content = repaired
+                    fmt_error = None
+                    diff_blocks = await build_diff_blocks(
+                        str(logical_path), original_content, new_content
+                    )
+
+            conflict_err = await tool._check_conflicts(
+                display_logical_path, original_content, allow_conflicts=params.allow_conflicts
+            )
+            if conflict_err:
+                return conflict_err
+
+            await tool._write_text(p, new_content)
+
+            guard = create_edit_parse_guard(
+                tool._session,
+                variant="replace",
+                arg=params.model_dump(),
+            )
+            await guard.observe_applied(str(logical_path), original_content, new_content)
+            notes = await guard.finish()
+
+            if fmt_error:
+                msg = f"{tool._out_prefix(_outside)}File successfully edited, but {fmt_error}"
+                if notes:
+                    msg += "\n\n" + "\n\n".join(notes)
+                return ToolError(
+                    message=msg,
+                    brief="Format validation failed",
+                )
+
+            if notes:
+                result_msg_parts.append("")
+                result_msg_parts.extend(notes)
+
+            return ToolReturnValue(
+                is_error=False,
+                output="",
+                message="".join(result_msg_parts),
+                display=[],
+            )
+
+        except (OSError, ValueError, RuntimeError) as e:
+            logger.warning("edit failed: {path}: {error}", path=file_path, error=e)
+            _outside_ex = False
+            with contextlib.suppress(Exception):
+                _outside_ex = not is_within_directory(
+                    kaos_path_from_tool_input(file_path, tool._work_dir).canonical(),
+                    tool._work_dir,
+                )
+            return ToolError(
+                message=f"{'[out of work-dir] ' if _outside_ex else ''}Failed to edit. Error: {e} Path: {display_path}",
+                brief="Failed to edit file",
+            )
+        except MemoryError:
+            raise

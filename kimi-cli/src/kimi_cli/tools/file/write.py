@@ -12,6 +12,7 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.display import DiffDisplayBlock
 from kimi_cli.tools.file import FileActions
+from kimi_cli.tools.file.edit_safety import create_edit_parse_guard
 from kimi_cli.tools.file.check_fmt import (
     check_json_text,
     check_toml_text,
@@ -304,6 +305,10 @@ class WriteFile(CallableTool2[Params]):
                 return result.rejection_error()
 
             # Write content to file
+            conflict_err = await self._check_conflicts(display_p, new_text)
+            if conflict_err:
+                return conflict_err
+
             if params.mode == "append" and file_existed:
                 await p.append_text(params.content, encoding="utf-8", errors="strict")
                 expected_size = len(old_text.encode("utf-8")) + len(
@@ -342,9 +347,21 @@ class WriteFile(CallableTool2[Params]):
             file_size = expected_size
             action_desc = "overwritten" if params.mode == "overwrite" else "appended to"
 
+            guard = create_edit_parse_guard(
+                self._session,
+                variant="write",
+                arg=params.model_dump(),
+                enabled_for_write=True,
+            )
+            await guard.observe_applied(str(logical_path), old_text, new_text)
+            notes = await guard.finish()
+
             if fmt_error:
+                msg = f"{'[out of work-dir] ' if _outside else ''}File successfully {action_desc}, but {fmt_error} Path: {display_path}"
+                if notes:
+                    msg += "\n\n" + "\n\n".join(notes)
                 return ToolError(
-                    message=f"{'[out of work-dir] ' if _outside else ''}File successfully {action_desc}, but {fmt_error} Path: {display_path}",
+                    message=msg,
                     brief="Format validation failed",
                 )
 
@@ -370,6 +387,8 @@ class WriteFile(CallableTool2[Params]):
             ]
             if _repair_diff:
                 message_parts.append(" JSON was auto-repaired.")
+            if notes:
+                message_parts.append("\n\n" + "\n\n".join(notes))
 
             return ToolReturnValue(
                 is_error=False,
@@ -392,3 +411,30 @@ class WriteFile(CallableTool2[Params]):
                 message=f"{'[out of work-dir] ' if _outside_ex else ''}Failed to write to {display_path}. Error: {e}.",
                 brief="Failed to write file",
             )
+
+    async def _check_conflicts(
+        self,
+        display_path: str,
+        content: str,
+        *,
+        allow_conflicts: bool = False,
+    ) -> ToolError | None:
+        """Pre-apply guard: refuse files containing conflict markers."""
+        if allow_conflicts:
+            return None
+        markers = ["<<<<<<<", "=======", ">>>>>>>"]
+        found: list[tuple[int, str]] = []
+        for i, line in enumerate(content.replace("\r\n", "\n").splitlines(), 1):
+            stripped = line.strip()
+            if stripped in markers or stripped.startswith("<<<<<<< ") or stripped.startswith(">>>>>>> "):
+                found.append((i, line))
+        if found:
+            lines_str = "\n".join(f"  line {n}: {text}" for n, text in found)
+            return ToolError(
+                message=(
+                    f"Conflict markers detected in `{display_path}`; refusing to write.\n{lines_str}\n"
+                    "Resolve the conflict first."
+                ),
+                brief="Conflict markers detected",
+            )
+        return None
