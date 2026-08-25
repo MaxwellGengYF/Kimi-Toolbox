@@ -18,7 +18,7 @@ from .grep_local import Grep  # noqa: E402
 from .hash_line import HashEdit, HashLine, HashRead  # noqa: E402
 from .read import ReadFile  # noqa: E402
 from .read_media import ReadMediaFile  # noqa: E402
-from .edit import ApplyPatchFile, EditFile  # noqa: E402
+from .edit import EditFile  # noqa: E402
 from .write import WriteFile  # noqa: E402
 
 __all__ = (
@@ -28,7 +28,6 @@ __all__ = (
     "Grep",
     "WriteFile",
     "EditFile",
-    "ApplyPatchFile",
     "HashLine",
     "HashRead",
     "HashEdit",

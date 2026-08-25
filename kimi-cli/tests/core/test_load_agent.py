@@ -233,6 +233,22 @@ def test_find_tool_class_by_name_resolves_tool_name_strings():
     assert todo_list is not None and todo_list.__name__ == "TodoList"
 
 
+def test_resolve_tool_class_shared_helper():
+    """resolve_tool_class resolves both class-name and tool-name manifest entries."""
+    import importlib
+
+    from kimi_cli.tools import resolve_tool_class
+
+    file_module = importlib.import_module("kimi_cli.tools.file")
+    # Class-name entry (Run-style) and tool-name entry (read-style).
+    assert resolve_tool_class(file_module, "ReadFile") is not None
+    read_cls = resolve_tool_class(file_module, "read")
+    assert read_cls is not None and read_cls.__name__ == "ReadFile"
+    edit_cls = resolve_tool_class(file_module, "edit")
+    assert edit_cls is not None and edit_cls.__name__ == "EditFile"
+    assert resolve_tool_class(file_module, "does_not_exist") is None
+
+
 def test_shipped_agent_manifests_use_tool_name_strings():
     """Every entry in src/kimix/agent_*.json uses the tool name string and resolves."""
     import importlib

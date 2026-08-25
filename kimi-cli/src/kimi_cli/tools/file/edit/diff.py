@@ -47,12 +47,6 @@ def normalize_diff(diff: str) -> str:
             continue
         if line.startswith("--- ") or line.startswith("+++ "):
             continue
-        if line.startswith("*** Begin Patch") or line.startswith("*** End Patch"):
-            continue
-        if line.startswith("*** Add File:") or line.startswith("*** Update File:"):
-            continue
-        if line.startswith("*** Delete File:") or line.startswith("*** Move to:"):
-            continue
         if line.startswith("*** End of File"):
             continue
         lines.append(line)

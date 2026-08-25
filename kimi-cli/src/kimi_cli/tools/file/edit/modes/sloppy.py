@@ -65,9 +65,6 @@ def _split_sections(input_text: str) -> list[list[str]]:
             current = [line]
         elif current is not None:
             current.append(line)
-        else:
-            # Skip leading envelope noise.
-            continue
     if current is not None:
         sections.append(current)
     return sections

@@ -18,11 +18,6 @@ def test_detect_explicit_mode_wins():
     assert params.resolved_mode == "replace"
 
 
-def test_detect_apply_patch_from_input():
-    params = EditParams(input="*** Begin Patch\n*** Add File: x.txt\n+hi\n*** End Patch\n")
-    assert params.resolved_mode == "apply_patch"
-
-
 def test_detect_hashline_from_input():
     params = EditParams(input="[path#AB]\nPUT 1.=1:\n+x\n")
     assert params.resolved_mode == "hashline"
@@ -54,3 +49,18 @@ def test_detect_replace_from_edits():
 def test_detect_ambiguous_raises():
     with pytest.raises(ValueError):
         EditParams(path="x.txt")
+
+
+def test_mode_registry_covers_every_edit_mode():
+    """MODE_REGISTRY maps every EditMode literal to a live executor class."""
+    from typing import get_args
+
+    from kimi_cli.tools.file.edit.modes import MODE_REGISTRY
+    from kimi_cli.tools.file.edit.params import EditMode
+
+    assert set(MODE_REGISTRY) == set(get_args(EditMode))
+    for mode, executor_cls in MODE_REGISTRY.items():
+        # Executor must declare the same mode and be instantiable per call.
+        assert executor_cls.mode == mode
+        executor = executor_cls()
+        assert callable(getattr(executor, "execute", None))

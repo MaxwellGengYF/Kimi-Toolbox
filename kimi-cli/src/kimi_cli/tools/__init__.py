@@ -1,7 +1,7 @@
 import json
 
 import orjson
-from typing import cast
+from typing import Any, cast
 
 import streamingjson  # type: ignore[reportMissingTypeStubs]
 from kaos.path import KaosPath
@@ -14,6 +14,32 @@ class SkipThisTool(Exception):
     """Raised when a tool decides to skip itself from the loading process."""
 
     pass
+
+
+def resolve_tool_class(module: Any, attr: str) -> type | None:
+    """Return the tool class in *module* referenced by a manifest ``module:attr`` entry.
+
+    ``attr`` may be the class name (e.g. ``Run``) or a tool-name string (e.g.
+    ``read``) matching a ``CallableTool``/``CallableTool2`` subclass ``name``.
+    Both the toolset loader and the reflection tool listing resolve manifest
+    entries through this helper so they can never drift apart.
+    """
+    from kosong.tooling import CallableTool, CallableTool2
+
+    tool_cls = getattr(module, attr, None)
+    if isinstance(tool_cls, type):
+        return tool_cls
+    for attr_name in dir(module):
+        if attr_name.startswith("_"):
+            continue
+        candidate = getattr(module, attr_name, None)
+        if not isinstance(candidate, type) or not issubclass(
+            candidate, (CallableTool, CallableTool2)
+        ):
+            continue
+        if getattr(candidate, "name", None) == attr:
+            return candidate
+    return None
 
 
 def _first_web_extract_url(args: JsonType) -> str | None:

@@ -7,7 +7,7 @@ from typing import Any, Literal, Union
 from kosong.tooling import ToolError, alias_note
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
-EditMode = Literal["replace", "patch", "hashline", "sloppy", "apply_patch"]
+EditMode = Literal["replace", "patch", "hashline", "sloppy"]
 
 
 class ReplaceEditItem(BaseModel):
@@ -61,7 +61,7 @@ class EditParams(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    mode: Literal["auto", "replace", "patch", "hashline", "sloppy", "apply_patch"] = Field(
+    mode: Literal["auto", "replace", "patch", "hashline", "sloppy"] = Field(
         default="auto",
         description="Edit mode. 'auto' detects the mode from the payload shape.",
     )
@@ -96,7 +96,7 @@ class EditParams(BaseModel):
 
     input: str | None = Field(
         default=None,
-        description="Input text for hashline / sloppy / apply_patch modes.",
+        description="Input text for hashline / sloppy modes.",
     )
 
     sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
@@ -185,9 +185,6 @@ def normalize_edit_mode(raw: str) -> EditMode | None:
         "hashline": "hashline",
         "hash_line": "hashline",
         "sloppy": "sloppy",
-        "apply_patch": "apply_patch",
-        "applypatch": "apply_patch",
-        "applypatchfile": "apply_patch",
     }
     return mapping.get(key)
 
@@ -201,8 +198,6 @@ def detect_mode(params: EditParams) -> EditMode:
             if stripped:
                 first_non_blank = stripped
                 break
-        if first_non_blank.startswith("*** Begin Patch") or first_non_blank.startswith("*** Begin"):
-            return "apply_patch"
         if first_non_blank.startswith("["):
             return "hashline"
         if first_non_blank.startswith("§"):
@@ -229,7 +224,6 @@ def detect_mode(params: EditParams) -> EditMode:
         "Could not determine edit mode. Supported payloads: "
         "replace ({file_path, old_string, new_string}), "
         "patch ({file_path, edits: [{op, diff}]}), "
-        "apply_patch ({input: '*** Begin Patch ... *** End Patch'}), "
         "hashline ({input: '[path#TAG] ...'}), "
         "sloppy ({input: '§path ...'})."
     )

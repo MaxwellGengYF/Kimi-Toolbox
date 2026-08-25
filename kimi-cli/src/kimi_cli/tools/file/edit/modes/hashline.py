@@ -150,9 +150,6 @@ def _parse_section_body(body_lines: list[tuple[int, str]]) -> list[HashlineOp]:
         if stripped.startswith("[") and stripped.endswith("]"):
             flush()
             continue
-        if stripped.startswith("*** "):
-            flush()
-            continue
 
         put_match = _PUT_RE.match(stripped) or _PUT_PASTE_RE.match(stripped)
         if put_match:
@@ -290,9 +287,6 @@ def parse_hashline_input(input_text: str) -> list[HashlineSection]:
                 path=header_match.group("path").strip(),
                 tag=header_match.group("tag").strip(),
             )
-            continue
-
-        if stripped.startswith("*** "):
             continue
 
         current_body.append((i, line))

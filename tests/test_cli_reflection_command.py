@@ -94,6 +94,27 @@ def test_build_reflection_prompt_includes_architecture_map():
     assert "config" in prompt.lower()
 
 
+def test_builtin_tools_listing_derived_from_manifest():
+    """The reflection tool map is generated from agent_worker.json, not hardcoded."""
+    import orjson
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    agent_src = repo_root / "src" / "kimix"
+    listing = commands._builtin_tools_listing(repo_root, agent_src / "tools")
+    norm = _norm(listing)
+
+    # Every manifest entry must be listed.
+    manifest = orjson.loads((agent_src / "agent_worker.json").read_bytes())
+    for tool_path in manifest["agent"]["tools"]:
+        attr = tool_path.split(":", 1)[1]
+        assert f"`{attr}`" in listing, f"manifest entry {attr!r} missing from listing"
+
+    # edit must point at the real multi-mode implementation, not the shim.
+    assert "`edit` — `kimi-cli/src/kimi_cli/tools/file/edit/__init__.py`" in norm
+    assert "kimi-cli/src/kimi_cli/tools/file/replace.py" not in norm
+
+
 def test_build_reflection_prompt_embeds_agents_md():
     prompt = commands._build_reflection_prompt(_fake_session())
     # AGENTS.md is read from the repo and embedded verbatim.

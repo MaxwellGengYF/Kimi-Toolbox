@@ -41,7 +41,7 @@ from kimi_cli import logger
 from kimi_cli.exception import InvalidToolError, MCPRuntimeError
 from kimi_cli.hooks.engine import HookEngine
 from kimi_cli.safety_check import sanitize_for_tokenizer
-from kimi_cli.tools import SkipThisTool
+from kimi_cli.tools import SkipThisTool, resolve_tool_class
 from kimi_cli.tools.utils import repair_tool_arguments
 from kimi_cli.wire.types import (
     AudioURLPart,
@@ -1389,13 +1389,7 @@ class KimiToolset:
                 error=e,
             )
             return None
-        tool_cls = getattr(module, class_name, None)
-        if not isinstance(tool_cls, type):
-            # `getattr` may return a submodule (e.g. `kimi_cli.tools.file.read` for the
-            # `read` submodule) or nothing; fall back to resolving by tool name string
-            # (e.g. `kimi_cli.tools.file:read` for the ReadFile tool), so agent
-            # manifests can list tools by their name.
-            tool_cls = KimiToolset._find_tool_class_by_name(module, class_name)
+        tool_cls = resolve_tool_class(module, class_name)
         if tool_cls is None:
             logger.warning(
                 "Tool class not found: {class_name} in {module_name}",
@@ -1436,16 +1430,7 @@ class KimiToolset:
         Used as a fallback when an agent manifest references a tool by its tool
         name string (e.g. ``read``) instead of the Python class name (``ReadFile``).
         """
-        for attr_name in dir(module):
-            if attr_name.startswith("_"):
-                continue
-            candidate = getattr(module, attr_name, None)
-            if not isinstance(candidate, type) or not issubclass(candidate, (CallableTool, CallableTool2)):
-                continue
-            declared_name = getattr(candidate, "name", None)
-            if isinstance(declared_name, str) and declared_name == tool_name:
-                return candidate
-        return None
+        return resolve_tool_class(module, tool_name)
 
     async def load_mcp_tools(
         self, mcp_configs: list[MCPConfig], runtime: Runtime, in_background: bool = True

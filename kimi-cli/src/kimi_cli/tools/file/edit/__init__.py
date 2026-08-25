@@ -10,15 +10,13 @@ from kimi_cli.soul.approval import Approval
 from kimi_cli.vfs import VFS
 
 from .base import BaseEditTool
-from .modes.hashline import HashlineModeExecutor
-from .modes.patch import ApplyPatchInput, ApplyPatchModeExecutor, PatchModeExecutor
+from .modes import MODE_REGISTRY
 from .modes.replace import ReplaceModeExecutor
-from .modes.sloppy import SloppyModeExecutor
 from .params import EditMode, EditParams, ReplaceEditItem, normalize_edit_mode
 
 
 class EditFile(CallableTool2[EditParams]):
-    """Edit tool supporting replace, patch, hashline, sloppy, and apply_patch modes."""
+    """Edit tool supporting replace, patch, hashline, and sloppy modes."""
 
     name: str = "edit"
     description: str = ReplaceModeExecutor.description
@@ -27,7 +25,6 @@ class EditFile(CallableTool2[EditParams]):
     def __init__(self, runtime: Runtime, approval: Approval, session: Session, vfs: VFS | None = None):
         super().__init__()
         self._tool = BaseEditTool(runtime, approval, session, vfs)
-        self._replace = ReplaceModeExecutor(self._tool)
 
     @property
     def _work_dir(self):
@@ -50,21 +47,13 @@ class EditFile(CallableTool2[EditParams]):
             # Validation should always populate this, but repair if needed.
             params.resolved_mode = normalize_edit_mode(params.mode) or "replace"
 
-        mode = params.resolved_mode
-        if mode == "replace":
-            return await self._replace.execute(self._tool, params)
-        if mode == "patch":
-            return await PatchModeExecutor().execute(self._tool, params)
-        if mode == "apply_patch":
-            return await ApplyPatchModeExecutor().execute(self._tool, params)
-        if mode == "hashline":
-            return await HashlineModeExecutor().execute(self._tool, params)
-        if mode == "sloppy":
-            return await SloppyModeExecutor().execute(self._tool, params)
-        return ToolError(
-            message=f"Invalid edit mode: {params.mode}",
-            brief="Invalid edit mode",
-        )
+        executor_cls = MODE_REGISTRY.get(params.resolved_mode)
+        if executor_cls is None:
+            return ToolError(
+                message=f"Invalid edit mode: {params.mode}",
+                brief="Invalid edit mode",
+            )
+        return await executor_cls().execute(self._tool, params)
 
     # -----------------------------------------------------------------------
     # Backward-compatible helpers exposed by the old EditFile implementation.
@@ -109,26 +98,10 @@ class EditFile(CallableTool2[EditParams]):
         return ReplaceModeExecutor()._apply_fuzzy_fallback(content, norm_content, norm_old, norm_new, edit)
 
 
-class ApplyPatchFile(CallableTool2[ApplyPatchInput]):
-    """Standalone tool exposing the Codex apply_patch wire name."""
-
-    name: str = "apply_patch"
-    description: str = ApplyPatchModeExecutor.description
-    params: type[ApplyPatchInput] = ApplyPatchInput
-
-    def __init__(self, runtime: Runtime, approval: Approval, session: Session, vfs: VFS | None = None):
-        super().__init__()
-        self._tool = BaseEditTool(runtime, approval, session, vfs)
-
-    async def __call__(self, params: ApplyPatchInput) -> ToolReturnValue:
-        return await ApplyPatchModeExecutor().execute(self._tool, params)
-
-
 __all__ = [
     "EditFile",
     "EditMode",
     "EditParams",
     "ReplaceEditItem",
     "normalize_edit_mode",
-    "ApplyPatchFile",
 ]

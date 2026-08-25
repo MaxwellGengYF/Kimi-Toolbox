@@ -1,10 +1,15 @@
+import importlib
+import inspect
 import os
 import uuid
 from pathlib import Path
 from typing import Any
+import orjson
 import pendulum
 
 import kimix.base as base
+
+from kimi_cli.tools import resolve_tool_class
 
 from . import constants
 from .utils import _input, _split_text
@@ -788,46 +793,42 @@ def _reflection_context_stats(session: Any) -> str:
     return 'visible above'
 
 
-def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path, kimi_cli_tools_dir: Path) -> str:
+def _builtin_tools_listing(repo_root: Path, kimix_tools_dir: Path) -> str:
     """Return the exact file path of every builtin tool, one tool per line.
 
-    Mirrors the worker tool manifest in ``src/kimix/agent_worker.json``
-    (``kimix.tools.*`` and ``kimi_cli.tools.*``). Paths are relative to the
-    repo root (e.g. ``src/kimix/tools/file/bash/bash_tool.py``) so the
-    reflection agent can edit the precise source file.
+    Derived from the worker tool manifest in ``src/kimix/agent_worker.json``
+    (``kimix.tools.*`` and ``kimi_cli.tools.*``) so it can never drift from the
+    actual toolset: each ``module:attr`` entry is resolved through the shared
+    ``resolve_tool_class`` helper to the source file that defines the tool
+    class. Paths are relative to the repo root (e.g.
+    ``src/kimix/tools/file/bash/bash_tool.py``) so the reflection agent can
+    edit the precise source file.
     """
+    manifest_path = kimix_tools_dir.parent / "agent_worker.json"
+    try:
+        manifest = orjson.loads(manifest_path.read_bytes())
+    except (OSError, ValueError):
+        return ""
 
-    def rel(p: Path) -> str:
+    lines: list[str] = []
+    for tool_path in (manifest.get("agent") or {}).get("tools") or []:
+        module_name, _, attr = tool_path.partition(":")
+        if not module_name or not attr:
+            continue
         try:
-            return p.resolve().relative_to(repo_root.resolve()).as_posix()
-        except ValueError:
-            return p.resolve().as_posix()
-
-    tools: list[tuple[str, Path]] = [
-        ('bash', kimix_tools_dir / 'file' / 'bash' / 'bash_tool.py'),
-        ('pwsh', kimix_tools_dir / 'file' / 'bash' / 'pwsh_tool.py'),
-        ('Run', kimix_tools_dir / 'file' / 'run.py'),
-        ('python', kimix_tools_dir / 'py' / '__init__.py'),
-        ('job_output', kimix_tools_dir / 'background' / '__init__.py'),
-        ('todo_write', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('todo_update', kimi_cli_tools_dir / 'todo' / '__init__.py'),
-        ('retrieve', kimi_cli_tools_dir / 'memory' / '__init__.py'),
-        ('read', kimi_cli_tools_dir / 'file' / 'read.py'),
-        ('read_image', kimi_cli_tools_dir / 'file' / 'read_media.py'),
-        ('edit', kimi_cli_tools_dir / 'file' / 'replace.py'),
-        ('write', kimi_cli_tools_dir / 'file' / 'write.py'),
-        ('subagent', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('send_message', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('list_agents', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('interrupt_agent', kimix_tools_dir / 'agent' / '__init__.py'),
-        ('workflow', kimix_tools_dir / 'swarm' / '__init__.py'),
-        ('glob', kimi_cli_tools_dir / 'file' / 'glob.py'),
-        ('grep', kimi_cli_tools_dir / 'file' / 'grep_local.py'),
-        ('fetch_url', kimix_tools_dir / 'web' / 'fetch_url.py'),
-        ('web_search', kimi_cli_tools_dir / 'web' / 'search.py'),
-        ('compact', kimix_tools_dir / 'context' / '__init__.py'),
-    ]
-    return '\n'.join(f'- `{name}` — `{rel(path)}`' for name, path in tools)
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        tool_cls = resolve_tool_class(module, attr)
+        if tool_cls is None:
+            continue
+        try:
+            path = Path(inspect.getfile(tool_cls)).resolve()
+            rel = path.relative_to(repo_root.resolve()).as_posix()
+        except (TypeError, OSError, ValueError):
+            continue
+        lines.append(f"- `{attr}` — `{rel}`")
+    return "\n".join(lines)
 
 
 def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -> str:
@@ -849,7 +850,7 @@ def _build_reflection_prompt(session: Any, *, report_path: Path | None = None) -
     if report_path is None:
         report_path = repo_root / 'docs' / f'reflection_report_{pendulum.now().format("YYYYMMDD_HHMMSS")}.md'
     context_stats = _reflection_context_stats(session)
-    builtin_tools = _builtin_tools_listing(repo_root, kimix_tools_dir, kimi_cli_tools_dir)
+    builtin_tools = _builtin_tools_listing(repo_root, kimix_tools_dir)
     return f'''# Reflection Task
 
 Reflect on the conversation context above. Find misunderstandings caused by the

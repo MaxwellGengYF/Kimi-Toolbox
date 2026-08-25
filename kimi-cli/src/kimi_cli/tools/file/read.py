@@ -1406,9 +1406,9 @@ class ReadFile(CallableTool2[Params]):
             message += " End of file reached."
         if truncated_line_numbers:
             message += f" Lines {truncated_line_numbers} were truncated."
-        message += f" Path: {display_path}"
         if note:
             message += note
+        message += f" Path: {display_path}"
         return ToolOk(
             output="".join(lines_with_no),
             message=message,

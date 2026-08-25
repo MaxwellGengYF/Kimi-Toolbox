@@ -284,8 +284,8 @@ class TestFileToolLogging:
         from kimi_cli.tools.file.replace import Edit, Params
 
         with (
-            patch("kimi_cli.tools.file.replace.logger") as mock_logger,
-            patch("kimi_cli.tools.file.replace.kaos_path_from_tool_input") as mock_path,
+            patch("kimi_cli.tools.file.edit.modes.replace.logger") as mock_logger,
+            patch("kimi_cli.tools.file.edit.modes.replace.kaos_path_from_tool_input") as mock_path,
         ):
             mock_path.side_effect = RuntimeError("Unexpected")
             result = await edit_file_tool(
