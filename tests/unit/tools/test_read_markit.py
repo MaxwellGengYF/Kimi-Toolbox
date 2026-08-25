@@ -38,6 +38,30 @@ class TestMarkitHelpers:
         assert "code block:" in text
         assert "example.com" in text
 
+    def test_markdown_to_text_preserves_inline_code_underscores(self) -> None:
+        """Inline code must not be rewritten by the italic/emphasis regexes.
+
+        Regression: ``syntax_check.py`` used to become ``syntaxcheck.py`` and
+        ``kimi_cli/soul/compaction.py`` became ``kimicli/soul/compaction.py``
+        because the `_..._` italic regex paired underscores across code spans.
+        """
+        md = (
+            "- run `uv run tools/syntax_check.py <python_file> ...`\n"
+            "- pipeline (`kimi_cli/soul/compaction.py`) + ledger "
+            "(`compaction_ledger.py`)\n"
+            "- keep `foo_bar` verbatim and _real italic_\n"
+        )
+        text = markdown_to_text(md)
+        assert "syntax_check.py" in text
+        assert "<python_file>" in text
+        assert "kimi_cli/soul/compaction.py" in text
+        assert "compaction_ledger.py" in text
+        assert "foo_bar" in text
+        assert "syntaxcheck.py" not in text
+        assert "kimicli" not in text
+        assert "compactionledger" not in text
+        assert "real italic" in text
+
 
 class TestMarkitReadFile:
     async def test_markdown_file_render_markdown(self, read_tool: ReadFile, tmp_path: Path) -> None:

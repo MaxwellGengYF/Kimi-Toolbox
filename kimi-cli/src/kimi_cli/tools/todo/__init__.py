@@ -5,11 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast, override
+from typing import Any, ClassVar, Literal, cast, override
 
 import orjson
 import rapidfuzz
-from kosong.tooling import CallableTool2, ToolError, ToolReturnValue, alias_note
+from kosong.tooling import (
+    FIELD_ALIASES_TODO_UPDATE,
+    _COMMON_FIELD_ALIASES,
+    CallableTool2,
+    ToolError,
+    ToolReturnValue,
+    alias_note,
+)
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -124,7 +131,7 @@ class Todo(BaseModel):
     model_config = {"populate_by_name": True}
 
     content: str = Field(
-        validation_alias=AliasChoices("content", "title"),
+        validation_alias=AliasChoices("content", "title", "task", "todo", "item", "name"),
         description="Title (report item shape: `content`).",
         min_length=1,
         max_length=65536,
@@ -315,6 +322,15 @@ class TodoList(CallableTool2[Params]):
     name: str = "todo_write"
     description: str = _TODOLIST_DESCRIPTION
     params: type[Params] = Params
+    # Per-tool field aliases: common aliases + todo_update-style synonyms.
+    # `task`/`todo`/`item`/`name` become `title` on the update models;
+    # nested todo_write items accept the same spellings via the Todo model's
+    # AliasChoices. The toolset's `_repair_todo_arguments` handles top-level
+    # singular keys that the flat alias map cannot express.
+    field_aliases: ClassVar[dict[str, str]] = {
+        **_COMMON_FIELD_ALIASES,
+        **FIELD_ALIASES_TODO_UPDATE,
+    }
 
     def __init__(self, runtime: Runtime) -> None:
         super().__init__()
@@ -1236,7 +1252,7 @@ class TodoUpdateItem(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     title: str = Field(
-        validation_alias=AliasChoices("title", "content"),
+        validation_alias=AliasChoices("title", "content", "task", "todo", "item", "name"),
         description=(
             "Title of the todo to update or create. Exact match is tried first; "
             "fuzzy match is used when enabled and exact match fails. "
@@ -1314,7 +1330,7 @@ class TodoUpdateParams(BaseModel):
 
     title: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("title", "content"),
+        validation_alias=AliasChoices("title", "content", "task", "todo", "item", "name"),
         description=(
             "Title of the todo to update or create when using a single top-level "
             "update. Use `updates` to batch multiple edits. `content` is accepted as "
@@ -1466,6 +1482,12 @@ class todo_update(TodoList):
         "- fuzzy: default True — match near-miss titles when the exact title is not found."
     )
     params: type[TodoUpdateParams] = TodoUpdateParams
+    # Same per-tool alias set as todo_write: `task`/`todo`/`item`/`name`
+    # become `title`, and `edits`/`changes`/`operations`/... become `updates`.
+    field_aliases: ClassVar[dict[str, str]] = {
+        **_COMMON_FIELD_ALIASES,
+        **FIELD_ALIASES_TODO_UPDATE,
+    }
 
     def __init__(self, runtime: Runtime) -> None:
         # Subclass todo_write for shared persistence/helpers, but use our own metadata.

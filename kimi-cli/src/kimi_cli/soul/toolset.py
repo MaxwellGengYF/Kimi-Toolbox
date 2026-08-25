@@ -542,6 +542,138 @@ def _repair_argument_format(arguments: JsonType) -> JsonType:
     return arguments
 
 
+# ── Todo tool argument fuzzy repair ────────────────────────────────────
+# LLM backends frequently shape todo arguments in natural-language style
+# instead of the declared JSON schema, e.g. a single `{"task": "..."}`
+# where `todos`/`title` is expected, or a bare-string todo list.  These
+# repairs are scoped to the canonical todo tools and only rewrite keys when
+# the schema-preferred key is absent, so well-formed calls pass through
+# untouched.  Field-name synonyms inside nested items are handled by the
+# per-tool `field_aliases` (see kimi_cli/tools/todo/__init__.py); this
+# layer handles the top-level shape that the flat alias map cannot express.
+
+_TODO_WRITE_SINGULAR_KEYS: frozenset[str] = frozenset({"todo", "task", "item"})
+_TODO_UPDATE_TITLE_KEYS: frozenset[str] = frozenset({"task", "todo", "item", "name"})
+_TODO_UPDATE_BATCH_KEYS: frozenset[str] = frozenset({
+    "edits",
+    "changes",
+    "operations",
+    "actions",
+    "modifications",
+    "batch",
+})
+
+
+def _looks_like_json_text(value: str) -> bool:
+    """True when a string starts with a JSON object/array opener."""
+    stripped = value.strip()
+    return bool(stripped) and stripped[0] in ("{", "[")
+
+
+def _wrap_todo_item(value: Any) -> Any:
+    """Wrap a bare todo value into a schema-valid item dict.
+
+    Bare strings become ``{"content": <value>, "status": "pending"}``;
+    dicts get a ``status`` default when the model requires one.  JSON
+    strings are left untouched so the existing JSON-string repair can parse
+    them.
+    """
+    if isinstance(value, str) and not _looks_like_json_text(value):
+        return {"content": value, "status": "pending"}
+    if isinstance(value, dict):
+        if "status" not in value:
+            return {**value, "status": "pending"}
+        return value
+    return value
+
+
+def _repair_todo_write_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Fuzzy-repair top-level todo_write arguments."""
+    if "todos" in arguments:
+        todos = arguments["todos"]
+        if isinstance(todos, str) and not _looks_like_json_text(todos):
+            arguments["todos"] = [{"content": todos, "status": "pending"}]
+        elif isinstance(todos, list):
+            arguments["todos"] = [_wrap_todo_item(item) for item in todos]
+        elif isinstance(todos, dict):
+            arguments["todos"] = _wrap_todo_item(todos)
+        return arguments
+
+    # `todos` absent: promote a singular key.  Item-level fields that do not
+    # exist on todo_write's top-level Params (status/notes) are folded into
+    # the wrapped item.
+    for key in _TODO_WRITE_SINGULAR_KEYS:
+        if key not in arguments:
+            continue
+        value = arguments.pop(key)
+        if isinstance(value, str) and not _looks_like_json_text(value):
+            item: dict[str, Any] = {"content": value, "status": "pending"}
+            for extra in ("status", "notes"):
+                if extra in arguments:
+                    item[extra] = arguments.pop(extra)
+            value = [item]
+        elif isinstance(value, dict):
+            value = _wrap_todo_item(value)
+        arguments["todos"] = value
+        break
+    return arguments
+
+
+def _repair_todo_update_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Fuzzy-repair top-level todo_update arguments."""
+    batch_key = (
+        "updates"
+        if "updates" in arguments
+        else ("todos" if "todos" in arguments else None)
+    )
+    if batch_key is not None:
+        updates = arguments[batch_key]
+        if isinstance(updates, str) and not _looks_like_json_text(updates):
+            arguments[batch_key] = [{"title": updates, "status": "pending"}]
+        elif isinstance(updates, list):
+            arguments[batch_key] = [
+                {"title": item, "status": "pending"} if isinstance(item, str) else item
+                for item in updates
+            ]
+        return arguments
+
+    # No batch list: promote a title synonym for a single edit.
+    if "title" not in arguments:
+        for key in _TODO_UPDATE_TITLE_KEYS:
+            if key in arguments:
+                arguments["title"] = arguments.pop(key)
+                break
+
+    # Promote a batch synonym only when no single-edit title is present.
+    if "title" not in arguments:
+        for key in _TODO_UPDATE_BATCH_KEYS:
+            if key not in arguments:
+                continue
+            value = arguments.pop(key)
+            if isinstance(value, str) and not _looks_like_json_text(value):
+                value = [{"title": value, "status": "pending"}]
+            if isinstance(value, (list, dict)):
+                arguments["updates"] = value
+            break
+    return arguments
+
+
+def _repair_todo_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Apply todo-tool-specific fuzzy argument repairs.
+
+    Scoped to the canonical todo tools (``todo_write`` / ``todo_update``).
+    Only rewrites keys when the schema-preferred key is absent; returns the
+    input unchanged otherwise.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return arguments
+    if tool_name == "todo_write":
+        return _repair_todo_write_arguments(arguments)
+    if tool_name == "todo_update":
+        return _repair_todo_update_arguments(arguments)
+    return arguments
+
+
 _REMINDER_TEXT_1 = (
     "\n\n<system-reminder>\n"
     "You are repeating the exact same tool call with identical parameters."
@@ -1084,6 +1216,10 @@ class KimiToolset:
                 t0 = time.monotonic()
                 try:
                     repaired_arguments = repair_tool_arguments(tool.params, arguments)
+                    if isinstance(repaired_arguments, dict):
+                        repaired_arguments = _repair_todo_arguments(
+                            tool_name, repaired_arguments
+                        )
 
                     # Long-content param extraction: detect malformed params and save to temp files.
                     # When the LLM passes a long content param (command, code, content, etc.) in

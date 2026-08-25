@@ -24,6 +24,58 @@ def _find_todo(tool: todo_update, title: str) -> Todo:
     raise AssertionError(f"todo {title!r} not found")
 
 
+class TestTodoUpdateFuzzyArgumentRepair:
+    """LLM-style argument shapes are repaired by per-tool field aliases."""
+
+    async def test_call_task_alias_maps_to_title(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="in_progress")]))
+
+        res = await update.call({"task": "Task A", "status": "done"})
+        assert not res.is_error
+        assert 'Updated "Task A" (status=done)' in res.output
+
+    async def test_call_todo_alias_maps_to_title(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="pending")]))
+
+        res = await update.call({"todo": "Task A", "status": "done"})
+        assert not res.is_error
+        assert 'Updated "Task A" (status=done)' in res.output
+
+    async def test_call_edits_alias_maps_to_updates(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="pending")]))
+
+        res = await update.call(
+            {"edits": [{"title": "Task A", "status": "done"}]}
+        )
+        assert not res.is_error
+        assert 'Updated "Task A" (status=done)' in res.output
+
+    async def test_call_operations_alias_maps_to_updates(self, runtime: Runtime) -> None:
+        lst = TodoList(runtime)
+        update = todo_update(runtime)
+        await lst(Params(todos=[Todo(content="Task A", status="pending")]))
+
+        res = await update.call(
+            {"operations": [{"title": "Task A", "status": "done"}]}
+        )
+        assert not res.is_error
+        assert 'Updated "Task A" (status=done)' in res.output
+
+    async def test_call_todo_write_nested_task_alias(self, runtime: Runtime) -> None:
+        """todo_write items accept `task` as an alias of `content`/`title`."""
+        lst = TodoList(runtime)
+
+        res = await lst.call({"todos": [{"task": "New", "status": "done"}]})
+        assert not res.is_error
+        assert _find_todo(lst, "New") is not None
+
+
 class TestTodoUpdateBasics:
     async def test_update_status_to_done(self, runtime: Runtime) -> None:
         lst = TodoList(runtime)

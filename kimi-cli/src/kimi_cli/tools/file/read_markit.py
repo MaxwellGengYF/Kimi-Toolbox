@@ -220,13 +220,24 @@ def markdown_to_text(md: str) -> str:
         lambda m: f"[code block: {m.group(0).count(chr(10))} lines]",
         md,
     )
-    # Inline code -> plain.
-    md = re.sub(r"`([^`]+)`", r"\1", md)
-    # Bold/italic markers.
+    # Inline code -> placeholder so later transformations (emphasis, links,
+    # headings) never rewrite code content. Restored at the end.
+    inline_code: list[str] = []
+
+    def _capture_inline_code(m: "re.Match[str]") -> str:
+        inline_code.append(m.group(1))
+        return f"\x00CODE{len(inline_code) - 1}\x00"
+
+    md = re.sub(r"`([^`]+)`", _capture_inline_code, md)
+
+    # Bold/italic markers. The underscore form is word-bounded: CommonMark
+    # disables intraword emphasis for `_`, so identifiers like `foo_bar` or
+    # module paths (`kimi_cli/soul/...`) are preserved verbatim instead of
+    # being treated as italic pairs.
     md = re.sub(r"\*\*([^*]+)\*\*", r"\1", md)
     md = re.sub(r"\*([^*]+)\*", r"\1", md)
     md = re.sub(r"__([^_]+)__", r"\1", md)
-    md = re.sub(r"_([^_]+)_", r"\1", md)
+    md = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"\1", md)
     # Links.
     md = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", md)
     # Images.
@@ -235,6 +246,9 @@ def markdown_to_text(md: str) -> str:
     md = re.sub(r"^#+\s*(.+)$", r"\1", md, flags=re.MULTILINE)
     # Horizontal rules.
     md = re.sub(r"^---+$", "", md, flags=re.MULTILINE)
+    # Restore inline code.
+    for i, code in enumerate(inline_code):
+        md = md.replace(f"\x00CODE{i}\x00", code)
     # Collapse blank runs.
     md = re.sub(r"\n{3,}", "\n\n", md)
     return md.strip()

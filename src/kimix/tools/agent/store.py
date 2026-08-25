@@ -66,6 +66,7 @@ class AgentSessionStore:
                     "created_at": entry.created_at,
                     "last_accessed": entry.last_accessed,
                     "total_turns": entry.total_turns,
+                    "state": entry.state,
                     "is_active": entry.is_active,
                 })
         return result

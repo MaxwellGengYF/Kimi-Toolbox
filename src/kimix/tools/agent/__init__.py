@@ -160,6 +160,22 @@ def _format_pending_messages(messages: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _queued_message_output(target_id: str, reason: str) -> str:
+    """Tool output when a message is queued for a non-running target.
+
+    Queued messages are only delivered when the parent explicitly resumes the
+    target session with ``subagent(session_id=...)``; without that there is no
+    next prompt, so the output must say so instead of implying automatic
+    delivery.
+    """
+    return (
+        f"Agent '{target_id}' is not running ({reason}). Message queued; it "
+        f"will be listed in the target's next prompt only if you resume the "
+        f"session with subagent(session_id='{target_id}', ...). Otherwise it "
+        "stays queued (no delivery)."
+    )
+
+
 def _resolve_prompt(prompt: str, base_dir: Path | None) -> str:
     """Return the effective task text.
 
@@ -376,7 +392,8 @@ class AskAgentParams(BaseModel):
         description=(
             "The message to deliver to the subagent. "
             "Delivered immediately if the target is running; otherwise queued "
-            "and listed at its next prompt."
+            "and listed at its next prompt — which happens only when the "
+            "session is resumed via subagent(session_id='<id>', ...)."
         ),
     )
     subagent_id: str | None = Field(
@@ -394,12 +411,15 @@ class AskAgent(CallableTool2):
     name: str = "send_message"
     description: str = (
         "Send a message to a background subagent by its subagent id, continuing "
-        "the same conversation. It becomes the subagent's next turn: if it is "
-        "still working, the message waits until its current turn finishes, so it "
-        "cannot redirect work already underway. This call returns no answer from "
-        "the subagent — only confirmation that the message was delivered — so "
-        "use it to give it more work. A failure means the message was NOT "
-        "delivered."
+        "the same conversation. If the target is running, the message becomes "
+        "its next turn (waiting until the current turn finishes, so it cannot "
+        "redirect work already underway). If the target is idle or its session "
+        "is closed, the message is queued: it is delivered only when the session "
+        "is resumed with subagent(session_id='<id>', ...), so it is NOT "
+        "delivered automatically to a closed session. This call returns no "
+        "answer from the subagent — only confirmation that the message was "
+        "delivered or queued — so use it to give it more work. A failure means "
+        "the message was NOT delivered."
     )
     params: type[BaseModel] = AskAgentParams
 
@@ -427,10 +447,7 @@ class AskAgent(CallableTool2):
             if target_id:
                 _queue_pending_message(target_id, message)
                 return ToolOk(
-                    output=(
-                        f"Agent '{target_id}' is not currently running (session closed "
-                        "or idle). Message queued and will be listed in its next prompt."
-                    ),
+                    output=_queued_message_output(target_id, "session closed or idle"),
                     brief="Message queued",
                 )
             return ToolError(
@@ -446,10 +463,7 @@ class AskAgent(CallableTool2):
             if target_id:
                 _queue_pending_message(target_id, message)
                 return ToolOk(
-                    output=(
-                        f"Agent '{target_id}' has no steerable session; message queued "
-                        "and will be listed in its next prompt."
-                    ),
+                    output=_queued_message_output(target_id, "no steerable session"),
                     brief="Message queued",
                 )
             return ToolError(
@@ -470,10 +484,7 @@ class AskAgent(CallableTool2):
         if target_id:
             _queue_pending_message(target_id, message)
         return ToolOk(
-            output=(
-                f"Agent '{target_id or 'unknown'}' is not running; message queued "
-                "and will be listed in its next prompt."
-            ),
+            output=_queued_message_output(target_id or "unknown", "not running"),
             brief="Message queued",
         )
 
@@ -983,8 +994,9 @@ class AgentListParams(BaseModel):
     scope: str = Field(
         default="children",
         description=(
-            "`children` (default) lists direct children only; `descendants` "
-            "walks the complete tree below you."
+            "`children` (default) lists direct children only. `descendants` is "
+            "accepted for compatibility but currently returns the same "
+            "direct-children list."
         ),
     )
 
@@ -994,16 +1006,14 @@ class AgentList(CallableTool2):
     description: str = (
         "List your continuable background subagents by durable id and label. "
         "Use it to recall which ones you started, not to poll for completion — "
-        "you are told when one finishes. Status comes from the live registry: "
-        "running means the agent is working right now, idle means it is loaded "
-        "but between turns, and ready means it exists only in storage — "
-        "resumable, not terminal, and not a result waiting to be collected; a "
-        "send_message starts a new turn on the same conversation, and a direct "
-        "child remains a send_message candidate in every status. Scope "
-        "`descendants` walks the whole tree below you in stable pre-order, "
-        "annotating each entry with its durable direct-parent session id and "
-        "depth. You may use send_message only for depth-1 entries; deeper "
-        "entries are candidates for interrupt_agent only."
+        "you are told when one finishes. Each entry reports session_id, "
+        "created_at, last_accessed, total_turns, state and is_active; sessions "
+        "closed via interrupt_agent are removed from the list. A listed child "
+        "remains a send_message candidate: send_message starts a new turn on "
+        "the same conversation when it is running, or queues a message that is "
+        "delivered when the session is resumed with subagent(session_id=..., "
+        "...). Scope `descendants` is accepted for compatibility but currently "
+        "returns the same direct-children list."
     )
     params: type[BaseModel] = AgentListParams
 
@@ -1035,12 +1045,13 @@ class AgentClose(CallableTool2):
     description: str = (
         "Request cancellation of a background agent's current turn by its agent "
         "id. The target may be your direct child or a deeper agent created "
-        "under you. Only the current turn stops: messages already queued for "
-        "the agent stay parked until a later send_message, agents it started "
-        "keep running, and the agent itself stays available for follow-ups. "
-        "This call returns as soon as the stop request is accepted, so the "
-        "target may keep running briefly; interrupting an agent that already "
-        "finished is an accepted no-op."
+        "under you. The current turn stops (agents it started keep running) and "
+        "the subagent session is closed and removed from the active list — "
+        "messages queued for it are preserved and will be listed if the same "
+        "session id is resumed with subagent(session_id=..., ...). This call "
+        "returns as soon as the stop request is accepted, so the target may "
+        "keep running briefly; interrupting an agent that already finished "
+        "still closes its session (no error)."
     )
     params: type[BaseModel] = AgentCloseParams
 

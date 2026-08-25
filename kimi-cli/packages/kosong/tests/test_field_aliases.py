@@ -35,6 +35,7 @@ from kosong.tooling import (
     FIELD_ALIASES_SUBAGENT,
     FIELD_ALIASES_TASK,
     FIELD_ALIASES_TODO,
+    FIELD_ALIASES_TODO_UPDATE,
     FIELD_ALIASES_WEB,
     CallableTool2,
     ToolOk,
@@ -292,6 +293,53 @@ def test_todo_aliases() -> None:
     data = {"items": ["a"], "replace": "overwrite"}
     repaired = _repair_dict_for_model(data, Model, FIELD_ALIASES_TODO)
     assert repaired == {"todos": ["a"], "mode": "overwrite"}
+
+
+def test_todo_list_compound_aliases() -> None:
+    """todo_list / task_list are accepted compound spellings of `todos`."""
+    class Model(BaseModel):
+        todos: list[str] = Field(default_factory=list)
+
+    for bad_key in ("todo_list", "task_list"):
+        repaired = _repair_dict_for_model({bad_key: ["a"]}, Model, FIELD_ALIASES_TODO)
+        assert repaired == {"todos": ["a"]}
+
+
+def test_todo_update_aliases() -> None:
+    """todo_update-style aliases map task/todo/item/name -> title and
+    edits/changes/operations -> updates."""
+    class Model(BaseModel):
+        title: str | None = None
+        updates: list[dict] | None = None
+
+    data = {"task": "Fix bug", "status": "done"}
+    repaired = _repair_dict_for_model(data, Model, FIELD_ALIASES_TODO_UPDATE)
+    assert repaired == {"title": "Fix bug", "status": "done"}
+
+    data2 = {"edits": [{"title": "A"}, {"content": "B"}]}
+    repaired2 = _repair_dict_for_model(data2, Model, FIELD_ALIASES_TODO_UPDATE)
+    assert repaired2 == {"updates": [{"title": "A"}, {"content": "B"}]}
+
+    data3 = {"operations": [{"title": "C"}, {"title": "D"}]}
+    repaired3 = _repair_dict_for_model(data3, Model, FIELD_ALIASES_TODO_UPDATE)
+    assert repaired3 == {"updates": [{"title": "C"}, {"title": "D"}]}
+
+    # A single-element list is unwrapped to a dict (existing list↔scalar
+    # repair); Pydantic still accepts it as a single update item.
+    data4 = {"operations": [{"title": "C"}]}
+    repaired4 = _repair_dict_for_model(data4, Model, FIELD_ALIASES_TODO_UPDATE)
+    assert repaired4 == {"updates": {"title": "C"}}
+
+
+def test_todo_update_aliases_not_in_common_set() -> None:
+    """todo_update aliases are per-tool opt-in.
+
+    In particular ``task`` must keep mapping to ``prompt`` globally (the
+    FIELD_ALIASES_GENERAL behavior) so tools with a ``prompt`` field are not
+    broken by the todo-specific ``task -> title`` rule.
+    """
+    assert _COMMON_FIELD_ALIASES.get("task") == "prompt"
+    assert _COMMON_FIELD_ALIASES.get("edits") == "edit"
 
 
 def test_active_aliases() -> None:

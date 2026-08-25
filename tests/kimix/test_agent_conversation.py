@@ -106,6 +106,7 @@ async def test_store_list_active(mock_sub_session: MagicMock) -> None:
     assert len(active) == 1
     assert active[0]["session_id"] == "s1"
     assert active[0]["total_turns"] == 3
+    assert active[0]["state"] == "running"
 
 
 async def test_store_lru_eviction(mock_sub_session: MagicMock) -> None:
@@ -1001,6 +1002,24 @@ async def test_ask_agent_main_agent_closed_session_queues(
     assert "ghost" in result.output
     assert _pending_message_count("ghost") == 1
     assert _drain_pending_messages("ghost") == ["Message from agent 'main-1':\nping?"]
+
+
+async def test_ask_agent_queued_output_explains_resume(mock_session: MagicMock) -> None:
+    """Queued output must say delivery happens only on subagent resume.
+
+    Without this, an agent may believe a message to a closed session will be
+    delivered automatically at some future prompt that never comes.
+    """
+    mock_session.custom_config = {}
+    mock_session.id = "main-1"
+    ask_agent = AskAgent(mock_session)
+    result = await ask_agent(AskAgentParams(question="ping?", id="ghost"))
+    assert not result.is_error
+    assert "queued" in result.output
+    assert "subagent(session_id='ghost'" in result.output
+    assert "only if you resume" in result.output
+    assert _pending_message_count("ghost") == 1
+    _drain_pending_messages("ghost")
 
 
 async def test_ask_agent_main_agent_no_active_sub_agents_errors(

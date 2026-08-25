@@ -19,6 +19,7 @@ from kimi_cli.soul.toolset import (
     _collect_candidates,
     _parse_stringified_arguments,
     _repair_argument_format,
+    _repair_todo_arguments,
     _unwrap_nested_arguments,
 )
 from kimi_cli.wire.types import TextPart, ToolCall, ToolResult
@@ -1171,6 +1172,91 @@ def test_repair_argument_format_parses_then_unwraps():
 def test_repair_argument_format_noop_for_plain_dict():
     """A plain dict is not changed by repair."""
     assert _repair_argument_format({"value": "x"}) == {"value": "x"}
+
+
+# --- _repair_todo_arguments: fuzzy todo argument repair -----------------
+
+
+def test_repair_todo_write_promotes_singular_key():
+    """todo_write accepts a single todo/task/item key as the todos field."""
+    assert _repair_todo_arguments("todo_write", {"todo": {"content": "A"}}) == {
+        "todos": {"content": "A", "status": "pending"}
+    }
+    assert _repair_todo_arguments("todo_write", {"task": "Implement X", "status": "done"}) == {
+        "todos": [{"content": "Implement X", "status": "done"}]
+    }
+    assert _repair_todo_arguments("todo_write", {"item": {"content": "B", "status": "done"}}) == {
+        "todos": {"content": "B", "status": "done"}
+    }
+
+
+def test_repair_todo_write_wraps_bare_string_todos():
+    """Bare-string todos are wrapped into schema-valid item dicts."""
+    assert _repair_todo_arguments(
+        "todo_write", {"todos": ["Buy milk", "Walk dog"]}
+    ) == {
+        "todos": [
+            {"content": "Buy milk", "status": "pending"},
+            {"content": "Walk dog", "status": "pending"},
+        ]
+    }
+    assert _repair_todo_arguments("todo_write", {"todos": "Single"}) == {
+        "todos": [{"content": "Single", "status": "pending"}]
+    }
+
+
+def test_repair_todo_write_fills_missing_status():
+    """Item dicts missing the required status get a pending default."""
+    assert _repair_todo_arguments("todo_write", {"todos": [{"content": "A"}]}) == {
+        "todos": [{"content": "A", "status": "pending"}]
+    }
+    # Valid statuses are preserved.
+    assert _repair_todo_arguments(
+        "todo_write", {"todos": [{"content": "A", "status": "done"}]}
+    ) == {"todos": [{"content": "A", "status": "done"}]}
+
+
+def test_repair_todo_update_promotes_title_synonyms():
+    """todo_update accepts task/todo/item/name as the title field."""
+    assert _repair_todo_arguments("todo_update", {"task": "Fix bug", "status": "done"}) == {
+        "title": "Fix bug",
+        "status": "done",
+    }
+    assert _repair_todo_arguments("todo_update", {"todo": "Write docs"}) == {
+        "title": "Write docs"
+    }
+
+
+def test_repair_todo_update_promotes_batch_synonyms():
+    """todo_update accepts edits/changes/operations as the updates field."""
+    assert _repair_todo_arguments(
+        "todo_update", {"edits": [{"title": "A"}, {"content": "B"}]}
+    ) == {"updates": [{"title": "A"}, {"content": "B"}]}
+    assert _repair_todo_arguments("todo_update", {"operations": [{"title": "C"}]}) == {
+        "updates": [{"title": "C"}]
+    }
+
+
+def test_repair_todo_update_wraps_bare_string_updates():
+    """Bare-string update lists are wrapped into title items."""
+    assert _repair_todo_arguments("todo_update", {"todos": ["X", "Y"]}) == {
+        "todos": [{"title": "X", "status": "pending"}, {"title": "Y", "status": "pending"}]
+    }
+    assert _repair_todo_arguments("todo_update", {"changes": "Just one"}) == {
+        "updates": [{"title": "Just one", "status": "pending"}]
+    }
+
+
+def test_repair_todo_arguments_keeps_valid_calls_unchanged():
+    """Well-formed todo calls and non-todo tools are not modified."""
+    valid_write = {"todos": [{"content": "A", "status": "done"}], "mode": "append"}
+    assert _repair_todo_arguments("todo_write", dict(valid_write)) == valid_write
+
+    valid_update = {"title": "A", "status": "in_progress", "force": True}
+    assert _repair_todo_arguments("todo_update", dict(valid_update)) == valid_update
+
+    other = {"value": "x", "task": "ignored"}
+    assert _repair_todo_arguments("bash", dict(other)) == other
 
 
 async def test_handle_repairs_nested_arguments():

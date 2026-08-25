@@ -503,12 +503,31 @@ FIELD_ALIASES_TODO: dict[str, str] = {
     "list": "todos",
     "tasks": "todos",
     "entries": "todos",
+    "todo_list": "todos",
+    "task_list": "todos",
     "replace": "mode",
     "override": "mode",
     "overwrite": "mode",
     "append": "mode",
     "merge": "mode",
     "update": "mode",
+}
+
+FIELD_ALIASES_TODO_UPDATE: dict[str, str] = {
+    # todo_update single-edit title synonyms (canonical field: `title`).
+    # Nested todo_write items accept the same spellings directly through the
+    # Todo model's AliasChoices (see kimi_cli/tools/todo/__init__.py).
+    "task": "title",
+    "todo": "title",
+    "item": "title",
+    "name": "title",
+    # todo_update batch-edit list synonyms (canonical field: `updates`).
+    "edits": "updates",
+    "changes": "updates",
+    "operations": "updates",
+    "actions": "updates",
+    "modifications": "updates",
+    "batch": "updates",
 }
 
 FIELD_ALIASES_ACTIVE: dict[str, str] = {
