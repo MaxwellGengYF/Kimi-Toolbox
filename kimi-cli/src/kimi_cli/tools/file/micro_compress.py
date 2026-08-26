@@ -41,6 +41,14 @@ import regex as re
 import xxhash
 from rapidfuzz import fuzz
 
+from kimi_cli.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TOOLS = _native_get_module("tools")
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -249,11 +257,13 @@ def strip_control_noise(text: str) -> str:
 
     Idempotent and lossless (the removed bytes are terminal-control noise).
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
+        return _NATIVE_TOOLS.compress_strip_control_noise(text)
     text = _ANSI_CSI.sub("", text)
     text = _ANSI_OSC.sub("", text)
     text = _ANSI_OTHER.sub("", text)
     # CR progress-bar collapse: within each line keep only the segment
-    # after the last ``\r`` (the final rendered frame).
+    # after the last \r (the final rendered frame).
     if "\r" in text:
         lines = text.split("\n")
         result: list[str] = []
@@ -264,6 +274,7 @@ def strip_control_noise(text: str) -> str:
                 result.append(line)
         text = "\n".join(result)
     return text
+
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +297,9 @@ def collapse_whitespace(
     if config is None:
         config = MicroCompressConfig()
 
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
+        return _NATIVE_TOOLS.compress_collapse_whitespace(text, kind, config)
     lines = text.split("\n")
-
     # A2 — strip trailing whitespace
     # For code kind, only strip trailing spaces (not tabs) so that
     # line-number separator tabs (e.g. ReadFile ``5\tcontent``) survive.
@@ -373,11 +385,13 @@ def _factor_common_indent(
 
 
 def renumber_lines(text: str) -> str:
-    """Compact fixed-width line numbers (``"   42\\t"`` → ``"42\\t"``).
+    """Compact fixed-width line numbers ("  42\\t" -> "42\\t").
 
-    Only fires when *every* substantial line matches ``^\\s*\\d+\\t``
+    Only fires when *every* substantial line matches ^\\s*\\d+\\t
     (ReadFile-style output).  The bijection is preserved exactly.
     """
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
+        return _NATIVE_TOOLS.compress_renumber_lines(text)
     lines = text.split("\n")
 
     substantial = 0
@@ -586,15 +600,19 @@ def intra_line_dedup(
 ) -> str:
     """Collapse a single very long line composed of a short repeating unit.
 
-    ``unit × k`` → ``unit ×k [+M chars elided]``.
+    unit × k → unit ×k [+M chars elided].
     """
     if config is None:
         config = MicroCompressConfig()
     if config.lossless_only or kind == "code" or not config.intra_line_dedup:
         return text
-
+    if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
+        return _NATIVE_TOOLS.compress_intra_line_dedup(
+            text, config.intra_line_dedup_len, _MAX_INTRA_LINE_UNIT
+        )
     threshold = config.intra_line_dedup_len
     lines = text.split("\n")
+
     changed = False
     new_lines: list[str] = []
     for ln in lines:

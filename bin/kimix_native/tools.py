@@ -21,6 +21,12 @@ Public API:
   - scan_lines_cb(content, callback) -> list[(line_index, byte_offset,
       line_len)]   (per-line Python matcher; offsets stay native)
 
+Micro-compression kernels (plan 016):
+  - compress_intra_line_dedup(text, threshold=2000, max_unit=2048) -> str
+  - compress_collapse_whitespace(text, kind="log", config=None) -> str
+  - compress_renumber_lines(text) -> str
+  - compress_strip_control_noise(text) -> str
+
 Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes"):
   - redact_sensitive_output(output) -> str           (WIRED in security.py)
   - scrub_child_env(env) -> dict                     (WIRED in security.py)
@@ -1314,3 +1320,413 @@ def build_export_markdown(history: list, opts: dict) -> bytes:
         buf, structure = _build_structure(history)
         return bytes(_native.tools.build_export_markdown(buf, structure, dict(opts)))
     return _compat_build_export_markdown(history, opts)
+
+
+# ---------------------------------------------------------------------------
+# Micro-compression kernels (plan 016)
+# ---------------------------------------------------------------------------
+# The _compat_* mirrors below are exact copies of the reference algorithms
+# from kimi-cli/src/kimi_cli/tools/file/micro_compress.py (selected lossless
+# / lightly-annotated stages).  The public functions gate through
+# use_native("TOOLS") and route non-ASCII input to the mirrors.
+
+_MAX_INTRA_LINE_UNIT = 2048
+_MAX_INDENT_SCAN = 8192
+
+_INTERNAL_SPACE_RUN = re.compile(r"(?<=\S) {3,}(?=\S)")
+_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+
+# ANSI / OSC / DCS escape sequences (strip_control_noise).
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
+
+
+def _cfg_get(config, name: str, default):
+    """Read a config field from a dataclass or a dict."""
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
+                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
+    threshold / max-unit gate from intra_line_dedup so it is a drop-in
+    per-line compressor."""
+    if len(line) <= threshold:
+        return line
+    n = len(line)
+    if n < 6:
+        return line
+    max_u = min(n // 3, max_unit)
+    for p in range(1, max_u + 1):
+        if n % p != 0:
+            continue
+        unit = line[:p]
+        if unit * (n // p) == line:
+            repeats = n // p
+            elided = n - p
+            marker = f" ×{repeats} [+{elided} chars elided]"
+            if len(unit) + len(marker) < n:
+                return f"{unit}{marker}"
+            return line
+    return line
+
+
+def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
+    """Exact mirror of micro_compress.py::_factor_common_indent.
+    Returns (new_lines, common_prefix) where common_prefix is empty when no
+    factor happened."""
+    non_blank = [ln for ln in lines if ln.strip()]
+    if len(non_blank) < 2:
+        return lines, ""
+
+    common = non_blank[0][:_MAX_INDENT_SCAN]
+    for ln in non_blank[1:]:
+        stripped = ln.lstrip(" \t")
+        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
+        n = min(len(common), len(indent))
+        i = 0
+        while i < n and common[i] == indent[i]:
+            i += 1
+        common = common[:i]
+        if not common:
+            break
+
+    if not common or len(common) < 4:
+        return lines, ""
+
+    prefix_len = len(common)
+    new_lines = [
+        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
+    ]
+    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
+
+
+def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
+                                        config=None) -> str:
+    """Exact mirror of micro_compress.py::collapse_whitespace."""
+    lines = text.split("\n")
+
+    # A2 — strip trailing whitespace
+    if _cfg_get(config, "strip_trailing_ws", True):
+        if kind == "code":
+            lines = [ln.rstrip(" ") for ln in lines]
+        else:
+            lines = [ln.rstrip() for ln in lines]
+
+    # A1 — collapse blank-line runs
+    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
+    if max_blanks >= 0:
+        collapsed: list[str] = []
+        blank_run = 0
+        for ln in lines:
+            if ln.strip() == "":
+                blank_run += 1
+                if blank_run <= max_blanks:
+                    collapsed.append("")
+            else:
+                blank_run = 0
+                collapsed.append(ln)
+        lines = collapsed
+
+    # A3 — factor common indentation (non-code, non-lossless-only)
+    if (
+        _cfg_get(config, "common_indent_factor", True)
+        and kind != "code"
+        and not _cfg_get(config, "lossless_only", False)
+    ):
+        lines, _ = _compat_factor_common_indent(lines)
+
+    # A4 — collapse internal space runs (prose/log only)
+    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
+        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
+
+    return "\n".join(lines)
+
+
+def _compat_compress_renumber_lines(text: str) -> str:
+    """Exact mirror of micro_compress.py::renumber_lines."""
+    lines = text.split("\n")
+
+    substantial = 0
+    numbered = 0
+    for ln in lines:
+        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
+            continue
+        substantial += 1
+        if _LINENO_RE.match(ln):
+            numbered += 1
+
+    if substantial == 0 or numbered < substantial:
+        return text
+
+    new_lines: list[str] = []
+    for ln in lines:
+        m = _LINENO_RE.match(ln)
+        if m:
+            num = int(m.group(1))
+            rest = ln[m.end():]
+            new_lines.append(f"{num}\t{rest}")
+        else:
+            new_lines.append(ln)
+    return "\n".join(new_lines)
+
+
+def _compat_compress_strip_control_noise(text: str) -> str:
+    """Exact mirror of micro_compress.py::strip_control_noise."""
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    if "\r" in text:
+        lines = text.split("\n")
+        result: list[str] = []
+        for ln in lines:
+            if "\r" in ln:
+                result.append(ln.rsplit("\r", 1)[-1])
+            else:
+                result.append(ln)
+        text = "\n".join(result)
+    return text
+
+
+
+
+# ---------------------------------------------------------------------------
+# Micro-compression kernels (plan 016)
+# ---------------------------------------------------------------------------
+# The _compat_* mirrors below are exact copies of the reference algorithms
+# from kimi-cli/src/kimi_cli/tools/file/micro_compress.py (selected lossless
+# / lightly-annotated stages).  The public functions gate through
+# use_native("TOOLS") and route non-ASCII input to the mirrors.
+
+_MAX_INTRA_LINE_UNIT = 2048
+_MAX_INDENT_SCAN = 8192
+
+_INTERNAL_SPACE_RUN = re.compile(r"(?<=\S) {3,}(?=\S)")
+_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+
+# ANSI / OSC / DCS escape sequences (strip_control_noise).
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
+
+
+def _cfg_get(config, name: str, default):
+    """Read a config field from a dataclass or a dict."""
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
+                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
+    threshold / max-unit gate from intra_line_dedup so it is a drop-in
+    per-line compressor."""
+    if len(line) <= threshold:
+        return line
+    n = len(line)
+    if n < 6:
+        return line
+    max_u = min(n // 3, max_unit)
+    for p in range(1, max_u + 1):
+        if n % p != 0:
+            continue
+        unit = line[:p]
+        if unit * (n // p) == line:
+            repeats = n // p
+            elided = n - p
+            marker = f" ×{repeats} [+{elided} chars elided]"
+            if len(unit) + len(marker) < n:
+                return f"{unit}{marker}"
+            return line
+    return line
+
+
+def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
+    """Exact mirror of micro_compress.py::_factor_common_indent.
+    Returns (new_lines, common_prefix) where common_prefix is empty when no
+    factor happened."""
+    non_blank = [ln for ln in lines if ln.strip()]
+    if len(non_blank) < 2:
+        return lines, ""
+
+    common = non_blank[0][:_MAX_INDENT_SCAN]
+    for ln in non_blank[1:]:
+        stripped = ln.lstrip(" \t")
+        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
+        n = min(len(common), len(indent))
+        i = 0
+        while i < n and common[i] == indent[i]:
+            i += 1
+        common = common[:i]
+        if not common:
+            break
+
+    if not common or len(common) < 4:
+        return lines, ""
+
+    prefix_len = len(common)
+    new_lines = [
+        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
+    ]
+    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
+
+
+def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
+                                        config=None) -> str:
+    """Exact mirror of micro_compress.py::collapse_whitespace."""
+    lines = text.split("\n")
+
+    # A2 — strip trailing whitespace
+    if _cfg_get(config, "strip_trailing_ws", True):
+        if kind == "code":
+            lines = [ln.rstrip(" ") for ln in lines]
+        else:
+            lines = [ln.rstrip() for ln in lines]
+
+    # A1 — collapse blank-line runs
+    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
+    if max_blanks >= 0:
+        collapsed: list[str] = []
+        blank_run = 0
+        for ln in lines:
+            if ln.strip() == "":
+                blank_run += 1
+                if blank_run <= max_blanks:
+                    collapsed.append("")
+            else:
+                blank_run = 0
+                collapsed.append(ln)
+        lines = collapsed
+
+    # A3 — factor common indentation (non-code, non-lossless-only)
+    if (
+        _cfg_get(config, "common_indent_factor", True)
+        and kind != "code"
+        and not _cfg_get(config, "lossless_only", False)
+    ):
+        lines, _ = _compat_factor_common_indent(lines)
+
+    # A4 — collapse internal space runs (prose/log only)
+    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
+        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
+
+    return "\n".join(lines)
+
+
+def _compat_compress_renumber_lines(text: str) -> str:
+    """Exact mirror of micro_compress.py::renumber_lines."""
+    lines = text.split("\n")
+
+    substantial = 0
+    numbered = 0
+    for ln in lines:
+        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
+            continue
+        substantial += 1
+        if _LINENO_RE.match(ln):
+            numbered += 1
+
+    if substantial == 0 or numbered < substantial:
+        return text
+
+    new_lines: list[str] = []
+    for ln in lines:
+        m = _LINENO_RE.match(ln)
+        if m:
+            num = int(m.group(1))
+            rest = ln[m.end():]
+            new_lines.append(f"{num}\t{rest}")
+        else:
+            new_lines.append(ln)
+    return "\n".join(new_lines)
+
+
+def _compat_compress_strip_control_noise(text: str) -> str:
+    """Exact mirror of micro_compress.py::strip_control_noise."""
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    if "\r" in text:
+        lines = text.split("\n")
+        result: list[str] = []
+        for ln in lines:
+            if "\r" in ln:
+                result.append(ln.rsplit("\r", 1)[-1])
+            else:
+                result.append(ln)
+        text = "\n".join(result)
+    return text
+
+
+def compress_intra_line_dedup(text: str, threshold: int = 2000,
+                              max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Collapse a single very long line composed of a short repeating unit.
+
+    Mirrors the behavior of micro_compress.py::intra_line_dedup for log-kind
+    text with the default config (lossless_only=False, intra_line_dedup=True).
+    Non-ASCII input routes to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_intra_line_dedup(text, threshold, max_unit)
+
+    if not text:
+        return text
+    lines = text.split("\n")
+    changed = False
+    new_lines: list[str] = []
+    for ln in lines:
+        compressed = _compat_compress_intra_line_dedup(ln, threshold, max_unit)
+        if compressed is not ln:
+            changed = True
+        new_lines.append(compressed)
+    return "\n".join(new_lines) if changed else text
+
+
+def compress_collapse_whitespace(text: str, kind: str = "log",
+                                  config=None) -> str:
+    """Collapse redundant whitespace.
+
+    Mirrors micro_compress.py::collapse_whitespace.  Non-ASCII input routes
+    to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_collapse_whitespace(
+            text,
+            kind,
+            bool(_cfg_get(config, "lossless_only", False)),
+            bool(_cfg_get(config, "strip_trailing_ws", True)),
+            int(_cfg_get(config, "blank_line_collapse", 1)),
+            bool(_cfg_get(config, "common_indent_factor", True)),
+            bool(_cfg_get(config, "prefix_fold", True)),
+        )
+    return _compat_compress_collapse_whitespace(text, kind, config)
+
+
+def compress_renumber_lines(text: str) -> str:
+    """Compact fixed-width leading line numbers ("  42\\t" -> "42\\t").
+
+    Mirrors micro_compress.py::renumber_lines.  Non-ASCII input routes to
+    the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_renumber_lines(text)
+    return _compat_compress_renumber_lines(text)
+
+
+def compress_strip_control_noise(text: str) -> str:
+    """Remove ANSI/OSC/DCS escape sequences and collapse CR progress-bar chains.
+
+    Mirrors micro_compress.py::strip_control_noise.  Non-ASCII input routes
+    to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_strip_control_noise(text)
+    return _compat_compress_strip_control_noise(text)

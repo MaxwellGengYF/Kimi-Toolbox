@@ -131,7 +131,7 @@ behavior-equivalence tests:
 |---|---|---|---|
 | TEXT | `kimi_cli/utils/tokens.py` `_estimate_chars_tokens`/`_is_cjk_text`/`count_tokens`, `kimi_cli/safety_check.py` `clean_text`/`sanitize_for_tokenizer` | `text.*` | sanitize 1 MB **27.3x** |
 | STREAM | `src/kimix/tools/common.py` `filter_output`/`_dedup_output` | `stream.filter_output` / `LineProcessor` | 1 MB ANSI strip **5.8x** |
-| TOOLS | `src/kimix/tools/file/find_str.py` `find_in_file`; `kimi_cli/tools/file/grep_local.py` `scan_lines_cb`; `kimi_cli/utils/export.py` `build_export_markdown` | `tools.find_in_file`/`scan_lines_cb`/`build_export_markdown` | — |
+| TOOLS | `src/kimix/tools/file/find_str.py` `find_in_file`; `kimi_cli/tools/file/grep_local.py` `scan_lines_cb`; `kimi_cli/utils/export.py` `build_export_markdown`; `kimi_cli/tools/file/micro_compress.py` `collapse_whitespace` / `intra_line_dedup` / `renumber_lines` / `strip_control_noise` | `tools.find_in_file`/`scan_lines_cb`/`build_export_markdown`/`compress_collapse_whitespace`/`compress_intra_line_dedup`/`compress_renumber_lines`/`compress_strip_control_noise` | 10 MB repeating log **8.8x**; 6 MB repeating unit **10.4x** |
 | PARSE | all 7 comment parsers via `parser/base.py::native_parse_result`; `bash_fix.fix_bash_command`; `bash_tool._process_unquoted`; `pwsh_fix.fix_pwsh_command` | `parse.parse`/`fix_bash_command`/`_process_unquoted`/`fix_pwsh_command` | parse C 1 MB **2.1x** |
 | INDEX | `src/kimix/retrieval.py` `NgramTokenizer` (normalize/detect_n/tokenize) | `index.NgramTokenizer` | — |
 | SEARCH | `src/kimix/retrieval.py` `jaro_similarity`/`jaro_winkler_similarity`/`sorensen_dice_coefficient`/`ngram_overlap`/`LevenshteinAutomaton._damerau_levenshtein`/`_freq_lower_bound` | `search.*` | — |
@@ -139,13 +139,33 @@ behavior-equivalence tests:
 | DIFF | `kimi_cli/utils/diff.py` `format_unified_diff`/`_build_diff_blocks_sync` | `diff.unified_diff`/`diff_hunks` | — |
 | CODEC | `kimi_cli/wire/server.py` `_frame_jsonrpc` (JSON-RPC framing); `kimi_cli/wire/file.py` `_dump_line` (jsonl record) | `codec.JsonRpcFrameWriter`/`JsonlRecorder` | — |
 
-Equivalence tests: `tests/native/` (130 tests) + `kimi-cli/tests/native/`
-(186 tests, incl. `test_additional_kernels_equivalence.py`) — every wired kernel
+### TOOLS micro-compression notes
+
+The four native compress kernels mirror only the pure-string stages of
+`kimi_cli/tools/file/micro_compress.py`:
+
+- `compress_strip_control_noise` — Stage 2 (lossless)
+- `compress_collapse_whitespace` — Stage 3 (lossless-or-annotated)
+- `compress_renumber_lines` — Stage 5 (lossless)
+- `compress_intra_line_dedup` — Stage 7 (annotated)
+
+All four kernels are wired on **ASCII-only input** (`str.isascii()`); non-ASCII
+text routes to the original Python body, matching the existing TOOLS kernel
+policy.  Stages that depend on third-party libraries are intentionally
+**not** ported because their Python paths already call C extensions and a C++
+port is unlikely to beat them by the required 2× margin: Stage 1
+`normalize_encoding` (unicodedata NFC), Stage 8 `near_duplicate_collapse`
+(rapidfuzz), and Stage 9 `elide_low_value_content`.  The excluded stages
+continue to run in Python before/after the native stages, so the overall
+pipeline output is unchanged.
+
+Equivalence tests: tests/native/ (318 tests, incl. test_compress_equivalence.py) + kimi-cli/tests/native/
+(186 tests, incl. test_additional_kernels_equivalence.py) — every wired kernel
 is run through the SAME corpus with the gate forced on vs off and outputs
 asserted identical (return values, bytes, errors, determinism, thread-safety
 smoke). kimix-base `python/tests/` adds per-kernel parity tests (incl.
 `test_diff.py`) and the C++ kernels are tested by
-`tests/unit/native/test_diff.cpp`.
+`tests/unit/native/test_diff.cpp` and `tests/unit/tools/test_compress.cpp`.
 
 > **Removed kernels:** json, image, concurrency, todo, workspace, soul were
 > **deleted** (C++ sources, py bindings, shims, and tests) because their native
