@@ -571,16 +571,15 @@ class BashParams(BaseModel):
         default="",
         alias="command",  # LLM can use "command" instead of "cmd"
         description=(
-            "Bash command or input text for an existing session. "
+            "Bash command or session input; may be a path to an existing `.sh` "
+            "script file (e.g. `scripts/deploy.sh`), executed via bash. "
             + accepts_alias_text("cmd", "command", word=False)
-            + " The value may also be a path to an existing `.sh` script file, "
-            "which is executed via bash (e.g. `scripts/deploy.sh`)."
         ),
     )
     mode: Literal["execute", "send", "interactive"] = mode_field(
-        execute_desc="Run `cmd` as a shell command.",
-        send_desc="Execute `cmd` in background, return task_id immediately.",
-        interactive_desc="Start a persistent Bash REPL, return task_id for further input.",
+        execute_desc="run now.",
+        send_desc="background, return task_id.",
+        interactive_desc="persistent REPL, return task_id.",
     )
     timeout: int = timeout_field()
     task_id: str | None = task_id_field("cmd")
@@ -601,8 +600,8 @@ class Bash(CallableTool2[BashParams]):
 
     name: str = "bash"
     description: str = (
-        "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
-        "Prefer `glob`/`grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
+        "Execute a bash command (POSIX syntax). Prefer `glob`/`grep` over "
+        "`find`/`ls`/`grep`/`rg` for file and content search. "
         + _interactive_scope_text(is_shell=True)
     )
     params: type[BashParams] = BashParams
@@ -621,8 +620,8 @@ class Bash(CallableTool2[BashParams]):
         # TestBashBackslashPaths): unquoted backslash paths are auto-converted.
         if sys.platform == "win32":
             self.description += (
-                " On Windows, unquoted backslash paths are auto-converted to forward slashes "
-                "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
+                " On Windows, unquoted backslash paths auto-convert to forward slashes; "
+                "quoted backslashes are preserved."
             )
 
         # Pre-normalize forbidden commands once at init time for O(1) per-call lookup.
@@ -652,10 +651,8 @@ class Bash(CallableTool2[BashParams]):
         # Proactive self-kill hint: make the agent's own PID visible up front
         # so the model avoids targeting it; the guard below blocks attempts.
         self.description += (
-            f" Safety: this tool runs inside the agent process (PID {os.getpid()}); "
-            "never run kill/taskkill/Stop-Process/pkill commands targeting that "
-            "PID, its parent processes, or this process's image name — the "
-            "self-kill guard blocks such commands."
+            f" Safety: runs in the agent process (PID {os.getpid()}); never kill that PID, "
+            "its parents, or this process's image — the self-kill guard blocks it."
         )
 
     def _hardline_blocked(self, command: str) -> ToolError | None:

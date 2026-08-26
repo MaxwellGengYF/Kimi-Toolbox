@@ -170,52 +170,42 @@ def test_descriptions_unchanged() -> None:
     # Proactive self-kill hint appended by the shell tools at init time; the
     # PID is the live process PID, so the snapshot interpolates it.
     self_kill_hint_text = (
-        f" Safety: this tool runs inside the agent process (PID {os.getpid()}); "
-        "never run kill/taskkill/Stop-Process/pkill commands targeting that "
-        "PID, its parent processes, or this process's image name — the "
-        "self-kill guard blocks such commands."
+        f" Safety: runs in the agent process (PID {os.getpid()}); never kill that PID, "
+        "its parents, or this process's image — the self-kill guard blocks it."
     )
 
     assert tools["bash"].description == (
-        "Execute a bash command. Supports Unix-style / POSIX bash syntax. "
-        "Prefer `glob`/`grep` tools over `find`/`ls`/`grep`/`rg` for file and content search. "
-        "Start a persistent session with interactive=True, then reuse the same tool with "
-        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
-        "Send 'exit' to close the session. "
-        "On Windows, unquoted backslash paths are auto-converted to forward slashes "
-        "(`cat src\\a.py` → `cat src/a.py`); backslashes inside quotes are preserved."
+        "Execute a bash command (POSIX syntax). Prefer `glob`/`grep` over "
+        "`find`/`ls`/`grep`/`rg` for file and content search. "
+        "For long sessions: interactive=True, then task_id=<id> to continue; "
+        "wait_for_pattern to block; job_output to monitor; send 'exit' to close. "
+        "On Windows, unquoted backslash paths auto-convert to forward slashes; "
+        "quoted backslashes are preserved."
         + self_kill_hint_text
     )
 
     assert tools["pwsh"].description == (
         "<PWSH_MD> "
-        "Start a persistent session with interactive=True, then reuse the same tool with "
-        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
-        "Send 'exit' to close the session. "
+        "For long sessions: interactive=True, then task_id=<id> to continue; "
+        "wait_for_pattern to block; job_output to monitor; send 'exit' to close. "
         "Windows paths must use backslashes (`\\`) instead of forward slashes (`/`)."
         + self_kill_hint_text
     )
 
     assert tools["python"].description == (
-        "Execute Python code or run a .py file directly. "
-        "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
-        "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
-        "the backend interpreter). To install packages for scripts run by this tool, use "
-        "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
-        "'uv pip install <pkg>' in the project directory — not bare 'pip install'. "
-        "By default the child env is scrubbed of secret-looking vars. "
-        "Start a background session with run_in_background=True, then reuse the same tool with "
-        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks."
+        "Execute Python code or a .py file (auto-detected via `code`). "
+        "Scripts run with a resolved interpreter (project .venv, else backend). "
+        "Install packages with '<python> -m pip install <pkg>' or 'uv pip install <pkg>' "
+        "in the project dir — not bare 'pip install'. "
+        "The child env is scrubbed of secret-looking vars by default. "
+        "For long runs: run_in_background=True, then task_id=<id> to continue; "
+        "wait_for_pattern to block; job_output to monitor."
     )
 
     assert tools["Run"].description == (
         "Run an executable or bash command. "
-        "Start a background session with run_in_background=True, then reuse the same tool with "
-        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks."
+        "For long runs: run_in_background=True, then task_id=<id> to continue; "
+        "wait_for_pattern to block; job_output to monitor."
     )
 
 

@@ -15,12 +15,12 @@ _TEMPLATES: dict[str, str] = {
     'sp_template': '{TOOL_CONVENTIONS}{AGENT_ROLE}:\n{NUMBERED}\n{AGENTS_MD}{SKILLS}',
     'sp_tool_conventions': '''\
 # Tool Conventions
-- **Output folding**: Long outputs are head+tail folded — first N and last N lines kept, middle replaced by a truncation marker.
-- **Output dedup**: Repeated lines from known commands are deduplicated automatically; output is always token-filtered.
-- **`rtk`**: Invoke known CLI tools via `rtk <process> <arguments...>` — it deduplicates and truncates the wrapped command's output.
-- **`wait_for_pattern`**: After starting or sending input, the tool blocks up to `timeout` seconds until the pattern appears in the output.
-- **`timeout`**: In seconds; the allowed range and default are in each tool's parameter schema.
-- **Working directory**: `Run` accepts `cwd`/`workdir`; for `Bash`/`pwsh`, change directory inside the command (`cd <dir> && <cmd>` bash, `cd <dir>; <cmd>` pwsh); `python` runs in the process working directory.
+- **Output folding**: long outputs keep first/last N lines; middle replaced by a truncation marker.
+- **Output dedup**: repeated lines from known commands are deduplicated automatically; output is always token-filtered.
+- **`rtk`**: invoke known CLI tools as `rtk <process> <arguments...>` — deduplicates and truncates output.
+- **`wait_for_pattern`**: blocks up to `timeout` seconds until the pattern appears.
+- **`timeout`**: seconds; range/default are in each tool's parameter schema.
+- **Working directory**: `Run` takes `cwd`/`workdir`; `Bash`/`pwsh`: `cd <dir> && <cmd>` / `cd <dir>; <cmd>`; `python` runs in the process cwd.
 ''',
     'sp_base_items': '''\
 Call tools in parallel.
@@ -29,13 +29,12 @@ OS: {KIMI_OS} WORK DIR: {KIMI_WORK_DIR}
     'sp_windows_item': 'Windows paths use backslashes (`\\`); always `\\` instead of `/` for file paths.\n',
     'sp_worker_core': '''\
 Read references/skills/files first; act on evidence, not knowledge.
-Persist until requirements met.
-One action per turn.
+Persist until requirements met; one action per turn.
 For long commands, use `python` instead of `{shell_tool}`.
 On error: retry, adjust, or decompose.
-Verify: run tests/checks before declaring done.
+Verify: run tests/checks before declaring done — never declare done from reading alone.
 compact after each milestone.
-Track with todo_* tools. Never declare done from reading alone — verify must pass.
+Track with todo_* tools.
 ''',
     'sp_worker_optional': '{YOLO}\n{RETRIEVE}\n{SUBAGENT}\n{TRIVIAL}\n',
     'sp_thinker_items': '''\
@@ -53,12 +52,12 @@ No commands, edits, or questions.
 For large content, cover the most relevant parts and note omissions.
 ''',
     'sp_supervisor_items': '''\
-Outline goals, constraints, unknowns, acceptance criteria before delegating.
+Before delegating: outline goals, constraints, unknowns, acceptance criteria.
 Decompose into non-overlapping tasks (Explorer/Worker/Reviewer/Verifier); serial if same output.
-Dispatch via `subagent` (background by default, returns durable id; `send_message` for follow-ups, `interrupt_agent` to stop).
+Dispatch via `subagent` (background by default; `send_message` follow-ups; `interrupt_agent` to stop).
 Never do sub-agent work yourself. Route failures through inquiry, then narrow correction.
-Track with `todo_write`; accept or inquire/reject each result. After all accepted, run one overall verification.
-Final: report tasks, deliverables, verification result, unresolved work, merged conclusion.
+Track with `todo_write`; accept or inquire/reject each result, then run one overall verification.
+Final: report tasks, deliverables, verification, unresolved work, merged conclusion.
 ''',
     'sp_swarm_leader_items': '''\
 The user wants parallel work across multiple homogeneous sub-agents.
@@ -73,15 +72,13 @@ Do not implement tasks yourself; only dispatch and summarize the aggregated resu
 
 # Optional worker clauses, substituted into ``sp_worker_optional`` per role.
 _WORKER_OPTIONAL_CLAUSES: dict[str, str] = {
-    'YOLO': 'Yolo: no asking. accept all. Independently pick the best option and continue; do not ask the user which to choose.',
+    'YOLO': 'Yolo: never ask — independently pick the best option and continue.',
     'RETRIEVE': 'Use `retrieve` whenever unsure about past conversation history.',
  'SUBAGENT': (
-     'Sub-Agent: deliver a self-contained final result — the agent that started you '
-     'sees only your result, not your transcript, tool output, or reasoning.\n'
-     'If any option, output the question and stop.\n'
-     'Report coverage: name what you completed, what you only sampled/approximated '
-     '(e.g. read partially or grepped instead of reading fully), and anything you '
-     'could not verify, so the parent can trust or re-check your result.'
+     'Sub-Agent: deliver a self-contained final result — the parent sees only '
+     'your result, not your transcript or reasoning.\n'
+     'Report coverage: what you completed, what you only sampled/approximated, '
+     'and anything unverified, so the parent can trust or re-check.'
  ),
     'TRIVIAL': 'If you need clarification from the parent agent, call the `send_message` tool with your question, then stop.',
 }

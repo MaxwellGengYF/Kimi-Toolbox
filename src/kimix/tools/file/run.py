@@ -118,22 +118,21 @@ class RunParams(BaseModel):
         default="",
         alias="cmd",  # backward compat: old "cmd" still works
         description=(
-            "Executable command line. Only real executables / processes are accepted — "
-            "No shell syntax (pipes, redirects, &&, ||, variables, etc.). "
+            "Executable command line — real executables only, no shell syntax "
+            "(pipes, redirects, &&, ||, variables). "
             "Example: `python -c \"print(1)\"` or `git status`. "
-            "Accepts `command` or `cmd` parameter."
+            "Accepts `command` or `cmd`."
         )
     )
     mode: Literal["execute", "send"] = mode_field(
-        execute_desc="Run `command` as a direct process (default).",
-        send_desc="Send `command` as stdin text to an existing session identified by `task_id`.",
+        execute_desc="run as a direct process.",
+        send_desc="send `command` as stdin to the `task_id` session.",
     )
     shell: bool = Field(
         default=False,
         description=(
-            "When True, execute `command` through the system shell (bash on Linux/macOS, "
-            "powershell on Windows). Supports pipes, redirects, variables, etc. "
-            "When False (default), execute `command` as a direct process without shell interpretation."
+            "True: run via the system shell (bash on Linux/macOS, powershell on Windows) "
+            "with pipes/redirects/variables. False (default): direct process, no shell interpretation."
         ),
     )
     timeout: int = timeout_field()

@@ -59,9 +59,9 @@ class Params(BaseModel):
     )
     timeout: int = timeout_field()
     mode: Literal["execute", "send", "interactive"] = mode_field(
-        execute_desc="Run code and wait for completion (default).",
-        send_desc="Execute code in background, return immediately with task_id.",
-        interactive_desc="Start a persistent Python REPL, return task_id for further input.",
+        execute_desc="run and wait for completion.",
+        send_desc="background, return task_id.",
+        interactive_desc="persistent REPL, return task_id.",
     )
     task_id: str | None = task_id_field("code", tail="running a new script")
     wait_for_pattern: str | None = wait_for_pattern_field()
@@ -85,13 +85,11 @@ class Params(BaseModel):
 class python(CallableTool2[Params]):
     name: str = "python"
     description: str = (
-        "Execute Python code or run a .py file directly. "
-        "Use `code` for inline Python code or a path to an existing .py file (auto-detected). "
-        "Scripts run with a resolved interpreter (a project .venv is used when found, otherwise "
-        "the backend interpreter). To install packages for scripts run by this tool, use "
-        "'<python> -m pip install <pkg>' with the interpreter reported in error messages, or "
-        "'uv pip install <pkg>' in the project directory — not bare 'pip install'. "
-        "By default the child env is scrubbed of secret-looking vars. "
+        "Execute Python code or a .py file (auto-detected via `code`). "
+        "Scripts run with a resolved interpreter (project .venv, else backend). "
+        "Install packages with '<python> -m pip install <pkg>' or 'uv pip install <pkg>' "
+        "in the project dir — not bare 'pip install'. "
+        "The child env is scrubbed of secret-looking vars by default. "
         + _interactive_scope_text(is_shell=False)
     )
     params: type[Params] = Params

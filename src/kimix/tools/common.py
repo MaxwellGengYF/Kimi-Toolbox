@@ -1702,15 +1702,12 @@ def _interactive_scope_text(*, is_shell: bool = True) -> str:
     """
     if is_shell:
         return (
-            "Start a persistent session with interactive=True, then reuse the same tool with "
-            "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-            "for a prompt. job_output remains available as a fallback for listing/monitoring tasks. "
-            "Send 'exit' to close the session."
+            "For long sessions: interactive=True, then task_id=<id> to continue; "
+            "wait_for_pattern to block; job_output to monitor; send 'exit' to close."
         )
     return (
-        "Start a background session with run_in_background=True, then reuse the same tool with "
-        "task_id=<id> to send input and read output in one step. Use wait_for_pattern to wait "
-        "for a prompt. job_output remains available as a fallback for listing/monitoring tasks."
+        "For long runs: run_in_background=True, then task_id=<id> to continue; "
+        "wait_for_pattern to block; job_output to monitor."
     )
 
 

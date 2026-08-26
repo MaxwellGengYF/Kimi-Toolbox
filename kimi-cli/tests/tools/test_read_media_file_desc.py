@@ -23,7 +23,7 @@ from kimi_cli.tools.file.read_media import ReadMediaFile
 Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current model to accept image input. Max size: 100MB.
 
 **Tips:**
-- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native resolution). Report coordinates relative to the original image size (never the displayed copy). After generating or editing media, read the result back before continuing.
+- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native). Report coordinates relative to the original size, never the displayed copy. After generating or editing media, read the result back before continuing.
 - Large images are downsampled by default, which can blur fine detail (small text, dense UI). When the `<system>` tag reports downsampling and you need detail, re-read with `region` (original-image pixel coordinates) for a full-fidelity crop, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely fit model limits, the tool errors and does not send the original. Resize via Shell or an image-processing tool, then read the copy — do not retry the unchanged file.
 - Only image/video files. For text files use `read`; to list directories use `ls` via Shell, or `glob` for pattern search.
@@ -40,7 +40,7 @@ Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current 
 Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current model to accept image input. Max size: 100MB.
 
 **Tips:**
-- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native resolution). Report coordinates relative to the original image size (never the displayed copy). After generating or editing media, read the result back before continuing.
+- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native). Report coordinates relative to the original size, never the displayed copy. After generating or editing media, read the result back before continuing.
 - Large images are downsampled by default, which can blur fine detail (small text, dense UI). When the `<system>` tag reports downsampling and you need detail, re-read with `region` (original-image pixel coordinates) for a full-fidelity crop, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely fit model limits, the tool errors and does not send the original. Resize via Shell or an image-processing tool, then read the copy — do not retry the unchanged file.
 - Only image/video files. For text files use `read`; to list directories use `ls` via Shell, or `glob` for pattern search.
@@ -58,7 +58,7 @@ Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current 
 Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current model to accept image input. Max size: 100MB.
 
 **Tips:**
-- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native resolution). Report coordinates relative to the original image size (never the displayed copy). After generating or editing media, read the result back before continuing.
+- A `<system>` tag accompanies the media: mime type, byte size, and for images the original pixel dimensions, plus delivery mode (untouched, downsampled, cropped, or native). Report coordinates relative to the original size, never the displayed copy. After generating or editing media, read the result back before continuing.
 - Large images are downsampled by default, which can blur fine detail (small text, dense UI). When the `<system>` tag reports downsampling and you need detail, re-read with `region` (original-image pixel coordinates) for a full-fidelity crop, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely fit model limits, the tool errors and does not send the original. Resize via Shell or an image-processing tool, then read the copy — do not retry the unchanged file.
 - Only image/video files. For text files use `read`; to list directories use `ls` via Shell, or `glob` for pattern search.

@@ -215,10 +215,9 @@ class PowershellParams(BaseModel):
         default="",
         validation_alias=AliasChoices("command", "cmd"),
         description=(
-            "The PowerShell command to execute. "
+            "PowerShell command, or path to an existing `.ps1` script file, "
+            "executed via PowerShell. "
             + accepts_alias_text("command", "cmd", word=False)
-            + " The value may also be a path to an existing `.ps1` script file, "
-            "which is executed via PowerShell (e.g. `scripts/deploy.ps1`)."
         ),
     )
     description: str | None = Field(
@@ -234,8 +233,7 @@ class PowershellParams(BaseModel):
         ge=1,
         le=900,
         description=(
-            "Timeout in seconds. The executor applies its configured "
-            "default and cap, and kills the command on expiry. "
+            "Timeout in seconds; kills the command on expiry. "
             + accepts_alias_text("timeout", "timeoutMs", word=False)
         ),
     )
@@ -269,9 +267,9 @@ class PowershellParams(BaseModel):
         ),
     )
     mode: Literal["execute", "send", "interactive"] = mode_field(
-        execute_desc="Run the PowerShell command.",
-        send_desc="Execute the command in background, return task_id immediately.",
-        interactive_desc="Start a persistent PowerShell REPL, return task_id for further input.",
+        execute_desc="run now.",
+        send_desc="background, return task_id.",
+        interactive_desc="persistent REPL, return task_id.",
     )
     task_id: str | None = task_id_field("cmd")
     wait_for_pattern: str | None = wait_for_pattern_field()
@@ -345,10 +343,8 @@ class Powershell(CallableTool2[PowershellParams]):
         # Proactive self-kill hint: make the agent's own PID visible up front
         # so the model avoids targeting it; the guard below blocks attempts.
         self.description += (
-            f" Safety: this tool runs inside the agent process (PID {os.getpid()}); "
-            "never run kill/taskkill/Stop-Process/pkill commands targeting that "
-            "PID, its parent processes, or this process's image name — the "
-            "self-kill guard blocks such commands."
+            f" Safety: runs in the agent process (PID {os.getpid()}); never kill that PID, "
+            "its parents, or this process's image — the self-kill guard blocks it."
         )
 
     def _hardline_blocked(self, command: str) -> ToolError | None:
