@@ -648,7 +648,7 @@ async def prompt_async(
     prompt_str = prompt_str.strip()
     prompt_str = escape_file_paths(prompt_str)
     if len(prompt_str) > 65536:  # too long, save to file
-        name, new_id = _export_to_temp_file(content=prompt_str)
+        name, new_id = _export_to_temp_file(key=None, content=prompt_str)
         prompt_str = f"read and execute: `{name}`"
     if merge_wire_messages is None:
         merge_wire_messages = output_function is not None
@@ -708,7 +708,7 @@ async def prompt_async(
                 if todo_reminder is None:
                     break
                 if len(todo_reminder) > 65536:  # too long, save to file
-                    name, new_id = _export_to_temp_file(content=todo_reminder)
+                    name, new_id = _export_to_temp_file(key=None, content=todo_reminder)
                     todo_reminder = f"read and execute: `{name}`"
                 label = "Todo review..." if attempt == 0 else "Final todo review..."
                 try:
