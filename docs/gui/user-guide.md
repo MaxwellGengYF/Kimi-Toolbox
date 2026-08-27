@@ -65,7 +65,8 @@ uv run kimix-gui --config=C:\path\to\provider.json
 
 在 **Settings → Models** 点击 **Connect ChatGPT**，浏览器会打开 OpenAI 登录页。完成登录后，
 浏览器通过仅监听本机的临时回调返回 Kimix；无需复制设备代码。连接成功后，内建 ChatGPT 模型会
-出现在 LLM Settings 的独立分组中；选择模型后仍需点击 **Use config** 才会应用到项目或 session。
+出现在 LLM Settings 的独立分组中；选择模型与变体后仍需点击 **Use model** 才会应用到项目或
+session。
 
 OAuth 现在属于 Kimix 核心认证层：GUI 与 `kimi login codex` 共用
 `KIMI_SHARE_DIR/openai-codex-state.json`，不会读取 Codex CLI 的私有缓存，也不会把 token 写入
@@ -81,16 +82,42 @@ uv run kimi login codex
 uv run kimix-gui
 ```
 
-ChatGPT 模型能力按 Codex 目录逐模型解析：使用 Codex 的 active context window、目录给出的默认与
-可选 reasoning effort，并保留服务器排列顺序。目录缺字段或离线回退时，当前官方 Codex 基线为
-272,000 context 与 128,000 max output 元数据；ChatGPT Codex subscription backend 不接受
-显式输出上限，因此该数值不会作为请求参数发送。普通会话使用该模型的默认 effort，命令行显式传入
-`--thinking` 时使用目录中最高的直接推理强度。Codex 的 `ultra` 还包含客户端自动委派，Kimix 的
-推理请求按官方做法将其映射为 `max`，子 Agent 编排仍由 KimiX 自己负责。
+ChatGPT 模型能力按 Codex 目录逐模型解析：每个模型只占左侧一行，右侧 **Variant** 下拉框按目录
+顺序列出可选 reasoning effort。已知值显示为“中等（medium）”一类本地化标签；未知的新值原样
+显示并透传。`ultra` 规范化为 `max` 并去重，`off` 不作为 ChatGPT reasoning effort，目录中的
+`none` 则允许选择。带“模型默认”标记的选项只说明目录默认值；点击 **Use model** 时仍保存明确
+强度，不保存“以后跟随默认”。目录后来移除已保存强度时，原值会显示为不可用并阻止启动，绝不
+静默切换到其他强度。
 
-主页顶部 **Settings** 修改 work dir 的新会话默认配置；可在 **Kimix provider config (.json)** 输入与 `kimix --config=...` 相同的外部 JSON 路径。**Add config** 校验并加入全局配置库，不改变当前绑定；从配置库选择后，**Use config** 才会应用到当前作用域。历史会话详情中的 **Configure** 修改该 session 下次恢复时使用的配置。聊天页按 `F4` 修改当前 session 的下次恢复配置，不会替换正在运行的 LLM。
+目录缺字段或离线回退时，当前官方 Codex 基线为 272,000 context 与 128,000 max output 元数据；
+ChatGPT Codex subscription backend 不接受显式输出上限，因此该数值不会作为请求参数发送。
+GUI 只在自己的 ChatGPT 订阅适配边界固定选中的 reasoning effort，不修改 Kimix CLI 内部既有的
+`thinking` 推导或其他 Provider 行为。
 
-配置优先级为 session 配置高于 work dir 默认配置。工程 Settings 可以添加或移除配置库引用，但不能移除正在使用的工程默认；移除引用不会删除 provider JSON 文件。配置单个 session 时只能从现有配置中选择，也可以选择 **Project default**；session Settings 不提供添加或删除操作。选择工程默认会删除该 session 的独立配置引用，使它持续跟随工程默认。全局 `KIMI_SHARE_DIR/kimix-gui.json`（默认 `~/.kimi/kimix-gui.json`）统一保存界面偏好、外部配置文件绝对路径列表和各 work dir 的 tagged LLM 默认值；每个 session 的 LLM 引用保存在 Kimi session 目录自己的 `kimix-gui.json`。这些引用文件不保存 OAuth token、Provider 参数或 API Key。若引用的 provider JSON 丢失，界面显示其路径和 Missing，禁止进入并要求先重新配置。
+主页顶部 **Settings** 修改 work dir 的新会话默认选择。Provider files 分组内部可以输入与
+`kimix --config=...` 相同的外部 JSON 路径；**Add** 校验并加入全局文件库，不改变当前绑定；选中
+模型后，**Use model** 才会应用到当前作用域。历史会话详情中的 **Configure** 修改该 session
+下次恢复时使用的选择；独立的 **Follow project default** 复选框会删除该 session 的覆盖，使其
+持续跟随工程默认。聊天页按 `F4` 只读查看启动时的已解析选择；目录刷新或设置修改不会替换正在
+运行的 LLM。
+
+LLM Settings 将 **ChatGPT subscription** 与 **Provider files** 分成两个带数量的可折叠来源分组，
+默认只展开当前模型所属的分组。模型行只在实际超出宽度时由列表视图省略，完整文本保留在 tooltip；
+每行和右侧详情都会明确显示来源。ChatGPT 未连接时，连接入口只出现在订阅分组中；添加 JSON
+文件的路径、浏览和添加控件只属于 Provider files 分组。Provider 文件只有一个不可编辑的
+`configured` Variant，仍完全服从文件内容。
+
+Provider JSON 可以加入配置库后再补凭据，但在 `api_key`、OAuth、`KIMI_API_KEY` / `KIMIX_API_KEY`
+或该 Provider 的标准 API Key 环境变量均不可用时会标记为 **API key missing**，并禁用
+**Use model**。配置检查只形成界面状态，不再在 GUI 启动时输出缺少 API Key 的运行时警告。
+
+选择优先级为 session 覆盖高于 work dir 默认。工程 Settings 可以添加或移除文件库引用，但不能
+移除正在使用的工程默认；移除引用不会删除 Provider JSON 文件。session Settings 不提供添加或
+删除操作。全局 `KIMI_SHARE_DIR/kimix-gui.json`（默认 `~/.kimi/kimix-gui.json`）使用 version 5，
+统一保存界面偏好、Provider 文件绝对路径和各 work dir 的明确 `target + variant`；每个 session
+目录自己的 version 3 `kimix-gui.json` 保存相同选择结构。这些文件不保存 OAuth token、Provider
+参数或 API Key。若 Provider 文件、ChatGPT 模型或明确变体不可用，界面保留原选择并禁止进入，
+要求用户重新选择。
 
 建议以桌面窗口运行。主页支持鼠标预览和打开会话。
 

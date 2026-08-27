@@ -25,10 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 from kimix_gui.i18n import SUPPORTED_LANGUAGES
-from kimix_gui.llm_config import inspect_llm_config
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.bridge import KimixBridge
 from kimix_gui.qt.chat_view import ChatView
+from kimix_gui.qt.components import DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED, DisclosureHeader
 from kimix_gui.qt.home_view import HomeView
 from kimix_gui.qt.i18n import (
     TRANSLATIONS_DIR,
@@ -212,7 +213,7 @@ def test_a_missing_catalog_degrades_to_the_english_msgid(qtbot, restore_english)
 def test_home_view_renders_chinese_chrome(qtbot, chinese, tmp_path: Path) -> None:
     """HomeView, built directly so no ``KimixGuiApp`` re-pins the language."""
 
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     home = HomeView(tmp_path, default_config=reference, session_config_loader=lambda _id: None)
     qtbot.addWidget(home)
     home.show_sessions(
@@ -260,7 +261,7 @@ def test_home_view_localizes_the_pure_layer_formatters(qtbot, chinese, tmp_path:
     from kimix_gui.qt.session_copy import format_file_size, format_relative_time
 
     now = 1_700_000_000.0
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     home = HomeView(tmp_path, default_config=reference, session_config_loader=lambda _id: None)
     qtbot.addWidget(home)
     home.show_sessions(
@@ -349,10 +350,10 @@ def test_chat_view_renders_chinese_chrome(qtbot, chinese) -> None:
 
 @needs_catalog
 def test_llm_settings_dialog_renders_chinese_chrome(qtbot, chinese, tmp_path: Path) -> None:
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     dialog = LLMSettingsDialog(
         current=reference,
-        references=(reference,),
+        models=(reference.model,),
         scope_label="新会话",
         manage_library=True,
     )
@@ -360,20 +361,30 @@ def test_llm_settings_dialog_renders_chinese_chrome(qtbot, chinese, tmp_path: Pa
 
     assert dialog.windowTitle() == "LLM 配置"
     assert widget_text(dialog, "settings-title") == "LLM 配置"
-    assert widget_text(dialog, "config-path-label") == "KIMIX 服务商配置(.JSON)"
+    path_input = find(dialog, "config-path", QLineEdit)
+    assert path_input.placeholderText() == "服务商 JSON 路径"
+    assert path_input.accessibleName() == "服务商 JSON 路径"
     assert find(dialog, "browse-config", QPushButton).text() == "浏览…"
-    assert find(dialog, "browse-config", QPushButton).toolTip() == "选择一个 JSON 文件"
-    assert find(dialog, "load-config", QPushButton).text() == "添加配置"
-    assert widget_text(dialog, "config-sources-title") == "可用配置"
-    assert widget_text(dialog, "config-details-title") == "配置详情"
-    assert find(dialog, "apply-settings", QPushButton).text() == "使用此配置"
+    assert find(dialog, "load-config", QPushButton).text() == "添加"
+    assert widget_text(dialog, "config-sources-title") == "可用模型"
+    assert widget_text(dialog, "config-details-title") == "模型选择"
+    assert widget_text(dialog, "selection-source") == "服务商文件"
+    assert widget_text(dialog, "selection-status") == "可用"
+    chatgpt_group = find(dialog, "chatgpt-config-group", DisclosureHeader)
+    provider_group = find(dialog, "provider-config-group", DisclosureHeader)
+    assert chatgpt_group.text() == f"{DISCLOSURE_COLLAPSED}  ChatGPT 订阅 · 0"
+    assert provider_group.text() == f"{DISCLOSURE_EXPANDED}  服务商文件 · 1"
+    assert chatgpt_group.toolTip() == "展开分组"
+    assert provider_group.toolTip() == "收起分组"
+    assert any("服务商文件" in item.text() for item in dialog.model_items())
+    assert find(dialog, "apply-settings", QPushButton).text() == "使用模型"
     assert find(dialog, "delete-config", QPushButton).text() == "移除"
     assert find(dialog, "cancel-settings", QPushButton).text() == "取消"
     # ``_format_tokens`` is a module function, so its copy goes through
     # ``QCoreApplication.translate`` instead of ``self.tr`` -- prove it lands too.
-    assert widget_text(dialog, "config-context") == "100,000 tokens"
-    assert widget_text(dialog, "config-capabilities") == "未指定"
-    assert widget_text(dialog, "config-thinking") == "强度 未指定 · 流式输出关"
+    assert widget_text(dialog, "model-context") == "100,000 tokens"
+    assert widget_text(dialog, "model-capabilities") == "未指定"
+    assert widget_text(dialog, "provider-thinking") == "由服务商文件配置"
 
 
 @needs_catalog

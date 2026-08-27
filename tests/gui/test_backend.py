@@ -17,15 +17,20 @@ from kimix_gui.backend import (
     create_sdk_session,
     new_session_id,
 )
-from kimix_gui.llm_config import ChatGPTSource
+from kimix_gui.llm import (
+    ProviderFileTarget,
+    chatgpt_selection,
+    configured_selection,
+    default_provider_file_path,
+)
 
 
 def test_session_options_are_standalone_values(tmp_path: Path) -> None:
-    options = SessionOptions(work_dir=tmp_path, model="kimi", thinking=True)
+    selection = configured_selection(ProviderFileTarget(tmp_path / "provider.json", "kimi"))
+    options = SessionOptions(work_dir=tmp_path, llm_selection=selection)
 
     assert options.work_dir == tmp_path
-    assert options.model == "kimi"
-    assert options.thinking is True
+    assert options.llm_selection == selection
     assert options.yolo is False
 
 
@@ -66,7 +71,10 @@ async def test_session_factory_passes_config_file(
     monkeypatch.setattr(backend, "create_session_async", fake_create)
 
     result = await create_sdk_session(
-        SessionOptions(tmp_path, config_file=config_file, model="override-model")
+        SessionOptions(
+            tmp_path,
+            llm_selection=configured_selection(ProviderFileTarget(config_file, "override-model")),
+        )
     )
 
     assert result is created
@@ -96,8 +104,9 @@ async def test_session_factory_resumes_through_kimix_worker_factory(
         SessionOptions(
             tmp_path,
             session_id="existing-session",
-            model="model-override",
-            thinking=True,
+            llm_selection=configured_selection(
+                ProviderFileTarget(default_provider_file_path(), "model-override")
+            ),
             yolo=True,
         )
     )
@@ -106,7 +115,7 @@ async def test_session_factory_resumes_through_kimix_worker_factory(
     assert received["session_id"] == "existing-session"
     assert received["resume"] is True
     assert received["model"] == "model-override"
-    assert received["thinking"] is True
+    assert "thinking" not in received
     assert received["yolo"] is True
 
 
@@ -127,7 +136,12 @@ async def test_session_factory_loads_worker_execution_tools(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    session = await create_sdk_session(SessionOptions(tmp_path, config_file=config_file))
+    session = await create_sdk_session(
+        SessionOptions(
+            tmp_path,
+            llm_selection=configured_selection(ProviderFileTarget(config_file)),
+        )
+    )
     try:
         runtime_session = cast(Any, session)
         tool_names = {tool.name for tool in runtime_session._cli.soul.agent.toolset.tools}
@@ -177,7 +191,10 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
     service = CodexAuthService(auth_file)
 
     session = await create_sdk_session(
-        SessionOptions(tmp_path, llm_source=ChatGPTSource("gpt-test-codex")),
+        SessionOptions(
+            tmp_path,
+            llm_selection=chatgpt_selection("gpt-test-codex", "medium"),
+        ),
         codex_service=service,
     )
     try:

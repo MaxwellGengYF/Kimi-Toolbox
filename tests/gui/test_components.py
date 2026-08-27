@@ -15,19 +15,29 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QLabel,
+    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from kimix_gui.llm_config import inspect_llm_config
+from kimix_gui.design import DARK
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.preferences import InterfacePreferences
-from kimix_gui.qt.components import Card, DialogFooter, KeyValueList
+from kimix_gui.qt.components import (
+    DISCLOSURE_COLLAPSED,
+    DISCLOSURE_EXPANDED,
+    Card,
+    DialogFooter,
+    DisclosureHeader,
+    KeyValueList,
+    SettingsList,
+)
 from kimix_gui.qt.preferences_dialog import PreferencesDialog
 from kimix_gui.qt.request_dialogs import ApprovalDialog, DeleteSessionsDialog, QuestionDialog
 from kimix_gui.qt.settings_dialog import LLMSettingsDialog
-from kimix_gui.qt.styling import CARD, TONE, CardLevel, Tone
+from kimix_gui.qt.styling import CARD, TONE, VARIANT, CardLevel, Tone, Variant
 
 
 def _provider_config(tmp_path: Path) -> Path:
@@ -51,7 +61,7 @@ def _provider_config(tmp_path: Path) -> Path:
 def _dialogs(tmp_path: Path) -> dict[str, QDialog]:
     """Every dialog in the app, keyed by the name used in the tables below."""
 
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     return {
         "approval": ApprovalDialog("Run bash", "ls -la"),
         "question": QuestionDialog("Which branch?", "main or dev"),
@@ -59,13 +69,13 @@ def _dialogs(tmp_path: Path) -> dict[str, QDialog]:
         "preferences": PreferencesDialog(InterfacePreferences(), font_families=list),
         "llm-settings": LLMSettingsDialog(
             current=reference,
-            references=(reference,),
+            models=(reference.model,),
             scope_label="New session",
             manage_library=True,
         ),
         "llm-settings-read-only": LLMSettingsDialog(
             current=reference,
-            references=(reference,),
+            models=(reference.model,),
             scope_label="Active session",
             read_only=True,
         ),
@@ -257,6 +267,52 @@ def test_a_destructive_confirmation_leaves_the_return_key_on_the_way_out(qtbot) 
     assert ordinary.default_button is safe
 
 
+def test_disclosure_header_uses_the_shared_chat_glyphs(qtbot) -> None:
+    header = DisclosureHeader(
+        "Provider files",
+        expanded=False,
+        expanded_tooltip="Collapse section",
+        collapsed_tooltip="Expand section",
+    )
+    qtbot.addWidget(header)
+    header.show()
+
+    assert header.label == "Provider files"
+    assert header.text() == f"{DISCLOSURE_COLLAPSED}  Provider files"
+    assert header.toolTip() == "Expand section"
+    assert header.accessibleName() == "Provider files"
+    assert header.accessibleDescription() == "Expand section"
+    assert header.property(VARIANT) == Variant.DISCLOSURE
+
+    qtbot.mouseClick(header, Qt.MouseButton.LeftButton)
+
+    assert header.isChecked()
+    assert header.text() == f"{DISCLOSURE_EXPANDED}  Provider files"
+    assert header.toolTip() == "Collapse section"
+    assert header.accessibleDescription() == "Collapse section"
+
+    header.set_label("Subscription models")
+
+    assert header.label == "Subscription models"
+    assert header.text() == f"{DISCLOSURE_EXPANDED}  Subscription models"
+    assert header.accessibleName() == "Subscription models"
+
+
+def test_settings_list_reserves_styled_padding_for_item_widgets(qtbot) -> None:
+    items = SettingsList()
+    control = QPushButton("Embedded control", items)
+    item = QListWidgetItem()
+    items.addItem(item)
+    qtbot.addWidget(items)
+
+    items.set_sized_item_widget(item, control)
+
+    assert items.itemWidget(item) is control
+    assert item.sizeHint().height() >= (
+        control.sizeHint().height() + DARK.sizing.settings_row_padding
+    )
+
+
 def test_the_key_column_sizes_itself_to_the_labels(qtbot) -> None:
     """It used to be ``setFixedWidth(110)``, which is a translation waiting to break.
 
@@ -313,8 +369,6 @@ CARD_PADDING: dict[str, str] = {
 
 @pytest.mark.parametrize("level", sorted(CARD_PADDING))
 def test_a_card_takes_its_padding_from_the_level(qtbot, level: str) -> None:
-    from kimix_gui.design import DARK
-
     card = Card(level)
     qtbot.addWidget(card)
     expected = getattr(DARK.card_padding, CARD_PADDING[level])

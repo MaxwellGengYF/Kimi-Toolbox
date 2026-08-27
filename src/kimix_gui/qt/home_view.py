@@ -24,11 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from kimix_gui.design import DARK
-from kimix_gui.llm_config import (
-    ChatGPTModelReference,
-    LLMReference,
-    llm_reference_available,
-)
+from kimix_gui.llm import ChatGPTTarget, ProviderFileTarget, ResolvedLLMSelection
 from kimix_gui.qt import keys
 from kimix_gui.qt.components import Card, KeyValueList
 from kimix_gui.qt.labels import translate_session_title
@@ -48,7 +44,7 @@ from kimix_gui.session_index import (
     SessionSummary,
 )
 
-SessionConfigLoader = Callable[[str], LLMReference | None]
+SessionConfigLoader = Callable[[str], ResolvedLLMSelection | None]
 
 # Import-time bound, like the transcript metrics: the names stay, the numbers
 # moved to the token layer.
@@ -74,7 +70,7 @@ class HomeView(QWidget):
         self,
         work_dir: Path,
         *,
-        default_config: LLMReference,
+        default_config: ResolvedLLMSelection,
         session_config_loader: SessionConfigLoader,
         parent: QWidget | None = None,
     ) -> None:
@@ -307,7 +303,7 @@ class HomeView(QWidget):
         if summary is None:
             return False
         saved = self._session_config_loader(summary.id)
-        return llm_reference_available(saved or self._default_config)
+        return (saved or self._default_config).available
 
     def session_rows(self) -> list[SessionRow]:
         rows: list[SessionRow] = []
@@ -333,14 +329,14 @@ class HomeView(QWidget):
         self._refresh_details_copy()
         self._update_selection_controls([])
 
-    def refresh_configuration(self, default_config: LLMReference) -> None:
+    def refresh_configuration(self, default_config: ResolvedLLMSelection) -> None:
         self._default_config = default_config
         self._refresh_model_label()
         if self.summary is not None:
             self._show_session(self.summary)
 
     def request_new_session(self) -> None:
-        if not llm_reference_available(self._default_config):
+        if not self._default_config.available:
             self.llm_required.emit(None)
             return
         self.new_session.emit()
@@ -412,9 +408,9 @@ class HomeView(QWidget):
     def _refresh_model_label(self) -> None:
         # Two whole sentences rather than a translated suffix glued onto a
         # translated stem: the " · missing" tail has no meaning on its own.
-        if llm_reference_available(self._default_config):
+        if self._default_config.available:
             template = self.tr("New sessions · {config}")
-        elif isinstance(self._default_config, ChatGPTModelReference):
+        elif isinstance(self._default_config.selection.target, ChatGPTTarget):
             template = self.tr("New sessions · {config} · connect ChatGPT")
         else:
             template = self.tr("New sessions · {config} · missing")
@@ -578,18 +574,20 @@ class HomeView(QWidget):
         saved_config = self._session_config_loader(summary.id)
         effective = saved_config or self._default_config
         self._detail_values["detail-llm"].setText(effective.label)
-        self._detail_values["detail-provider"].setText(effective.provider_type)
+        self._detail_values["detail-provider"].setText(effective.model.provider_type)
         config_source = (
             self.tr("ChatGPT subscription")
-            if isinstance(effective, ChatGPTModelReference)
-            else str(effective.path)
+            if isinstance(effective.selection.target, ChatGPTTarget)
+            else str(effective.selection.target.path)
+            if isinstance(effective.selection.target, ProviderFileTarget)
+            else effective.model.endpoint
         )
         if saved_config is None:
             config_source = self.tr("{path} · project default").format(path=config_source)
-        if not llm_reference_available(effective):
+        if not effective.available:
             config_source = (
                 self.tr("{path} · connect ChatGPT")
-                if isinstance(effective, ChatGPTModelReference)
+                if isinstance(effective.selection.target, ChatGPTTarget)
                 else self.tr("{path} · missing")
             ).format(path=config_source)
         self._detail_values["detail-config"].setText(config_source)
@@ -684,7 +682,7 @@ class HomeView(QWidget):
 
     def _open_summary(self, summary: SessionSummary) -> None:
         saved = self._session_config_loader(summary.id)
-        if not llm_reference_available(saved or self._default_config):
+        if not (saved or self._default_config).available:
             self.llm_required.emit(summary.id)
             return
         self.resume_session.emit(summary.id)

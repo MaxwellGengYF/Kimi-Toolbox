@@ -11,7 +11,7 @@
 ```powershell
 uv sync                                  # 默认 dev group，包含 PySide6 与 pytest-qt
 uv sync --no-dev --extra gui             # 接近发行用户的 GUI 运行环境
-uv run kimix-gui [--work-dir DIR] [--session ID] [--config provider.json] [--model M] [--thinking] [--yolo]
+uv run kimix-gui [--work-dir DIR] [--session ID] [--config provider.json] [--model M] [--yolo]
 uv run pytest tests/gui -q                   # GUI 全量测试，offscreen Qt
 uv run pytest tests/gui/test_todos.py -q # 单文件
 uv run pytest -q -k composer             # 按关键词筛选
@@ -32,8 +32,8 @@ uv run python scripts/gui/build_translations.py
   docstring。
 - 使用 Python 3.14 语法。`except TypeError, ValueError:`（PEP 758 的无括号多异常）是有意的；
   仓库已有多处，不要“修正”为带括号写法。
-- 解析 wire / state 使用 `orjson`。stdlib `json` 只在 `llm_config.py` 用于写出人类可读、
-  `indent=2` 的 metadata，不要扩散。
+- 解析 wire / state 与 GUI metadata 使用 `orjson`；metadata 用 `OPT_INDENT_2` 保持可读，产品代码
+  不引入 stdlib `json`。
 - 跨层数据使用 `@dataclass(frozen=True, slots=True)`。
 - ruff 配置为 line-length 100、target py314，并与上游统一启用 E/F/I/N/W。
 - `setObjectName()` 只表达身份与测试钩子；外观使用 `qt/styling` 的动态属性和 `theme.py` QSS，
@@ -49,8 +49,8 @@ uv run python scripts/gui/build_translations.py
 
 1. `python -O` 会把 assert 整条删除，使“不变量”在发行环境根本不检查。曾有
    `assert config.model is not None` 在 `-O` 下退化为后续的 `AttributeError`。
-2. `AssertionError` 不在调用方的领域异常处理链中。它会绕过本层异常，例如 `llm_config` 的调用方
-   捕获 `LLMConfigError`，设置对话框才能把问题渲染为可读信息。
+2. `AssertionError` 不在调用方的领域异常处理链中。它会绕过本层异常，例如 Provider 文件检查的
+   调用方捕获 `LLMInspectionError`，设置对话框才能把 `LLMProblem` 渲染为可读信息。
 
 需要类型收窄时优先改结构，不要机械换成 `raise`：
 

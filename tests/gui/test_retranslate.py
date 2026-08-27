@@ -21,7 +21,7 @@ import pytest
 from PySide6.QtCore import QEvent, QObject, QRect
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
-from kimix_gui.llm_config import inspect_llm_config
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.qt.bridge import KimixBridge
 from kimix_gui.qt.chat_view import ChatView
 from kimix_gui.qt.home_view import HomeView
@@ -268,7 +268,7 @@ def test_a_live_chat_view_changes_language(qtbot, chinese) -> None:
 
 @needs_catalog
 def test_a_live_home_view_changes_language(qtbot, tmp_path, chinese) -> None:
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     view = HomeView(
         tmp_path,
         default_config=reference,
@@ -304,7 +304,7 @@ def test_the_metadata_field_names_change_language(qtbot, tmp_path, chinese) -> N
 
     view = HomeView(
         tmp_path,
-        default_config=inspect_llm_config(_provider_config(tmp_path)),
+        default_config=resolved_provider_file(_provider_config(tmp_path)),
         session_config_loader=lambda _session_id: None,
     )
     qtbot.addWidget(view)

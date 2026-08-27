@@ -20,11 +20,27 @@ once and left it wrong for the rest of the session.
 """
 
 from kimix_gui.qt.components.card import Card
+from kimix_gui.qt.components.disclosure import (
+    DISCLOSURE_COLLAPSED,
+    DISCLOSURE_EXPANDED,
+    DisclosureHeader,
+)
 from kimix_gui.qt.components.footer import DialogFooter
 from kimix_gui.qt.components.key_value import KeyValueList
 from kimix_gui.qt.components.settings_list import SettingsList
+from kimix_gui.qt.components.variant_picker import VariantOption, VariantPicker
 
 # ``CardLevel`` is not re-exported: it is part of the property vocabulary and
 # belongs with ``Variant`` and ``Role`` in :mod:`kimix_gui.qt.styling`, which is
 # where callers already import from.
-__all__ = ["Card", "DialogFooter", "KeyValueList", "SettingsList"]
+__all__ = [
+    "DISCLOSURE_COLLAPSED",
+    "DISCLOSURE_EXPANDED",
+    "Card",
+    "DialogFooter",
+    "DisclosureHeader",
+    "KeyValueList",
+    "SettingsList",
+    "VariantOption",
+    "VariantPicker",
+]

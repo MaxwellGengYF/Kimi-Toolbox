@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize
-from PySide6.QtWidgets import QListWidget, QWidget
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt
+from PySide6.QtWidgets import QListWidget, QListWidgetItem, QWidget
 
 from kimix_gui.design import DARK
+
+_MINIMUM_ROW_HEIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class SettingsList(QListWidget):
@@ -39,12 +41,39 @@ class SettingsList(QListWidget):
         for row in range(first, last + 1):
             item = self.item(row)
             if item is not None:
-                item.setSizeHint(QSize(0, height))
+                self._apply_item_height(item, height)
 
     def _apply_row_height(self) -> None:
         height = self._row_height()
         for row in range(self.count()):
-            self.item(row).setSizeHint(QSize(0, height))
+            self._apply_item_height(self.item(row), height)
+
+    def set_item_minimum_height(self, item: QListWidgetItem, height: int) -> None:
+        """Keep enough total row height for an item-widget's styled content.
+
+        ``QListWidget::item`` padding is taken from the row before Qt lays out an
+        item widget. Callers therefore pass the complete row height they need, not
+        just the child widget's height. The value is retained across font changes.
+        """
+
+        item.setData(_MINIMUM_ROW_HEIGHT_ROLE, max(0, height))
+        self._apply_item_height(item, self._row_height())
+
+    def set_sized_item_widget(self, item: QListWidgetItem, widget: QWidget) -> None:
+        """Attach a control and reserve room for it plus the styled row padding."""
+
+        self.setItemWidget(item, widget)
+        widget.ensurePolished()
+        self.set_item_minimum_height(
+            item,
+            widget.sizeHint().height() + DARK.sizing.settings_row_padding,
+        )
+
+    @staticmethod
+    def _apply_item_height(item: QListWidgetItem, default_height: int) -> None:
+        minimum = item.data(_MINIMUM_ROW_HEIGHT_ROLE)
+        height = max(default_height, minimum) if isinstance(minimum, int) else default_height
+        item.setSizeHint(QSize(0, height))
 
     def _row_height(self) -> int:
         return max(

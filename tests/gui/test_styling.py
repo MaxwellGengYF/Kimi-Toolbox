@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from kimix_gui.design import DARK
-from kimix_gui.llm_config import inspect_llm_config
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt import styling
 from kimix_gui.qt.bridge import KimixBridge
@@ -132,6 +132,7 @@ FREED_OBJECT_NAMES: frozenset[str] = frozenset(
         "approve",
         "cancel-pad",
         "cancel-prompt",
+        "chatgpt-config-group",
         "chat-header",
         "chat-title",
         "chat-toolbar",
@@ -163,6 +164,7 @@ FREED_OBJECT_NAMES: frozenset[str] = frozenset(
         "preferences-page-title",
         "preferences-subtitle",
         "preferences-title",
+        "provider-config-group",
         "reject",
         "select-shown",
         "selection-count",
@@ -388,6 +390,10 @@ EXPECTED_PROPERTIES: dict[str, dict[str, str]] = {
     "settings-scope": {TONE: Tone.MUTED},
     "settings-error": {TONE: Tone.DANGER},
     "config-details-title": {ROLE: Role.TITLE},
+    "model-details-title": {ROLE: Role.OVERLINE},
+    "provider-details-title": {ROLE: Role.OVERLINE},
+    "chatgpt-config-group": {VARIANT: Variant.DISCLOSURE},
+    "provider-config-group": {VARIANT: Variant.DISCLOSURE},
     "apply-settings": {VARIANT: Variant.PRIMARY},
     "preferences-title": {ROLE: Role.DISPLAY, LEVEL: Level.TWO},
     "preferences-subtitle": {TONE: Tone.MUTED},
@@ -408,7 +414,6 @@ EXPECTED_PROPERTIES: dict[str, dict[str, str]] = {
     "session-meta": {ROLE: Role.CAPTION},
     "font-preview": {CARD: CardLevel.INSET},
     "font-preview-label": {ROLE: Role.OVERLINE},
-    "config-path-label": {ROLE: Role.OVERLINE},
     "config-sources-title": {ROLE: Role.TITLE},
     "dialog-title": {ROLE: Role.SECTION},
     "delete-title": {ROLE: Role.SECTION},
@@ -437,6 +442,7 @@ ELEMENT_STYLED: dict[str, tuple[type[QWidget], str, frozenset[str]]] = {
     "font-fallback": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "interface-language": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "interface-theme": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
+    "variant-picker": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "font-size": (QSpinBox, "QSpinBox", _OPAQUE_CONTROL_DECLARATIONS),
     "approval-payload": (QTextEdit, "QTextEdit", _OPAQUE_CONTROL_DECLARATIONS),
     # Secondary buttons: the bare QPushButton rule is their intentional look.
@@ -469,6 +475,7 @@ NO_QSS_BY_DESIGN: dict[str, str] = {
     "config-details": "layout-only container",
     "dialog-footer": "layout-only button row; DialogFooter owns the order, not a look",
     "config-sources": "layout-only container",
+    "provider-file-picker": "layout-only container inside the Provider files group",
     "detail-metadata": "layout-only container",
     "preferences-appearance": "layout-only page container",
     "preferences-models": "layout-only page container",
@@ -485,16 +492,19 @@ NO_QSS_BY_DESIGN: dict[str, str] = {
     **{
         name: "key/value list value, base label style"
         for name in (
-            "config-model",
-            "config-format",
-            "config-model-id",
-            "config-provider",
-            "config-endpoint",
-            "config-credential",
-            "config-context",
-            "config-output",
-            "config-capabilities",
-            "config-thinking",
+            "selection-model",
+            "selection-source",
+            "selection-status",
+            "model-id",
+            "model-context",
+            "model-output",
+            "model-capabilities",
+            "model-modalities",
+            "provider-type",
+            "provider-endpoint",
+            "provider-credential",
+            "provider-format",
+            "provider-thinking",
             "detail-updated",
             "detail-llm",
             "detail-provider",
@@ -510,6 +520,8 @@ NO_QSS_BY_DESIGN: dict[str, str] = {
     # Custom painters: their colours come from tokens inside ``paintEvent``.
     "todo-progress": "custom paintEvent, colours read from tokens",
     "font-preview-text": "font is set per preview, that is the whole point",
+    "inherit-project-default": "native checkbox; it carries selection semantics, not appearance",
+    "variant-picker-label": "base label next to the element-styled combo box",
 }
 
 
@@ -534,7 +546,7 @@ def _tagged_widgets(roots: list[QWidget]) -> dict[str, list[QWidget]]:
 def style_gallery(qtbot, tmp_path: Path) -> dict[str, list[QWidget]]:
     """One instance of every view that owns a tagged widget."""
 
-    reference = inspect_llm_config(_provider_config(tmp_path))
+    reference = resolved_provider_file(_provider_config(tmp_path))
     home = HomeView(tmp_path, default_config=reference, session_config_loader=lambda _id: None)
     home.show_sessions(
         [
@@ -557,8 +569,9 @@ def style_gallery(qtbot, tmp_path: Path) -> dict[str, list[QWidget]]:
         PreferencesDialog(InterfacePreferences(), font_families=list),
         LLMSettingsDialog(
             current=reference,
-            references=(reference,),
+            models=(reference.model,),
             scope_label="New session",
+            project_default=reference,
             manage_library=True,
         ),
         # Read-only is a second chrome, not a disabled variant of the first: it
@@ -566,7 +579,7 @@ def style_gallery(qtbot, tmp_path: Path) -> dict[str, list[QWidget]]:
         # controls, so both spellings need an instance to be reachable here.
         LLMSettingsDialog(
             current=reference,
-            references=(reference,),
+            models=(reference.model,),
             scope_label="Active session",
             read_only=True,
         ),
@@ -624,6 +637,10 @@ def test_the_two_full_size_dialogs_head_themselves_the_same_way(
     for name in ("config-sources-title", "config-details-title", "preferences-page-title"):
         for widget in style_gallery[name]:
             assert widget.property(ROLE) == Role.TITLE, name
+
+    for name in ("model-details-title", "provider-details-title"):
+        for widget in style_gallery[name]:
+            assert widget.property(ROLE) == Role.OVERLINE, name
 
 
 def test_every_object_name_has_a_styling_decision(

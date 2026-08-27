@@ -30,7 +30,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QStackedWidget, QVBoxLayo
 
 from kimix_gui.app import KimixGuiApp
 from kimix_gui.backend import SessionOptions
-from kimix_gui.llm_config import inspect_llm_config
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.qt import keys
 from kimix_gui.qt.bridge import KimixBridge
 from kimix_gui.qt.chat_view import ChatView
@@ -75,7 +75,7 @@ def _home(tmp_path: Path) -> HomeView:
     )
     home = HomeView(
         tmp_path,
-        default_config=inspect_llm_config(config),
+        default_config=resolved_provider_file(config),
         session_config_loader=lambda _id: None,
     )
     home.resize(900, 600)

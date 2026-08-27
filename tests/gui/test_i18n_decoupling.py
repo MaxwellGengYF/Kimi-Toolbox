@@ -9,11 +9,7 @@ from pathlib import Path
 
 from kimi_agent_sdk import ApprovalRequest, BriefDisplayBlock, ToolResult, ToolReturnValue
 from kimix_gui import tool_display, transcript_layout
-from kimix_gui.llm_config import (
-    config_file_available,
-    inspect_llm_config,
-    unavailable_config_reference,
-)
+from kimix_gui.llm import resolved_provider_file
 from kimix_gui.qt import labels, paint
 from kimix_gui.rendering import WireNormalizer
 from kimix_gui.tool_display import (
@@ -51,30 +47,29 @@ def write_provider_config(path: Path) -> Path:
     return path
 
 
-def test_inspected_reference_is_marked_inspected(tmp_path: Path) -> None:
-    reference = inspect_llm_config(write_provider_config(tmp_path / "provider.json"))
-    assert reference.inspected is True
-    assert config_file_available(reference) is True
+def test_inspected_provider_selection_is_available(tmp_path: Path) -> None:
+    resolved = resolved_provider_file(write_provider_config(tmp_path / "provider.json"))
+    assert resolved.available is True
 
 
-def test_placeholder_reference_is_marked_uninspected(tmp_path: Path) -> None:
-    reference = unavailable_config_reference(tmp_path / "missing.json")
-    assert reference.inspected is False
-    assert reference.provider_type == "Unavailable"
+def test_missing_provider_selection_has_a_structured_problem(tmp_path: Path) -> None:
+    resolved = resolved_provider_file(tmp_path / "missing.json")
+    assert resolved.available is False
+    assert resolved.model.provider_type == "Unavailable"
+    assert resolved.problem is not None
 
 
 def test_availability_ignores_translated_display_strings(tmp_path: Path) -> None:
-    present = tmp_path / "present.json"
-    present.write_text("{}", encoding="utf-8")
-    translated = replace(
-        unavailable_config_reference(present),
+    missing = resolved_provider_file(tmp_path / "missing.json")
+    translated_model = replace(
+        missing.model,
         provider_type="不可用",
-        base_url="不可用",
+        endpoint="不可用",
         credential="不可用",
-        model_name="配置不可用",
-        error=None,
+        model_id="配置不可用",
     )
-    assert config_file_available(translated) is False
+    translated = replace(missing, model=translated_model)
+    assert translated.available is False
 
 
 def _entry(normalized: object) -> object:

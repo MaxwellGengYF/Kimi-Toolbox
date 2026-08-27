@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from kimix_gui.app import KimixGuiApp
 from kimix_gui.backend import SessionOptions
 from kimix_gui.design import DARK
-from kimix_gui.llm_config import KimixGuiConfigStore, inspect_llm_config
+from kimix_gui.llm import KimixGuiConfigStore, resolved_provider_file
 from kimix_gui.qt import theme
 from kimix_gui.qt.chat_view import ChatView
 from kimix_gui.qt.request_dialogs import DeleteSessionsDialog
@@ -55,7 +55,7 @@ def _config_store(tmp_path: Path) -> KimixGuiConfigStore:
             tmp_path / "sessions" / session_id / "kimix-gui.json"
         ),
     )
-    store.set_default(tmp_path, inspect_llm_config(config_file))
+    store.set_default(tmp_path, resolved_provider_file(config_file).selection)
     return store
 
 

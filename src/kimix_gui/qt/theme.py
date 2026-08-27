@@ -309,6 +309,21 @@ QPushButton[variant="ghost"]:hover, QPushButton[variant="icon"]:hover {{
 QPushButton[variant="ghost"]:disabled {{
     background: transparent;
 }}
+QToolButton[variant="disclosure"] {{
+    background: {p.panel};
+    color: {p.accent};
+    border: {z.border_width}px solid {p.border};
+    border-radius: {r.md}px;
+    padding: {s.sm}px {s.md}px;
+    font-weight: {t.weight_semibold};
+    text-align: left;
+}}
+QToolButton[variant="disclosure"]:hover {{
+    background: {p.boost};
+}}
+QToolButton[variant="disclosure"]:focus {{
+    border-color: {p.focus_ring};
+}}
 """
 
 
@@ -478,7 +493,10 @@ QListWidget#preferences-categories, QListWidget#config-list {{
     padding: {s.sm}px;
 }}
 QListWidget#preferences-categories::item, QListWidget#config-list::item {{
-    padding: {s.md}px {s.lg}px;
+    padding: {z.settings_row_padding // 2}px {s.lg}px;
+}}
+QComboBox#variant-picker[state="unavailable"] {{
+    border-color: {p.danger_border};
 }}
 """
 

@@ -20,7 +20,14 @@ from PySide6.QtWidgets import QPushButton, QWidget
 
 from kimix_gui.app import KimixGuiApp
 from kimix_gui.backend import SessionOptions
-from kimix_gui.llm_config import ChatGPTModelReference, ChatGPTSource
+from kimix_gui.llm import (
+    PROBLEM_MODEL_UNAVAILABLE,
+    ChatGPTTarget,
+    chatgpt_model_descriptor,
+    chatgpt_selection,
+    resolve_selection,
+    unavailable_model,
+)
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.bridge import KimixBridge
 from kimix_gui.qt.codex_dialog import CodexLoginDialog
@@ -121,16 +128,20 @@ def test_login_dialog_cancel_carries_operation_id(qtbot) -> None:
 
 
 def test_builtin_chatgpt_model_applies_only_after_explicit_click(qtbot) -> None:
-    reference = ChatGPTModelReference(
-        model_name="gpt-5.4",
-        supported_efforts=("low", "medium", "high", "xhigh"),
-        default_reasoning_effort="medium",
-        available=True,
+    model = chatgpt_model_descriptor(
+        CodexModel(
+            "gpt-5.4",
+            reasoning_efforts=("low", "medium", "high", "xhigh"),
+            default_reasoning_effort="medium",
+        ),
+        connected=True,
         stale=False,
     )
+    selection = chatgpt_selection("gpt-5.4", "medium")
+    resolved = resolve_selection(selection, [model])
     dialog = LLMSettingsDialog(
-        current=reference,
-        references=(reference,),
+        current=resolved,
+        models=(model,),
         scope_label="New sessions",
         manage_library=True,
         chatgpt_connected=True,
@@ -141,25 +152,25 @@ def test_builtin_chatgpt_model_applies_only_after_explicit_click(qtbot) -> None:
     dialog.applied.connect(applied.append)
 
     assert applied == []
-    assert dialog.selected_config() == reference
+    assert dialog.selected_selection() == selection
     assert not find(dialog, "delete-config", QPushButton).isEnabled()
-    assert widget_text(dialog, "config-context") == "272,000 tokens"
-    assert widget_text(dialog, "config-output") == "128,000 tokens"
-    assert widget_text(dialog, "config-thinking") == (
-        "default medium · efforts low, medium, high, xhigh"
-    )
+    assert widget_text(dialog, "model-context") == "272,000 tokens"
+    assert widget_text(dialog, "model-output") == "128,000 tokens"
+    assert dialog._variant_picker.currentData() == "reasoning_effort/medium"
     find(dialog, "apply-settings", QPushButton).click()
 
-    assert applied == [LLMSettingsResult(reference)]
+    assert applied == [LLMSettingsResult(selection)]
 
 
 def test_disconnected_model_picker_offers_login_without_making_model_available(
     qtbot,
 ) -> None:
-    reference = ChatGPTModelReference(model_name="gpt-5.4")
+    model = chatgpt_model_descriptor(CodexModel("gpt-5.4"), connected=False, stale=True)
+    selection = chatgpt_selection("gpt-5.4", "medium")
+    reference = resolve_selection(selection, [model])
     dialog = LLMSettingsDialog(
         current=reference,
-        references=(),
+        models=(model,),
         scope_label="New sessions",
         chatgpt_connected=False,
     )
@@ -169,30 +180,28 @@ def test_disconnected_model_picker_offers_login_without_making_model_available(
     dialog.connect_chatgpt.connect(lambda: requested.append(True))
 
     assert not find(dialog, "apply-settings", QPushButton).isEnabled()
-    assert any("Connect ChatGPT" in item.text() for item in dialog.config_items())
     find(dialog, "connect-chatgpt-models", QPushButton).click()
 
     assert requested == [True]
 
 
 def test_connected_account_marks_absent_saved_model_unavailable(qtbot) -> None:
-    reference = ChatGPTModelReference(
-        model_name="retired-model",
-        available=False,
-        problem_code="model_unavailable",
-    )
+    selection = chatgpt_selection("retired-model", "medium")
+    model = unavailable_model(ChatGPTTarget("retired-model"), PROBLEM_MODEL_UNAVAILABLE)
+    reference = resolve_selection(selection, [model])
     dialog = LLMSettingsDialog(
         current=reference,
-        references=(),
+        models=(),
         scope_label="Saved session",
         chatgpt_connected=True,
     )
     qtbot.addWidget(dialog)
-    dialog.set_chatgpt_references((), connected=True)
+    dialog.set_models((), chatgpt_connected=True)
     dialog.show()
 
     assert "not available" in widget_text(dialog, "settings-error")
-    assert find(dialog, "connect-chatgpt-models", QPushButton).isHidden()
+    login = dialog.findChild(QPushButton, "connect-chatgpt-models")
+    assert login is None or login.isHidden()
     assert not find(dialog, "apply-settings", QPushButton).isEnabled()
 
 
@@ -204,7 +213,7 @@ def test_saved_chatgpt_session_waits_for_initial_model_catalog(
         SessionOptions(
             tmp_path,
             session_id="saved-session",
-            llm_source=ChatGPTSource("account-only-model"),
+            llm_selection=chatgpt_selection("account-only-model", "medium"),
         )
     )
     app._pending_codex_startup = True
@@ -221,7 +230,13 @@ def test_saved_chatgpt_session_waits_for_initial_model_catalog(
     app.on_codex_catalog_changed(
         CodexModelCatalog(
             operation_id=9,
-            models=(CodexModel("account-only-model"),),
+            models=(
+                CodexModel(
+                    "account-only-model",
+                    reasoning_efforts=("low", "medium"),
+                    default_reasoning_effort="medium",
+                ),
+            ),
             stale=False,
         )
     )

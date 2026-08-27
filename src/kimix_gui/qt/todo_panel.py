@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from kimix_gui.design import DARK
 from kimix_gui.qt.appearance import FONT_CHANGED
+from kimix_gui.qt.components.disclosure import DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED
 from kimix_gui.qt.retranslate import Retranslator
 from kimix_gui.qt.styling import (
     FLASH,
@@ -272,7 +273,7 @@ class TodoPanel(QFrame):
         style(self._title, role=Role.OVERLINE)
         self._count = QLabel("0/0")
         self._count.setObjectName("todo-count")
-        self._chevron = QLabel("▴")
+        self._chevron = QLabel(DISCLOSURE_EXPANDED)
         self._chevron.setObjectName("todo-chevron")
         style(self._chevron, role=Role.FOOTNOTE)
         header_layout.addWidget(self._dot)
@@ -451,7 +452,7 @@ class TodoPanel(QFrame):
         self._strip.setVisible(self._expanded)
         self._scroll.setVisible(self._expanded)
         self._footer.setVisible(self._expanded)
-        self._chevron.setText("▴" if self._expanded else "▾")
+        self._chevron.setText(DISCLOSURE_EXPANDED if self._expanded else DISCLOSURE_COLLAPSED)
         repolish(self)
 
     def _set_flash(self, active: bool) -> None:

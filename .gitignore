@@ -11,6 +11,8 @@ src/kimix/default_config.json
 nul
 src/app/dist
 node_modules/
+# Generated Qt translation catalogs (rebuild from the tracked .ts sources).
+src/kimix_gui/translations/*.qm
 # Staged native binaries (runtime_py.pyd on Windows / runtime_py.so on Linux) from kimix-base.
 # The pure-Python shim package bin/kimix_native/ IS tracked (re-included).
 bin/*

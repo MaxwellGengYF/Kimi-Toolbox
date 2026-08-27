@@ -21,8 +21,13 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 |---|---|
 | `app.py` | `KimixGuiApp`：home / chat 路由，持有 bridge 与统一 GUI 配置存储 |
 | `backend.py` | `SessionOptions` + `create_sdk_session()`，包装 `kimix.create_session_async()` |
+| `chatgpt_provider.py` | GUI-only ChatGPT 订阅适配：验证并固定用户选择的明确 reasoning effort，不改变 Kimix 核心的布尔推导 |
 | `design/` | 与框架无关的设计 token：`palette.py` / `categories.py` / `scale.py` / `theme.py`（`DARK`） |
 | `i18n.py` | 纯函数 `resolve_language(preference, system_locale)` + 支持语言常量 |
+| `llm/domain.py` | 不可变 Provider target、Model、Variant、selection、resolved snapshot 与结构化 `LLMProblem` |
+| `llm/catalog.py` | ChatGPT 模型目录 → Model/Variant 描述；保持顺序并规范化 reasoning effort |
+| `llm/provider_file.py` | Provider JSON 检查、脱敏元数据、凭据可用状态与运行时文件加载 |
+| `llm/store.py` | `KimixGuiConfigStore`：全局 v5 / session v3 精确选择、旧版本迁移与原子写入 |
 | `preferences.py` | `InterfacePreferences`（字体 / 语言 / 主题）及其纯规范化/序列化函数 |
 | `transcript_data.py` | transcript 语义 AST、`HistoryEntry`、类型化 mutation/reducer、纯 formatter 与递归 `entry_cost()` |
 | `rendering.py` | `WireNormalizer`：SDK message → AST mutation；只在此边界解析工具参数；状态条独立产出 `StatusValues` |
@@ -31,7 +36,6 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 | `history.py` | `wire.jsonl` 外层校验 → 共用 normalizer/reducer → 按正文/record 双预算滑动的 AST window（`Timeline`） |
 | `session_index.py` | 按 kimi-cli 存储规则列出/删除历史会话，产出 `SessionSummary` |
 | `todos.py` | 读 `state.json` 与 `TodoDisplayBlock`，产出 `TodoSnapshot` |
-| `llm_config.py` | provider JSON 的脱敏引用库 + `KimixGuiConfigStore`（全局与 session 的 `kimix-gui.json`）|
 | `kimi_workdir.py` | Windows 盘符大小写与 Kimi metadata 对齐 |
 | `qt/bridge.py` | `KimixBridge`：worker 线程、asyncio loop、带 epoch 的 `TranscriptUpdate` / `HistoryPage` 信号、请求 future、`StreamCoalescer` |
 | `qt/codex_dialog.py` | ChatGPT 账号卡、浏览器登录模态框与活动会话断开确认 |
@@ -46,12 +50,12 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 | `qt/transcript_cards.py` | 卡片几何、结构化 section → `QTextDocument`、高度/document 两级缓存 |
 | `qt/paint.py` | Qt 翻译边界与 transcript 颜色解析（`layout_record` + `qcolor`，不含几何、不画） |
 | `qt/todo_panel.py` | 挂在 transcript 右上角的可收缩 TODO 面板（自己盯着宿主重新贴边）|
-| `qt/settings_dialog.py` | `LLMSettingsDialog` |
+| `qt/settings_dialog.py` | `LLMSettingsDialog`：Provider/Model 列表、独立 session 继承开关与明确 Variant 选择 |
 | `qt/preferences_dialog.py` | `PreferencesDialog`：Appearance（字体 + 语言）/ Models 两页 |
 | `qt/request_dialogs.py` | `ApprovalDialog` / `QuestionDialog` / `DeleteSessionsDialog` |
 | `qt/theme.py` | 深色调色盘 + 全局 QSS（唯一 `setStyleSheet` 处）|
 | `qt/styling.py` | 动态属性词汇表（`variant`/`role`/…）+ `style()` / `set_style_property()` / `repolish()` |
-| `qt/components/` | 共享组件：`DialogFooter` / `KeyValueList` / `Card` / `SettingsList` |
+| `qt/components/` | 共享组件：`DialogFooter` / `KeyValueList` / `Card` / `SettingsList` / `DisclosureHeader` / `VariantPicker` |
 | `qt/appearance.py` | 哪些 Qt 事件意味着「缓存的外观派生值已失效」：`APPEARANCE_CHANGED` / `FONT_CHANGED` |
 | `qt/i18n.py` | QTranslator 安装：`active_language()` / `set_active_language()` / `apply_language()` |
 | `qt/labels.py` | 纯层单词标签的 `QT_TRANSLATE_NOOP` 词表 + `translate_label()` |
@@ -59,10 +63,11 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 | `qt/retranslate.py` | `Retranslator`：宿主控件的 `LanguageChange` 子对象，重跑 bound 的文案语句 |
 | `qt/keys.py` | 全应用键位表（`HOME` / `CHAT` / `APPROVAL`）+ `install()` / `ensure_focus()` |
 
-ChatGPT Codex 不是 GUI 私有 Provider。浏览器 OAuth、共享凭据、刷新和模型目录由
-`kimi-cli/src/kimi_cli/auth/codex.py` 与核心 `OAuthManager` 管理；Codex 请求适配位于
-`kimi-cli/src/kimi_cli/llm_codex.py`。GUI 的设置页和 bridge 只调用这些核心接口，不保存或刷新
-OAuth token。
+ChatGPT Codex 不是 GUI 私有 Provider。浏览器 OAuth、共享凭据、刷新、模型目录和 Kimix 自己的
+`thinking: bool` 推导都保留在 `kimi-cli`；GUI 不修改这些规则。`chatgpt_provider.py` 调用未改动的
+核心 `create_codex_provider(..., thinking=False)`，随后只在 GUI 会话边界验证目录仍包含已保存 Variant，
+并把明确 reasoning effort 固定到本次 provider 快照。OAuth token 始终由核心刷新，既不跨进 Qt
+线程，也不进入 GUI metadata。
 
 表里没有的模块就是不存在的模块：`src/kimix_gui/screens/`（Textual 时代的残壳）与
 `qt/app.py`（5 行 re-export，零 importer）都已删除，`KimixGuiApp` 从 `kimix_gui.app` 导。
@@ -70,15 +75,16 @@ OAuth token。
 
 ## GUI 配置存储
 
-`KimixGuiConfigStore` 是全局 GUI 配置的唯一内存快照和写入者。version 4 根对象同时保存
-`interface`、`configs` 与 `work_dirs`；缺少或无效的可选 `interface` 使用规范化默认值，下一次
-任意保存会把完整区块写回，同时保留另外两类配置。不要再为界面偏好创建第二个 store，否则两个
-启动期快照会在先后保存时互相覆盖。
+`KimixGuiConfigStore` 是全局 GUI 配置的唯一内存快照和写入者。全局 version 5 保存 `interface`、
+`provider_files` 与 `work_dirs.<path>.default_llm`；默认值是完整的 `target + variant`，而不是可刷新
+的目录描述。session 覆盖归属于 Kimi session 目录自己的 `kimix-gui.json`，version 3 的 `llm`
+字段保存同一种选择结构。两处都使用 `orjson` 和同目录临时文件替换原子写入，不保存 OAuth token、
+API Key 或 Provider 参数。
 
-`work_dirs.<path>.default` 是带 `kind` 的 LLM source；version 3 的路径字符串会在内存中迁移，
-下一次保存写为 version 4。session 独立覆盖仍归属于 Kimi session 目录自己的
-`kimix-gui.json`，version 2 使用 `llm` tagged object；继续读取 version 1 的 `config` 路径并在
-下一次修改时升级。两者都不保存 OAuth token。
+全局 v3/v4 与 session v1/v2 仍可读。Provider 文件立即迁移为 `configured` Variant；旧 ChatGPT
+引用先迁移为 `legacy_default`。只有当前项目或实际访问的 session 在取得新鲜目录后，才把目录默认
+强度固定并写回；启动不扫描全部历史。模型、默认强度或已保存 Variant 消失时不猜测、不回退，界面
+显示结构化不可用问题并阻止启动。
 
 ## Bridge 线程模型
 

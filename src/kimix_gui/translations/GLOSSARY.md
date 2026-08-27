@@ -18,7 +18,10 @@
 | preferences | 偏好设置 | 指 `PreferencesDialog` |
 | config / configuration | 配置 | 文件本身叫「配置文件」 |
 | provider | 服务商 | 不用「提供商」「供应商」 |
+| provider file | 服务商文件 | 指外部 JSON Provider 配置文件 |
+| source | 来源 | LLM 来自服务商文件还是 ChatGPT 订阅 |
 | model | 模型 | |
+| variant | 变体 | 模型下的一组明确运行参数，不译作「模式」 |
 | ChatGPT | ChatGPT | 品牌名，不译 |
 | Codex | Codex | 产品/后端名，不译 |
 | OAuth | OAuth | 协议名，不译 |
@@ -37,7 +40,8 @@
 | details | 详情 | |
 | project default | 项目默认 | |
 | effort | 强度 | thinking effort |
-| server default | 服务端默认 | 模型目录未指定具体强度时 |
+| model default | 模型默认 | 目录标记的默认变体；保存时仍固定明确值 |
+| provider default | 服务商默认 | 模型目录没有 reasoning effort 时 |
 | stream | 流式输出 | |
 | hook | hook | 不译，与 SDK 一致 |
 | command | 命令 | `/help` 这类斜杠命令本体不译 |
@@ -67,6 +71,8 @@
 | archived | 已归档 | |
 | missing | 缺失 | 配置文件找不到 |
 | unavailable | 不可用 | |
+| API key missing | 缺少 API Key | Provider 文件没有可用凭据 |
+| expand / collapse section | 展开分组 / 收起分组 | LLM 来源分组的折叠按钮 |
 | not specified | 未指定 | |
 | connecting… | 连接中… | 省略号保持 `…`（U+2026），不写三个点 |
 | connected | 已连接 | ChatGPT 账号状态 |

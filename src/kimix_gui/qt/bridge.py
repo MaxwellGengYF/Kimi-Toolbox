@@ -40,7 +40,7 @@ from kimix_gui.backend import (
     create_sdk_session,
 )
 from kimix_gui.history import HistoryLoader, Timeline, create_timeline
-from kimix_gui.llm_config import ChatGPTSource
+from kimix_gui.llm import ChatGPTTarget
 from kimix_gui.qt.status_line import format_status_line
 from kimix_gui.rendering import StatusValues, WireNormalizer, status_values
 from kimix_gui.session_index import (
@@ -401,7 +401,8 @@ class KimixBridge(QObject):
         return (
             session is not None
             and options is not None
-            and isinstance(options.llm_source, ChatGPTSource)
+            and options.llm_selection is not None
+            and isinstance(options.llm_selection.target, ChatGPTTarget)
         )
 
     def resolve_request(self, token: int, epoch: int, value: object) -> None:
@@ -542,7 +543,8 @@ class KimixBridge(QObject):
         active = (
             self._session is not None
             and options is not None
-            and isinstance(options.llm_source, ChatGPTSource)
+            and options.llm_selection is not None
+            and isinstance(options.llm_selection.target, ChatGPTTarget)
         )
         if active and not close_active_session:
             self.codex_auth_changed.emit(

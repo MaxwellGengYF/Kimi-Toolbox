@@ -55,12 +55,13 @@ FLASH: Final = "flash"
 
 
 class Variant:
-    """Fill treatments for ``QPushButton``."""
+    """Visual treatments for interactive controls."""
 
     PRIMARY: Final = "primary"
     DANGER: Final = "danger"
     GHOST: Final = "ghost"
     ICON: Final = "icon"
+    DISCLOSURE: Final = "disclosure"
 
 
 class Role:

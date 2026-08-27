@@ -200,7 +200,7 @@ def test_dropping_a_home_view_leaves_nothing_dangerous_to_collect(
     qtbot, collected, tmp_path: Path
 ) -> None:
     """The session list rebuilds every row on every keystroke, and it is a lot of rows."""
-    from kimix_gui.llm_config import inspect_llm_config
+    from kimix_gui.llm import resolved_provider_file
     from kimix_gui.qt.home_view import HomeView
     from kimix_gui.session_index import SessionSummary
 
@@ -212,7 +212,7 @@ def test_dropping_a_home_view_leaves_nothing_dangerous_to_collect(
     )
     home = HomeView(
         tmp_path,
-        default_config=inspect_llm_config(config),
+        default_config=resolved_provider_file(config),
         session_config_loader=lambda _id: None,
     )
     home.resize(900, 600)

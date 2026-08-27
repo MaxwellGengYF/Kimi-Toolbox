@@ -9,8 +9,8 @@ LLM 每次改动都必须知道的核心限制；专题背景、真实行为、�
 | --- | --- | --- |
 | 新增、删除、移动模块；调整依赖方向 | [`architecture.md`](architecture.md) | 分层与完整模块职责表 |
 | bridge、线程、Qt 生命周期、路由或模态 | [`architecture.md`](architecture.md) | worker 线程、epoch、流式合并、Qt 对象所有权、current view |
+| LLM Provider、模型目录、变体、持久化或迁移 | [`architecture.md`](architecture.md) | 精确选择、刷新快照、v5/v3 存储与 GUI-only ChatGPT 变体边界 |
 | transcript、历史、工具卡片、TODO、会话文件 | [`transcript-and-sessions.md`](transcript-and-sessions.md) | 单一高度模型、历史窗口、工具分类、存储与内存上限 |
-| 需要理解已接受的跨层设计取舍 | [`adr/`](adr/) | 边界规范化、数据权威等架构决策记录 |
 | QSS、控件属性、共享组件 | [`styling.md`](styling.md) | 设计 token、属性词汇、特异度、组件准入与 DialogFooter |
 | 字体、主题、手绘颜色、外观缓存 | [`appearance-and-themes.md`](appearance-and-themes.md) | Qt 外观事件、缓存失效、深浅主题不变量 |
 | 新增或修改界面文案、语言切换 | [`i18n.md`](i18n.md) | 翻译边界、Linguist 流程、运行时重译 |

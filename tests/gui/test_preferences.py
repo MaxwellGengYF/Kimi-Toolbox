@@ -6,7 +6,7 @@ import orjson
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QComboBox, QPushButton, QSpinBox
 
-from kimix_gui.llm_config import KimixGuiConfigStore, unavailable_config_reference
+from kimix_gui.llm import KimixGuiConfigStore, resolved_provider_file
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.components import SettingsList
 from kimix_gui.qt.preferences_dialog import PreferencesDialog
@@ -26,14 +26,14 @@ def test_gui_config_store_round_trips_font_priorities(tmp_path) -> None:
         ("Cascadia Mono", "Consolas"), 17
     )
     assert orjson.loads(store_file.read_bytes()) == {
-        "version": 4,
+        "version": 5,
         "interface": {
             "font_families": ["Cascadia Mono", "Consolas"],
             "font_size": 17,
             "language": "auto",
             "theme": "auto",
         },
-        "configs": [],
+        "provider_files": [],
         "work_dirs": {},
     }
     assert not store_file.with_suffix(".json.tmp").exists()
@@ -54,7 +54,7 @@ def test_preferences_written_before_language_existed_still_load(tmp_path) -> Non
         )
     )
 
-    assert KimixGuiConfigStore.VERSION == 4
+    assert KimixGuiConfigStore.VERSION == 5
     assert KimixGuiConfigStore(store_file).interface == InterfacePreferences(
         ("Consolas",), 15, "auto", "auto"
     )
@@ -80,7 +80,7 @@ def test_preferences_written_before_the_theme_key_existed_still_load(tmp_path) -
         )
     )
 
-    assert KimixGuiConfigStore.VERSION == 4
+    assert KimixGuiConfigStore.VERSION == 5
     assert KimixGuiConfigStore(store_file).interface == InterfacePreferences(
         ("Consolas",), 15, "zh_CN", "auto"
     )
@@ -160,9 +160,14 @@ def test_existing_gui_config_without_interface_preserves_llm_metadata(tmp_path) 
     store.set_interface(InterfacePreferences(language="zh_CN"))
 
     saved = orjson.loads(store_file.read_bytes())
-    assert saved["configs"] == [config_path]
+    assert saved["provider_files"] == [config_path]
     assert saved["work_dirs"] == {
-        work_dir: {"default": {"kind": "config_file", "path": config_path}}
+        work_dir: {
+            "default_llm": {
+                "target": {"kind": "provider_file", "path": config_path},
+                "variant": {"kind": "configured"},
+            }
+        }
     }
     assert saved["interface"]["language"] == "zh_CN"
 
@@ -190,15 +195,15 @@ def test_interface_font_uses_saved_font_size(qtbot) -> None:
 def test_settings_sidebars_share_font_aware_item_height(qtbot, tmp_path: Path) -> None:
     preferences = PreferencesDialog(InterfacePreferences(), font_families=list)
     llm = LLMSettingsDialog(
-        current=unavailable_config_reference(tmp_path / "missing.json"),
-        references=(),
+        current=resolved_provider_file(tmp_path / "missing.json"),
+        models=(),
         scope_label="New sessions",
     )
     qtbot.addWidget(preferences)
     qtbot.addWidget(llm)
 
     category = find(preferences, "preferences-categories", SettingsList).item(0)
-    config = find(llm, "config-list", SettingsList).item(0)
+    config = llm.model_items()[0]
     assert category.sizeHint().height() == config.sizeHint().height()
     assert category.sizeHint().height() >= 44
 

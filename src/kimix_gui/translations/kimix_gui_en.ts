@@ -378,6 +378,17 @@
     </message>
 </context>
 <context>
+    <name>ConfigGroupHeader</name>
+    <message>
+        <source>Collapse section</source>
+        <translation type="vanished">Collapse section</translation>
+    </message>
+    <message>
+        <source>Expand section</source>
+        <translation type="vanished">Expand section</translation>
+    </message>
+</context>
+<context>
     <name>DeleteSessionsDialog</name>
     <message>
         <location filename="../qt/request_dialogs.py" line="+90"/>
@@ -436,7 +447,7 @@
 <context>
     <name>HomeView</name>
     <message>
-        <location filename="../qt/home_view.py" line="+153"/>
+        <location filename="../qt/home_view.py" line="+149"/>
         <source>Sessions</source>
         <translation>Sessions</translation>
     </message>
@@ -456,7 +467,7 @@
         <translation>History</translation>
     </message>
     <message>
-        <location line="+402"/>
+        <location line="+404"/>
         <source>{count} selected</source>
         <translation>{count} selected</translation>
     </message>
@@ -466,7 +477,7 @@
         <translation>Select all</translation>
     </message>
     <message>
-        <location line="-397"/>
+        <location line="-399"/>
         <source>Delete</source>
         <translation>Delete</translation>
     </message>
@@ -652,7 +663,7 @@
         <translation>ChatGPT subscription</translation>
     </message>
     <message>
-        <location line="+5"/>
+        <location line="+7"/>
         <source>{path} · project default</source>
         <translation>{path} · project default</translation>
     </message>
@@ -752,7 +763,7 @@
 <context>
     <name>KimixBridge</name>
     <message>
-        <location filename="../qt/bridge.py" line="+635"/>
+        <location filename="../qt/bridge.py" line="+637"/>
         <source>Failed to open session: {reason}</source>
         <translation>Failed to open session: {reason}</translation>
     </message>
@@ -862,27 +873,25 @@
 <context>
     <name>KimixGuiApp</name>
     <message>
-        <location filename="../app.py" line="+268"/>
+        <location filename="../app.py" line="+311"/>
         <source>Current session · in use</source>
         <translation>Current session · in use</translation>
     </message>
     <message>
-        <location line="+13"/>
         <source>This ChatGPT model is not available for the connected account.</source>
-        <translation>This ChatGPT model is not available for the connected account.</translation>
+        <translation type="vanished">This ChatGPT model is not available for the connected account.</translation>
     </message>
     <message>
-        <location line="+5"/>
         <source>Connect ChatGPT to use this subscription model.</source>
-        <translation>Connect ChatGPT to use this subscription model.</translation>
+        <translation type="vanished">Connect ChatGPT to use this subscription model.</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+19"/>
         <source>LLM configuration is unavailable</source>
         <translation>LLM configuration is unavailable</translation>
     </message>
     <message>
-        <location line="+48"/>
+        <location line="+46"/>
         <source>Session {id}</source>
         <translation>Session {id}</translation>
     </message>
@@ -892,17 +901,17 @@
         <translation>New sessions</translation>
     </message>
     <message>
-        <location line="+204"/>
+        <location line="+163"/>
         <source>Failed to save preferences: {reason}</source>
         <translation>Failed to save preferences: {reason}</translation>
     </message>
     <message>
-        <location line="+34"/>
+        <location line="+28"/>
         <source>Failed to save LLM configuration metadata: {reason}</source>
         <translation>Failed to save LLM configuration metadata: {reason}</translation>
     </message>
     <message>
-        <location line="+13"/>
+        <location line="+16"/>
         <source>Project default · {config}</source>
         <translation>Project default · {config}</translation>
     </message>
@@ -910,103 +919,206 @@
 <context>
     <name>LLMSettingsDialog</name>
     <message>
-        <location filename="../qt/settings_dialog.py" line="+92"/>
         <source>Project default</source>
-        <translation>Project default</translation>
+        <translation type="vanished">Project default</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Connect ChatGPT · {label}</source>
-        <translation>Connect ChatGPT · {label}</translation>
+        <translation type="vanished">Connect ChatGPT · {label}</translation>
     </message>
     <message>
-        <location line="+4"/>
         <source>Missing · {label}</source>
-        <translation>Missing · {label}</translation>
+        <translation type="vanished">Missing · {label}</translation>
     </message>
     <message>
-        <location line="+8"/>
         <source>Connect ChatGPT · {model}</source>
-        <translation>Connect ChatGPT · {model}</translation>
+        <translation type="vanished">Connect ChatGPT · {model}</translation>
     </message>
     <message>
-        <location line="+4"/>
         <source>Missing · {provider} · {model}</source>
-        <translation>Missing · {provider} · {model}</translation>
+        <translation type="vanished">Missing · {provider} · {model}</translation>
     </message>
     <message>
-        <location line="+9"/>
         <source>IN USE · {status}</source>
-        <translation>IN USE · {status}</translation>
+        <translation type="vanished">IN USE · {status}</translation>
     </message>
     <message>
-        <location line="+30"/>
-        <location line="+48"/>
+        <location filename="../qt/settings_dialog.py" line="+133"/>
+        <location line="+57"/>
         <source>LLM configuration</source>
         <translation>LLM configuration</translation>
     </message>
     <message>
-        <location line="+21"/>
         <source>KIMIX PROVIDER CONFIG (.JSON)</source>
-        <translation>KIMIX PROVIDER CONFIG (.JSON)</translation>
+        <translation type="vanished">KIMIX PROVIDER CONFIG (.JSON)</translation>
     </message>
     <message>
-        <location line="+13"/>
+        <location line="+226"/>
         <source>Browse...</source>
         <translation>Browse...</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Choose a JSON file</source>
-        <translation>Choose a JSON file</translation>
+        <translation type="vanished">Choose a JSON file</translation>
     </message>
     <message>
-        <location line="+1"/>
         <source>Add config</source>
-        <translation>Add config</translation>
+        <translation type="vanished">Add config</translation>
     </message>
     <message>
-        <location line="+20"/>
         <source>ACTIVE CONFIG</source>
-        <translation>ACTIVE CONFIG</translation>
+        <translation type="vanished">ACTIVE CONFIG</translation>
     </message>
     <message>
-        <location line="+0"/>
         <source>AVAILABLE CONFIGS</source>
-        <translation>AVAILABLE CONFIGS</translation>
+        <translation type="vanished">AVAILABLE CONFIGS</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="-37"/>
+        <location line="+415"/>
         <source>Connect ChatGPT</source>
         <translation>Connect ChatGPT</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="-446"/>
+        <source>CHATGPT SUBSCRIPTION · {count}</source>
+        <translation>CHATGPT SUBSCRIPTION · {count}</translation>
+    </message>
+    <message>
+        <location line="-62"/>
+        <source>Provider thinking</source>
+        <translation>Provider thinking</translation>
+    </message>
+    <message>
+        <location line="+22"/>
+        <source>Use model</source>
+        <translation>Use model</translation>
+    </message>
+    <message>
+        <location line="+42"/>
+        <source>PROVIDER FILES · {count}</source>
+        <translation>PROVIDER FILES · {count}</translation>
+    </message>
+    <message>
+        <location line="+31"/>
         <source>Use ChatGPT subscription models</source>
         <translation>Use ChatGPT subscription models</translation>
     </message>
     <message>
-        <location line="+13"/>
         <source>CONFIG DETAILS</source>
-        <translation>CONFIG DETAILS</translation>
+        <translation type="vanished">CONFIG DETAILS</translation>
     </message>
     <message>
-        <location line="+6"/>
+        <source>PROVIDER FILE</source>
+        <translation type="vanished">PROVIDER FILE</translation>
+    </message>
+    <message>
+        <location line="+407"/>
+        <location line="+19"/>
+        <source>Unavailable</source>
+        <translation>Unavailable</translation>
+    </message>
+    <message>
+        <location line="-17"/>
+        <source>API key missing</source>
+        <translation>API key missing</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>File missing</source>
+        <translation>File missing</translation>
+    </message>
+    <message>
         <source>Name</source>
-        <translation>Name</translation>
+        <translation type="vanished">Name</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-551"/>
+        <source>Source</source>
+        <translation>Source</translation>
+    </message>
+    <message>
+        <location line="+43"/>
         <source>Format</source>
         <translation>Format</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-18"/>
         <source>Model ID</source>
         <translation>Model ID</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-164"/>
+        <source>IN USE</source>
+        <translation>IN USE</translation>
+    </message>
+    <message>
+        <location line="+102"/>
+        <source>ACTIVE MODEL</source>
+        <translation>ACTIVE MODEL</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>AVAILABLE MODELS</source>
+        <translation>AVAILABLE MODELS</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Follow project default</source>
+        <translation>Follow project default</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Use the project&apos;s saved model and variant for this session</source>
+        <translation>Use the project&apos;s saved model and variant for this session</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>MODEL SELECTION</source>
+        <translation>MODEL SELECTION</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Current model</source>
+        <translation>Current model</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Status</source>
+        <translation>Status</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Variant</source>
+        <translation>Variant</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Model variant</source>
+        <translation>Model variant</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Choose the exact runtime variant saved for this model</source>
+        <translation>Choose the exact runtime variant saved for this model</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>MODEL DETAILS</source>
+        <translation>MODEL DETAILS</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Input</source>
+        <translation>Input</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>PROVIDER DETAILS</source>
+        <translation>PROVIDER DETAILS</translation>
+    </message>
+    <message>
+        <location line="+6"/>
         <source>Provider</source>
         <translation>Provider</translation>
     </message>
@@ -1021,7 +1133,195 @@
         <translation>Credential</translation>
     </message>
     <message>
+        <location line="+112"/>
+        <source>No Provider files added</source>
+        <translation>No Provider files added</translation>
+    </message>
+    <message>
+        <location line="+18"/>
         <location line="+1"/>
+        <source>Provider JSON path</source>
+        <translation>Provider JSON path</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Add</source>
+        <translation>Add</translation>
+    </message>
+    <message>
+        <location line="+86"/>
+        <source>Unavailable variant · {variant}</source>
+        <translation>Unavailable variant · {variant}</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>not selected</source>
+        <translation>not selected</translation>
+    </message>
+    <message>
+        <location line="+45"/>
+        <source>Available</source>
+        <translation>Available</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Available · cached catalog</source>
+        <translation>Available · cached catalog</translation>
+    </message>
+    <message>
+        <location line="+42"/>
+        <location line="+237"/>
+        <source>Configured in Provider file</source>
+        <translation>Configured in Provider file</translation>
+    </message>
+    <message>
+        <location line="-235"/>
+        <source>Provider default</source>
+        <translation>Provider default</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <location line="+201"/>
+        <source>Choose a variant</source>
+        <translation>Choose a variant</translation>
+    </message>
+    <message>
+        <location line="-199"/>
+        <source>{variant} · Model default</source>
+        <translation>{variant} · Model default</translation>
+    </message>
+    <message>
+        <location line="+35"/>
+        <source>Failed to save Provider file metadata: {reason}</source>
+        <translation>Failed to save Provider file metadata: {reason}</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>Failed to remove Provider file: {reason}</source>
+        <translation>Failed to remove Provider file: {reason}</translation>
+    </message>
+    <message>
+        <location line="+112"/>
+        <source>Select Kimix Provider file</source>
+        <translation>Select Kimix Provider file</translation>
+    </message>
+    <message>
+        <location line="+27"/>
+        <source>Model unavailable</source>
+        <translation>Model unavailable</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Variant unavailable</source>
+        <translation>Variant unavailable</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>None ({value})</source>
+        <translation>None ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Minimal ({value})</source>
+        <translation>Minimal ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Low ({value})</source>
+        <translation>Low ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Medium ({value})</source>
+        <translation>Medium ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>High ({value})</source>
+        <translation>High ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Extra high ({value})</source>
+        <translation>Extra high ({value})</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Maximum ({value})</source>
+        <translation>Maximum ({value})</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Selected by Variant</source>
+        <translation>Selected by Variant</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>stream on</source>
+        <translation>stream on</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>stream off</source>
+        <translation>stream off</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>effort {effort} · {stream}</source>
+        <translation>effort {effort} · {stream}</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Kimix Provider file must be JSON: {path}</source>
+        <translation>Kimix Provider file must be JSON: {path}</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Provider file does not exist: {path}</source>
+        <translation>Provider file does not exist: {path}</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Invalid Provider JSON {path}: {reason}</source>
+        <translation>Invalid Provider JSON {path}: {reason}</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Provider JSON must contain an object: {path}</source>
+        <translation>Provider JSON must contain an object: {path}</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Invalid Kimix Provider file {path}: {reason}</source>
+        <translation>Invalid Kimix Provider file {path}: {reason}</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Provider file is unavailable: {path}</source>
+        <translation>Provider file is unavailable: {path}</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Invalid session LLM selection: {path}</source>
+        <translation>Invalid session LLM selection: {path}</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>This model is not available for the connected account.</source>
+        <translation>This model is not available for the connected account.</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The saved model variant is no longer available.</source>
+        <translation>The saved model variant is no longer available.</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Choose a model variant before using this configuration.</source>
+        <translation>Choose a model variant before using this configuration.</translation>
+    </message>
+    <message>
+        <location line="-617"/>
         <source>Context</source>
         <translation>Context</translation>
     </message>
@@ -1036,17 +1336,16 @@
         <translation>Capabilities</translation>
     </message>
     <message>
-        <location line="+1"/>
         <source>Thinking</source>
-        <translation>Thinking</translation>
+        <translation type="vanished">Thinking</translation>
     </message>
     <message>
-        <location line="+13"/>
+        <location line="+27"/>
         <source>Remove</source>
         <translation>Remove</translation>
     </message>
     <message>
-        <location line="+5"/>
+        <location line="+7"/>
         <source>Close</source>
         <translation>Close</translation>
     </message>
@@ -1056,137 +1355,157 @@
         <translation>Cancel</translation>
     </message>
     <message>
-        <location line="+4"/>
         <source>Use config</source>
-        <translation>Use config</translation>
+        <translation type="vanished">Use config</translation>
     </message>
     <message>
-        <location line="+42"/>
+        <location line="+54"/>
+        <source>Collapse section</source>
+        <translation>Collapse section</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Expand section</source>
+        <translation>Expand section</translation>
+    </message>
+    <message>
+        <location line="+35"/>
+        <source>No subscription models available</source>
+        <translation>No subscription models available</translation>
+    </message>
+    <message>
+        <source>No provider files added</source>
+        <translation type="vanished">No provider files added</translation>
+    </message>
+    <message>
+        <source>Connect ChatGPT to list subscription models</source>
+        <translation type="vanished">Connect ChatGPT to list subscription models</translation>
+    </message>
+    <message>
         <source>CHATGPT SUBSCRIPTION</source>
-        <translation>CHATGPT SUBSCRIPTION</translation>
+        <translation type="vanished">CHATGPT SUBSCRIPTION</translation>
     </message>
     <message>
-        <location line="+6"/>
         <source>PROVIDER FILES</source>
-        <translation>PROVIDER FILES</translation>
+        <translation type="vanished">PROVIDER FILES</translation>
     </message>
     <message>
-        <location line="+164"/>
         <source>Failed to save configuration metadata: {reason}</source>
-        <translation>Failed to save configuration metadata: {reason}</translation>
+        <translation type="vanished">Failed to save configuration metadata: {reason}</translation>
     </message>
     <message>
-        <location line="+36"/>
         <source>Failed to remove configuration reference: {reason}</source>
-        <translation>Failed to remove configuration reference: {reason}</translation>
+        <translation type="vanished">Failed to remove configuration reference: {reason}</translation>
     </message>
     <message>
-        <location line="+39"/>
         <source>This model is not available for the connected ChatGPT account.</source>
-        <translation>This model is not available for the connected ChatGPT account.</translation>
+        <translation type="vanished">This model is not available for the connected ChatGPT account.</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+482"/>
         <source>Connect ChatGPT to use this subscription model.</source>
         <translation>Connect ChatGPT to use this subscription model.</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="-783"/>
+        <location line="+453"/>
+        <source>ChatGPT subscription</source>
+        <translation>ChatGPT subscription</translation>
+    </message>
+    <message>
+        <location line="-451"/>
+        <location line="+453"/>
+        <source>Provider file</source>
+        <translation>Provider file</translation>
+    </message>
+    <message>
         <source>Built-in</source>
-        <translation>Built-in</translation>
+        <translation type="vanished">Built-in</translation>
     </message>
     <message>
-        <location line="+8"/>
         <source>ChatGPT OAuth</source>
-        <translation>ChatGPT OAuth</translation>
+        <translation type="vanished">ChatGPT OAuth</translation>
     </message>
     <message>
-        <location line="+6"/>
-        <location line="+141"/>
+        <location line="+12"/>
+        <location line="+4"/>
+        <location line="+281"/>
         <source>Not specified</source>
         <translation>Not specified</translation>
     </message>
     <message>
-        <location line="-120"/>
         <source>default {default} · efforts {efforts}</source>
-        <translation>default {default} · efforts {efforts}</translation>
+        <translation type="vanished">default {default} · efforts {efforts}</translation>
     </message>
     <message>
-        <location line="+5"/>
         <source>server default · efforts {efforts}</source>
-        <translation>server default · efforts {efforts}</translation>
+        <translation type="vanished">server default · efforts {efforts}</translation>
     </message>
     <message>
-        <location line="+1"/>
         <source>server default</source>
-        <translation>server default</translation>
+        <translation type="vanished">server default</translation>
     </message>
     <message>
         <source>efforts {efforts}</source>
         <translation type="vanished">efforts {efforts}</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>effort {effort} · stream on</source>
-        <translation>effort {effort} · stream on</translation>
+        <translation type="vanished">effort {effort} · stream on</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>effort {effort} · stream off</source>
-        <translation>effort {effort} · stream off</translation>
+        <translation type="vanished">effort {effort} · stream off</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-7"/>
         <source>not specified</source>
         <translation>not specified</translation>
     </message>
     <message>
-        <location line="+53"/>
         <source>Select Kimix provider config</source>
-        <translation>Select Kimix provider config</translation>
+        <translation type="vanished">Select Kimix provider config</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="-68"/>
         <source>JSON files (*.json)</source>
         <translation>JSON files (*.json)</translation>
     </message>
     <message>
-        <location line="+28"/>
         <source>Kimix configuration must be a JSON file: {path}</source>
-        <translation>Kimix configuration must be a JSON file: {path}</translation>
+        <translation type="vanished">Kimix configuration must be a JSON file: {path}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Configuration file does not exist: {path}</source>
-        <translation>Configuration file does not exist: {path}</translation>
+        <translation type="vanished">Configuration file does not exist: {path}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Invalid JSON configuration {path}: {reason}</source>
-        <translation>Invalid JSON configuration {path}: {reason}</translation>
+        <translation type="vanished">Invalid JSON configuration {path}: {reason}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Kimix configuration must contain a JSON object: {path}</source>
-        <translation>Kimix configuration must contain a JSON object: {path}</translation>
+        <translation type="vanished">Kimix configuration must contain a JSON object: {path}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Invalid Kimix configuration {path}: {reason}</source>
-        <translation>Invalid Kimix configuration {path}: {reason}</translation>
+        <translation type="vanished">Invalid Kimix configuration {path}: {reason}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Configuration file is unavailable: {path}</source>
-        <translation>Configuration file is unavailable: {path}</translation>
+        <translation type="vanished">Configuration file is unavailable: {path}</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Invalid session configuration reference: {path}</source>
-        <translation>Invalid session configuration reference: {path}</translation>
+        <translation type="vanished">Invalid session configuration reference: {path}</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+100"/>
+        <source>No API key or OAuth credential is configured: {path}</source>
+        <translation>No API key or OAuth credential is configured: {path}</translation>
+    </message>
+    <message>
+        <location line="-24"/>
         <source>{count} tokens</source>
         <translation>{count} tokens</translation>
     </message>
@@ -1412,7 +1731,7 @@
 <context>
     <name>TodoPanel</name>
     <message>
-        <location filename="../qt/todo_panel.py" line="+505"/>
+        <location filename="../qt/todo_panel.py" line="+506"/>
         <source>Todos</source>
         <translation>Todos</translation>
     </message>

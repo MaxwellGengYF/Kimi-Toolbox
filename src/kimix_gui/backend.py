@@ -32,15 +32,19 @@ except ImportError:  # Local Kimix-CLI-X revisions export the worker factory pri
 
 
 from kimi_cli.auth.codex import CodexAuthService, default_codex_auth_service
-from kimi_cli.llm_codex import CodexProviderLease, create_codex_provider
+from kimi_cli.llm_codex import CodexProviderLease
 
+from kimix_gui.chatgpt_provider import create_selected_codex_provider
 from kimix_gui.kimi_workdir import resolve_kimi_work_dir
-from kimix_gui.llm_config import (
-    ChatGPTSource,
-    ConfigFileSource,
-    LLMSource,
-    default_config_path,
-    load_kimix_provider_dict,
+from kimix_gui.llm import (
+    CONFIGURED_VARIANT,
+    PROVIDER_DEFAULT_VARIANT,
+    ChatGPTTarget,
+    LLMSelection,
+    ProviderFileTarget,
+    configured_selection,
+    default_provider_file_path,
+    load_provider_mapping,
 )
 
 
@@ -69,57 +73,14 @@ class SdkSession(Protocol):
     async def close(self) -> None: ...
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
 class SessionOptions:
     """Configuration for creating or resuming a public SDK session."""
 
     work_dir: Path
     session_id: str | None = None
-    llm_source: LLMSource | None = None
-    thinking: bool = False
+    llm_selection: LLMSelection | None = None
     yolo: bool = False
-
-    def __init__(
-        self,
-        work_dir: Path,
-        session_id: str | None = None,
-        llm_source: LLMSource | None = None,
-        thinking: bool = False,
-        yolo: bool = False,
-        *,
-        config_file: Path | None = None,
-        model: str | None = None,
-    ) -> None:
-        """Normalize legacy constructor arguments at the application boundary.
-
-        ``config_file`` and ``model`` remain accepted for callers using the public
-        CLI-era shape, but are never stored as a second source of truth.
-        """
-
-        if llm_source is not None and (config_file is not None or model is not None):
-            raise ValueError("llm_source cannot be combined with config_file or model")
-        source = llm_source
-        if source is None and (config_file is not None or model is not None):
-            source = ConfigFileSource(config_file or default_config_path(), model)
-        object.__setattr__(self, "work_dir", work_dir)
-        object.__setattr__(self, "session_id", session_id)
-        object.__setattr__(self, "llm_source", source)
-        object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "yolo", yolo)
-
-    @property
-    def config_file(self) -> Path | None:
-        source = self.llm_source
-        return source.path if isinstance(source, ConfigFileSource) else None
-
-    @property
-    def model(self) -> str | None:
-        source = self.llm_source
-        if isinstance(source, ConfigFileSource):
-            return source.model_override
-        if isinstance(source, ChatGPTSource):
-            return source.model
-        return None
 
 
 class ManagedSdkSession:
@@ -183,14 +144,23 @@ async def create_sdk_session(
     """Create or resume a session through Kimix's public Worker factory."""
 
     work_dir = resolve_kimi_work_dir(options.work_dir)
-    source = options.llm_source
+    selection = options.llm_selection or configured_selection(
+        ProviderFileTarget(default_provider_file_path())
+    )
+    target = selection.target
     session_id = options.session_id or new_session_id()
-    if isinstance(source, ChatGPTSource):
-        runtime = await create_codex_provider(
+    if isinstance(target, ChatGPTTarget):
+        if selection.variant.kind == "reasoning_effort":
+            reasoning_effort = selection.variant.value
+        elif selection.variant == PROVIDER_DEFAULT_VARIANT:
+            reasoning_effort = None
+        else:
+            raise ValueError(f"Invalid ChatGPT variant: {selection.variant.id}")
+        runtime = await create_selected_codex_provider(
             codex_service or default_codex_auth_service(),
-            model_name=source.model,
+            model_name=target.model,
             session_id=session_id,
-            thinking=options.thinking,
+            reasoning_effort=reasoning_effort,
         )
         try:
             session = await create_session_async(
@@ -198,8 +168,7 @@ async def create_sdk_session(
                 session_id=session_id,
                 resume=options.session_id is not None,
                 provider_dict=runtime.provider_dict,
-                model=source.model,
-                thinking=options.thinking,
+                model=target.model,
                 yolo=options.yolo,
                 chat_provider=runtime.provider,
             )
@@ -208,18 +177,19 @@ async def create_sdk_session(
             raise
         return ManagedSdkSession(session, runtime.lease)
 
+    if selection.variant != CONFIGURED_VARIANT:
+        raise ValueError(f"Invalid Provider file variant: {selection.variant.id}")
+    if not isinstance(target, ProviderFileTarget):
+        raise TypeError(f"Unsupported LLM target: {target!r}")
     provider_dict = None
-    if source is not None and (
-        source.path.is_file() or source.path.resolve(strict=False) != default_config_path()
-    ):
-        provider_dict = load_kimix_provider_dict(source.path)
-    model = source.model_override if isinstance(source, ConfigFileSource) else None
+    if target.path.is_file() or target.path != default_provider_file_path():
+        provider_dict = load_provider_mapping(target.path)
+    model = target.model_override
     if provider_dict is not None and model is not None:
         provider_dict["model"] = model
     common: dict[str, Any] = {
         "provider_dict": provider_dict,
         "model": model,
-        "thinking": options.thinking,
         "yolo": options.yolo,
     }
 

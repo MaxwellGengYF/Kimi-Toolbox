@@ -1,605 +1,524 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any, cast
 
+import orjson
+from kimi_cli.auth.codex import (
+    AUTH_CONNECTED,
+    CodexAuthSnapshot,
+    CodexModel,
+    CodexModelCatalog,
+)
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLineEdit, QPushButton, QSplitter
+from PySide6.QtGui import QStandardItemModel
+from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit, QListWidget, QPushButton, QSplitter
 
 from kimix_gui.app import KimixGuiApp
 from kimix_gui.backend import SessionOptions
-from kimix_gui.llm_config import (
+from kimix_gui.llm import (
+    LEGACY_DEFAULT_VARIANT,
+    PROBLEM_CREDENTIAL_MISSING,
+    ChatGPTTarget,
     KimixGuiConfigStore,
-    inspect_llm_config,
-    unavailable_config_reference,
+    LLMSelection,
+    chatgpt_model_descriptor,
+    chatgpt_selection,
+    configured_selection,
+    reasoning_effort_variant,
+    resolve_selection,
+    resolved_provider_file,
 )
-from kimix_gui.qt.preferences_dialog import PreferencesDialog
-from kimix_gui.qt.settings_dialog import LLMSettingsDialog
-from kimix_gui.session_index import SessionSummary
+from kimix_gui.qt.components import DisclosureHeader, VariantPicker
+from kimix_gui.qt.settings_dialog import LLMSettingsDialog, LLMSettingsResult
 
-from .qtutil import find, launch_app, wait_chat_ready, wait_home, widget_text
-from .test_llm_config import write_json_config, write_llm_config
+from .qtutil import find, widget_text
 
 
-class FakeSession:
-    def __init__(self, session_id: str) -> None:
-        self.id = session_id
-        self.status = SimpleNamespace(
-            context_tokens=100,
-            max_context_tokens=1_000,
-            context_usage=0.1,
+def write_provider_file(path: Path, *, api_key: str = "test-key") -> Path:
+    path.write_bytes(
+        orjson.dumps(
+            {
+                "model": "provider-model",
+                "name": "Provider Model",
+                "max_context_size": 100_000,
+                "type": "openai_legacy",
+                "url": "https://example.test/v1",
+                "api_key": api_key,
+            }
         )
-        self.closed = False
-
-    async def prompt(
-        self,
-        user_input: str,
-        *,
-        merge_wire_messages: bool = False,
-    ) -> AsyncIterator[object]:
-        if False:  # pragma: no cover
-            yield None
-
-    def cancel(self) -> None:
-        return None
-
-    async def clear(self, **custom_arguments: object) -> None:
-        return None
-
-    async def compact(self, *, custom_instruction: str = "") -> None:
-        return None
-
-    async def close(self) -> None:
-        self.closed = True
+    )
+    return path
 
 
-async def session_loader(_work_dir: Path) -> list[SessionSummary]:
-    return [
-        SessionSummary(
-            id="session-1",
-            title="Existing session",
-            updated_at=100.0,
-        )
+def chatgpt_model(
+    *,
+    connected: bool = True,
+    efforts: tuple[str, ...] = ("low", "medium", "high", "ultra"),
+    default: str | None = "medium",
+):
+    return chatgpt_model_descriptor(
+        CodexModel(
+            "gpt-test",
+            display_name="GPT Test",
+            reasoning_efforts=efforts,
+            default_reasoning_effort=default,
+        ),
+        connected=connected,
+        stale=False,
+    )
+
+
+def dialog_for_model(model, *, effort: str = "medium", **kwargs) -> LLMSettingsDialog:
+    selection = chatgpt_selection(model.model_id, effort)
+    return LLMSettingsDialog(
+        current=resolve_selection(selection, [model]),
+        models=(model,),
+        scope_label="New sessions",
+        chatgpt_connected=model.problem is None,
+        **kwargs,
+    )
+
+
+def test_chatgpt_variants_share_one_model_row(qtbot) -> None:
+    model = chatgpt_model()
+    dialog = dialog_for_model(model)
+    qtbot.addWidget(dialog)
+
+    assert len(dialog.model_items()) == 1
+    assert dialog.model_items()[0].text().splitlines()[0] == "GPT Test"
+    assert "medium" not in dialog.model_items()[0].text().splitlines()[0]
+
+
+def test_variant_picker_preserves_catalog_order_and_pins_explicit_choice(qtbot) -> None:
+    model = chatgpt_model(efforts=("low", "ultra", "max", "off", "future"), default="ultra")
+    dialog = dialog_for_model(model, effort="max")
+    qtbot.addWidget(dialog)
+    selected: list[LLMSettingsResult] = []
+    dialog.applied.connect(selected.append)
+    picker = find(dialog, "variant-picker", VariantPicker)
+
+    assert [picker.itemData(index) for index in range(picker.count())] == [
+        "reasoning_effort/low",
+        "reasoning_effort/max",
+        "reasoning_effort/future",
     ]
+    assert "Model default" in picker.itemText(1)
+    picker.setCurrentIndex(0)
+    picker.activated.emit(0)
+    find(dialog, "apply-settings", QPushButton).click()
+
+    assert selected == [LLMSettingsResult(chatgpt_selection("gpt-test", "low"))]
 
 
-def config_files(tmp_path: Path) -> tuple[Path, Path]:
-    first = write_llm_config(
-        tmp_path / "first.json",
-        model="first-model",
-        display_name="First Model",
+def test_variant_picker_is_keyboard_focusable_and_accessible(qtbot) -> None:
+    dialog = dialog_for_model(chatgpt_model())
+    qtbot.addWidget(dialog)
+    picker = find(dialog, "variant-picker", VariantPicker)
+    picker.show()
+    picker.setFocus()
+
+    assert picker.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert picker.accessibleName() == "Model variant"
+    assert "exact runtime variant" in picker.accessibleDescription()
+
+
+def test_removed_saved_variant_stays_visible_and_blocks_apply(qtbot) -> None:
+    model = chatgpt_model(efforts=("low", "high"), default="low")
+    dialog = dialog_for_model(model, effort="medium")
+    qtbot.addWidget(dialog)
+    picker = find(dialog, "variant-picker", VariantPicker)
+    picker_model = picker.model()
+
+    assert picker.currentData() == "reasoning_effort/medium"
+    assert picker.property("state") == "unavailable"
+    assert isinstance(picker_model, QStandardItemModel)
+    assert not picker_model.item(0).isEnabled()
+    assert "no longer available" in widget_text(dialog, "settings-error")
+    assert not find(dialog, "apply-settings", QPushButton).isEnabled()
+
+
+def test_catalog_refresh_keeps_a_removed_current_model_as_an_unavailable_row(qtbot) -> None:
+    dialog = dialog_for_model(chatgpt_model())
+    qtbot.addWidget(dialog)
+
+    dialog.set_models((), chatgpt_connected=True)
+
+    assert len(dialog.model_items()) == 1
+    assert dialog.model_items()[0].model_descriptor.model_id == "gpt-test"
+    assert "Model unavailable" in dialog.model_items()[0].text()
+    assert not find(dialog, "apply-settings", QPushButton).isEnabled()
+
+
+def test_unknown_future_variant_uses_its_raw_catalog_label(qtbot) -> None:
+    model = chatgpt_model(efforts=("future-effort",), default="future-effort")
+    dialog = dialog_for_model(model, effort="future-effort")
+    qtbot.addWidget(dialog)
+    picker = find(dialog, "variant-picker", QComboBox)
+
+    assert picker.itemText(0) == "future-effort · Model default"
+
+
+def test_provider_file_has_one_configured_variant_without_editable_picker(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    resolved = resolved_provider_file(write_provider_file(tmp_path / "provider.json"))
+    dialog = LLMSettingsDialog(
+        current=resolved,
+        models=(resolved.model,),
+        scope_label="New sessions",
     )
-    second = write_llm_config(
-        tmp_path / "second.json",
-        model="second-model",
-        display_name="Second Model",
-        provider="anthropic",
-        base_url="https://api.anthropic.test/v1",
+    qtbot.addWidget(dialog)
+
+    assert len(resolved.model.variants) == 1
+    assert resolved.model.variants[0].key == configured_selection(resolved.selection.target).variant
+    assert find(dialog, "variant-picker", VariantPicker).isHidden()
+
+
+def test_provider_add_controls_live_inside_provider_group(qtbot, tmp_path: Path) -> None:
+    resolved = resolved_provider_file(write_provider_file(tmp_path / "provider.json"))
+    dialog = LLMSettingsDialog(
+        current=resolved,
+        models=(resolved.model,),
+        scope_label="New sessions",
+        manage_library=True,
     )
-    return first, second
+    qtbot.addWidget(dialog)
+    picker = find(dialog, "provider-file-picker")
+    provider_header = find(dialog, "provider-config-group", DisclosureHeader)
+    model_list = find(dialog, "config-list", QListWidget)
+
+    assert model_list.isAncestorOf(picker)
+    provider_header.setChecked(False)
+    assert picker.isHidden()
+    provider_header.setChecked(True)
+    assert not picker.isHidden()
 
 
-def config_store(tmp_path: Path) -> KimixGuiConfigStore:
-    return KimixGuiConfigStore(
+def test_adding_provider_file_registers_and_selects_it(qtbot, tmp_path: Path) -> None:
+    first = resolved_provider_file(write_provider_file(tmp_path / "first.json"))
+    second_path = write_provider_file(tmp_path / "second.json")
+    registered = []
+    dialog = LLMSettingsDialog(
+        current=first,
+        models=(first.model,),
+        scope_label="New sessions",
+        manage_library=True,
+        registrar=registered.append,
+    )
+    qtbot.addWidget(dialog)
+    path_input = find(dialog, "config-path", QLineEdit)
+    path_input.setText(str(second_path))
+
+    find(dialog, "load-config", QPushButton).click()
+
+    assert registered == [resolved_provider_file(second_path).selection.target]
+    assert dialog.selected_selection() == resolved_provider_file(second_path).selection
+
+
+def test_missing_provider_credential_is_marked_unavailable_not_preflighted(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in ("KIMI_API_KEY", "KIMIX_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    resolved = resolved_provider_file(
+        write_provider_file(tmp_path / "missing-key.json", api_key="")
+    )
+    dialog = LLMSettingsDialog(
+        current=resolved,
+        models=(resolved.model,),
+        scope_label="New sessions",
+    )
+    qtbot.addWidget(dialog)
+
+    assert resolved.problem is not None
+    assert resolved.problem.kind == PROBLEM_CREDENTIAL_MISSING
+    assert "No API key" in widget_text(dialog, "settings-error")
+    assert not find(dialog, "apply-settings", QPushButton).isEnabled()
+
+
+def test_session_inheritance_is_a_control_above_the_model_list(qtbot) -> None:
+    project_model = chatgpt_model()
+    project_selection = chatgpt_selection("gpt-test", "medium")
+    project = resolve_selection(project_selection, [project_model])
+    override_model = chatgpt_model(efforts=("low", "high"), default="high")
+    dialog = LLMSettingsDialog(
+        current=project,
+        models=(override_model,),
+        scope_label="Session test",
+        project_default=project,
+        inherits_project_default=True,
+        chatgpt_connected=True,
+    )
+    qtbot.addWidget(dialog)
+    inherit = find(dialog, "inherit-project-default", QCheckBox)
+
+    assert inherit.isChecked()
+    assert inherit.parent() is not find(dialog, "config-list", QListWidget)
+    assert len(dialog.model_items()) == 1
+    picker = find(dialog, "variant-picker", VariantPicker)
+    assert picker.selected_key() == reasoning_effort_variant("medium").id
+    assert not picker.isEnabled()
+    dialog._list.setCurrentItem(dialog.model_items()[0])
+    assert not inherit.isChecked()
+
+
+def test_follow_project_default_emits_the_exact_project_selection(qtbot) -> None:
+    model = chatgpt_model()
+    project = resolve_selection(chatgpt_selection("gpt-test", "medium"), [model])
+    session = resolve_selection(chatgpt_selection("gpt-test", "high"), [model])
+    dialog = LLMSettingsDialog(
+        current=session,
+        models=(model,),
+        scope_label="Session test",
+        project_default=project,
+        chatgpt_connected=True,
+    )
+    qtbot.addWidget(dialog)
+    applied: list[LLMSettingsResult] = []
+    dialog.applied.connect(applied.append)
+
+    assert dialog.select_project_default()
+    find(dialog, "apply-settings", QPushButton).click()
+
+    assert applied == [LLMSettingsResult(project.selection, use_project_default=True)]
+
+
+def test_narrow_dialog_stacks_source_and_detail_panes(qtbot) -> None:
+    dialog = dialog_for_model(chatgpt_model())
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.resize(600, 700)
+    qtbot.wait(10)
+    assert find(dialog, "settings-body", QSplitter).orientation() == Qt.Orientation.Vertical
+
+    dialog.resize(1000, 700)
+    qtbot.wait(10)
+    assert find(dialog, "settings-body", QSplitter).orientation() == Qt.Orientation.Horizontal
+
+
+def test_model_text_is_full_and_only_the_view_may_elide_overflow(qtbot) -> None:
+    long_name = "GPT " + "very-long-model-name-" * 12
+    model = chatgpt_model_descriptor(
+        CodexModel(
+            "gpt-test",
+            display_name=long_name,
+            reasoning_efforts=("medium",),
+            default_reasoning_effort="medium",
+        ),
+        connected=True,
+        stale=False,
+    )
+    dialog = dialog_for_model(model)
+    qtbot.addWidget(dialog)
+    item = dialog.model_items()[0]
+
+    assert item.text().startswith(long_name)
+    assert not item.text().splitlines()[0].endswith("...")
+    assert item.toolTip() == item.text()
+    assert find(dialog, "config-list", QListWidget).textElideMode() == Qt.TextElideMode.ElideRight
+
+
+def test_fresh_catalog_pins_legacy_project_default_once(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    metadata = tmp_path / "kimix-gui.json"
+    metadata.write_bytes(
+        orjson.dumps(
+            {
+                "version": 4,
+                "configs": [],
+                "work_dirs": {
+                    str(work_dir.resolve()): {"default": {"kind": "chatgpt", "model": "gpt-test"}}
+                },
+            }
+        )
+    )
+    store = KimixGuiConfigStore(metadata)
+    app = KimixGuiApp(SessionOptions(work_dir), config_store=store)
+    assert app.default_config.selection.variant == LEGACY_DEFAULT_VARIANT
+
+    app.on_codex_auth_changed(CodexAuthSnapshot(1, AUTH_CONNECTED))
+    app.on_codex_catalog_changed(
+        CodexModelCatalog(
+            1,
+            (
+                CodexModel(
+                    "gpt-test",
+                    reasoning_efforts=("low", "medium", "high"),
+                    default_reasoning_effort="medium",
+                ),
+            ),
+            False,
+        )
+    )
+
+    assert app.default_config.selection.variant == reasoning_effort_variant("medium")
+    assert store.default_selection_for(work_dir) == app.default_config.selection
+
+
+def test_fresh_catalog_without_a_valid_default_does_not_guess_for_legacy_selection(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    metadata = tmp_path / "kimix-gui.json"
+    metadata.write_bytes(
+        orjson.dumps(
+            {
+                "version": 4,
+                "configs": [],
+                "work_dirs": {
+                    str(work_dir.resolve()): {"default": {"kind": "chatgpt", "model": "gpt-test"}}
+                },
+            }
+        )
+    )
+    store = KimixGuiConfigStore(metadata)
+    app = KimixGuiApp(SessionOptions(work_dir), config_store=store)
+
+    app.on_codex_auth_changed(CodexAuthSnapshot(1, AUTH_CONNECTED))
+    app.on_codex_catalog_changed(
+        CodexModelCatalog(
+            1,
+            (
+                CodexModel(
+                    "gpt-test",
+                    reasoning_efforts=("low", "high"),
+                    default_reasoning_effort=None,
+                ),
+            ),
+            False,
+        )
+    )
+
+    assert app.default_config.selection.variant == LEGACY_DEFAULT_VARIANT
+    assert not app.default_config.available
+    assert store.default_selection_for(work_dir) == app.default_config.selection
+
+
+def test_fresh_catalog_pins_an_accessed_legacy_session_without_scanning_others(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    session_file = tmp_path / "sessions" / "session-1" / "kimix-gui.json"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_bytes(
+        orjson.dumps(
+            {
+                "version": 2,
+                "llm": {"kind": "chatgpt", "model": "gpt-test"},
+            }
+        )
+    )
+    store = KimixGuiConfigStore(
         tmp_path / "metadata.json",
         session_file_resolver=lambda _work_dir, session_id: (
             tmp_path / "sessions" / session_id / "kimix-gui.json"
         ),
     )
+    app = KimixGuiApp(SessionOptions(work_dir), config_store=store)
+    refreshes: list[dict[str, Any]] = []
 
+    class OpenDialog:
+        def set_models(self, _models: object, **kwargs: Any) -> None:
+            refreshes.append(kwargs)
 
-def _select_config(dialog: LLMSettingsDialog, path: Path) -> None:
-    if not dialog.select_config(path):
-        raise AssertionError(f"config {path} not listed")
+    dialog = OpenDialog()
+    app._llm_dialogs[cast(Any, dialog)] = "session-1"
 
-
-def _wait_settings(qtbot, app: KimixGuiApp) -> LLMSettingsDialog:
-    qtbot.waitUntil(lambda: isinstance(app.screen, LLMSettingsDialog), timeout=10_000)
-    dialog = app.screen
-    assert isinstance(dialog, LLMSettingsDialog)
-    return dialog
-
-
-def _open_project_llm_settings(qtbot, app: KimixGuiApp, home) -> LLMSettingsDialog:
-    qtbot.mouseClick(find(home, "open-settings"), Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: isinstance(app.screen, PreferencesDialog), timeout=10_000)
-    preferences = app.screen
-    assert isinstance(preferences, PreferencesDialog)
-    preferences.show_category(PreferencesDialog.CATEGORY_MODELS)
-    find(preferences, "manage-llm-settings", QPushButton).click()
-    qtbot.waitUntil(
-        lambda: preferences.findChild(LLMSettingsDialog) is not None,
-        timeout=10_000,
+    app.on_codex_auth_changed(CodexAuthSnapshot(1, AUTH_CONNECTED))
+    assert store.session_selection_for(work_dir, "session-1").selection == LLMSelection(
+        ChatGPTTarget("gpt-test"),
+        LEGACY_DEFAULT_VARIANT,
     )
-    dialog = preferences.findChild(LLMSettingsDialog)
-    assert dialog is not None
-    # The library opens *over* Preferences rather than replacing it, and that is what
-    # the user is looking at now. ``screen`` used to name Preferences here, because the
-    # window kept its own record of one modal and this site deliberately did not update
-    # it; Qt tracks the stack, so the top of it is what gets reported.
-    assert app.screen is dialog
-    assert dialog.parentWidget() is preferences
-    assert preferences.isVisible() is True
-    return dialog
 
-
-def _close_preferences(qtbot, dialog: LLMSettingsDialog) -> None:
-    preferences = dialog.parentWidget()
-    assert isinstance(preferences, PreferencesDialog)
-    find(preferences, "cancel-preferences", QPushButton).click()
-    qtbot.waitUntil(lambda: not preferences.isVisible(), timeout=10_000)
-
-
-def test_new_session_without_llm_shows_configuration_toast(qtbot, tmp_path: Path) -> None:
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, unavailable_config_reference(tmp_path / "missing.json"))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
+    app.on_codex_catalog_changed(
+        CodexModelCatalog(
+            1,
+            (
+                CodexModel(
+                    "gpt-test",
+                    reasoning_efforts=("low", "medium", "high"),
+                    default_reasoning_effort="medium",
+                ),
+            ),
+            False,
+        )
     )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    assert find(home, "start-new-session", QPushButton).isEnabled()
-    qtbot.mouseClick(find(home, "start-new-session"), Qt.MouseButton.LeftButton)
-    _wait_settings(qtbot, app)
-    notification = list(app._notifications)[-1]
-    assert notification.title == "LLM configuration required"
-    assert notification.message == "Select a valid LLM configuration to continue."
-    assert notification.severity == "warning"
+
+    pinned = chatgpt_selection("gpt-test", "medium")
+    assert store.session_selection_for(work_dir, "session-1").selection == pinned
+    assert refreshes[-1]["current"].selection == pinned
 
 
-def test_session_without_config_continues_to_inherit_default(qtbot, tmp_path: Path) -> None:
-    first, _second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("session-1")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
+def test_catalog_refresh_does_not_mutate_running_session_snapshot(tmp_path: Path) -> None:
+    selection = chatgpt_selection("gpt-test", "medium")
+    app = KimixGuiApp(SessionOptions(tmp_path, llm_selection=selection))
+    app.on_codex_auth_changed(CodexAuthSnapshot(1, AUTH_CONNECTED))
+    initial_catalog = CodexModelCatalog(
+        1,
+        (
+            CodexModel(
+                "gpt-test",
+                reasoning_efforts=("low", "medium", "high"),
+                default_reasoning_effort="medium",
+            ),
+        ),
+        False,
     )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    qtbot.keyClick(home, Qt.Key.Key_Return)
-    wait_chat_ready(qtbot, app)
-    assert opened[0].config_file == first.resolve()
-    assert store.session_for(tmp_path, "session-1") is None
+    app.on_codex_catalog_changed(initial_catalog)
+    running = app.default_config
+    app._active_config = running
 
-
-def test_saved_session_config_overrides_startup_config(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_session(tmp_path, "session-1", inspect_llm_config(second))
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("session-1")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path, config_file=first, model="cli-override"),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
+    app.on_codex_catalog_changed(
+        CodexModelCatalog(
+            2,
+            (
+                CodexModel(
+                    "gpt-test",
+                    reasoning_efforts=("low", "high"),
+                    default_reasoning_effort="low",
+                ),
+            ),
+            False,
+        )
     )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    qtbot.keyClick(home, Qt.Key.Key_Return)
-    wait_chat_ready(qtbot, app)
-    assert opened[0].config_file == second.resolve()
-    assert opened[0].model is None
+
+    assert app._active_config is running
+    assert app._active_config.available
+    assert not app.default_config.available
 
 
-def test_home_can_configure_existing_session(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    store.add_config(inspect_llm_config(second))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    qtbot.mouseClick(find(home, "configure-session"), Qt.MouseButton.LeftButton)
-    dialog = _wait_settings(qtbot, app)
-    assert dialog.findChild(QLineEdit, "config-path") is None
-    assert dialog.findChild(QPushButton, "browse-config") is None
-    assert dialog.findChild(QPushButton, "load-config") is None
-    assert dialog.findChild(QPushButton, "delete-config") is None
-    _select_config(dialog, second)
-    assert widget_text(dialog, "config-model") == "Second Model"
-    assert widget_text(dialog, "config-provider") == "anthropic"
-    find(dialog, "apply-settings", QPushButton).click()
-    home = wait_home(qtbot, app)
-    saved = store.session_for(tmp_path, "session-1")
-    assert saved is not None
-    assert saved.path == second.resolve()
-    assert widget_text(home, "detail-llm") == "Second Model"
-
-
-def test_session_can_return_to_project_default(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    store.set_session(tmp_path, "session-1", inspect_llm_config(second))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    assert widget_text(home, "detail-llm") == "Second Model"
-    qtbot.mouseClick(find(home, "configure-session"), Qt.MouseButton.LeftButton)
-    dialog = _wait_settings(qtbot, app)
-    assert dialog.select_project_default()
-    assert widget_text(dialog, "config-model") == "First Model"
-    find(dialog, "apply-settings", QPushButton).click()
-    home = wait_home(qtbot, app)
-    assert store.session_for(tmp_path, "session-1") is None
-    assert widget_text(home, "detail-llm") == "First Model"
-    assert "project default" in widget_text(home, "detail-config")
-
-
-def test_home_default_config_applies_to_new_session(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("new-session")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    find(dialog, "config-path", QLineEdit).setText(str(second))
-    find(dialog, "load-config", QPushButton).click()
-    find(dialog, "apply-settings", QPushButton).click()
-    _close_preferences(qtbot, dialog)
-    home = wait_home(qtbot, app)
-    assert widget_text(home, "home-model").endswith("Second Model")
-    saved_default = store.default_for(tmp_path)
-    assert saved_default is not None
-    assert saved_default.path == second.resolve()
-
-    qtbot.keyClick(home, Qt.Key.Key_N)
-    wait_chat_ready(qtbot, app)
-    assert opened[0].config_file == second.resolve()
-    saved_session = store.session_for(tmp_path, "new-session")
-    assert saved_session is not None
-    assert saved_session.path == second.resolve()
-
-
-def test_add_config_does_not_change_project_default(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    find(dialog, "config-path", QLineEdit).setText(str(second))
-    find(dialog, "load-config", QPushButton).click()
-    find(dialog, "cancel-settings", QPushButton).click()
-    _close_preferences(qtbot, dialog)
-    wait_home(qtbot, app)
-    saved_default = store.default_for(tmp_path)
-    assert saved_default is not None
-    assert saved_default.path == first.resolve()
-    assert {reference.path for reference in store.configs()} == {
-        first.resolve(),
-        second.resolve(),
-    }
-
-
-def test_settings_browse_adds_json_config(qtbot, tmp_path: Path, monkeypatch) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    captured: dict[str, str] = {}
-
-    def fake_pick(_parent: object, start_directory: str) -> Path:
-        captured["start"] = start_directory
-        return second
-
-    monkeypatch.setattr("kimix_gui.qt.settings_dialog.pick_json_file", fake_pick)
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    find(dialog, "browse-config", QPushButton).click()
-    assert captured["start"] == str(first.parent)
-    assert find(dialog, "config-path", QLineEdit).text() == str(second.resolve())
-    assert widget_text(dialog, "config-model") == "Second Model"
-    find(dialog, "cancel-settings", QPushButton).click()
-    _close_preferences(qtbot, dialog)
-    wait_home(qtbot, app)
-    assert {reference.path for reference in store.configs()} == {
-        first.resolve(),
-        second.resolve(),
-    }
-
-
-def test_settings_browse_cancel_leaves_library_unchanged(
-    qtbot, tmp_path: Path, monkeypatch
+def test_session_override_and_project_default_store_the_same_selection_shape(
+    tmp_path: Path,
 ) -> None:
-    first, _second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    monkeypatch.setattr(
-        "kimix_gui.qt.settings_dialog.pick_json_file",
-        lambda _parent, _start_directory: None,
+    store = KimixGuiConfigStore(
+        tmp_path / "metadata.json",
+        session_file_resolver=lambda _work_dir, session_id: (
+            tmp_path / "sessions" / session_id / "kimix-gui.json"
+        ),
     )
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    find(dialog, "browse-config", QPushButton).click()
-    assert find(dialog, "config-path", QLineEdit).text() == str(first.resolve())
-    assert widget_text(dialog, "config-model") == "First Model"
-    assert {reference.path for reference in store.configs()} == {first.resolve()}
+    project = chatgpt_selection("gpt-test", "medium")
+    override = chatgpt_selection("gpt-test", "high")
+    store.set_default(tmp_path, project)
+    store.set_session(tmp_path, "session-1", override)
+
+    global_value = orjson.loads((tmp_path / "metadata.json").read_bytes())["work_dirs"][
+        str(tmp_path.resolve())
+    ]["default_llm"]
+    session_value = orjson.loads(
+        (tmp_path / "sessions" / "session-1" / "kimix-gui.json").read_bytes()
+    )["llm"]
+
+    assert global_value.keys() == session_value.keys() == {"target", "variant"}
+    assert global_value["variant"]["value"] == "medium"
+    assert session_value["variant"]["value"] == "high"
 
 
-def test_project_settings_can_remove_non_default_config(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    store.add_config(inspect_llm_config(second))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    assert find(dialog, "delete-config", QPushButton).isEnabled() is False
-    _select_config(dialog, second)
-    assert find(dialog, "delete-config", QPushButton).isEnabled()
-    find(dialog, "delete-config", QPushButton).click()
-    assert {reference.path for reference in store.configs()} == {first.resolve()}
-    assert all(
-        item.reference.path.resolve() != second.resolve()
-        for item in dialog.config_items()
-        if not item.project_default
-    )
-    assert find(dialog, "delete-config", QPushButton).isEnabled() is False
+def test_session_selection_type_is_immutable() -> None:
+    selection = LLMSelection(ChatGPTTarget("gpt-test"), reasoning_effort_variant("medium"))
 
-
-def test_missing_session_config_requires_reconfiguration(qtbot, tmp_path: Path) -> None:
-    first, _second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    store.set_session(
-        tmp_path,
-        "session-1",
-        unavailable_config_reference(tmp_path / "missing.json"),
-    )
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    assert find(home, "open-session", QPushButton).isEnabled()
-    assert "missing" in widget_text(home, "detail-config")
-    qtbot.mouseClick(find(home, "open-session"), Qt.MouseButton.LeftButton)
-    _wait_settings(qtbot, app)
-    notification = list(app._notifications)[-1]
-    assert notification.title == "LLM configuration required"
-    assert notification.message == "Select a valid LLM configuration to continue."
-    assert notification.severity == "warning"
-
-
-def test_deleted_session_config_keeps_path_until_reconfigured(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    reference = inspect_llm_config(first)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(second))
-    store.set_session(tmp_path, "session-1", reference)
-    first.unlink()
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("session-1")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    assert widget_text(home, "detail-llm") == "Configuration unavailable"
-    assert widget_text(home, "detail-provider") == "Unavailable"
-    assert str(first.resolve()) in widget_text(home, "detail-config")
-    assert find(home, "open-session", QPushButton).isEnabled()
-
-    qtbot.keyClick(home, Qt.Key.Key_Return)
-    dialog = _wait_settings(qtbot, app)
-    assert widget_text(dialog, "config-model") == "Configuration unavailable"
-    assert "does not exist" in widget_text(dialog, "settings-error")
-    assert find(dialog, "apply-settings", QPushButton).isEnabled() is False
-
-    _select_config(dialog, second)
-    find(dialog, "apply-settings", QPushButton).click()
-    home = wait_home(qtbot, app)
-    assert find(home, "open-session", QPushButton).isEnabled()
-
-    qtbot.keyClick(home, Qt.Key.Key_Return)
-    wait_chat_ready(qtbot, app)
-    assert opened[0].config_file == second.resolve()
-
-
-def test_direct_resume_with_missing_config_opens_settings(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(second))
-    store.set_session(tmp_path, "session-1", inspect_llm_config(first))
-    first.unlink()
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("session-1")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path, session_id="session-1"),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    _wait_settings(qtbot, app)
-    assert opened == []
-
-
-def test_settings_stacks_library_and_details_on_narrow_window(qtbot, tmp_path: Path) -> None:
-    first, _second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app, size=(700, 560))
-    home = wait_home(qtbot, app)
-    dialog = _open_project_llm_settings(qtbot, app, home)
-    dialog.resize(700, 560)
-    qtbot.waitUntil(
-        lambda: find(dialog, "settings-body", QSplitter).orientation() == Qt.Orientation.Vertical,
-        timeout=5_000,
-    )
-    sources = find(dialog, "config-sources")
-    details = find(dialog, "config-details")
-    assert details.y() > sources.y()
-    assert find(dialog, "dialog-footer").geometry().bottom() <= dialog.rect().bottom()
-    assert find(dialog, "delete-config").x() >= 0
-    assert find(dialog, "apply-settings").geometry().right() <= dialog.width()
-
-
-def test_home_refreshes_changed_external_config(qtbot, tmp_path: Path) -> None:
-    first, _second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_session(tmp_path, "session-1", inspect_llm_config(first))
-    write_llm_config(
-        first,
-        model="changed-model",
-        display_name="Changed Model",
-        provider="google_genai",
-        base_url="https://google.test/v1",
-    )
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    assert widget_text(home, "detail-llm") == "Changed Model"
-    assert widget_text(home, "detail-provider") == "google_genai"
-
-
-def test_settings_applies_external_json_config(qtbot, tmp_path: Path) -> None:
-    first, _second = config_files(tmp_path)
-    json_config = write_json_config(
-        tmp_path / "external.json",
-        model="claude-json",
-        display_name="Claude JSON",
-    )
-    store = config_store(tmp_path)
-    store.set_default(tmp_path, inspect_llm_config(first))
-    store.add_config(inspect_llm_config(json_config))
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_loader=session_loader,
-        config_store=store,
-    )
-    launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    qtbot.mouseClick(find(home, "configure-session"), Qt.MouseButton.LeftButton)
-    dialog = _wait_settings(qtbot, app)
-    _select_config(dialog, json_config)
-    assert widget_text(dialog, "config-format") == "JSON"
-    assert widget_text(dialog, "config-model") == "Claude JSON"
-    find(dialog, "apply-settings", QPushButton).click()
-    wait_home(qtbot, app)
-    saved = store.session_for(tmp_path, "session-1")
-    assert saved is not None
-    assert saved.path == json_config.resolve()
-    assert saved.file_format == "JSON"
-
-
-def test_chat_settings_only_show_active_config(qtbot, tmp_path: Path) -> None:
-    first, second = config_files(tmp_path)
-    store = config_store(tmp_path)
-    store.set_session(tmp_path, "session-1", inspect_llm_config(first))
-    store.add_config(inspect_llm_config(second))
-    opened: list[SessionOptions] = []
-
-    async def factory(options: SessionOptions) -> FakeSession:
-        opened.append(options)
-        return FakeSession("session-1")
-
-    app = KimixGuiApp(
-        SessionOptions(tmp_path),
-        session_factory=factory,
-        session_loader=session_loader,
-        config_store=store,
-    )
-    window = launch_app(qtbot, app)
-    home = wait_home(qtbot, app)
-    qtbot.keyClick(home, Qt.Key.Key_Return)
-    chat = wait_chat_ready(qtbot, app)
-    assert opened[0].config_file == first.resolve()
-
-    qtbot.keyClick(window, Qt.Key.Key_F4)
-    dialog = _wait_settings(qtbot, app)
-    assert widget_text(dialog, "settings-scope") == "Current session · in use"
-    assert len(dialog.config_items()) == 1
-    assert dialog.config_items()[0].active is True
-    assert "IN USE" in dialog.config_items()[0].text()
-    assert widget_text(dialog, "config-model") == "First Model"
-    assert dialog.findChild(QPushButton, "apply-settings") is None
-    assert dialog.findChild(QPushButton, "delete-config") is None
-    assert dialog.findChild(QLineEdit, "config-path") is None
-    find(dialog, "close-settings", QPushButton).click()
-    qtbot.waitUntil(lambda: app.screen is chat, timeout=10_000)
-    assert len(opened) == 1
-    saved = store.session_for(tmp_path, "session-1")
-    assert saved is not None
-    assert saved.path == first.resolve()
+    assert selection == chatgpt_selection("gpt-test", "medium")
