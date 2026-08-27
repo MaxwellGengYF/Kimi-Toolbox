@@ -7,6 +7,7 @@ Color enums, ANSI helpers, the custom ``print``, ``PrintStream`` and the
 
 from __future__ import annotations
 
+import builtins
 import functools
 import io
 import os
@@ -230,6 +231,56 @@ def _ends_with_newline(word: str) -> bool:
 
 _colorful_print = True
 _print_func: Callable = print
+
+
+def _resolve_native_print() -> Callable | None:
+    """Resolve ``runtime_py.print.native_print`` (no ``kimix_native.print`` shim yet).
+
+    The compiled extension is reached through the shim's ``_native`` handle —
+    the same handle every ``kimix_native.<kernel>`` shim binds. Returns None
+    when native is unavailable or the runtime predates the print submodule, in
+    which case printing stays on the builtin ``print``.
+    """
+    try:
+        import kimix_native as _kn
+        native = getattr(_kn, "_native", None)
+        if native is None:
+            return None
+        return getattr(getattr(native, "print", None), "native_print", None)
+    except Exception:
+        return None
+
+
+_NATIVE_PRINT = _resolve_native_print()
+
+
+def _native_print_func(
+    *values: object,
+    sep: str | None = " ",
+    end: str | None = "\n",
+    file: Any = None,
+    flush: bool = False,
+) -> None:
+    """Native ``print``: queue pre-formatted UTF-8 to the async print stream.
+
+    Mirrors the builtin ``print`` contract (``str()`` coercion, ``sep``/``end``)
+    but writes through ``runtime_py.print.native_print`` — raw bytes, no extra
+    newline, GIL released, fflushed when ``flush=True``. Only stdout is
+    supported; any other ``file`` falls back to the builtin ``print``.
+    """
+    if file is not None and file is not sys.stdout:
+        builtins.print(*values, sep=sep, end=end, file=file, flush=flush)
+        return
+    sep = " " if sep is None else sep
+    end = "\n" if end is None else end
+    text = sep.join(str(v) for v in values) if values else ""
+    if end:
+        text += end
+    _NATIVE_PRINT(text.encode("utf-8", "surrogatepass"), flush=flush)
+
+
+if _native_use_native("PRINT") and _NATIVE_PRINT is not None:
+    _print_func = _native_print_func
 
 
 def print(*values: object, sep: str | None = " ", end: str | None = "\n", file: Any = None, flush: bool = False):
