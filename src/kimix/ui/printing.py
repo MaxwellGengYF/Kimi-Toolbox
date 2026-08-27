@@ -7,7 +7,6 @@ Color enums, ANSI helpers, the custom ``print``, ``PrintStream`` and the
 
 from __future__ import annotations
 
-import builtins
 import functools
 import io
 import os
@@ -261,22 +260,17 @@ def _native_print_func(
     file: Any = None,
     flush: bool = False,
 ) -> None:
-    """Native ``print``: queue pre-formatted UTF-8 to the async print stream.
+    """Native ``print`` — thin forwarder; all logic lives in C++ now.
 
-    Mirrors the builtin ``print`` contract (``str()`` coercion, ``sep``/``end``)
-    but writes through ``runtime_py.print.native_print`` — raw bytes, no extra
-    newline, GIL released, fflushed when ``flush=True``. Only stdout is
-    supported; any other ``file`` falls back to the builtin ``print``.
+    The binding used to receive pre-formatted bytes; it has since absorbed
+    the whole builtin-print contract (``str()`` coercion, ``sep``/``end``
+    joining with the usual ``None`` defaults, ``surrogatepass`` UTF-8
+    encoding and the non-stdout fallback to ``builtins.print``), so this
+    wrapper only forwards the arguments to keep the hot path at one hop.
+    Writes go through ``runtime_py.print.native_print`` — GIL released,
+    fflushed when ``flush=True``.
     """
-    if file is not None and file is not sys.stdout:
-        builtins.print(*values, sep=sep, end=end, file=file, flush=flush)
-        return
-    sep = " " if sep is None else sep
-    end = "\n" if end is None else end
-    text = sep.join(str(v) for v in values) if values else ""
-    if end:
-        text += end
-    _NATIVE_PRINT(text.encode("utf-8", "surrogatepass"), flush=flush)
+    _NATIVE_PRINT(*values, sep=sep, end=end, file=file, flush=flush)
 
 
 if _native_use_native("PRINT") and _NATIVE_PRINT is not None:

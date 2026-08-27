@@ -1,6 +1,6 @@
 {
     "model": "deepseek-v4-flash",
-    "max_context_size": 1048576,
+    "max_context_size": 1000000,
     "capabilities": [
         "thinking"
     ],
@@ -19,7 +19,7 @@
         {
             "role": "planner",
             "model": "deepseek-v4-pro",
-            "max_context_size": 1048576,
+            "max_context_size": 1000000,
             "capabilities": ["thinking"],
             "url": "https://api.deepseek.com/anthropic",
             "type": "anthropic",
@@ -28,7 +28,7 @@
         {
             "role": "sub_agent",
             "model": "deepseek-v4-flash",
-            "max_context_size": 1048576,
+            "max_context_size": 1000000,
             "capabilities": ["thinking"],
             "url": "https://api.deepseek.com/anthropic",
             "type": "anthropic",
