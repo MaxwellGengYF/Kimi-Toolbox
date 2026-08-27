@@ -51,6 +51,9 @@ image_process = [
 # Windows readline compatibility for CLI Tab completion
 windows_cli = ["pyreadline3>=3.5.6"]
 
+# PySide6 desktop client. Kept optional so SDK/CLI-only installs do not pull Qt.
+gui = ["PySide6>=6.8"]
+
 # All optional dependencies
 all = [
     "pymupdf>=1.23.0",
@@ -67,6 +70,7 @@ all = [
     "ruff>=0.15.10",
     "mypy>=1.5.0",
     "pyreadline3>=3.5.6",
+    "PySide6>=6.8",
 ]
 
 [[tool.uv.index]]
@@ -74,7 +78,7 @@ url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kimix", "src/kimi_agent_sdk"]
+packages = ["src/kimix", "src/kimi_agent_sdk", "src/kimix_gui"]
 sources = ["src"]
 
 # The pure-Python ``kimix_native`` shim (``bin/kimix_native``) is the single
@@ -117,8 +121,17 @@ ignore = [
     "E501",  # Line too long (handled by formatter)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Qt virtual methods must retain the camelCase names defined by PySide6.
+"src/kimix_gui/qt/**/*.py" = ["N802"]
+# Existing domain exception name is part of the migrated GUI API.
+"src/kimix_gui/kimi_workdir.py" = ["N818"]
+# The GUI test environment must be configured before importing Qt.
+"tests/gui/conftest.py" = ["E402"]
+
 [project.scripts]
 kimix = "kimix.cli:cli"
+kimix-gui = "kimix_gui.__main__:main"
 
 [tool.mypy]
 # Strict mode switch
@@ -152,6 +165,7 @@ exclude = ["tests/", "scripts/"]
   asyncio_mode = "auto"
   testpaths = ["tests"]
   pythonpath = ["."]
+  qt_api = "pyside6"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
@@ -163,6 +177,8 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.0.0",
+    "pytest-qt>=4.5",
+    "PySide6>=6.8",
     "ruff>=0.15.10",
     "mypy>=1.5.0",
     "respx>=0.22.0",

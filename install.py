@@ -62,6 +62,14 @@ def command_exists(cmd: str) -> bool:
 # prompt is then answered affirmatively without user input.
 _ASSUME_YES = False
 
+_GUI_TOOL_LAUNCHERS = (
+    "kimix-gui",
+    "kimix-gui.exe",
+    "kimix-gui.cmd",
+    "kimix-gui.bat",
+    "kimix-gui.ps1",
+)
+
 
 def _ask_yes_no(prompt: str, default: bool = True) -> bool:
     """Ask the user a yes/no question.
@@ -100,6 +108,60 @@ def run_command(cmd: list[str], description: str) -> bool:
         print(f"   Details: {e}")
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
+
+
+def _uv_tool_bin_dir() -> Path | None:
+    """Return the directory where uv exposes installed tool launchers."""
+    try:
+        result = subprocess.run(
+            ["uv", "tool", "dir", "--bin"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"❌ Could not locate uv's tool launcher directory: {exc}")
+        return None
+
+    bin_dir = result.stdout.strip()
+    if result.returncode != 0 or not bin_dir:
+        details = result.stderr.strip()
+        print("❌ Could not locate uv's tool launcher directory.")
+        if details:
+            print(f"   Details: {details}")
+        return None
+
+    return Path(bin_dir).expanduser().resolve()
+
+
+def _remove_gui_tool_launchers() -> bool:
+    """Remove GUI launchers created by uv for a CLI-only installation.
+
+    Python package metadata cannot make a console script conditional on an
+    optional dependency, so ``uv tool install`` creates ``kimix-gui`` even
+    when the ``gui`` extra was not selected. Remove only the exact launcher
+    names from uv's tool bin directory; the ``kimix`` launcher is untouched.
+    """
+    bin_dir = _uv_tool_bin_dir()
+    if bin_dir is None:
+        return False
+
+    removed: list[str] = []
+    try:
+        for launcher_name in _GUI_TOOL_LAUNCHERS:
+            launcher = bin_dir / launcher_name
+            if launcher.is_file() or launcher.is_symlink():
+                launcher.unlink()
+                removed.append(launcher.name)
+    except OSError as exc:
+        print(f"❌ Could not remove the kimix-gui launcher: {exc}")
+        return False
+
+    if removed:
+        print(f"✅ GUI launcher not installed: {', '.join(removed)} removed from {bin_dir}.")
+    else:
+        print("✅ GUI launcher is not present in uv's tool directory.")
+    return True
 
 
 def _install_coreutils() -> tuple[bool, bool]:
@@ -705,9 +767,24 @@ def main(argv: list[str] | None = None) -> int:
             "   so that the updated PATH environment variable is loaded."
         )
 
-    # 3. Run uv sync
+    install_gui = _ask_yes_no(
+        "Install the PySide6 desktop GUI and kimix-gui command?",
+        default=False,
+    )
+    if install_gui:
+        print("🖥️  GUI selected; PySide6 and the kimix-gui command will be installed.")
+    else:
+        print("⏭️  GUI skipped; PySide6 and the kimix-gui command will not be installed.")
+
+    # 3. Run uv sync. The dev group contains GUI test dependencies, so it must
+    #    be disabled for a genuinely CLI-only environment.
     if _ask_yes_no("Sync dependencies with uv?"):
-        if not run_command(["uv", "sync"], "Syncing dependencies with uv"):
+        sync_command = ["uv", "sync"]
+        if install_gui:
+            sync_command.extend(["--extra", "gui"])
+        else:
+            sync_command.append("--no-dev")
+        if not run_command(sync_command, "Syncing dependencies with uv"):
             print(
                 "\n💔 Oops! Something went wrong while syncing dependencies.\n"
                 "   Please check the error messages above and try again.\n"
@@ -724,15 +801,28 @@ def main(argv: list[str] | None = None) -> int:
     # 5. Install the kimix_base native runtime (download + unpack into bin/)
     _install_kimix_native()
 
-    # 6. Run uv tool install -e .
+    # 6. Install the selected tool environment. ``--force`` also lets a rerun
+    #    switch an existing editable installation between CLI-only and GUI.
     if _ask_yes_no("Install tool in editable mode?"):
-        if not run_command(["uv", "tool", "install", "-e", "."], "Installing tool in editable mode"):
+        tool_requirement = ".[gui]" if install_gui else "."
+        if not run_command(
+            ["uv", "tool", "install", "--force", "-e", tool_requirement],
+            "Installing tool in editable mode",
+        ):
             print(
                 "\n💔 Oops! Something went wrong while installing the tool.\n"
                 "   Please check the error messages above and try again.\n"
                 "   If the issue persists, you may need to install the tool manually."
             )
             return 1
+        if not install_gui and not _remove_gui_tool_launchers():
+            print(
+                "\n💔 The CLI was installed, but the kimix-gui launcher could not be removed.\n"
+                "   Remove it from uv's tool bin directory, then try again."
+            )
+            return 1
+        if install_gui:
+            print("\n🚀 Desktop GUI is ready. Start it with: kimix-gui")
     else:
         print("⏭️  Skipping uv tool install. The tool may not be available on PATH.")
 

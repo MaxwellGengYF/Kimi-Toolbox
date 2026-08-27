@@ -16,6 +16,20 @@ kimix
 python -m kimix
 ```
 
+### Desktop GUI
+
+The PySide6 desktop GUI is an optional install so headless SDK and CLI users do not
+need Qt:
+
+```bash
+pip install "kimix[gui]"
+kimix-gui
+```
+
+For a source checkout, `uv sync` installs the development environment (including Qt),
+then `uv run kimix-gui`. See the [desktop GUI guide](docs/gui/user-guide.md) and
+[GUI development notes](docs/gui/README.md).
+
 > **Note:** This repo supports not only KIMI LLM but also various API keys! Like OpenAI, Anthropic, etc. Default config templates are in `docs/`; use `kimix --config=xx.json` after setup.
 
 ![teasor](kimix_en.png)

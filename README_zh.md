@@ -16,6 +16,18 @@ kimix
 python -m kimix
 ```
 
+### 桌面 GUI
+
+PySide6 桌面 GUI 作为可选依赖提供，纯 SDK / CLI 用户无需安装 Qt：
+
+```bash
+pip install "kimix[gui]"
+kimix-gui
+```
+
+源码开发时运行 `uv sync` 即可安装包含 Qt 的开发环境，再用 `uv run kimix-gui` 启动。详见
+[桌面 GUI 使用说明](docs/gui/user-guide.md)与[开发文档](docs/gui/README.md)。
+
 注意！这个仓库不止支持 KIMI LLM，支持各类 API Key! 如 OpenAI, Anthropic 等。各类默认 config 模板在 `docs/`, 配置后通过 `kimix --config=xx.json` 即可使用 !
 
 ![teasor](kimix_zh.png)

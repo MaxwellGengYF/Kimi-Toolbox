@@ -19,3 +19,15 @@
 | `xxhash` | `hashlib` (non-crypto) | `import xxhash; h = xxhash.xxh64(data).hexdigest()` — 10x+ faster hashing |
 | `pybase64` | `base64` | `import pybase64; pybase64.b64encode(data)` / `pybase64.b64decode(data)` — faster SIMD-accelerated base64 |
 | `pendulum` | `datetime` | `import pendulum; now = pendulum.now()` — drop-in `datetime` replacement with better timezone handling |
+
+## PySide6 desktop client
+
+- Before changing `src/kimix_gui/`, `tests/gui/`, GUI translations, or GUI scripts, start at [`docs/gui/README.md`](docs/gui/README.md) and read the routed topic documents for the affected area.
+- Keep `src/kimix_gui/` top-level modules free of Qt, except `app.py` and `__main__.py`; all widgets belong under `src/kimix_gui/qt/`.
+- `KimixBridge` owns its daemon thread and asyncio loop. SDK objects never cross into the UI thread; cross-thread values are frozen dataclasses.
+- Every asynchronous session payload carries an epoch. Session changes bump it, stale payloads are discarded after awaits, and streaming text goes through `StreamCoalescer`.
+- Parent every cached Qt object and release it with `deleteLater()`; never mask cross-thread destruction with disabled GC or scheduled collection.
+- Keep transcript/history memory bounded and preserve the single sources of truth documented for view state, TODO state, session paths, and GUI configuration.
+- UI appearance goes through design tokens, the global theme stylesheet, and styling properties. Do not add per-widget stylesheets.
+- Define shortcuts only in `qt/keys.py`, and keep translations at the Qt boundary. After changing `tr()` copy, run `uv run python scripts/gui/build_translations.py` and commit both `.ts` and `.qm` catalogs.
+- Product code under `src/kimix_gui/` does not use `assert`; wire/state JSON uses `orjson`.

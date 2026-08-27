@@ -31,6 +31,7 @@ def _tty_stdin(monkeypatch):
 @pytest.fixture
 def _noop_install_steps(monkeypatch):
     """Stub out every step of ``main()`` that touches the real system."""
+    monkeypatch.setattr(install_mod, "command_exists", lambda command: True)
     monkeypatch.setattr(install_mod, "_install_coreutils", lambda: (False, False))
     monkeypatch.setattr(install_mod, "_install_ripgrep", lambda: (False, False))
     monkeypatch.setattr(install_mod, "_install_rtk", lambda: (False, False))
@@ -38,6 +39,7 @@ def _noop_install_steps(monkeypatch):
     monkeypatch.setattr(install_mod, "_sync_kimix_native_version", lambda version: True)
     monkeypatch.setattr(install_mod, "_install_kimix_native", lambda **kw: True)
     monkeypatch.setattr(install_mod, "run_command", lambda cmd, description: True)
+    monkeypatch.setattr(install_mod, "_remove_gui_tool_launchers", lambda: True)
 
 
 # ---------------------------------------------------------------------------
@@ -97,3 +99,76 @@ def test_main_accepts_unknown_arguments():
     with pytest.raises(SystemExit) as excinfo:
         install_mod.main(["--bogus"])
     assert excinfo.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# GUI installation choice
+# ---------------------------------------------------------------------------
+
+
+def test_main_installs_gui_extra_in_both_uv_environments(
+    _noop_install_steps, monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(install_mod, "_ask_yes_no", lambda prompt, default=True: True)
+    monkeypatch.setattr(
+        install_mod,
+        "run_command",
+        lambda command, description: commands.append(command) or True,
+    )
+    monkeypatch.setattr(
+        install_mod,
+        "_remove_gui_tool_launchers",
+        lambda: pytest.fail("GUI launchers should be kept"),
+    )
+
+    assert install_mod.main([]) == 0
+    assert ["uv", "sync", "--extra", "gui"] in commands
+    assert ["uv", "tool", "install", "--force", "-e", ".[gui]"] in commands
+
+
+def test_main_excludes_gui_dependencies_and_launcher(
+    _noop_install_steps, monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    commands: list[list[str]] = []
+    removed_launchers: list[bool] = []
+
+    def answer_prompt(prompt: str, default: bool = True) -> bool:
+        if "PySide6 desktop GUI" in prompt:
+            assert default is False
+            return False
+        return True
+
+    monkeypatch.setattr(install_mod, "_ask_yes_no", answer_prompt)
+    monkeypatch.setattr(
+        install_mod,
+        "run_command",
+        lambda command, description: commands.append(command) or True,
+    )
+    monkeypatch.setattr(
+        install_mod,
+        "_remove_gui_tool_launchers",
+        lambda: removed_launchers.append(True) or True,
+    )
+
+    assert install_mod.main([]) == 0
+    assert ["uv", "sync", "--no-dev"] in commands
+    assert ["uv", "tool", "install", "--force", "-e", "."] in commands
+    assert removed_launchers == [True]
+
+
+def test_remove_gui_tool_launchers_preserves_cli_launcher(monkeypatch, tmp_path):
+    cli_launcher = tmp_path / "kimix.exe"
+    gui_launcher = tmp_path / "kimix-gui.exe"
+    gui_script = tmp_path / "kimix-gui.ps1"
+    cli_launcher.touch()
+    gui_launcher.touch()
+    gui_script.touch()
+    monkeypatch.setattr(install_mod, "_uv_tool_bin_dir", lambda: tmp_path)
+
+    assert install_mod._remove_gui_tool_launchers() is True
+    assert cli_launcher.exists()
+    assert not gui_launcher.exists()
+    assert not gui_script.exists()
