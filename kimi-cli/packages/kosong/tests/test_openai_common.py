@@ -20,6 +20,7 @@ from kosong.chat_provider import (
 from kosong.chat_provider.openai_common import (
     clamp_thinking_effort,
     convert_error,
+    extract_reasoning_text,
     maybe_log_reasoning_content_error,
     reasoning_effort_to_thinking_effort,
     thinking_effort_to_reasoning_effort,
@@ -698,3 +699,62 @@ async def test_kimi_streamed_message_survives_empty_sse_event() -> None:
     )
     message, _ = _build_message([body.encode()])
     assert await _collect_texts(message) == ["Compaction summary"]
+
+
+class TestExtractReasoningText:
+    """Fallback extraction of reasoning text across backend-specific fields."""
+
+    def test_prefers_configured_key(self) -> None:
+        class Msg:
+            reasoning_content = "deepseek thinking"
+            reasoning = "commandcode thinking"
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "deepseek thinking"
+
+    def test_falls_back_to_reasoning_field(self) -> None:
+        class Msg:
+            reasoning = "commandcode thinking"
+
+        # reasoning_key defaults to reasoning_content in create_llm; the
+        # Command Code API only sends `reasoning`, so it must fall back.
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "commandcode thinking"
+
+    def test_falls_back_to_reasoning_details_blocks(self) -> None:
+        class Msg:
+            reasoning_details = [
+                {"type": "reasoning.text", "text": "step one"},
+                {"type": "reasoning.text", "text": " step two"},
+            ]
+
+        assert (
+            extract_reasoning_text(Msg(), "reasoning_content")
+            == "step one step two"
+        )
+
+    def test_reasoning_details_accepts_object_blocks(self) -> None:
+        class Block:
+            text = "obj block"
+
+        class Msg:
+            reasoning_details = [Block()]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "obj block"
+
+    def test_empty_string_preserved(self) -> None:
+        class Msg:
+            reasoning_content = ""
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == ""
+
+    def test_disabled_when_key_is_empty_string(self) -> None:
+        class Msg:
+            reasoning = "thinking text"
+
+        # An explicit empty reasoning_key disables reasoning round-tripping.
+        assert extract_reasoning_text(Msg(), "") is None
+
+    def test_none_when_no_field_present(self) -> None:
+        class Msg:
+            content = "hi"
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") is None

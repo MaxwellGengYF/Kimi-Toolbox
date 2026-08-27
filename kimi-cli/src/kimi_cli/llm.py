@@ -459,6 +459,13 @@ def create_llm(
     # provider can force its temperature based on the same decision that later
     # drives with_thinking().
     capabilities = derive_model_capabilities(model)
+    # A configured non-"off" thinking effort implies thinking should be on when
+    # the caller did not make an explicit decision (thinking is None). This is
+    # what makes configs like `C:/dev/ds_cmdcode.json` (`thinking_effort: "high"`
+    # + `capabilities: ["thinking"]`, no `default_thinking`) emit reasoning
+    # blocks even when create_llm is called without a `thinking` argument.
+    if thinking is None and thinking_effort not in (None, "off") and "thinking" in capabilities:
+        thinking = True
     thinking_on = "always_thinking" in capabilities or (
         thinking is True and "thinking" in capabilities
     )

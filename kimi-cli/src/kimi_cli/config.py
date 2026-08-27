@@ -754,6 +754,16 @@ class Config(BaseModel):
     def validate_model(self) -> Self:
         if self.model is not None and self.provider is None:
             raise ValueError("Active model configured without a provider")
+        # A non-"off" `thinking_effort` implies thinking mode should be on by
+        # default. Configs like `C:/dev/ds_cmdcode.json` set
+        # `thinking_effort: "high"` + `capabilities: ["thinking"]` and expect
+        # reasoning output without also writing `default_thinking: true`.
+        # An explicit `default_thinking` value always wins.
+        if (
+            "default_thinking" not in self.model_fields_set
+            and self.thinking_effort not in (None, "off")
+        ):
+            self.default_thinking = True
         return self
 
     @model_validator(mode="after")

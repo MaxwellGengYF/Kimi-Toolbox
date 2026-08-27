@@ -815,3 +815,77 @@ async def test_openai_legacy_without_user_omits_field():
             pass
         body = json.loads(mock.calls.last.request.content.decode())
         assert "user" not in body
+
+
+async def test_openai_legacy_non_stream_extracts_reasoning_field():
+    """Command Code's OpenAI endpoint returns reasoning under ``reasoning`` /
+    ``reasoning_details`` instead of ``reasoning_content``; the provider must
+    still surface a ThinkPart (rendered as the ``[thinking]`` block)."""
+    response_json = make_chat_completion_response("deepseek/deepseek-v4-flash")
+    response_json["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": "72.",
+        "reasoning": "9 * 8 = 72.",
+        "reasoning_details": [
+            {"type": "reasoning.text", "text": "9 * 8 = 72.", "format": "unknown", "index": 0}
+        ],
+    }
+    with respx.mock(base_url="https://api.commandcode.ai") as mock:
+        mock.post("/provider/v1/chat/completions").mock(
+            return_value=Response(200, json=response_json)
+        )
+        provider = OpenAILegacy(
+            model="deepseek/deepseek-v4-flash",
+            base_url="https://api.commandcode.ai/provider/v1",
+            api_key="test-key",
+            stream=False,
+            reasoning_key="reasoning_content",  # default used by create_llm
+        )
+        stream = await provider.generate("", [], [Message(role="user", content="9*8?")])
+        parts = [part async for part in stream]
+        assert [p.model_dump(exclude_none=True) for p in parts] == snapshot(
+            [
+                {"type": "think", "think": "9 * 8 = 72."},
+                {"type": "text", "text": "72."},
+            ]
+        )
+
+
+async def test_openai_legacy_stream_extracts_reasoning_field():
+    """Streaming deltas from Command Code carry ``delta.reasoning``; each delta
+    must surface as a ThinkPart even though the configured key is
+    ``reasoning_content``."""
+    from openai.types.chat import ChatCompletionChunk
+
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacyStreamedMessage
+
+    async def _aiter():
+        for text in ("9 * 8", " = 72."):
+            yield ChatCompletionChunk.model_validate(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "deepseek/deepseek-v4-flash",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": "",
+                                "reasoning": text,
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+
+    streamed = OpenAILegacyStreamedMessage(_aiter(), reasoning_key="reasoning_content")
+    parts = [part async for part in streamed]
+    assert [p.model_dump(exclude_none=True) for p in parts] == snapshot(
+        [
+            {"type": "think", "think": "9 * 8"},
+            {"type": "think", "think": " = 72."},
+        ]
+    )
