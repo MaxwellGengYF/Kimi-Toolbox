@@ -1,3 +1,5 @@
+"""Tests for Kimix's managed OpenAI Codex provider."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,8 +11,8 @@ import pytest
 from kosong.message import Message
 from kosong.tooling import Tool
 
-from kimix_gui.codex_auth import CodexModel, CodexModelCatalog, CodexRuntimeCredentials
-from kimix_gui.codex_provider import (
+from kimi_cli.auth.codex import CodexModel, CodexModelCatalog, CodexRuntimeCredentials
+from kimi_cli.llm_codex import (
     CodexProviderLease,
     CodexRequestAuth,
     ManagedOpenAICodex,

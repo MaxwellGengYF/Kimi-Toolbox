@@ -1,11 +1,17 @@
 """Tests for OAuthManager: resolve_api_key and ensure_fresh behavior."""
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
 
+from kimi_cli.auth.codex import (
+    CODEX_OAUTH_KEY,
+    CodexAuthError,
+    CodexProblem,
+    CodexRuntimeCredentials,
+)
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
     OAuthManager,
@@ -44,6 +50,19 @@ def _make_oauth_manager(config: Config, initial_token: OAuthToken | None = None)
         return OAuthManager(config)
 
 
+def _make_codex_config() -> Config:
+    return Config(
+        provider=LLMProvider(
+            type="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_key=SecretStr(""),
+            oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+        ),
+        model=LLMModel(model="gpt-5.4", max_context_size=272_000),
+        services=Services(),
+    )
+
+
 def test_resolve_api_key_returns_oauth_token_when_available():
     config = _make_config(with_oauth=True)
     token = OAuthToken(
@@ -59,6 +78,43 @@ def test_resolve_api_key_returns_oauth_token_when_available():
     result = oauth.resolve_api_key(SecretStr(""), ref)
 
     assert result == "oauth-access-123"
+
+
+@pytest.mark.asyncio
+async def test_codex_branch_resolves_and_refreshes_shared_credentials():
+    initial = CodexRuntimeCredentials("codex-access", "account-1", 2_000)
+    refreshed = CodexRuntimeCredentials("codex-refreshed", "account-1", 4_000)
+    service = MagicMock()
+    service.cached_credentials.return_value = initial
+    service.ensure_credentials = AsyncMock(return_value=refreshed)
+    config = _make_codex_config()
+    oauth = OAuthManager(config, codex_service=service)
+
+    assert oauth.resolve_api_key(config.provider.api_key, config.provider.oauth) == "codex-access"
+
+    await oauth.ensure_fresh(force=True)
+
+    service.ensure_credentials.assert_awaited_once_with(force_refresh=True)
+    assert (
+        oauth.resolve_api_key(config.provider.api_key, config.provider.oauth) == "codex-refreshed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_branch_maps_rejected_refresh_to_unauthorized():
+    service = MagicMock()
+    service.cached_credentials.return_value = CodexRuntimeCredentials(
+        "codex-access",
+        "account-1",
+        2_000,
+    )
+    service.ensure_credentials = AsyncMock(
+        side_effect=CodexAuthError(CodexProblem("invalid_grant"))
+    )
+    oauth = OAuthManager(_make_codex_config(), codex_service=service)
+
+    with pytest.raises(OAuthUnauthorized, match="Codex login is required"):
+        await oauth.ensure_fresh(force=True)
 
 
 def test_resolve_api_key_falls_back_to_api_key_when_no_token():

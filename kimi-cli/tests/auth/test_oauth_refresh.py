@@ -9,6 +9,14 @@ import aiohttp
 import pytest
 from pydantic import SecretStr
 
+from kimi_cli.auth.codex import (
+    AUTH_CONNECTED,
+    CODEX_BASE_URL,
+    CODEX_OAUTH_KEY,
+    CodexAuthSnapshot,
+    CodexModel,
+    CodexModelCatalog,
+)
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
     XAI_API_KEY_ENV,
@@ -24,7 +32,9 @@ from kimi_cli.auth.oauth import (
     _refresh_threshold,
     _save_to_file,
     has_xai_api_key_env,
+    login_codex,
     login_xai,
+    logout_codex,
     logout_xai,
     read_xai_api_key_env,
     refresh_token,
@@ -611,7 +621,9 @@ async def test_ensure_fresh_dispatches_xai_refresh():
 
     with (
         patch("kimi_cli.auth.oauth.load_tokens", return_value=token),
-        patch("kimi_cli.auth.oauth.refresh_xai_token", AsyncMock(return_value=refreshed)) as mock_refresh,
+        patch(
+            "kimi_cli.auth.oauth.refresh_xai_token", AsyncMock(return_value=refreshed)
+        ) as mock_refresh,
         patch("kimi_cli.auth.oauth.refresh_token") as mock_kimi_refresh,
         patch("kimi_cli.auth.oauth.save_tokens"),
     ):
@@ -732,7 +744,10 @@ async def test_login_xai_sets_token_auth_custom_headers(tmp_path, monkeypatch):
         patch("kimi_cli.auth.oauth.request_xai_device_authorization", fake_device_authorization),
         patch("kimi_cli.auth.oauth._request_xai_device_token", fake_device_token),
         patch("kimi_cli.auth.oauth._list_xai_models", AsyncMock(return_value=["grok-3"])),
-        patch("kimi_cli.auth.oauth.save_tokens", return_value=OAuthRef(storage="file", key=XAI_OAUTH_KEY)),
+        patch(
+            "kimi_cli.auth.oauth.save_tokens",
+            return_value=OAuthRef(storage="file", key=XAI_OAUTH_KEY),
+        ),
     ):
         events = [e async for e in login_xai(config, open_browser=False)]
 
@@ -806,3 +821,71 @@ async def test_logout_xai_clears_api_key_provider(tmp_path, monkeypatch):
     assert config.provider is None
     assert config.model is None
     mock_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_login_codex_configures_shared_oauth_provider(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    service = MagicMock()
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        model = CodexModel(
+            slug="gpt-5.4",
+            display_name="GPT-5.4",
+            reasoning_efforts=("low", "high"),
+            default_reasoning_effort="high",
+        )
+        return (
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (model,), False),
+        )
+
+    service.login = fake_login
+    with (
+        patch("kimi_cli.auth.oauth.default_codex_auth_service", return_value=service),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert [event.type for event in events] == ["verification_url", "waiting", "success"]
+    assert config.provider is not None
+    assert config.provider.type == "openai-codex"
+    assert config.provider.base_url == CODEX_BASE_URL
+    assert config.provider.oauth == OAuthRef(storage="file", key=CODEX_OAUTH_KEY)
+    assert config.model is not None
+    assert config.model.model == "gpt-5.4"
+    assert config.model.supported_efforts == {"low", "high"}
+    mock_save.assert_called_once_with(config)
+
+
+@pytest.mark.asyncio
+async def test_logout_codex_clears_shared_provider(tmp_path):
+    config = _make_config()
+    config.provider = LLMProvider(
+        type="openai-codex",
+        base_url=CODEX_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    service = MagicMock()
+    service.disconnect = AsyncMock()
+
+    with (
+        patch("kimi_cli.auth.oauth.default_codex_auth_service", return_value=service),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in logout_codex(config)]
+
+    assert [event.type for event in events] == ["success"]
+    service.disconnect.assert_awaited_once_with()
+    assert config.provider is None
+    assert config.model is None
+    mock_save.assert_called_once_with(config)

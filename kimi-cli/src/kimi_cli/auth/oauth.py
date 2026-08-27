@@ -20,6 +20,15 @@ import orjson
 from pydantic import SecretStr
 
 from kimi_cli.auth import KIMI_CODE_PLATFORM_ID
+from kimi_cli.auth.codex import (
+    CODEX_OAUTH_KEY,
+    CodexAuthError,
+    CodexAuthService,
+    default_codex_auth_service,
+)
+from kimi_cli.auth.codex import (
+    TERMINAL_AUTH_PROBLEMS as CODEX_TERMINAL_AUTH_PROBLEMS,
+)
 from kimi_cli.auth.platforms import (
     ModelInfo,
     get_platform_by_id,
@@ -39,7 +48,6 @@ from kimi_cli.share import get_share_dir
 from kimi_cli.utils.logging import logger
 
 if TYPE_CHECKING:
-
     from kimi_cli.soul.agent import Runtime
 
 
@@ -416,7 +424,7 @@ def _load_from_file(key: str) -> OAuthToken | None:
         return None
     try:
         payload = orjson.loads(path.read_text(encoding="utf-8"))
-    except (orjson.JSONDecodeError, OSError):
+    except orjson.JSONDecodeError, OSError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -580,7 +588,7 @@ async def refresh_token(refresh_token: str, *, max_retries: int = 3) -> OAuthTok
                 data: dict[str, Any]
                 try:
                     data = await response.json(content_type=None)
-                except (orjson.JSONDecodeError, aiohttp.ContentTypeError):
+                except orjson.JSONDecodeError, aiohttp.ContentTypeError:
                     data = {}
             if status in (401, 403):
                 raise OAuthUnauthorized(
@@ -677,7 +685,7 @@ async def refresh_xai_token(
                 data: dict[str, Any]
                 try:
                     data = await response.json(content_type=None)
-                except (orjson.JSONDecodeError, aiohttp.ContentTypeError):
+                except orjson.JSONDecodeError, aiohttp.ContentTypeError:
                     data = {}
             if status in (401, 403):
                 raise OAuthUnauthorized(
@@ -954,9 +962,7 @@ async def logout_kimi_code(config: Config) -> AsyncIterator[OAuthEvent]:
     return
 
 
-async def login_xai(
-    config: Config, *, open_browser: bool = True
-) -> AsyncIterator[OAuthEvent]:
+async def login_xai(config: Config, *, open_browser: bool = True) -> AsyncIterator[OAuthEvent]:
     """Perform xAI OAuth device-code login and update config for Grok access."""
     if not config.is_from_default_location:
         yield OAuthEvent(
@@ -1156,9 +1162,119 @@ async def logout_xai(config: Config) -> AsyncIterator[OAuthEvent]:
     return
 
 
+async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
+    """Log in to ChatGPT Codex and configure it as the active provider."""
+
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Login requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    from kimi_cli.auth.codex import CODEX_BASE_URL
+
+    service = default_codex_auth_service()
+    loop = asyncio.get_running_loop()
+    challenge_ready: asyncio.Future[Any] = loop.create_future()
+    operation_id = uuid.uuid4().int
+
+    async def _publish_challenge(challenge: Any) -> None:
+        if not challenge_ready.done():
+            challenge_ready.set_result(challenge)
+
+    login_task = asyncio.create_task(service.login(operation_id, _publish_challenge))
+    done, _pending = await asyncio.wait(
+        {challenge_ready, login_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if challenge_ready in done:
+        challenge = challenge_ready.result()
+        yield OAuthEvent(
+            "verification_url",
+            challenge.authorization_url,
+            {"url": challenge.authorization_url},
+        )
+        try:
+            opened = await asyncio.to_thread(webbrowser.open, challenge.authorization_url)
+        except Exception as exc:
+            logger.warning("Failed to open Codex authorization URL: {error}", error=exc)
+            opened = False
+        if not opened:
+            yield OAuthEvent("info", "Open the authorization URL in your browser to continue.")
+        yield OAuthEvent("waiting", "Waiting for ChatGPT authorization...")
+
+    try:
+        _snapshot, catalog = await login_task
+    except CodexAuthError as exc:
+        if not challenge_ready.done():
+            challenge_ready.cancel()
+        yield OAuthEvent("error", f"Codex login failed: {exc.problem.code}")
+        return
+
+    model = catalog.models[0]
+    capabilities: set[str] = {"thinking"}
+    modalities = {value.lower() for value in model.input_modalities}
+    if modalities & {"image", "images", "vision"}:
+        capabilities.add("image_in")
+    if modalities & {"video", "videos"}:
+        capabilities.add("video_in")
+    supported_efforts = {
+        effort
+        for effort in model.reasoning_efforts
+        if effort in {"low", "medium", "high", "xhigh", "max"}
+    }
+    config.provider = LLMProvider(
+        type="openai-codex",
+        base_url=CODEX_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    model_data: dict[str, Any] = {
+        "model": model.slug,
+        "display_name": model.display_name,
+        "max_context_size": model.max_context_size,
+        "max_tokens": model.max_tokens,
+        "capabilities": capabilities,
+    }
+    if supported_efforts:
+        model_data["supported_efforts"] = supported_efforts
+    config.model = LLMModel(**model_data)
+    save_config(config)
+    yield OAuthEvent("success", "Logged in to ChatGPT Codex successfully.")
+
+
+async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
+    """Remove shared Codex credentials and its active provider configuration."""
+
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Logout requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    await default_codex_auth_service().disconnect()
+    provider = config.provider
+    if provider is not None and (
+        provider.type == "openai-codex"
+        or (provider.oauth is not None and provider.oauth.key == CODEX_OAUTH_KEY)
+    ):
+        config.provider = None
+        config.model = None
+    save_config(config)
+    yield OAuthEvent("success", "Logged out of ChatGPT Codex successfully.")
+
+
 class OAuthManager:
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        codex_service: CodexAuthService | None = None,
+    ) -> None:
         self._config = config
+        self._codex_service = codex_service
         # Cache access tokens only; refresh tokens are always read from persisted storage.
         self._access_tokens: dict[str, str] = {}
         # ``asyncio.Lock`` binds to the running event loop on first acquire and
@@ -1228,6 +1344,11 @@ class OAuthManager:
 
     def _load_initial_tokens(self) -> None:
         for ref in self._iter_oauth_refs():
+            if ref.key == CODEX_OAUTH_KEY:
+                credentials = self._get_codex_service().cached_credentials()
+                if credentials is not None:
+                    self._access_tokens[ref.key] = credentials.access_token
+                continue
             token = load_tokens(ref)
             if token and not self._should_suppress_persisted_token(ref, token):
                 self._cache_access_token(ref, token)
@@ -1278,10 +1399,16 @@ class OAuthManager:
         if oauth:
             token = self._access_tokens.get(oauth.key)
             if token is None:
-                persisted = load_tokens(oauth)
-                if persisted and not self._should_suppress_persisted_token(oauth, persisted):
-                    self._cache_access_token(oauth, persisted)
-                    token = self._access_tokens.get(oauth.key)
+                if oauth.key == CODEX_OAUTH_KEY:
+                    credentials = self._get_codex_service().cached_credentials()
+                    if credentials is not None:
+                        token = credentials.access_token
+                        self._access_tokens[oauth.key] = token
+                else:
+                    persisted = load_tokens(oauth)
+                    if persisted and not self._should_suppress_persisted_token(oauth, persisted):
+                        self._cache_access_token(oauth, persisted)
+                        token = self._access_tokens.get(oauth.key)
             if token:
                 return token
             logger.warning(
@@ -1291,7 +1418,17 @@ class OAuthManager:
             )
         return api_key.get_secret_value()
 
-    _KNOWN_OAUTH_KEYS: set[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY})
+    _KNOWN_OAUTH_KEYS: set[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY, CODEX_OAUTH_KEY})
+
+    def _get_codex_service(self) -> CodexAuthService:
+        if self._codex_service is None:
+            self._codex_service = default_codex_auth_service()
+        return self._codex_service
+
+    def codex_service(self) -> CodexAuthService:
+        """Return the Codex OAuth service owned by this manager."""
+
+        return self._get_codex_service()
 
     def _iter_known_oauth_refs(self) -> list[OAuthRef]:
         """Return configured OAuth refs for providers we know how to refresh."""
@@ -1314,7 +1451,36 @@ class OAuthManager:
                 attempt a refresh.  Used after receiving a 401 from the server.
         """
         for ref in self._iter_known_oauth_refs():
-            await self._ensure_fresh_single_ref(ref, runtime, force=force)
+            if ref.key == CODEX_OAUTH_KEY:
+                await self._ensure_fresh_codex(ref, runtime, force=force)
+            else:
+                await self._ensure_fresh_single_ref(ref, runtime, force=force)
+
+    async def _ensure_fresh_codex(
+        self,
+        ref: OAuthRef,
+        runtime: Runtime | None,
+        *,
+        force: bool,
+    ) -> None:
+        try:
+            credentials = await self._get_codex_service().ensure_credentials(force_refresh=force)
+        except CodexAuthError as exc:
+            if exc.problem.code in CODEX_TERMINAL_AUTH_PROBLEMS:
+                self._access_tokens.pop(ref.key, None)
+                self._apply_access_token(ref, runtime, "")
+                if force:
+                    raise OAuthUnauthorized("Codex login is required.") from exc
+                return
+            if force:
+                raise OAuthError(str(exc)) from exc
+            logger.warning(
+                "Failed to refresh Codex OAuth token: {error}",
+                error=exc,
+            )
+            return
+        self._access_tokens[ref.key] = credentials.access_token
+        self._apply_access_token(ref, runtime, credentials.access_token)
 
     async def _ensure_fresh_single_ref(
         self, ref: OAuthRef, runtime: Runtime | None = None, *, force: bool = False
@@ -1520,6 +1686,12 @@ class OAuthManager:
             assert isinstance(runtime.llm.chat_provider, XAI), "Expected XAI chat provider"
             fallback_api_key = provider.api_key.get_secret_value()
             runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
+        elif ref.key == CODEX_OAUTH_KEY:
+            from kosong.chat_provider.codex import OpenAICodex
+
+            if isinstance(runtime.llm.chat_provider, OpenAICodex):
+                fallback_api_key = provider.api_key.get_secret_value()
+                runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
 
 
 if __name__ == "__main__":

@@ -6,11 +6,7 @@ import sys
 from dataclasses import dataclass, replace
 from functools import partial
 
-from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication, QDialog, QWidget
-
-from kimix_gui.backend import SessionOptions, create_sdk_session
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_DISCONNECTED,
     CodexAuthService,
@@ -19,6 +15,10 @@ from kimix_gui.codex_auth import (
     CodexModelCatalog,
     fallback_catalog,
 )
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
+
+from kimix_gui.backend import SessionOptions, create_sdk_session
 from kimix_gui.history import HistoryLoader
 from kimix_gui.llm_config import (
     ChatGPTModelReference,

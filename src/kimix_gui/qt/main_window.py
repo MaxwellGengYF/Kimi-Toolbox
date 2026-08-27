@@ -279,19 +279,19 @@ class MainWindow(QMainWindow):
         self._toast.show_message(message, title, severity=severity)
 
     def _on_codex_auth_changed(self, snapshot: object) -> None:
-        from kimix_gui.codex_auth import CodexAuthSnapshot
+        from kimi_cli.auth.codex import CodexAuthSnapshot
 
         if isinstance(snapshot, CodexAuthSnapshot):
             self.controller.on_codex_auth_changed(snapshot)
 
     def _on_codex_browser_challenge(self, challenge: object) -> None:
-        from kimix_gui.codex_auth import CodexBrowserChallenge
+        from kimi_cli.auth.codex import CodexBrowserChallenge
 
         if isinstance(challenge, CodexBrowserChallenge):
             self.controller.on_codex_browser_challenge(challenge)
 
     def _on_codex_catalog_changed(self, catalog: object) -> None:
-        from kimix_gui.codex_auth import CodexModelCatalog
+        from kimi_cli.auth.codex import CodexModelCatalog
 
         if isinstance(catalog, CodexModelCatalog):
             self.controller.on_codex_catalog_changed(catalog)

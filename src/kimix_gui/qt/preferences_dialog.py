@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from kimi_cli.auth.codex import (
+    AUTH_DISCONNECTED,
+    CodexAuthSnapshot,
+    CodexModelCatalog,
+    fallback_catalog,
+)
 from PySide6.QtCore import QT_TRANSLATE_NOOP, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -19,12 +25,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from kimix_gui.codex_auth import (
-    AUTH_DISCONNECTED,
-    CodexAuthSnapshot,
-    CodexModelCatalog,
-    fallback_catalog,
-)
 from kimix_gui.design import SUPPORTED_THEMES, SYSTEM_THEME
 from kimix_gui.i18n import SUPPORTED_LANGUAGES, SYSTEM_LANGUAGE
 from kimix_gui.preferences import InterfacePreferences

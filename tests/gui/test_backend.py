@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import orjson
 import pytest
+from kimi_cli.auth.codex import CODEX_BASE_URL, CodexAuthService
 
 from kimix_gui import backend
 from kimix_gui.backend import (
@@ -16,7 +17,6 @@ from kimix_gui.backend import (
     create_sdk_session,
     new_session_id,
 )
-from kimix_gui.codex_auth import CODEX_BASE_URL, CodexAuthService
 from kimix_gui.llm_config import ChatGPTSource
 
 

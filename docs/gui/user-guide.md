@@ -67,12 +67,19 @@ uv run kimix-gui --config=C:\path\to\provider.json
 浏览器通过仅监听本机的临时回调返回 Kimix；无需复制设备代码。连接成功后，内建 ChatGPT 模型会
 出现在 LLM Settings 的独立分组中；选择模型后仍需点击 **Use config** 才会应用到项目或 session。
 
-OAuth 凭据独立保存在 `KIMI_SHARE_DIR/kimix-gui-codex-auth.json`，不会读取、导入或共享
-Codex CLI 的凭据，也不会写入 provider JSON、GUI 配置或 session metadata。断开连接只删除这个
-本地凭据文件；已保存的 ChatGPT 模型引用会保留，并在重新登录后恢复。该集成沿用 Hermes 的独立
-凭据与 ChatGPT Codex backend 路线，并把登录阶段改为 Authorization Code + PKCE 的本机浏览器回调。
-它仍依赖非公开的 OAuth client/backend endpoint；上游变化会显示为登录或模型目录错误，不会影响
-外部 provider JSON。
+OAuth 现在属于 Kimix 核心认证层：GUI 与 `kimi login codex` 共用
+`KIMI_SHARE_DIR/openai-codex-state.json`，不会读取 Codex CLI 的私有缓存，也不会把 token 写入
+provider JSON、GUI 配置或 session metadata。GUI 的 **Disconnect** 与 `kimi logout codex` 都会
+删除共享登录状态；已保存的 ChatGPT 模型引用会保留，并在重新登录后恢复。
+登录使用 Authorization Code + PKCE 的本机浏览器回调。该能力仍依赖非公开的 OAuth client/backend
+endpoint；上游变化会显示为登录或模型目录错误，不会影响外部 provider JSON。
+
+也可以先在终端完成同一套登录，再打开 GUI：
+
+```powershell
+uv run kimi login codex
+uv run kimix-gui
+```
 
 ChatGPT 模型能力按 Codex 目录逐模型解析：使用 Codex 的 active context window、目录给出的默认与
 可选 reasoning effort，并保留服务器排列顺序。目录缺字段或离线回退时，当前官方 Codex 基线为

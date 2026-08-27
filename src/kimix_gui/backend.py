@@ -31,8 +31,9 @@ except ImportError:  # Local Kimix-CLI-X revisions export the worker factory pri
             _kimix_base._default_yolo = previous_yolo
 
 
-from kimix_gui.codex_auth import CodexAuthService, default_codex_auth_service
-from kimix_gui.codex_provider import CodexProviderLease, create_codex_provider
+from kimi_cli.auth.codex import CodexAuthService, default_codex_auth_service
+from kimi_cli.llm_codex import CodexProviderLease, create_codex_provider
+
 from kimix_gui.kimi_workdir import resolve_kimi_work_dir
 from kimix_gui.llm_config import (
     ChatGPTSource,

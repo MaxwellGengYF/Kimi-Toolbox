@@ -4,18 +4,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QCoreApplication, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
-
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_CONNECTING,
     AUTH_LOGIN_REQUIRED,
@@ -31,6 +20,17 @@ from kimix_gui.codex_auth import (
     CodexModelCatalog,
     CodexProblem,
 )
+from PySide6.QtCore import QCoreApplication, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
 from kimix_gui.qt.components import Card, DialogFooter
 from kimix_gui.qt.styling import CardLevel, Level, Role, Tone, Variant, style
 

@@ -1,4 +1,4 @@
-"""Managed Kosong Codex provider with per-request OAuth credentials."""
+"""Kimix's managed Kosong Codex provider with per-request OAuth credentials."""
 
 from __future__ import annotations
 
@@ -18,8 +18,7 @@ from kosong.message import Message
 from kosong.tooling import Tool
 from openai.types.responses import ResponseInputParam
 
-from kimix_gui import __version__
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     CODEX_BASE_URL,
     PROBLEM_MODEL_UNAVAILABLE,
     CodexAuthError,
@@ -27,6 +26,7 @@ from kimix_gui.codex_auth import (
     CodexModel,
     CodexProblem,
 )
+from kimi_cli.constant import get_user_agent
 
 _KIMIX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _ENCRYPTED_REASONING_INCLUDE = ("reasoning.encrypted_content",)
@@ -95,16 +95,23 @@ class CodexRequestAuth(httpx.Auth):
             request.headers["ChatGPT-Account-ID"] = account_id
         else:
             request.headers.pop("ChatGPT-Account-ID", None)
-        request.headers["User-Agent"] = f"kimix-gui/{__version__}"
-        request.headers["originator"] = "kimix-gui"
+        request.headers["User-Agent"] = get_user_agent()
+        request.headers["originator"] = "kimix"
 
 
 class ManagedOpenAICodex(OpenAICodex):
     """A shared provider that emits the official Codex Responses request shape."""
 
-    def __init__(self, *, session_id: str, **client_kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str | None,
+        shared: bool = True,
+        **client_kwargs: Any,
+    ) -> None:
         super().__init__(**client_kwargs)
         self._session_id = session_id
+        self._shared = shared
 
     def _request_kwargs(
         self,
@@ -136,14 +143,15 @@ class ManagedOpenAICodex(OpenAICodex):
             "store": False,
             "stream": self._stream,
             "include": list(_ENCRYPTED_REASONING_INCLUDE),
-            "prompt_cache_key": self._session_id,
-            "extra_headers": {
+        }
+        if self._session_id:
+            request["prompt_cache_key"] = self._session_id
+            request["extra_headers"] = {
                 "session-id": self._session_id,
                 "thread-id": self._session_id,
                 "session_id": self._session_id,
                 "x-client-request-id": self._session_id,
-            },
-        }
+            }
         return request, inputs
 
     async def generate(
@@ -170,7 +178,8 @@ class ManagedOpenAICodex(OpenAICodex):
         return responses_adapter.OpenAIResponsesStreamedMessage(response)
 
     async def aclose(self) -> None:
-        return
+        if not self._shared:
+            await super().aclose()
 
     async def shutdown(self) -> None:
         await super().aclose()
@@ -221,20 +230,21 @@ async def create_codex_provider(
     http_client = httpx.AsyncClient(
         auth=CodexRequestAuth(service),
         headers={
-            "User-Agent": f"kimix-gui/{__version__}",
-            "originator": "kimix-gui",
+            "User-Agent": get_user_agent(),
+            "originator": "kimix",
         },
     )
     kimix_efforts = _kimix_reasoning_efforts(model)
     provider: ManagedOpenAICodex = ManagedOpenAICodex(
         session_id=session_id,
+        shared=True,
         model=model.slug,
         api_key="oauth-managed",
         base_url=CODEX_BASE_URL,
         http_client=http_client,
         default_headers={
-            "User-Agent": f"kimix-gui/{__version__}",
-            "originator": "kimix-gui",
+            "User-Agent": get_user_agent(),
+            "originator": "kimix",
         },
         max_retries=0,
         supported_efforts=set(kimix_efforts) or None,

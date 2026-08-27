@@ -1,4 +1,4 @@
-"""ChatGPT Codex OAuth, credential storage, and model discovery."""
+"""Kimix core support for ChatGPT Codex OAuth and model discovery."""
 
 from __future__ import annotations
 
@@ -20,16 +20,17 @@ from uuid import uuid4
 
 import httpx
 import orjson
-from kimi_cli.share import get_share_dir
 
-from kimix_gui import __version__
+from kimi_cli.constant import get_user_agent
+from kimi_cli.share import get_share_dir
 
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-CODEX_AUTH_FILENAME = "kimix-gui-codex-auth.json"
+CODEX_OAUTH_KEY = "oauth/openai-codex"
+CODEX_AUTH_FILENAME = "openai-codex-state.json"
 AUTH_STORE_VERSION = 1
 REFRESH_SKEW_SECONDS = 120
 BROWSER_LOGIN_TIMEOUT_SECONDS = 15 * 60
@@ -74,6 +75,7 @@ PROBLEM_SERVER = "server_error"
 PROBLEM_CALLBACK_UNAVAILABLE = "callback_unavailable"
 
 _TERMINAL_TOKEN_ERRORS = {"invalid_grant", "invalid_token", "refresh_token_reused"}
+TERMINAL_AUTH_PROBLEMS = frozenset(_TERMINAL_TOKEN_ERRORS | {PROBLEM_LOGIN_REQUIRED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +217,7 @@ Clock = Callable[[], float]
 
 
 def default_codex_auth_file() -> Path:
-    """Return Kimix GUI's private Codex credential file."""
+    """Return Kimix's shared Codex credential and model-state file."""
 
     return get_share_dir() / CODEX_AUTH_FILENAME
 
@@ -337,7 +339,7 @@ class _CrossProcessLock:
 
 
 class CodexAuthService:
-    """Own the independent OAuth store and all ChatGPT Codex network operations."""
+    """Own Kimix's Codex OAuth state and all ChatGPT Codex network operations."""
 
     def __init__(
         self,
@@ -359,11 +361,33 @@ class CodexAuthService:
         self._sleep = sleep
         self._callback_ports = callback_ports
         self._login_timeout = login_timeout
-        self._refresh_lock = asyncio.Lock()
-        self._login_lock = asyncio.Lock()
+        self._refresh_lock: asyncio.Lock | None = None
+        self._refresh_lock_loop: asyncio.AbstractEventLoop | None = None
+        self._login_lock: asyncio.Lock | None = None
+        self._login_lock_loop: asyncio.AbstractEventLoop | None = None
         self._cancelled_operations: set[int] = set()
         self._cancel_events: dict[int, asyncio.Event] = {}
         self._client: httpx.AsyncClient | None = None
+
+    def _get_lock(self, kind: str) -> asyncio.Lock:
+        """Return a service lock bound to the current event loop."""
+
+        loop = asyncio.get_running_loop()
+        if kind == "refresh":
+            if self._refresh_lock is None or self._refresh_lock_loop is not loop:
+                self._refresh_lock = asyncio.Lock()
+                self._refresh_lock_loop = loop
+            return self._refresh_lock
+        if self._login_lock is None or self._login_lock_loop is not loop:
+            self._login_lock = asyncio.Lock()
+            self._login_lock_loop = loop
+        return self._login_lock
+
+    def cached_credentials(self) -> CodexRuntimeCredentials | None:
+        """Read currently persisted credentials without performing network I/O."""
+
+        tokens = self._tokens_from_state(self._read_state())
+        return self._runtime_credentials(tokens) if tokens is not None else None
 
     async def aclose(self) -> None:
         client = self._client
@@ -376,9 +400,7 @@ class CodexAuthService:
         tokens = self._tokens_from_state(state)
         models = self._models_from_state(state)
         problem = self._problem_from_state(state)
-        if problem is not None and problem.code in _TERMINAL_TOKEN_ERRORS | {
-            PROBLEM_LOGIN_REQUIRED
-        }:
+        if problem is not None and problem.code in TERMINAL_AUTH_PROBLEMS:
             auth_state = AUTH_LOGIN_REQUIRED
         elif tokens is not None:
             auth_state = AUTH_CONNECTED
@@ -411,7 +433,7 @@ class CodexAuthService:
         operation_id: int,
         challenge_callback: ChallengeCallback,
     ) -> tuple[CodexAuthSnapshot, CodexModelCatalog]:
-        async with self._login_lock:
+        async with self._get_lock("login"):
             self._raise_if_cancelled(operation_id)
             cancel_event = asyncio.Event()
             self._cancel_events[operation_id] = cancel_event
@@ -452,14 +474,12 @@ class CodexAuthService:
                     await self._close_browser_authorization(authorization)
 
     async def disconnect(self, operation_id: int = 0) -> CodexAuthSnapshot:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
-                try:
+                with suppress(FileNotFoundError):
                     self.auth_file.unlink()
-                except FileNotFoundError:
-                    pass
             finally:
                 lock.release()
         return CodexAuthSnapshot(operation_id=operation_id, state=AUTH_DISCONNECTED)
@@ -470,7 +490,7 @@ class CodexAuthService:
         force_refresh: bool = False,
         failed_access_token: str | None = None,
     ) -> CodexRuntimeCredentials:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
@@ -743,7 +763,7 @@ class CodexAuthService:
         return self._json_object(response)
 
     async def _save_tokens(self, tokens: _StoredTokens, *, operation_id: int) -> None:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
@@ -869,7 +889,7 @@ class CodexAuthService:
         *,
         expected_access_token: str,
     ) -> bool:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
@@ -895,7 +915,7 @@ class CodexAuthService:
         *,
         expected_access_token: str | None,
     ) -> None:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
@@ -915,7 +935,7 @@ class CodexAuthService:
                 lock.release()
 
     async def _record_auth_problem(self, problem: CodexProblem) -> None:
-        async with self._refresh_lock:
+        async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
@@ -951,17 +971,13 @@ class CodexAuthService:
             os.replace(temporary, self.auth_file)
             self._limit_permissions(self.auth_file, directory=False)
         finally:
-            try:
+            with suppress(FileNotFoundError):
                 temporary.unlink()
-            except FileNotFoundError:
-                pass
 
     @staticmethod
     def _limit_permissions(path: Path, *, directory: bool) -> None:
-        try:
+        with suppress(OSError):
             os.chmod(path, stat.S_IRWXU if directory else stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
 
     @staticmethod
     def _tokens_from_state(state: Mapping[str, Any]) -> _StoredTokens | None:
@@ -1033,7 +1049,7 @@ class CodexAuthService:
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                headers={"User-Agent": f"kimix-gui/{__version__}"},
+                headers={"User-Agent": get_user_agent()},
                 transport=self._transport,
             )
         return self._client
@@ -1103,7 +1119,7 @@ def _build_authorization_url(*, redirect_uri: str, code_challenge: str, state: s
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
             "state": state,
-            "originator": "kimix-gui",
+            "originator": "kimix",
         }
     )
     return f"{AUTHORIZATION_URL}?{query}"

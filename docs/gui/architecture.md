@@ -21,8 +21,6 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 |---|---|
 | `app.py` | `KimixGuiApp`：home / chat 路由，持有 bridge 与统一 GUI 配置存储 |
 | `backend.py` | `SessionOptions` + `create_sdk_session()`，包装 `kimix.create_session_async()` |
-| `codex_auth.py` | ChatGPT Codex 浏览器 OAuth、本机 PKCE 回调、独立凭据文件、刷新锁与模型目录缓存 |
-| `codex_provider.py` | Kosong `OpenAICodex` 的逐请求认证层与顶层 session 资源 lease |
 | `design/` | 与框架无关的设计 token：`palette.py` / `categories.py` / `scale.py` / `theme.py`（`DARK`） |
 | `i18n.py` | 纯函数 `resolve_language(preference, system_locale)` + 支持语言常量 |
 | `preferences.py` | `InterfacePreferences`（字体 / 语言 / 主题）及其纯规范化/序列化函数 |
@@ -60,6 +58,11 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 | `qt/status_line.py` | 把 `rendering.status_values()` 的数字成句（状态条）|
 | `qt/retranslate.py` | `Retranslator`：宿主控件的 `LanguageChange` 子对象，重跑 bound 的文案语句 |
 | `qt/keys.py` | 全应用键位表（`HOME` / `CHAT` / `APPROVAL`）+ `install()` / `ensure_focus()` |
+
+ChatGPT Codex 不是 GUI 私有 Provider。浏览器 OAuth、共享凭据、刷新和模型目录由
+`kimi-cli/src/kimi_cli/auth/codex.py` 与核心 `OAuthManager` 管理；Codex 请求适配位于
+`kimi-cli/src/kimi_cli/llm_codex.py`。GUI 的设置页和 bridge 只调用这些核心接口，不保存或刷新
+OAuth token。
 
 表里没有的模块就是不存在的模块：`src/kimix_gui/screens/`（Textual 时代的残壳）与
 `qt/app.py`（5 行 re-export，零 importer）都已删除，`KimixGuiApp` 从 `kimix_gui.app` 导。

@@ -264,6 +264,15 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 | `openai-codex` | OpenAI Codex（ChatGPT 后端） |
 | `copilot-acp` | GitHub Copilot ACP 子进程（外部 Agent，无进程内 LLM） |
 
+使用 ChatGPT 订阅登录 Codex 时无需手写 token 或 provider JSON；Kimix 会配置
+`openai-codex` Provider，并在请求前刷新共享凭据：
+
+```bash
+uv run kimi login codex
+# 退出并清除共享凭据
+uv run kimi logout codex
+```
+
 > 当省略 `api_key` / `url` 时，Provider 注册表会回退到各 Provider 的标准环境变量（如 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`、`XIAOMI_API_KEY`、`GLM_API_KEY`/`ZAI_API_KEY`、`MINIMAX_API_KEY`）。完整的逐 Provider 环境变量列表见 `kimi-cli/packages/kosong/src/kosong/providers/__init__.py`。
 
 **自定义配置示例（参考 `docs/anthropic.json` 等）：**

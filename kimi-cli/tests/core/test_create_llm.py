@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from inline_snapshot import snapshot
 from kosong.chat_provider.echo import EchoChatProvider
@@ -8,8 +10,11 @@ from kosong.chat_provider.xai import XAI
 from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
 from pydantic import SecretStr
 
-from kimi_cli.config import LLMModel, LLMProvider, OpenAISettings
+from kimi_cli.auth.codex import CODEX_OAUTH_KEY, CodexRuntimeCredentials
+from kimi_cli.auth.oauth import OAuthManager
+from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, OpenAISettings, Services
 from kimi_cli.llm import augment_provider_with_env_vars, create_llm
+from kimi_cli.llm_codex import ManagedOpenAICodex
 
 
 @pytest.mark.skip(reason="inline-snapshot incompatibility with pydantic SecretStr on this platform")
@@ -68,7 +73,9 @@ def test_create_llm_kimi_model_parameters(monkeypatch):
             "base_url": "https://api.test/v1/",
             "temperature": 0.6,
             "top_p": 0.8,
-            "max_tokens": 1234, "max_completion_tokens": 1234}
+            "max_tokens": 1234,
+            "max_completion_tokens": 1234,
+        }
     )
 
 
@@ -197,6 +204,43 @@ def test_create_llm_openai_responses_with_session_id():
     assert llm is not None
     assert isinstance(llm.chat_provider, OpenAIResponses)
     assert llm.chat_provider._generation_kwargs["user"] == "sess-abc-123"
+
+
+@pytest.mark.asyncio
+async def test_create_llm_codex_oauth_uses_core_managed_provider():
+    provider = LLMProvider(
+        type="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    model = LLMModel(
+        model="gpt-5.4",
+        max_context_size=272_000,
+        capabilities={"thinking"},
+    )
+    config = Config(provider=provider, model=model, services=Services())
+    service = MagicMock()
+    service.cached_credentials.return_value = CodexRuntimeCredentials(
+        "codex-access",
+        "account-1",
+        2_000,
+    )
+    service.ensure_credentials = AsyncMock()
+    oauth = OAuthManager(config, codex_service=service)
+
+    llm = create_llm(provider, model, session_id="session-1", oauth=oauth)
+
+    assert llm is not None
+    assert isinstance(llm.chat_provider, ManagedOpenAICodex)
+    assert llm.chat_provider.client.api_key == "oauth-managed"
+    assert llm.chat_provider._session_id == "session-1"
+    assert llm.chat_provider._client_kwargs["default_headers"] == {
+        "User-Agent": "KimiCLI/kimix",
+        "originator": "kimix",
+        "ChatGPT-Account-ID": "account-1",
+    }
+    await llm.chat_provider.aclose()
 
 
 def test_augment_provider_with_env_vars_xai(monkeypatch):
@@ -547,6 +591,7 @@ def test_create_llm_no_custom_headers_has_empty_headers():
     assert isinstance(llm.chat_provider, OpenAILegacy)
     assert llm.chat_provider.client._custom_headers == {}
 
+
 def test_create_llm_openai_responses_thinking_false_no_reasoning_in_params():
     """thinking=False should call with_thinking("off"), which sets reasoning_effort=None.
     The OpenAIResponses provider handles this by omitting reasoning from the request."""
@@ -683,9 +728,7 @@ def test_create_llm_supported_efforts_passes_max():
         max_context_size=128000,
         capabilities={"thinking"},
     )
-    openai_llm = create_llm(
-        openai_provider, openai_model, thinking=True, thinking_effort="max"
-    )
+    openai_llm = create_llm(openai_provider, openai_model, thinking=True, thinking_effort="max")
     assert openai_llm is not None
     assert isinstance(openai_llm.chat_provider, OpenAILegacy)
     assert openai_llm.chat_provider.thinking_effort == "max"

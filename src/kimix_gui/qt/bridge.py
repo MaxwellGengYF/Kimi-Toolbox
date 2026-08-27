@@ -12,16 +12,7 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
-
-from kimi_agent_sdk import ApprovalRequest, RunCancelled, ToolError, is_request
-from kimix_gui.backend import (
-    SdkSession,
-    SessionOptions,
-    close_sdk_session,
-    create_sdk_session,
-)
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_CONNECTING,
     AUTH_DISCONNECTED,
@@ -38,6 +29,15 @@ from kimix_gui.codex_auth import (
     CodexAuthSnapshot,
     CodexBrowserChallenge,
     CodexProblem,
+)
+from PySide6.QtCore import QObject, Signal
+
+from kimi_agent_sdk import ApprovalRequest, RunCancelled, ToolError, is_request
+from kimix_gui.backend import (
+    SdkSession,
+    SessionOptions,
+    close_sdk_session,
+    create_sdk_session,
 )
 from kimix_gui.history import HistoryLoader, Timeline, create_timeline
 from kimix_gui.llm_config import ChatGPTSource

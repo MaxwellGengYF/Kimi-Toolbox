@@ -4,12 +4,7 @@ import asyncio
 import time
 
 import pytest
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QPushButton, QWidget
-
-from kimix_gui.app import KimixGuiApp
-from kimix_gui.backend import SessionOptions
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_DISCONNECTED,
     AUTH_RETRY_LATER,
@@ -20,6 +15,11 @@ from kimix_gui.codex_auth import (
     CodexModelCatalog,
     CodexProblem,
 )
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QPushButton, QWidget
+
+from kimix_gui.app import KimixGuiApp
+from kimix_gui.backend import SessionOptions
 from kimix_gui.llm_config import ChatGPTModelReference, ChatGPTSource
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.bridge import KimixBridge

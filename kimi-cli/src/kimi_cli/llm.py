@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from kosong.chat_provider import StreamedMessage, TokenUsage
     from kosong.message import Message
     from kosong.tooling import Tool
+
     from kimi_cli.auth.oauth import OAuthManager
     from kimi_cli.config import Config, LLMModel, LLMProvider
 
@@ -206,11 +207,14 @@ class _LoopDetectedStreamedMessage:
                     raise LoopDetectedError(
                         "Repeated single character or word detected in LLM stream."
                     )
-            elif isinstance(part, ThinkPart) and not part.encrypted:
-                if self._detector.feed(part.think):
-                    raise LoopDetectedError(
-                        "Repeated single character or word detected in LLM stream."
-                    )
+            elif (
+                isinstance(part, ThinkPart)
+                and not part.encrypted
+                and self._detector.feed(part.think)
+            ):
+                raise LoopDetectedError(
+                    "Repeated single character or word detected in LLM stream."
+                )
             yield part
 
     @property
@@ -281,7 +285,9 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
             if not model.model and (model_name := os.getenv("KIMI_MODEL_NAME")):
                 model.model = model_name
                 applied["KIMI_MODEL_NAME"] = model_name
-            if not model.max_context_size and (max_context_size := os.getenv("KIMI_MODEL_MAX_CONTEXT_SIZE")):
+            if not model.max_context_size and (
+                max_context_size := os.getenv("KIMI_MODEL_MAX_CONTEXT_SIZE")
+            ):
                 model.max_context_size = int(max_context_size)
                 applied["KIMI_MODEL_MAX_CONTEXT_SIZE"] = max_context_size
             if not model.capabilities and (capabilities := os.getenv("KIMI_MODEL_CAPABILITIES")):
@@ -302,7 +308,9 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
             if not model.model and (model_name := os.getenv("XAI_MODEL_NAME")):
                 model.model = model_name
                 applied["XAI_MODEL_NAME"] = model_name
-            if not model.max_context_size and (max_context_size := os.getenv("XAI_MODEL_MAX_CONTEXT_SIZE")):
+            if not model.max_context_size and (
+                max_context_size := os.getenv("XAI_MODEL_MAX_CONTEXT_SIZE")
+            ):
                 model.max_context_size = int(max_context_size)
                 applied["XAI_MODEL_MAX_CONTEXT_SIZE"] = max_context_size
             if not model.capabilities and (capabilities := os.getenv("XAI_MODEL_CAPABILITIES")):
@@ -381,13 +389,16 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
 def _kimi_default_headers(provider: LLMProvider, oauth: OAuthManager | None) -> dict[str, str]:
     user_agent = get_user_agent() if provider.type in {"kimi", "_chaos"} else None
     headers = {"User-Agent": user_agent} if user_agent else dict()
-    if oauth:
+    if oauth and provider.type != "openai-codex":
         headers.update(oauth.common_headers())
     if provider.custom_headers:
         headers.update(provider.custom_headers)
     return headers
 
+
 LEGAL_THINKING_EFFORT = frozenset({"off", "low", "medium", "high", "xhigh", "max"})
+
+
 # ---------------------------------------------------------------------------
 # Cross-provider session contract
 # ---------------------------------------------------------------------------
@@ -432,7 +443,6 @@ def create_llm(
     thinking: bool | None = None,
     session_id: str | None = None,
     oauth: OAuthManager | None = None,
-    
     max_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
@@ -447,8 +457,10 @@ def create_llm(
             provider_type=provider.type,
         )
         return None
-    
-    assert not thinking_effort or thinking_effort in LEGAL_THINKING_EFFORT, 'thinking_effort must be `off`, `low`, `medium`, `high`, `xhigh` and `max`'
+
+    assert not thinking_effort or thinking_effort in LEGAL_THINKING_EFFORT, (
+        "thinking_effort must be `off`, `low`, `medium`, `high`, `xhigh` and `max`"
+    )
     resolved_api_key = (
         oauth.resolve_api_key(provider.api_key, provider.oauth)
         if oauth and provider.oauth
@@ -620,6 +632,9 @@ def create_llm(
             # the exception: its `session_id` maps to extra_body.session_id for
             # sticky routing (see the OpenRouter provider).
             from kosong.chat_provider.compat import (
+                GMI,
+                NVIDIA,
+                ZAI,
                 AIGateway,
                 Alibaba,
                 Arcee,
@@ -629,11 +644,9 @@ def create_llm(
                 DeepInfra,
                 DeepSeek,
                 Fireworks,
-                GMI,
                 HuggingFace,
                 Kilocode,
                 KimiCoding,
-                NVIDIA,
                 Nous,
                 Novita,
                 OllamaCloud,
@@ -643,8 +656,8 @@ def create_llm(
                 StepFun,
                 Upstage,
                 Xiaomi,
-                ZAI,
             )
+
             compat_providers = {
                 "ai-gateway": AIGateway,
                 "alibaba": Alibaba,
@@ -726,13 +739,49 @@ def create_llm(
                 default_headers=_kimi_default_headers(provider, oauth),
                 supported_efforts=model.supported_efforts,
             ).with_parallel_tool_calls(enabled=True)
-        case "openai-codex" | "actual":
-            if provider.type == "openai-codex":
-                from kosong.chat_provider.codex import OpenAICodex as CodexProvider
-            else:
-                from kosong.chat_provider.codex import Actual as CodexProvider
+        case "openai-codex":
+            import httpx
 
-            chat_provider = CodexProvider(
+            from kimi_cli.auth.codex import CODEX_OAUTH_KEY, extract_chatgpt_account_id
+            from kimi_cli.llm_codex import CodexRequestAuth, ManagedOpenAICodex
+
+            codex_headers = {
+                "User-Agent": get_user_agent(),
+                "originator": "kimix",
+            }
+            if provider.custom_headers:
+                codex_headers.update(provider.custom_headers)
+            codex_client_kwargs: dict[str, object] = {}
+            codex_api_key = resolved_api_key
+            if provider.oauth is not None and provider.oauth.key == CODEX_OAUTH_KEY and oauth:
+                codex_service = oauth.codex_service()
+                credentials = codex_service.cached_credentials()
+                if credentials is not None and credentials.account_id:
+                    codex_headers["ChatGPT-Account-ID"] = credentials.account_id
+                codex_client_kwargs["http_client"] = httpx.AsyncClient(
+                    auth=CodexRequestAuth(codex_service),
+                    headers=codex_headers,
+                )
+                codex_api_key = "oauth-managed"
+            elif account_id := extract_chatgpt_account_id(resolved_api_key):
+                codex_headers["ChatGPT-Account-ID"] = account_id
+
+            chat_provider = ManagedOpenAICodex(
+                session_id=session_id,
+                shared=False,
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=codex_api_key,
+                default_headers=codex_headers,
+                max_retries=0,
+                supported_efforts=model.supported_efforts,
+                **codex_client_kwargs,
+            ).with_parallel_tool_calls(enabled=True)
+
+        case "actual":
+            from kosong.chat_provider.codex import Actual
+
+            chat_provider = Actual(
                 model=model.model,
                 base_url=provider.base_url,
                 api_key=resolved_api_key,
@@ -761,8 +810,7 @@ def create_llm(
         case "copilot-acp":
             # External ACP subprocess — no kosong ChatProvider implementation.
             logger.warning(
-                "Provider type 'copilot-acp' is not supported by kosong; "
-                "no LLM will be created."
+                "Provider type 'copilot-acp' is not supported by kosong; no LLM will be created."
             )
             return None
         case "anthropic":
@@ -828,21 +876,22 @@ def create_llm(
             )
     _generation_kwargs = None
     if chat_provider is not None:
-        _generation_kwargs = getattr(chat_provider, '_generation_kwargs', None)
-    if temperature is not None and _generation_kwargs and 'temperature' in _generation_kwargs:
-        _generation_kwargs['temperature'] = float(temperature)
-    if top_p is not None and _generation_kwargs and 'top_p' in _generation_kwargs:
-        _generation_kwargs['top_p'] = float(top_p)
-    if top_k is not None and _generation_kwargs and 'top_k' in _generation_kwargs:
-        _generation_kwargs['top_k'] = int(top_k)
-    if max_tokens is not None and _generation_kwargs and 'max_tokens' in _generation_kwargs:
-        _generation_kwargs['max_tokens'] = int(max_tokens)
-    
+        _generation_kwargs = getattr(chat_provider, "_generation_kwargs", None)
+    if temperature is not None and _generation_kwargs and "temperature" in _generation_kwargs:
+        _generation_kwargs["temperature"] = float(temperature)
+    if top_p is not None and _generation_kwargs and "top_p" in _generation_kwargs:
+        _generation_kwargs["top_p"] = float(top_p)
+    if top_k is not None and _generation_kwargs and "top_k" in _generation_kwargs:
+        _generation_kwargs["top_k"] = int(top_k)
+    if max_tokens is not None and _generation_kwargs and "max_tokens" in _generation_kwargs:
+        _generation_kwargs["max_tokens"] = int(max_tokens)
 
     # Apply thinking using the pre-computed capability/thinking decision so it
     # matches the temperature forced above for the kimi provider.
     if thinking_on:
-        chat_provider = chat_provider.with_thinking(thinking_effort if thinking_effort is not None else 'max')
+        chat_provider = chat_provider.with_thinking(
+            thinking_effort if thinking_effort is not None else "max"
+        )
     elif thinking is False:
         chat_provider = chat_provider.with_thinking("off")
     # If thinking is None and model doesn't always think, leave as-is (default behavior)

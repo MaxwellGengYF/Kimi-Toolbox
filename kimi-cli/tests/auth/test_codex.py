@@ -1,3 +1,5 @@
+"""Kimix core ChatGPT Codex OAuth behavior."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +12,7 @@ import httpx
 import orjson
 import pytest
 
-from kimix_gui.codex_auth import (
+from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_LOGIN_REQUIRED,
     AUTH_RETRY_LATER,
@@ -165,7 +167,7 @@ async def test_browser_flow_uses_pkce_callback_exchanges_and_fetches_models(
     assert authorization_query["code_challenge_method"] == ["S256"]
     assert authorization_query["id_token_add_organizations"] == ["true"]
     assert authorization_query["codex_cli_simplified_flow"] == ["true"]
-    assert authorization_query["originator"] == ["kimix-gui"]
+    assert authorization_query["originator"] == ["kimix"]
     token_call = next(call for call in calls if call[1] == TOKEN_URL)
     token_form = parse_qs(str(token_call[2]))
     assert token_form["grant_type"] == ["authorization_code"]

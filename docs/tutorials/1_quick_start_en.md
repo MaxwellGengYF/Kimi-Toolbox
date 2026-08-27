@@ -149,6 +149,15 @@ Run `/init` in the interactive terminal to create the default config interactive
 | `openai-codex` | OpenAI Codex (ChatGPT backend) |
 | `copilot-acp` | GitHub Copilot ACP subprocess (external agent; no in-process LLM) |
 
+To use a ChatGPT subscription, let Kimix configure the `openai-codex` provider and
+refresh its shared credentials instead of copying a token into provider JSON:
+
+```bash
+uv run kimi login codex
+# Sign out and remove the shared credentials
+uv run kimi logout codex
+```
+
 > When `api_key` / `url` are omitted, the provider registry falls back to each provider's standard environment variables (e.g. `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `XIAOMI_API_KEY`, `GLM_API_KEY`/`ZAI_API_KEY`, `MINIMAX_API_KEY`). See `kimi-cli/packages/kosong/src/kosong/providers/__init__.py` for the full per-provider list.
 
 Load custom config:
