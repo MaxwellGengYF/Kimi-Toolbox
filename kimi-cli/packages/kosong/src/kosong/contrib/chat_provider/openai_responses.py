@@ -158,14 +158,19 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
     def _is_deepseek_backend(self) -> bool:
         """Detect the DeepSeek Responses API backend.
 
-        DeepSeek's implementation does not generate reasoning ``summary`` parts
-        and does not support ``encrypted_content``: the chain of thought is
-        delivered as plaintext ``content`` (``reasoning_text`` parts) instead,
-        both in stream events and on reasoning items.
+        DeepSeek's own API (``api.deepseek.com``) does not generate reasoning
+        ``summary`` parts and does not support ``encrypted_content``: the chain
+        of thought is delivered as plaintext ``content`` (``reasoning_text``
+        parts) instead, both in stream events and on reasoning items.
+
+        Detection is driven by the base URL rather than the model name:
+        third-party gateways that host DeepSeek models (e.g. Alibaba Cloud
+        Bailian / Model Studio ``*.maas.aliyuncs.com``) implement the standard
+        OpenAI Responses wire format — ``summary`` must be a list of
+        ``summary_text`` items on reasoning input items, and DeepSeek-style
+        ``content`` / ``reasoning_text`` input items are rejected with a 400
+        ("summary is required and must be a list for reasoning").
         """
-        model = (self.model_name or "").lower()
-        if model.startswith("deepseek"):
-            return True
         base_url = (self._base_url or str(self.client.base_url)).lower()
         return "deepseek" in base_url
 

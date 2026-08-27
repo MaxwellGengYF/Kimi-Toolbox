@@ -550,9 +550,14 @@ def test_non_stream_reads_reasoning_content() -> None:
 
 def test_deepseek_round_trip_uses_content_not_summary() -> None:
     """ThinkParts in history must round-trip as plaintext ``content``
-    (``reasoning_text``) for DeepSeek — ``summary`` / ``encrypted_content`` are
-    unsupported there and would be silently dropped."""
-    provider = OpenAIResponses(model="deepseek-v4-flash", api_key="test-key")
+    (``reasoning_text``) for the native DeepSeek API (``api.deepseek.com``) —
+    ``summary`` / ``encrypted_content`` are unsupported there and would be
+    silently dropped."""
+    provider = OpenAIResponses(
+        model="deepseek-v4-flash",
+        api_key="test-key",
+        base_url="https://api.deepseek.com",
+    )
     message = Message(
         role="assistant",
         content=[ThinkPart(think="hidden reasoning", encrypted="blob")],
@@ -582,12 +587,31 @@ def test_openai_round_trip_keeps_summary_and_encrypted() -> None:
 
 
 def test_deepseek_backend_detection() -> None:
-    assert OpenAIResponses(model="deepseek-v4-flash", api_key="k")._is_deepseek_backend() is True
+    # The native DeepSeek API is detected via its host, not the model name.
+    assert (
+        OpenAIResponses(
+            model="deepseek-v4-flash", api_key="k", base_url="https://api.deepseek.com"
+        )._is_deepseek_backend()
+        is True
+    )
     assert (
         OpenAIResponses(
             model="gpt-5-codex", api_key="k", base_url="https://api.deepseek.com"
         )._is_deepseek_backend()
         is True
+    )
+    # A model name starting with "deepseek" does NOT imply the native DeepSeek
+    # wire format: third-party gateways hosting deepseek models (e.g. Alibaba
+    # Cloud Bailian *.maas.aliyuncs.com) speak the standard OpenAI Responses
+    # format with ``summary`` lists.
+    assert OpenAIResponses(model="deepseek-v4-flash", api_key="k")._is_deepseek_backend() is False
+    assert (
+        OpenAIResponses(
+            model="deepseek-v4-flash-0731",
+            api_key="k",
+            base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        )._is_deepseek_backend()
+        is False
     )
     assert OpenAIResponses(model="gpt-5-codex", api_key="k")._is_deepseek_backend() is False
 
@@ -631,7 +655,9 @@ async def test_reasoning_effort_adds_include_for_standard_backends() -> None:
 async def test_reasoning_effort_merges_caller_provided_include() -> None:
     """A caller-provided ``include`` must be preserved and merged, not
     overwritten by the auto-added ``reasoning.encrypted_content``."""
-    provider = _make_provider(stream=False).with_generation_kwargs(include=["code_interpreter_call.outputs"])
+    provider = _make_provider(stream=False).with_generation_kwargs(
+        include=["code_interpreter_call.outputs"]
+    )
     captured: dict[str, Any] = {}
 
     async def fake_create(**kwargs: Any) -> Any:
@@ -646,10 +672,55 @@ async def test_reasoning_effort_merges_caller_provided_include() -> None:
 
 @pytest.mark.asyncio
 async def test_reasoning_effort_does_not_request_encrypted_content_for_deepseek() -> None:
-    """DeepSeek backends do not support ``encrypted_content``; the request must
-    not include it (strictly OpenAI-compatible gateways would 400 on the
-    unknown ``include`` value)."""
-    provider = OpenAIResponses(model="deepseek-v4-flash", api_key="sk-test", stream=False)
+    """The native DeepSeek API does not support ``encrypted_content``; the
+    request must not include it (strictly OpenAI-compatible gateways would 400
+    on the unknown ``include`` value)."""
+    provider = OpenAIResponses(
+        model="deepseek-v4-flash",
+        api_key="sk-test",
+        base_url="https://api.deepseek.com",
+        stream=False,
+    )
     captured = await _capture_create_kwargs(provider, reasoning_effort="high")
     assert captured["extra_body"]["reasoning"] == {"effort": "high", "summary": "auto"}
     assert "include" not in captured
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_adds_include_for_third_party_deepseek_gateway() -> None:
+    """Third-party gateways hosting deepseek models (e.g. Alibaba Cloud
+    Bailian ``*.maas.aliyuncs.com``) follow the standard OpenAI Responses API:
+    they accept ``include`` and ``reasoning.summary: "auto"`` and return
+    ``summary`` lists, so they are treated like any standard backend."""
+    provider = OpenAIResponses(
+        model="deepseek-v4-flash-0731",
+        api_key="sk-test",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        stream=False,
+    )
+    captured = await _capture_create_kwargs(provider, reasoning_effort="high")
+    assert captured["extra_body"]["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert captured["include"] == ["reasoning.encrypted_content"]
+
+
+def test_third_party_deepseek_gateway_round_trip_uses_summary() -> None:
+    """Regression: a deepseek model hosted on Alibaba Cloud Bailian must
+    round-trip history reasoning items as ``summary`` lists. Sending the
+    DeepSeek-native ``content`` / ``reasoning_text`` shape there triggers a 400
+    ``Invalid 'summary': summary is required and must be a list for reasoning``."""
+    provider = OpenAIResponses(
+        model="deepseek-v4-flash-0731",
+        api_key="test-key",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    message = Message(
+        role="assistant",
+        content=[ThinkPart(think="hidden reasoning", encrypted=None)],
+    )
+    items = provider._convert_message(message)
+    reasoning = _reasoning_items(items)
+    assert len(reasoning) == 1
+    item = reasoning[0]
+    assert "content" not in item
+    assert "encrypted_content" not in item
+    assert item["summary"] == [{"type": "summary_text", "text": "hidden reasoning"}]
