@@ -19,7 +19,9 @@ epoch 和 Qt 对象所有权见 [`architecture.md`](architecture.md)；绘制颜
 
 卡片的几何、布局与测量都归 `qt/transcript_cards.py`：
 
-- `layout_for()` 是像素到字符格的唯一换算处，换算基准是 *card* 宽度，不是行宽度。
+- `layout_for()` 是 `RecordLayout` 的唯一入口，换算基准是 *card* 宽度，不是行宽度；其中的字符格
+  标题只作为纯文本 fallback。GUI 标题由 `header_line()` 使用当前字体的真实像素宽度拟合，省略号
+  贴着 disclosure 箭头前的文本边界放置，不能再用固定 40/60/72 字符上限提前丢掉摘要。
 - `body_width()` 是唯一的换行宽度。
 - `CardBodies.row_height()` 是唯一的高度答案。
 - `CardBodies.document()` 每个 body 只留一份；key 里没有行号，两行同文同宽就共用。
@@ -89,8 +91,10 @@ Qt 收到较宽的 AST snapshot 后，`TranscriptModel` 只向 `QListView` 暴�
 snapshot 内的 presentation slice；新旧 slice 的重叠 row 保持原对象，只对两端发出
 `rowsRemoved` / `rowsInserted`，不能 `modelReset` 后让 `QListView` 重新测量整片窗口。稳定 record id
 继续保持边缘记录的像素锚点；slice 耗尽后才让 bridge 读取另一个 decoded window。
-滚动条的高频 `valueChanged` 以 16 ms 单次 timer 合并，下一帧只消费最后一个位置；向外滚动短页的
-wheel 仍同步激活边缘，不能因合并而丢失“一页一次”的请求。
+滚动条的高频 `valueChanged` 中，“是否贴底”的跟随意图必须在信号到达时同步更新，历史边缘处理与
+viewport 通知再以 16 ms 单次 timer 合并，下一帧只消费最后一个位置。流式 mutation 也按 16 ms
+刷新；如果把贴底判定一起延后，旧 `value` 会与刷新后的新 `maximum` 比较，用户刚拖到底部也会被
+误判成未贴底。向外滚动短页的 wheel 仍同步激活边缘，不能因合并而丢失“一页一次”的请求。
 当一页短到滚动条同时位于顶部和底部时，`valueChanged` 不会再发生；此时向外的滚轮事件必须直接
 激活对应边缘，并保持“一页一次、新页到达后重新 armed”的节流语义，否则首屏会卡在这一页。
 `QListView` 对可变行高会询问整个 model 的 `sizeHint()`，所以只限制 document LRU、不限制 model
@@ -133,7 +137,7 @@ Rich 时代的 `_FAMILY_LABEL_STYLE`（值是 `"bold cyan"` 一类 Rich markup�
 `RecordLayout.header_runs` 与 `body_sections` 都由纯层直接遍历 AST 产生。每个 section 明确携带
 text、format、tone 与 spacing；调用上下文使用 `tone="context"`，输出使用 `tone="primary"`，
 不再靠字符区间或字段名推断。`CardBodies` 按 section 构建文档，Markdown 交给
-`QTextDocumentFragment.fromMarkdown()`。图标矩形、文本矩形和正文矩形仍全部由
+`QTextDocumentFragment.fromMarkdown()`。图标矩形、文本矩形、header 像素省略和正文矩形仍全部由
 `qt/transcript_cards.py` 回答，不能在 delegate 里另算一套；状态来自 `ToolActivity.result.status`，
 不得靠检查标题或正文字符推断。
 

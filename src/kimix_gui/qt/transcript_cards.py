@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QRect
+from PySide6.QtCore import QObject, QRect, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -56,8 +58,8 @@ COPY_WIDTH = _METRICS.copy_width
 STATUS_WIDTH = HEADER_HEIGHT
 DISCLOSURE_WIDTH = HEADER_HEIGHT
 
-# Rough pixels per character cell. ``layout_record`` counts cells, not pixels, because
-# it decides where to truncate a one-line summary; this is the only place that converts.
+# Rough pixels per character cell for the framework-neutral plain-text fallback.
+# Painted headers use ``header_line`` and real font metrics below.
 _CELL_WIDTH = 8
 _MIN_CELLS = 24
 # Narrowest body Qt is asked to wrap at, so a collapsed pane still lays out.
@@ -136,6 +138,62 @@ def header_text_rect(
     left = status_rect(card).right() + 1 if has_status else card.left() + PAD_X
     trailing = disclosure_rect(card).left() if has_disclosure else copy_rect(card).left()
     return QRect(left, card.top(), max(0, trailing - left), HEADER_HEIGHT)
+
+
+@dataclass(frozen=True, slots=True)
+class HeaderLine:
+    """Pixel-fitted text and rects for one transcript header."""
+
+    label: str
+    label_rect: QRect
+    summary: str
+    summary_rect: QRect
+
+    @property
+    def text(self) -> str:
+        return " ".join(filter(None, (self.label, self.summary)))
+
+
+def header_line(
+    layout: RecordLayout,
+    card: QRect,
+    font: QFont,
+    *,
+    has_disclosure: bool,
+) -> HeaderLine:
+    """Fit the summary to the exact band ending at the disclosure action.
+
+    ``RecordLayout.header`` remains the cell-based plain-text fallback.  Painting and
+    viewport diagnostics use the unabridged summary here so proportional fonts, CJK,
+    and user-selected font sizes all place the ellipsis from real pixel metrics.
+    """
+
+    band = header_text_rect(
+        card,
+        has_status=bool(layout.status),
+        has_disclosure=has_disclosure,
+    )
+    label_font = QFont(font)
+    label_font.setBold(True)
+    label_width = min(band.width(), QFontMetrics(label_font).horizontalAdvance(layout.label))
+    label_rect = QRect(band.left(), band.top(), label_width, band.height())
+    summary_left = label_rect.right() + 1 + active_theme().spacing.sm
+    summary_rect = QRect(
+        summary_left,
+        band.top(),
+        max(0, band.right() - summary_left + 1),
+        band.height(),
+    )
+    summary_font = QFont(font)
+    summary_font.setBold(False)
+    summary = ""
+    if layout.full_summary and summary_rect.width() > 0:
+        summary = QFontMetrics(summary_font).elidedText(
+            layout.full_summary,
+            Qt.TextElideMode.ElideRight,
+            summary_rect.width(),
+        )
+    return HeaderLine(layout.label, label_rect, summary, summary_rect)
 
 
 def body_rect(card: QRect) -> QRect:

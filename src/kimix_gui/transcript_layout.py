@@ -156,6 +156,7 @@ class RecordLayout:
     bar_color: str
     italic_body: bool
     status: str = ""
+    full_summary: str = ""
 
     @property
     def header(self) -> str:
@@ -392,8 +393,9 @@ def layout_entry(
     summary = entry_summary(entry, translate) or placeholder
     summary_width = max(0, available - cell_len(label) - 1)
     fitted = fit_summary(summary, summary_width)
+    shows_summary = compact or isinstance(entry, ActivityEntry)
     header_runs = (HeaderRun(label, "label", True),)
-    if compact or isinstance(entry, ActivityEntry):
+    if shows_summary:
         header_runs += (HeaderRun(fitted, "summary"),)
     if compact:
         sections: tuple[BodySection, ...] = ()
@@ -409,6 +411,7 @@ def layout_entry(
         bar_color=bar_color_name(entry),
         italic_body=isinstance(entry, TextEntry) and entry.kind == "thinking",
         status=status,
+        full_summary=summary if shows_summary else "",
     )
 
 

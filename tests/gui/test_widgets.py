@@ -17,7 +17,13 @@ from kimix_gui.qt.bridge import KimixBridge, StreamCoalescer
 from kimix_gui.qt.composer import Composer, ComposerPad
 from kimix_gui.qt.main_window import Toast
 from kimix_gui.qt.transcript import MAX_TRANSCRIPT_CHARS, Transcript
-from kimix_gui.qt.transcript_cards import CARD_MARGIN_Y, HEADER_HEIGHT
+from kimix_gui.qt.transcript_cards import (
+    CARD_MARGIN_Y,
+    HEADER_HEIGHT,
+    card_rect,
+    header_line,
+    layout_for,
+)
 from kimix_gui.qt.transcript_model import MAX_PRESENTATION_RECORDS
 from kimix_gui.transcript_data import ROOT_SOURCE, AppendText, ReplaceEntry, TranscriptUpdate
 
@@ -143,6 +149,24 @@ def test_non_dialogue_records_take_one_header_band(qtbot) -> None:
     )
     assert transcript.sizeHintForRow(0) == _COMPACT_HEIGHT
     assert transcript.visible_text().startswith("Read")
+
+
+def test_visible_text_uses_the_same_pixel_fitted_header_as_paint(qtbot) -> None:
+    transcript = _shown(qtbot, width=420)
+    append_entry(transcript, activity_entry("read", summary="i" * 300))
+    index = transcript.model().index(0, 0)
+    qtbot.waitUntil(lambda: transcript.visualRect(index).height() > 0)
+    record = transcript.records[0]
+    layout = layout_for(record, transcript.viewport().width())
+    expected = header_line(
+        layout,
+        card_rect(transcript.visualRect(index)),
+        transcript.font(),
+        has_disclosure=True,
+    )
+
+    assert expected.summary.endswith("…")
+    assert transcript.visible_text().splitlines() == [expected.text]
 
 
 def test_only_explicit_copy_action_copies_dialogue_message(qtbot) -> None:
@@ -348,6 +372,46 @@ def test_transcript_stays_put_when_user_scrolls_up(qtbot) -> None:
     visible = transcript.visible_text()
     assert "turn-000" in visible
     assert "new-after-scroll" not in visible
+
+
+def test_transcript_scrolling_up_and_streaming_in_one_frame_stays_put(qtbot) -> None:
+    transcript = _shown(qtbot, width=640, height=220)
+    append_texts(transcript, [("user", f"turn-{i:03d}") for i in range(12)])
+    bar = transcript.verticalScrollBar()
+    qtbot.waitUntil(lambda: bar.maximum() > 0 and bar.value() == bar.maximum())
+
+    bar.setValue(bar.maximum() // 2)
+    user_position = bar.value()
+    old_maximum = bar.maximum()
+    append_fragment(transcript, "assistant", "first\n" + "x" * 500, key="live-answer")
+
+    qtbot.waitUntil(lambda: bar.maximum() > old_maximum)
+    assert transcript.pinned_to_latest is False
+    assert bar.value() == user_position
+
+
+def test_transcript_reaching_bottom_and_streaming_in_one_frame_keeps_following(qtbot) -> None:
+    transcript = _shown(qtbot, width=640, height=220)
+    append_texts(transcript, [("user", f"turn-{i:03d}") for i in range(12)])
+    bar = transcript.verticalScrollBar()
+    qtbot.waitUntil(lambda: bar.maximum() > 0)
+    bar.setValue(0)
+    qtbot.waitUntil(lambda: not transcript.pinned_to_latest)
+
+    old_maximum = bar.maximum()
+    bar.setValue(old_maximum)
+    append_fragment(transcript, "assistant", "first\n" + "x" * 500, key="live-answer")
+
+    qtbot.waitUntil(
+        lambda: (
+            bar.maximum() > old_maximum
+            and bar.value() == bar.maximum()
+            and transcript.pinned_to_latest
+        )
+    )
+    followed_maximum = bar.maximum()
+    append_fragment(transcript, "assistant", "\n" + "y" * 500, key="live-answer")
+    qtbot.waitUntil(lambda: bar.maximum() > followed_maximum and bar.value() == bar.maximum())
 
 
 def test_replacing_history_window_keeps_live_rows(qtbot) -> None:

@@ -81,29 +81,15 @@ class LLMSettingsResult:
 class ModelListItem(QListWidgetItem):
     """One left-pane row per Model, independent of its Variant count."""
 
-    def __init__(self, model: LLMModelDescriptor, *, active: bool = False) -> None:
+    def __init__(self, model: LLMModelDescriptor) -> None:
         super().__init__()
         self.model_descriptor = model
-        self.active = active
         self.refresh()
 
     def refresh(self) -> None:
-        model = self.model_descriptor
-        source = (
-            QCoreApplication.translate("LLMSettingsDialog", "ChatGPT subscription")
-            if isinstance(model.target, ChatGPTTarget)
-            else QCoreApplication.translate("LLMSettingsDialog", "Provider file")
-        )
-        status_parts = [source, model.model_id]
-        if model.problem is not None:
-            status_parts.insert(1, _short_problem(model.problem))
-        if self.active:
-            status_parts.insert(
-                0,
-                QCoreApplication.translate("LLMSettingsDialog", "IN USE"),
-            )
-        self.setText(f"{model.label}\n{' · '.join(status_parts)}")
-        self.setToolTip(self.text())
+        label = self.model_descriptor.label
+        self.setText(label)
+        self.setToolTip(label)
 
 
 class LLMSettingsDialog(QDialog):
@@ -336,7 +322,7 @@ class LLMSettingsDialog(QDialog):
             PROVIDER_FILE_GROUP: [],
         }
         for model in sorted(self._models.values(), key=lambda item: item.priority):
-            grouped[_model_group(model)].append(ModelListItem(model, active=self._read_only))
+            grouped[_model_group(model)].append(ModelListItem(model))
         self._add_group(CHATGPT_GROUP, grouped[CHATGPT_GROUP])
         if grouped[PROVIDER_FILE_GROUP] or self._manage_library or self._read_only:
             self._add_group(PROVIDER_FILE_GROUP, grouped[PROVIDER_FILE_GROUP])

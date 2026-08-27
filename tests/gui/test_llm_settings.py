@@ -86,8 +86,8 @@ def test_chatgpt_variants_share_one_model_row(qtbot) -> None:
     qtbot.addWidget(dialog)
 
     assert len(dialog.model_items()) == 1
-    assert dialog.model_items()[0].text().splitlines()[0] == "GPT Test"
-    assert "medium" not in dialog.model_items()[0].text().splitlines()[0]
+    assert dialog.model_items()[0].text() == "GPT Test"
+    assert "medium" not in dialog.model_items()[0].text()
 
 
 def test_variant_picker_preserves_catalog_order_and_pins_explicit_choice(qtbot) -> None:
@@ -146,7 +146,8 @@ def test_catalog_refresh_keeps_a_removed_current_model_as_an_unavailable_row(qtb
 
     assert len(dialog.model_items()) == 1
     assert dialog.model_items()[0].model_descriptor.model_id == "gpt-test"
-    assert "Model unavailable" in dialog.model_items()[0].text()
+    assert dialog.model_items()[0].text() == "gpt-test"
+    assert widget_text(dialog, "selection-status") == "Model unavailable"
     assert not find(dialog, "apply-settings", QPushButton).isEnabled()
 
 
@@ -301,7 +302,7 @@ def test_narrow_dialog_stacks_source_and_detail_panes(qtbot) -> None:
     assert find(dialog, "settings-body", QSplitter).orientation() == Qt.Orientation.Horizontal
 
 
-def test_model_text_is_full_and_only_the_view_may_elide_overflow(qtbot) -> None:
+def test_model_list_uses_only_the_full_name_and_the_view_may_elide_overflow(qtbot) -> None:
     long_name = "GPT " + "very-long-model-name-" * 12
     model = chatgpt_model_descriptor(
         CodexModel(
@@ -317,9 +318,9 @@ def test_model_text_is_full_and_only_the_view_may_elide_overflow(qtbot) -> None:
     qtbot.addWidget(dialog)
     item = dialog.model_items()[0]
 
-    assert item.text().startswith(long_name)
-    assert not item.text().splitlines()[0].endswith("...")
-    assert item.toolTip() == item.text()
+    assert item.text() == long_name
+    assert "\n" not in item.text()
+    assert item.toolTip() == long_name
     assert find(dialog, "config-list", QListWidget).textElideMode() == Qt.TextElideMode.ElideRight
 
 

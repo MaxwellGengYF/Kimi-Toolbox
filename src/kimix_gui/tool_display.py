@@ -29,7 +29,10 @@ _SDK_BORING_RESULT_MESSAGES = frozenset({"success", "succeeded", "ok", "done", "
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_FAILED = "failed"
 
-_COMPACT_VALUE_MAX_LEN = 60
+# Defensive normalization budget only.  Visible transcript width belongs to the
+# layout/painter; this is deliberately far beyond a practical header so widening a
+# window can reveal more text instead of exposing an old 40/60/72-character cutoff.
+_SUMMARY_SAFETY_MAX_LEN = 4096
 _DETAIL_KEYS = frozenset(
     {
         "content",
@@ -227,8 +230,9 @@ def _pretty_value(value: object) -> str:
         return str(value)
 
 
-def _one_line(value: object, limit: int = 72) -> str:
+def _one_line(value: object) -> str:
     text = " ".join(str(value).split())
+    limit = _SUMMARY_SAFETY_MAX_LEN
     if len(text) <= limit:
         return text
     if limit <= 3:
@@ -302,9 +306,9 @@ def _summary_parts(family: str, parsed: Mapping[str, Any]) -> tuple[LiteralText,
                 if isinstance(first, Mapping):
                     old = first.get("old") or first.get("old_string") or old
             if old:
-                parts.append(_one_line(old, 40))
+                parts.append(_one_line(old))
             elif new:
-                parts.append(_one_line(new, 40))
+                parts.append(_one_line(new))
         return tuple(literal(part) for part in parts if part)
     if family == "shell":
         parts = [str(_first(parsed, "command", "cmd") or "")]
@@ -315,7 +319,7 @@ def _summary_parts(family: str, parsed: Mapping[str, Any]) -> tuple[LiteralText,
     if family == "python":
         code = str(_first(parsed, "code", "file") or "")
         first_line = next((line.strip() for line in code.splitlines() if line.strip()), "")
-        summary = _one_line(first_line or code, 72)
+        summary = _one_line(first_line or code)
         return (literal(summary),) if summary else ()
     if family == "todo":
         todos = parsed.get("todos") or parsed.get("updates") or parsed.get("items")
@@ -338,7 +342,7 @@ def _summary_parts(family: str, parsed: Mapping[str, Any]) -> tuple[LiteralText,
                 url = first.get("url") or first.get("href") if isinstance(first, Mapping) else first
         return (literal(str(url)),) if url else ()
     if family == "agent":
-        value = _one_line(_first(parsed, "description", "prompt") or "", 72)
+        value = _one_line(_first(parsed, "description", "prompt") or "")
         return (literal(value),) if value else ()
 
     parts: list[str] = []
@@ -350,13 +354,11 @@ def _summary_parts(family: str, parsed: Mapping[str, Any]) -> tuple[LiteralText,
                 first_line = next(
                     (line.strip() for line in value.splitlines() if line.strip()), value
                 )
-                stream_preview = _one_line(first_line, 72)
+                stream_preview = _one_line(first_line)
             continue
-        text = " ".join(str(value).split())
-        if len(text) > _COMPACT_VALUE_MAX_LEN:
-            text = text[: _COMPACT_VALUE_MAX_LEN - 3] + "..."
+        text = _one_line(value)
         parts.append(f"{canonical}:{text}")
-    summary = " ".join(parts) or stream_preview
+    summary = _one_line(" ".join(parts) or stream_preview)
     return (literal(summary),) if summary else ()
 
 
@@ -437,7 +439,7 @@ def build_tool_call_content(
             details = (RawBlock(raw_arguments, parse_state=parse_state),)
         if extras not in (None, "", {}, []):
             details += (RawBlock(_pretty_value(extras), label=literal("Extras")),)
-        preview = _one_line(raw_arguments or "", 72)
+        preview = _one_line(raw_arguments or "")
         return ToolCallContent(
             summary_parts=(literal(preview),) if preview else (),
             details=details,

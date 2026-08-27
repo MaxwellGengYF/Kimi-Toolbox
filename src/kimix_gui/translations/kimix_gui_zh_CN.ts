@@ -943,7 +943,7 @@
         <translation type="vanished">使用中 · {status}</translation>
     </message>
     <message>
-        <location filename="../qt/settings_dialog.py" line="+133"/>
+        <location filename="../qt/settings_dialog.py" line="+119"/>
         <location line="+57"/>
         <source>LLM configuration</source>
         <translation>LLM 配置</translation>
@@ -975,12 +975,12 @@
     </message>
     <message>
         <location line="-37"/>
-        <location line="+415"/>
+        <location line="+419"/>
         <source>Connect ChatGPT</source>
         <translation>连接 ChatGPT</translation>
     </message>
     <message>
-        <location line="-446"/>
+        <location line="-450"/>
         <source>CHATGPT SUBSCRIPTION · {count}</source>
         <translation>ChatGPT 订阅 · {count}</translation>
     </message>
@@ -1013,7 +1013,7 @@
         <translation type="vanished">服务商文件</translation>
     </message>
     <message>
-        <location line="+407"/>
+        <location line="+411"/>
         <location line="+19"/>
         <source>Unavailable</source>
         <translation>不可用</translation>
@@ -1033,7 +1033,7 @@
         <translation type="vanished">名称</translation>
     </message>
     <message>
-        <location line="-551"/>
+        <location line="-555"/>
         <source>Source</source>
         <translation>来源</translation>
     </message>
@@ -1048,12 +1048,11 @@
         <translation>模型 ID</translation>
     </message>
     <message>
-        <location line="-164"/>
         <source>IN USE</source>
-        <translation>使用中</translation>
+        <translation type="vanished">使用中</translation>
     </message>
     <message>
-        <location line="+102"/>
+        <location line="-62"/>
         <source>ACTIVE MODEL</source>
         <translation>当前模型</translation>
     </message>
@@ -1149,7 +1148,7 @@
         <translation>添加</translation>
     </message>
     <message>
-        <location line="+86"/>
+        <location line="+90"/>
         <source>Unavailable variant · {variant}</source>
         <translation>变体不可用 · {variant}</translation>
     </message>
@@ -1321,7 +1320,7 @@
         <translation>使用此配置前请选择模型变体。</translation>
     </message>
     <message>
-        <location line="-617"/>
+        <location line="-621"/>
         <source>Context</source>
         <translation>上下文</translation>
     </message>
@@ -1402,19 +1401,17 @@
         <translation type="vanished">此模型不可用于已连接的 ChatGPT 账号。</translation>
     </message>
     <message>
-        <location line="+482"/>
+        <location line="+486"/>
         <source>Connect ChatGPT to use this subscription model.</source>
         <translation>连接 ChatGPT 后可使用此订阅模型。</translation>
     </message>
     <message>
-        <location line="-783"/>
-        <location line="+453"/>
+        <location line="-330"/>
         <source>ChatGPT subscription</source>
         <translation>ChatGPT 订阅</translation>
     </message>
     <message>
-        <location line="-451"/>
-        <location line="+453"/>
+        <location line="+2"/>
         <source>Provider file</source>
         <translation>服务商文件</translation>
     </message>

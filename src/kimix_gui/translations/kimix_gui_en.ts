@@ -943,7 +943,7 @@
         <translation type="vanished">IN USE · {status}</translation>
     </message>
     <message>
-        <location filename="../qt/settings_dialog.py" line="+133"/>
+        <location filename="../qt/settings_dialog.py" line="+119"/>
         <location line="+57"/>
         <source>LLM configuration</source>
         <translation>LLM configuration</translation>
@@ -975,12 +975,12 @@
     </message>
     <message>
         <location line="-37"/>
-        <location line="+415"/>
+        <location line="+419"/>
         <source>Connect ChatGPT</source>
         <translation>Connect ChatGPT</translation>
     </message>
     <message>
-        <location line="-446"/>
+        <location line="-450"/>
         <source>CHATGPT SUBSCRIPTION · {count}</source>
         <translation>CHATGPT SUBSCRIPTION · {count}</translation>
     </message>
@@ -1013,7 +1013,7 @@
         <translation type="vanished">PROVIDER FILE</translation>
     </message>
     <message>
-        <location line="+407"/>
+        <location line="+411"/>
         <location line="+19"/>
         <source>Unavailable</source>
         <translation>Unavailable</translation>
@@ -1033,7 +1033,7 @@
         <translation type="vanished">Name</translation>
     </message>
     <message>
-        <location line="-551"/>
+        <location line="-555"/>
         <source>Source</source>
         <translation>Source</translation>
     </message>
@@ -1048,12 +1048,11 @@
         <translation>Model ID</translation>
     </message>
     <message>
-        <location line="-164"/>
         <source>IN USE</source>
-        <translation>IN USE</translation>
+        <translation type="vanished">IN USE</translation>
     </message>
     <message>
-        <location line="+102"/>
+        <location line="-62"/>
         <source>ACTIVE MODEL</source>
         <translation>ACTIVE MODEL</translation>
     </message>
@@ -1149,7 +1148,7 @@
         <translation>Add</translation>
     </message>
     <message>
-        <location line="+86"/>
+        <location line="+90"/>
         <source>Unavailable variant · {variant}</source>
         <translation>Unavailable variant · {variant}</translation>
     </message>
@@ -1321,7 +1320,7 @@
         <translation>Choose a model variant before using this configuration.</translation>
     </message>
     <message>
-        <location line="-617"/>
+        <location line="-621"/>
         <source>Context</source>
         <translation>Context</translation>
     </message>
@@ -1402,19 +1401,17 @@
         <translation type="vanished">This model is not available for the connected ChatGPT account.</translation>
     </message>
     <message>
-        <location line="+482"/>
+        <location line="+486"/>
         <source>Connect ChatGPT to use this subscription model.</source>
         <translation>Connect ChatGPT to use this subscription model.</translation>
     </message>
     <message>
-        <location line="-783"/>
-        <location line="+453"/>
+        <location line="-330"/>
         <source>ChatGPT subscription</source>
         <translation>ChatGPT subscription</translation>
     </message>
     <message>
-        <location line="-451"/>
-        <location line="+453"/>
+        <location line="+2"/>
         <source>Provider file</source>
         <translation>Provider file</translation>
     </message>

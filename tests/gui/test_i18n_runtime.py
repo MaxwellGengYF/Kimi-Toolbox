@@ -376,7 +376,7 @@ def test_llm_settings_dialog_renders_chinese_chrome(qtbot, chinese, tmp_path: Pa
     assert provider_group.text() == f"{DISCLOSURE_EXPANDED}  服务商文件 · 1"
     assert chatgpt_group.toolTip() == "展开分组"
     assert provider_group.toolTip() == "收起分组"
-    assert any("服务商文件" in item.text() for item in dialog.model_items())
+    assert [item.text() for item in dialog.model_items()] == ["Test Model"]
     assert find(dialog, "apply-settings", QPushButton).text() == "使用模型"
     assert find(dialog, "delete-config", QPushButton).text() == "移除"
     assert find(dialog, "cancel-settings", QPushButton).text() == "取消"

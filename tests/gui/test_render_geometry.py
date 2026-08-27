@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import fields
 
 import pytest
-from PySide6.QtCore import QPoint, QRect
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
 from PySide6.QtWidgets import QStyleOptionViewItem
 
@@ -73,6 +73,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "cyan",
             "italic_body": False,
             "status": "",
+            "full_summary": "",
         },
         56,
     ),
@@ -87,6 +88,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "green",
             "italic_body": False,
             "status": "",
+            "full_summary": "",
         },
         76,
     ),
@@ -101,6 +103,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "green",
             "italic_body": False,
             "status": "",
+            "full_summary": "",
         },
         56,
     ),
@@ -115,6 +118,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "muted",
             "italic_body": True,
             "status": "",
+            "full_summary": "",
         },
         56,
     ),
@@ -132,6 +136,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "cyan",
             "italic_body": False,
             "status": "pending",
+            "full_summary": "a.py",
         },
         30,
     ),
@@ -158,6 +163,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "cyan",
             "italic_body": False,
             "status": "ok",
+            "full_summary": "a.py · 12 lines",
         },
         30,
     ),
@@ -189,6 +195,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "red",
             "italic_body": False,
             "status": "error",
+            "full_summary": "missing.py · failed",
         },
         83,
     ),
@@ -206,6 +213,7 @@ GOLDEN_ROWS: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] =
             "bar_color": "muted",
             "italic_body": False,
             "status": "",
+            "full_summary": "Session: demo",
         },
         30,
     ),
@@ -483,6 +491,38 @@ def test_hit_regions_keep_their_left_to_right_order() -> None:
     assert body.top() == header.bottom() + 1
     assert body.left() > gutter.right()
     assert bar.height() == card.height(), "the bar spans the whole card, not just the header"
+
+
+def test_header_summary_uses_real_pixels_up_to_the_disclosure_boundary(qapp, pinned_font) -> None:
+    full_summary = "i" * 400
+    layout = layout_record(
+        activity_entry("read", call_id="pixel-summary", summary=full_summary),
+        width=GOLDEN_CELL_WIDTH,
+    )
+    card = cards.card_rect(QRect(0, 0, 600, 90))
+    line = cards.header_line(layout, card, qapp.font(), has_disclosure=True)
+    text_band = cards.header_text_rect(card, has_status=True, has_disclosure=True)
+    regular_font = QFont(qapp.font())
+    regular_font.setBold(False)
+    metrics = QFontMetrics(regular_font)
+
+    assert layout.summary.endswith("...")
+    assert layout.full_summary == full_summary
+    assert line.summary == metrics.elidedText(
+        full_summary,
+        Qt.TextElideMode.ElideRight,
+        line.summary_rect.width(),
+    )
+    assert line.summary.endswith("…")
+    assert line.summary_rect.right() == text_band.right()
+    assert metrics.horizontalAdvance(line.summary) <= line.summary_rect.width()
+    assert line.summary_rect.width() - metrics.horizontalAdvance(line.summary) <= max(
+        1, metrics.horizontalAdvance("i")
+    )
+
+    wide_card = cards.card_rect(QRect(0, 0, 900, 90))
+    wide_line = cards.header_line(layout, wide_card, qapp.font(), has_disclosure=True)
+    assert len(wide_line.summary) > len(line.summary)
 
 
 def test_delegate_hit_tests_follow_the_pixel_geometry(qtbot) -> None:

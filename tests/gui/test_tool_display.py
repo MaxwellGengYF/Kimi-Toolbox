@@ -68,6 +68,28 @@ def test_unknown_tool_keeps_all_fields_and_raw_arguments() -> None:
     assert [field.name for field in call.fields] == ["query", "limit"]
 
 
+def test_long_header_sources_survive_until_width_aware_layout() -> None:
+    text = "x" * 180
+    python = build_tool_call_content("python", {"code": text}, "raw", parse_state="complete")
+    agent = build_tool_call_content(
+        "subagent", {"description": text, "prompt": "details"}, "raw", parse_state="complete"
+    )
+    edit = build_tool_call_content(
+        "edit",
+        {"path": "app.py", "old_string": text, "new_string": "replacement"},
+        "raw",
+        parse_state="complete",
+    )
+    generic = build_tool_call_content("custom_mcp", {"value": text}, "raw", parse_state="complete")
+    invalid = build_tool_call_content("read", None, text, parse_state="invalid")
+
+    assert resolve_text(python.summary_parts[0]) == text
+    assert resolve_text(agent.summary_parts[0]) == text
+    assert resolve_text(edit.summary_parts[-1]) == text
+    assert resolve_text(generic.summary_parts[0]) == f"value:{text}"
+    assert resolve_text(invalid.summary_parts[0]) == text
+
+
 def test_invalid_call_arguments_are_a_finite_raw_fallback() -> None:
     call = build_tool_call_content(
         "read", None, "{]", parse_state="invalid", extras={"provider": "test"}

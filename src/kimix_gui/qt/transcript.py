@@ -57,8 +57,8 @@ from kimix_gui.qt.transcript_cards import (
     card_rect,
     copy_rect,
     disclosure_rect,
+    header_line,
     header_rect,
-    header_text_rect,
     layout_for,
     status_rect,
 )
@@ -227,9 +227,10 @@ class TranscriptDelegate(QStyledItemDelegate):
         painter.fillRect(bar_rect(rect, hovered=hovered), bar_color)
         if layout.status:
             _paint_status_icon(painter, status_rect(rect), layout.status, layout.bar_color)
-        header_band = header_text_rect(
+        line = header_line(
+            layout,
             rect,
-            has_status=bool(layout.status),
+            painter.font(),
             has_disclosure=not dialogue,
         )
         if layout.status == STATUS_OK and not uncategorized:
@@ -247,31 +248,19 @@ class TranscriptDelegate(QStyledItemDelegate):
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
-        label_width = min(
-            header_band.width(), painter.fontMetrics().horizontalAdvance(layout.label)
-        )
-        label_band = QRect(header_band.left(), header_band.top(), label_width, header_band.height())
         painter.drawText(
-            label_band,
+            line.label_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             layout.label,
         )
         font.setBold(False)
         painter.setFont(font)
-        if layout.summary:
-            gap = active_theme().spacing.sm
-            summary_left = label_band.right() + 1 + gap
-            summary_band = QRect(
-                summary_left,
-                header_band.top(),
-                max(0, header_band.right() - summary_left + 1),
-                header_band.height(),
-            )
+        if line.summary:
             painter.setPen(QColor(palette.muted))
             painter.drawText(
-                summary_band,
+                line.summary_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                layout.summary,
+                line.summary,
             )
         if not dialogue:
             _paint_disclosure_icon(painter, disclosure_rect(rect), expanded=not layout.compact)
@@ -970,10 +959,21 @@ class Transcript(QListView):
         self._scroll_frame.stop()
 
     def _queue_scroll(self, value: int) -> None:
-        """Keep only the final scrollbar position until the next event-loop frame."""
+        """Capture user follow intent now; defer the heavier edge work to the next frame."""
 
         if self._shifting_window or self._scroll_processing_suspended:
             return
+        bar = self.verticalScrollBar()
+        at_bottom = value >= bar.maximum()
+        if (
+            at_bottom
+            and value > 0
+            and self._history_at_latest
+            and not self._model.has_hidden_newer_history
+        ):
+            self._stick_to_bottom = True
+        elif not at_bottom:
+            self._stick_to_bottom = False
         self._pending_scroll_value = value
         if not self._scroll_frame.isActive():
             self._scroll_frame.start()
@@ -992,15 +992,6 @@ class Transcript(QListView):
         bar = self.verticalScrollBar()
         at_top = value <= 0
         at_bottom = value >= bar.maximum()
-        if (
-            at_bottom
-            and value > 0
-            and self._history_at_latest
-            and not self._model.has_hidden_newer_history
-        ):
-            self._stick_to_bottom = True
-        elif not at_bottom:
-            self._stick_to_bottom = False
         if at_top:
             if self._top_event_armed and not at_bottom and self._activate_top_edge():
                 return
@@ -1051,8 +1042,15 @@ class Transcript(QListView):
             rect = self.visualRect(self._model.index(row))
             if not rect.intersects(viewport):
                 continue
-            layout = layout_for(self.records[row], width)
-            lines.append(layout.header)
+            record = self.records[row]
+            layout = layout_for(record, width)
+            line = header_line(
+                layout,
+                card_rect(rect),
+                self.font(),
+                has_disclosure=not is_dialogue_entry(record.entry),
+            )
+            lines.append(line.text)
             if layout.body:
                 lines.append(layout.body)
         return "\n".join(lines)
