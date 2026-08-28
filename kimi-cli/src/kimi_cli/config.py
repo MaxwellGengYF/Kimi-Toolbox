@@ -269,7 +269,7 @@ Default is 3."""
 
     The reserved space follows the context budget formula
     ``max(tool_call_buffer_tokens, reserved_context_size, max_tokens +
-    safety_margin_tokens)`` (Safety Margin is 4096) — only the *largest* single
+    safety_margin_tokens)`` (Safety Margin is 1024) — only the *largest* single
     reservation counts, so a large per-tool output buffer does not shrink the
     usable input window. ``reserved_context_size`` therefore acts both as the
     default reservation when no output budget / tool buffer is configured, and

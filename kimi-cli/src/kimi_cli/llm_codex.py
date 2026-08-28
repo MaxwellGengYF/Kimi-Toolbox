@@ -26,6 +26,21 @@ from kimi_cli.auth.codex import (
     CodexModel,
     CodexProblem,
 )
+from kimi_cli.codex_context import (
+    CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS as CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
+)
+from kimi_cli.codex_context import (
+    CODEX_AUTO_COMPACT_PERCENT as CODEX_AUTO_COMPACT_PERCENT,
+)
+from kimi_cli.codex_context import (
+    CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT as CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+)
+from kimi_cli.codex_context import (
+    CODEX_TOKEN_BUDGET_REMINDER_TOKENS as CODEX_TOKEN_BUDGET_REMINDER_TOKENS,
+)
+from kimi_cli.codex_context import (
+    codex_loop_control as codex_loop_control,
+)
 from kimi_cli.constant import get_user_agent
 
 _KIMIX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
@@ -89,6 +104,10 @@ class CodexRequestAuth(httpx.Auth):
         retry_response = yield request
         if retry_response.status_code == 401:
             await retry_response.aread()
+            # The replay used a freshly refreshed token and was still rejected;
+            # drop it so the next request re-authenticates instead of reusing a
+            # credential the backend has already refused.
+            await self._service.invalidate_credentials(credentials.access_token)
 
     @staticmethod
     def _apply(request: httpx.Request, access_token: str, account_id: str | None) -> None:
@@ -271,6 +290,7 @@ async def create_codex_provider(
         "type": "openai-codex",
         "url": CODEX_BASE_URL,
         "api_key": "oauth-managed",
+        "loop_control": codex_loop_control(model.max_context_size),
     }
     if kimix_efforts:
         provider_dict["supported_efforts"] = list(kimix_efforts)

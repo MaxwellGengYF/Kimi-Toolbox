@@ -326,6 +326,49 @@ class TestShouldAutoCompact:
             safety_margin_tokens=safety_margin,
         )
 
+    def test_high_reserved_context_size_neutralizes_output_reservation(self):
+        """``reserved_context_size >= max_context_size * trigger_ratio`` makes the
+        ratio rule the only trigger, independent of ``max_tokens``.
+
+        This is the invariant ``kimi_cli.codex_context.codex_loop_control`` relies
+        on: the reservation is capped at ``max_context_size -
+        reserved_context_size``, so a high floor collapses it and removes
+        ``max_tokens`` / ``tool_call_buffer_tokens`` from the decision. The Codex
+        backend never receives an output-token limit, so reserving for one would
+        strand input headroom to protect nothing.
+        """
+        max_context = 272_000
+        ratio = 0.95
+        reserved = 261_184  # codex's auto_compact_token_limit + fallback buffer
+        ratio_boundary = int(max_context * ratio)  # 258_400
+
+        for max_tokens in (16_000, 64_000, 128_000, 384_000):
+            for tool_buffer in (0, 32_768, 100_000):
+                kwargs = dict(
+                    trigger_ratio=ratio,
+                    reserved_context_size=reserved,
+                    max_tokens=max_tokens,
+                    tool_call_buffer_tokens=tool_buffer,
+                )
+                assert should_auto_compact(ratio_boundary, max_context, **kwargs)
+                assert not should_auto_compact(ratio_boundary - 1, max_context, **kwargs)
+
+        # The reserved rule still provides a backstop at ``reserved_context_size``.
+        assert should_auto_compact(
+            reserved,
+            max_context,
+            trigger_ratio=0.99,
+            reserved_context_size=reserved,
+            max_tokens=128_000,
+        )
+        assert not should_auto_compact(
+            reserved - 1,
+            max_context,
+            trigger_ratio=0.99,
+            reserved_context_size=reserved,
+            max_tokens=128_000,
+        )
+
     def test_tool_call_buffer_dominates_reserved_boundary(self):
         """A dynamic tool-call output buffer expands the boundary when it is the
         largest single reservation."""

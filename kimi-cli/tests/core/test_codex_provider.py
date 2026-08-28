@@ -12,12 +12,18 @@ from kosong.message import Message
 from kosong.tooling import Tool
 
 from kimi_cli.auth.codex import CodexModel, CodexModelCatalog, CodexRuntimeCredentials
+from kimi_cli.codex_context import CODEX_LOOP_CONTROL_KEYS, codex_trigger_point
 from kimi_cli.llm_codex import (
+    CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
+    CODEX_AUTO_COMPACT_PERCENT,
+    CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
     CodexProviderLease,
     CodexRequestAuth,
     ManagedOpenAICodex,
+    codex_loop_control,
     create_codex_provider,
 )
+from kimi_cli.soul.compaction import should_auto_compact
 
 
 @dataclass
@@ -373,3 +379,150 @@ async def test_child_close_keeps_shared_transport_until_top_level_shutdown() -> 
 
     await provider.shutdown()
     assert http_client.is_closed is True
+
+
+# ── Codex-parity context accounting ─────────────────────────────────────────
+
+
+def _codex_trigger_point(max_context_size: int) -> int:
+    """The token count at which openai/codex forces compaction.
+
+    Recomputed here from the mirrored constants rather than calling
+    ``codex_trigger_point``, so the shipped helper is checked against an
+    independent transcription of ``codex-rs/core/src/session/context_window.rs``::
+
+        token_limit_reached = scope_tokens >= auto_compact_token_limit + fallback_buffer
+                           || active_tokens >= context_window * effective_percent / 100
+    """
+    usable = max_context_size * CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT // 100
+    buffered = (
+        max_context_size * CODEX_AUTO_COMPACT_PERCENT // 100
+        + CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS
+    )
+    return min(usable, buffered)
+
+
+def _kimix_trigger_point(max_context_size: int, loop_control: dict[str, Any], **kwargs: Any) -> int:
+    """First token count for which ``should_auto_compact`` returns True."""
+    call = dict(
+        trigger_ratio=loop_control["compaction_trigger_ratio"],
+        reserved_context_size=loop_control["reserved_context_size"],
+        **kwargs,
+    )
+    low, high = 0, max_context_size
+    while low < high:
+        mid = (low + high) // 2
+        if should_auto_compact(mid, max_context_size, **call):
+            high = mid
+        else:
+            low = mid + 1
+    return low
+
+
+def test_codex_loop_control_matches_codex_thresholds() -> None:
+    loop_control = codex_loop_control(272_000)
+
+    # auto_compact_token_limit (244_800) + fallback buffer (16_384).
+    assert loop_control["reserved_context_size"] == 261_184
+    assert loop_control["compaction_trigger_ratio"] == 0.95
+    # Codex reminds at 6_144 remaining tokens against the 90% limit.
+    assert loop_control["compact_reminder_threshold"] == pytest.approx(238_656 / 272_000)
+
+
+def test_codex_loop_control_neutralizes_the_output_reservation() -> None:
+    """``max_tokens`` and the tool-output buffer must not move the trigger point.
+
+    The Codex backend rejects explicit output-token limits, so reserving
+    ``max_tokens`` would shrink the usable window to protect nothing.
+    """
+    max_context_size = 272_000
+    loop_control = codex_loop_control(max_context_size)
+    expected = _codex_trigger_point(max_context_size)
+    assert expected == 258_400
+
+    for max_tokens in (None, 16_000, 64_000, 128_000, 384_000):
+        for tool_buffer in (0, 32_768, 100_000):
+            assert (
+                _kimix_trigger_point(
+                    max_context_size,
+                    loop_control,
+                    max_tokens=max_tokens,
+                    tool_call_buffer_tokens=tool_buffer,
+                )
+                == expected
+            )
+
+
+@pytest.mark.parametrize("max_context_size", [128_000, 272_000, 400_000, 1_000_000])
+def test_codex_loop_control_parity_across_window_sizes(max_context_size: int) -> None:
+    loop_control = codex_loop_control(max_context_size)
+    assert (
+        _kimix_trigger_point(
+            max_context_size,
+            loop_control,
+            max_tokens=max_context_size // 4,
+            tool_call_buffer_tokens=32_768,
+        )
+        == _codex_trigger_point(max_context_size)
+    )
+
+
+def test_codex_loop_control_is_a_valid_loop_control_payload() -> None:
+    from kimi_cli.config import LoopControl
+
+    resolved = LoopControl.model_validate(codex_loop_control(272_000))
+    assert resolved.reserved_context_size == 261_184
+    assert resolved.compaction_trigger_ratio == 0.95
+    # Pruning must still run strictly before compaction.
+    assert resolved.prune_trigger_ratio < resolved.compaction_trigger_ratio
+    assert resolved.compact_reminder_threshold < resolved.compaction_trigger_ratio
+
+
+def test_codex_loop_control_skipped_for_unknown_window() -> None:
+    assert codex_loop_control(0) == {}
+    assert codex_loop_control(-1) == {}
+
+
+@pytest.mark.asyncio
+async def test_provider_dict_carries_codex_loop_control() -> None:
+    model = CodexModel(
+        "gpt-test",
+        max_context_size=272_000,
+        max_tokens=128_000,
+        reasoning_efforts=("low", "medium", "high"),
+        default_reasoning_effort="medium",
+    )
+    service = _CatalogService([], model)
+
+    runtime = await create_codex_provider(
+        cast(Any, service),
+        model_name=model.slug,
+        session_id="session-id",
+        thinking=False,
+    )
+    try:
+        assert runtime.provider_dict["loop_control"] == codex_loop_control(272_000)
+    finally:
+        await runtime.lease.close()
+
+
+@pytest.mark.parametrize("max_context_size", [128_000, 272_000, 400_000, 1_000_000])
+def test_codex_trigger_point_matches_the_reference_transcription(max_context_size: int) -> None:
+    assert codex_trigger_point(max_context_size) == _codex_trigger_point(max_context_size)
+
+
+def test_codex_loop_control_only_touches_declared_keys() -> None:
+    """The advertised key set must match what the helper actually returns."""
+
+    assert set(codex_loop_control(272_000)) == set(CODEX_LOOP_CONTROL_KEYS)
+
+
+def test_llm_codex_reexports_the_shared_accounting() -> None:
+    """``llm_codex`` and ``config`` must not drift apart on these numbers."""
+
+    from kimi_cli import codex_context
+
+    assert codex_loop_control is codex_context.codex_loop_control
+    assert CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT == 95
+    assert CODEX_AUTO_COMPACT_PERCENT == 90
+    assert CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS == 16_384
