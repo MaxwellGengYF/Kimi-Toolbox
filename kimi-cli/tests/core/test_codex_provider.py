@@ -8,6 +8,7 @@ from typing import Any, cast
 import httpx
 import orjson
 import pytest
+from kosong.chat_provider.codex import OpenAICodex
 from kosong.message import Message
 from kosong.tooling import Tool
 
@@ -19,7 +20,6 @@ from kimi_cli.llm_codex import (
     CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
     CodexProviderLease,
     CodexRequestAuth,
-    ManagedOpenAICodex,
     codex_loop_control,
     create_codex_provider,
 )
@@ -176,10 +176,12 @@ async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort()
         thinking=False,
     )
     try:
+        assert type(runtime.provider) is OpenAICodex
         assert runtime.provider._generation_kwargs == {
             "reasoning_effort": "medium",
         }
         assert runtime.provider._session_id == "session-id"
+        assert runtime.provider._own_http_client is False
         assert runtime.provider_dict["max_context_size"] == 272_000
         assert runtime.provider_dict["max_tokens"] == 128_000
         assert runtime.model.max_tokens == 128_000
@@ -240,7 +242,7 @@ async def test_provider_uses_the_official_codex_responses_contract() -> None:
         )
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    provider = ManagedOpenAICodex(
+    provider = OpenAICodex(
         session_id="gui_session",
         model="gpt-5.6-terra",
         api_key="oauth-managed",
@@ -329,7 +331,7 @@ async def test_provider_maps_sequential_kimix_mode_to_official_parallel_flag() -
         )
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    provider = ManagedOpenAICodex(
+    provider = OpenAICodex(
         session_id="gui_session",
         model="gpt-5.6-terra",
         api_key="oauth-managed",
@@ -367,11 +369,12 @@ async def test_provider_lease_closes_shared_transport_exactly_once() -> None:
 @pytest.mark.asyncio
 async def test_child_close_keeps_shared_transport_until_top_level_shutdown() -> None:
     http_client = httpx.AsyncClient()
-    provider = ManagedOpenAICodex(
+    provider = OpenAICodex(
         session_id="session-id",
         model="model",
         api_key="oauth-managed",
         http_client=http_client,
+        own_http_client=False,
     )
 
     await provider.aclose()

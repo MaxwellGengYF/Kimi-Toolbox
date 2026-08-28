@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from inline_snapshot import snapshot
+from kosong.chat_provider.codex import OpenAICodex
 from kosong.chat_provider.echo import EchoChatProvider
 from kosong.chat_provider.kimi import Kimi
 from kosong.chat_provider.xai import XAI
@@ -14,7 +16,6 @@ from kimi_cli.auth.codex import CODEX_OAUTH_KEY, CodexRuntimeCredentials
 from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, OpenAISettings, Services
 from kimi_cli.llm import augment_provider_with_env_vars, create_llm
-from kimi_cli.llm_codex import ManagedOpenAICodex
 
 
 @pytest.mark.skip(reason="inline-snapshot incompatibility with pydantic SecretStr on this platform")
@@ -252,7 +253,7 @@ def test_create_llm_openai_responses_with_session_id():
 
 
 @pytest.mark.asyncio
-async def test_create_llm_codex_oauth_uses_core_managed_provider():
+async def test_create_llm_codex_oauth_uses_canonical_provider():
     provider = LLMProvider(
         type="openai-codex",
         base_url="https://chatgpt.com/backend-api/codex",
@@ -277,15 +278,16 @@ async def test_create_llm_codex_oauth_uses_core_managed_provider():
     llm = create_llm(provider, model, session_id="session-1", oauth=oauth)
 
     assert llm is not None
-    assert isinstance(llm.chat_provider, ManagedOpenAICodex)
+    assert type(llm.chat_provider) is OpenAICodex
     assert llm.chat_provider.client.api_key == "oauth-managed"
     assert llm.chat_provider._session_id == "session-1"
+    assert llm.chat_provider._own_http_client is True
     assert llm.chat_provider._client_kwargs["default_headers"] == {
         "User-Agent": "KimiCLI/kimix",
         "originator": "kimix",
         "ChatGPT-Account-ID": "account-1",
     }
-    await llm.chat_provider.aclose()
+    await cast(OpenAICodex, llm.chat_provider).aclose()
 
 
 def test_augment_provider_with_env_vars_xai(monkeypatch):

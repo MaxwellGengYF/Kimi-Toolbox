@@ -181,12 +181,13 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
             return None
         return reasoning_effort_to_thinking_effort(reasoning_effort)
 
-    async def generate(
+    def _request_kwargs(
         self,
         system_prompt: str,
         tools: Sequence[Tool],
         history: Sequence[Message],
-    ) -> OpenAIResponsesStreamedMessage:
+    ) -> tuple[dict[str, Any], ResponseInputParam]:
+        """Build SDK request kwargs and return the mutable input used for recovery."""
         inputs: ResponseInputParam = []
         if system_prompt:
             system_message: ResponseInputItemParam = {"role": "system", "content": system_prompt}
@@ -235,6 +236,15 @@ class OpenAIResponses(OpenAICompatibleProviderMixin):
             "store": False,
             **generation_kwargs,
         }
+        return create_kwargs, inputs
+
+    async def generate(
+        self,
+        system_prompt: str,
+        tools: Sequence[Tool],
+        history: Sequence[Message],
+    ) -> OpenAIResponsesStreamedMessage:
+        create_kwargs, inputs = self._request_kwargs(system_prompt, tools, history)
         try:
             response = await self.client.responses.create(**create_kwargs)
         except openai.APIStatusError as e:

@@ -13,7 +13,7 @@ here as they do in the official harness:
 Codex reserves output headroom as a flat 5% of the window; it never subtracts
 the model's maximum output length (``ModelInfo`` has no ``max_output_tokens``
 field at all). Neither can we: the Codex backend rejects explicit output-token
-limits, so ``ManagedOpenAICodex._request_kwargs`` sends no ``max_output_tokens``
+limits, so ``OpenAICodex._request_kwargs`` sends no ``max_output_tokens``
 and the provider's ``_generation_kwargs`` carries no ``max_tokens`` key. Letting
 ``max_tokens`` shrink the input window would reserve ~129k tokens on a 272k
 model to protect a request field that is never sent.

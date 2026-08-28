@@ -756,9 +756,10 @@ def create_llm(
             ).with_parallel_tool_calls(enabled=True)
         case "openai-codex":
             import httpx
+            from kosong.chat_provider.codex import OpenAICodex
 
             from kimi_cli.auth.codex import CODEX_OAUTH_KEY, extract_chatgpt_account_id
-            from kimi_cli.llm_codex import CodexRequestAuth, ManagedOpenAICodex
+            from kimi_cli.llm_codex import CodexRequestAuth
 
             codex_headers = {
                 "User-Agent": get_user_agent(),
@@ -781,9 +782,9 @@ def create_llm(
             elif account_id := extract_chatgpt_account_id(resolved_api_key):
                 codex_headers["ChatGPT-Account-ID"] = account_id
 
-            chat_provider = ManagedOpenAICodex(
+            chat_provider = OpenAICodex(
                 session_id=session_id,
-                shared=False,
+                own_http_client=True,
                 model=model.model,
                 base_url=provider.base_url,
                 api_key=codex_api_key,
