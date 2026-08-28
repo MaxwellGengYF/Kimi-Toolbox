@@ -5,24 +5,23 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import orjson
 from kimi_cli.metadata import WorkDirMeta
 from kimi_cli.share import get_share_dir
 
 from kimix_gui.kimi_workdir import resolve_kimi_work_dir
+from kimix_gui.llm.axes import AXIS_THINKING_EFFORT
 from kimix_gui.llm.domain import (
-    CONFIGURED_VARIANT,
-    LEGACY_DEFAULT_VARIANT,
     PROBLEM_INVALID_SESSION_SELECTION,
     ChatGPTTarget,
     LLMProblem,
     LLMSelection,
-    LLMVariantKey,
     ProviderFileTarget,
     ProviderTarget,
 )
+from kimix_gui.llm.parameters import ParameterAssignment
 from kimix_gui.preferences import (
     InterfacePreferences,
     parse_interface_preferences,
@@ -30,6 +29,7 @@ from kimix_gui.preferences import (
 )
 
 STORE_FILENAME = "kimix-gui.json"
+SelectionFormat = Literal["legacy", "variant", "parameters"]
 
 
 def default_store_file() -> Path:
@@ -61,8 +61,8 @@ SessionSelectionFileResolver = Callable[[Path, str], Path]
 class KimixGuiConfigStore:
     """Persist interface preferences, Provider files and exact LLM selections."""
 
-    VERSION = 5
-    SESSION_VERSION = 3
+    VERSION = 6
+    SESSION_VERSION = 4
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class KimixGuiConfigStore:
         entry = self._work_dir_entry(work_dir, create=False)
         if not entry:
             return None
-        return self._selection_from_value(entry.get("default_llm"), legacy=False)
+        return self._selection_from_value(entry.get("default_llm"), format="parameters")
 
     def set_default(self, work_dir: Path, selection: LLMSelection) -> None:
         self._remember_provider_file(selection.target)
@@ -170,11 +170,13 @@ class KimixGuiConfigStore:
             return None, False
         version = data.get("version")
         if version == 1:
-            return cls._selection_from_value(data.get("config"), legacy=True), True
+            return cls._selection_from_value(data.get("config"), format="legacy"), True
         if version == 2:
-            return cls._selection_from_value(data.get("llm"), legacy=True), True
+            return cls._selection_from_value(data.get("llm"), format="legacy"), True
+        if version == 3:
+            return cls._selection_from_value(data.get("llm"), format="variant"), True
         if version == cls.SESSION_VERSION:
-            return cls._selection_from_value(data.get("llm"), legacy=False), False
+            return cls._selection_from_value(data.get("llm"), format="parameters"), False
         return None, False
 
     def _write_session_selection(
@@ -231,6 +233,8 @@ class KimixGuiConfigStore:
         if not isinstance(value, dict):
             return None
         kind = value.get("kind")
+        if not isinstance(kind, str):
+            return None
         if kind in {"provider_file", "config_file"}:
             path = cls._path_from_value(value.get("path"))
             override = value.get("model_override")
@@ -243,51 +247,58 @@ class KimixGuiConfigStore:
                 return ChatGPTTarget(model)
         return None
 
-    @staticmethod
-    def _variant_from_value(value: object) -> LLMVariantKey | None:
-        if not isinstance(value, dict):
-            return None
-        kind = value.get("kind")
-        variant_value = value.get("value")
-        if kind not in {
-            "configured",
-            "provider_default",
-            "reasoning_effort",
-            "legacy_default",
-        }:
-            return None
-        if variant_value is not None and not isinstance(variant_value, str):
-            return None
-        try:
-            return LLMVariantKey(kind, variant_value)
-        except ValueError:
-            return None
-
     @classmethod
     def _selection_from_value(
         cls,
         value: object,
         *,
-        legacy: bool,
+        format: SelectionFormat,
     ) -> LLMSelection | None:
-        if legacy:
+        if format == "legacy":
             target = cls._legacy_target_from_value(value)
             if target is None:
                 return None
-            variant = (
-                LEGACY_DEFAULT_VARIANT if isinstance(target, ChatGPTTarget) else CONFIGURED_VARIANT
-            )
-            return LLMSelection(target, variant)
+            return LLMSelection(target, pinned=not isinstance(target, ChatGPTTarget))
         if not isinstance(value, dict):
             return None
         target = cls._target_from_value(value.get("target"))
-        variant = cls._variant_from_value(value.get("variant"))
-        if target is None or variant is None:
+        if target is None:
+            return None
+        if format == "variant":
+            migrated = cls._selection_from_variant(target, value.get("variant"))
+            return migrated
+        parameters = value.get("parameters")
+        pinned = value.get("pinned")
+        if not isinstance(parameters, dict) or not isinstance(pinned, bool):
             return None
         try:
-            return LLMSelection(target, variant)
+            assignment = ParameterAssignment(parameters)
         except ValueError:
             return None
+        return LLMSelection(target, assignment, pinned)
+
+    @staticmethod
+    def _selection_from_variant(
+        target: ProviderTarget,
+        value: object,
+    ) -> LLMSelection | None:
+        if not isinstance(value, dict):
+            return None
+        kind = value.get("kind")
+        if not isinstance(kind, str):
+            return None
+        variant_value = value.get("value")
+        if kind in {"configured", "provider_default"} and variant_value is None:
+            return LLMSelection(target)
+        if kind == "legacy_default" and variant_value is None:
+            return LLMSelection(target, pinned=False)
+        if kind != "reasoning_effort" or not isinstance(variant_value, str):
+            return None
+        try:
+            parameters = ParameterAssignment({AXIS_THINKING_EFFORT: variant_value})
+        except ValueError:
+            return None
+        return LLMSelection(target, parameters)
 
     @classmethod
     def _legacy_target_from_value(cls, value: object) -> ProviderTarget | None:
@@ -300,38 +311,47 @@ class KimixGuiConfigStore:
     def _selection_value(cls, selection: LLMSelection) -> dict[str, Any]:
         return {
             "target": cls._target_value(selection.target),
-            "variant": cls._variant_value(selection.variant),
+            "parameters": dict(selection.parameters.entries),
+            "pinned": selection.pinned,
         }
 
     @classmethod
     def _target_value(cls, target: ProviderTarget) -> dict[str, Any]:
         if isinstance(target, ChatGPTTarget):
             return {"kind": target.kind, "model": target.model}
-        value: dict[str, Any] = {
-            "kind": target.kind,
-            "path": cls._path_text(target.path),
-        }
-        if target.model_override is not None:
-            value["model_override"] = target.model_override
-        return value
-
-    @staticmethod
-    def _variant_value(variant: LLMVariantKey) -> dict[str, Any]:
-        value: dict[str, Any] = {"kind": variant.kind}
-        if variant.value is not None:
-            value["value"] = variant.value
-        return value
+        if isinstance(target, ProviderFileTarget):
+            value: dict[str, Any] = {
+                "kind": target.kind,
+                "path": cls._path_text(target.path),
+            }
+            if target.model_override is not None:
+                value["model_override"] = target.model_override
+            return value
+        raise TypeError(f"Unsupported persisted Provider target: {target!r}")
 
     def _load(self) -> tuple[dict[str, Any], bool]:
         try:
             raw = orjson.loads(self.store_file.read_bytes())
         except OSError, orjson.JSONDecodeError, TypeError, ValueError:
             return self._empty_data(), False
-        if not isinstance(raw, dict) or raw.get("version") not in {3, 4, self.VERSION}:
+        if not isinstance(raw, dict):
             return self._empty_data(), False
-
-        legacy = raw.get("version") in {3, 4}
-        source_files = raw.get("configs") if legacy else raw.get("provider_files")
+        version = raw.get("version")
+        if not isinstance(version, int) or version not in {
+            3,
+            4,
+            5,
+            self.VERSION,
+        }:
+            return self._empty_data(), False
+        selection_format: SelectionFormat
+        if version in {3, 4}:
+            selection_format = "legacy"
+        elif version == 5:
+            selection_format = "variant"
+        else:
+            selection_format = "parameters"
+        source_files = raw.get("configs") if selection_format == "legacy" else raw.get("provider_files")
         source_work_dirs = raw.get("work_dirs")
         data = self._empty_data()
         data["interface"] = serialize_interface_preferences(
@@ -349,11 +369,20 @@ class KimixGuiConfigStore:
             for work_dir, value in source_work_dirs.items():
                 if not isinstance(work_dir, str) or not isinstance(value, dict):
                     continue
-                selection_value = value.get("default") if legacy else value.get("default_llm")
-                selection = self._selection_from_value(selection_value, legacy=legacy)
+                selection_value = (
+                    value.get("default")
+                    if selection_format == "legacy"
+                    else value.get("default_llm")
+                )
+                selection = self._selection_from_value(
+                    selection_value,
+                    format=selection_format,
+                )
                 if selection is not None:
-                    data["work_dirs"][work_dir] = {"default_llm": self._selection_value(selection)}
-        return data, legacy
+                    data["work_dirs"][work_dir] = {
+                        "default_llm": self._selection_value(selection)
+                    }
+        return data, version != self.VERSION
 
     def _empty_data(self) -> dict[str, Any]:
         return {

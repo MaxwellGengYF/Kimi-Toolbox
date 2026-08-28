@@ -29,5 +29,5 @@
 - Parent every cached Qt object and release it with `deleteLater()`; never mask cross-thread destruction with disabled GC or scheduled collection.
 - Keep transcript/history memory bounded and preserve the single sources of truth documented for view state, TODO state, session paths, and GUI configuration.
 - UI appearance goes through design tokens, the global theme stylesheet, and styling properties. Do not add per-widget stylesheets.
-- Define shortcuts only in `qt/keys.py`, and keep translations at the Qt boundary. After changing `tr()` copy, run `uv run python scripts/gui/build_translations.py` and commit both `.ts` and `.qm` catalogs.
+- Define shortcuts only in `qt/keys.py`, and keep translations at the Qt boundary. After changing `tr()` copy, run `uv run python scripts/gui/build_translations.py` and commit the `.ts` catalogs only. The compiled `.qm` files are gitignored local build output; never add them to a commit.
 - Product code under `src/kimix_gui/` does not use `assert`; wire/state JSON uses `orjson`.

@@ -27,8 +27,9 @@ from kimix_gui.qt.components.disclosure import (
 )
 from kimix_gui.qt.components.footer import DialogFooter
 from kimix_gui.qt.components.key_value import KeyValueList
+from kimix_gui.qt.components.parameter_form import ParameterForm
+from kimix_gui.qt.components.parameter_picker import ParameterPicker, ParameterValueOption
 from kimix_gui.qt.components.settings_list import SettingsList
-from kimix_gui.qt.components.variant_picker import VariantOption, VariantPicker
 
 # ``CardLevel`` is not re-exported: it is part of the property vocabulary and
 # belongs with ``Variant`` and ``Role`` in :mod:`kimix_gui.qt.styling`, which is
@@ -40,7 +41,8 @@ __all__ = [
     "DialogFooter",
     "DisclosureHeader",
     "KeyValueList",
+    "ParameterValueOption",
+    "ParameterForm",
+    "ParameterPicker",
     "SettingsList",
-    "VariantOption",
-    "VariantPicker",
 ]

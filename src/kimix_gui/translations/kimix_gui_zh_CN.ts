@@ -873,7 +873,7 @@
 <context>
     <name>KimixGuiApp</name>
     <message>
-        <location filename="../app.py" line="+311"/>
+        <location filename="../app.py" line="+250"/>
         <source>Current session · in use</source>
         <translation>当前会话 · 使用中</translation>
     </message>
@@ -886,12 +886,12 @@
         <translation type="vanished">连接 ChatGPT 后可使用此订阅模型。</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+18"/>
         <source>LLM configuration is unavailable</source>
         <translation>LLM 配置不可用</translation>
     </message>
     <message>
-        <location line="+46"/>
+        <location line="+47"/>
         <source>Session {id}</source>
         <translation>会话 {id}</translation>
     </message>
@@ -901,17 +901,17 @@
         <translation>新会话</translation>
     </message>
     <message>
-        <location line="+163"/>
+        <location line="+113"/>
         <source>Failed to save preferences: {reason}</source>
         <translation>保存偏好设置失败：{reason}</translation>
     </message>
     <message>
-        <location line="+28"/>
+        <location line="+29"/>
         <source>Failed to save LLM configuration metadata: {reason}</source>
         <translation>保存 LLM 配置元数据失败：{reason}</translation>
     </message>
     <message>
-        <location line="+16"/>
+        <location line="+18"/>
         <source>Project default · {config}</source>
         <translation>项目默认 · {config}</translation>
     </message>
@@ -943,8 +943,8 @@
         <translation type="vanished">使用中 · {status}</translation>
     </message>
     <message>
-        <location filename="../qt/settings_dialog.py" line="+119"/>
-        <location line="+57"/>
+        <location filename="../qt/settings_dialog.py" line="+118"/>
+        <location line="+49"/>
         <source>LLM configuration</source>
         <translation>LLM 配置</translation>
     </message>
@@ -953,7 +953,7 @@
         <translation type="vanished">KIMIX 服务商配置(.JSON)</translation>
     </message>
     <message>
-        <location line="+226"/>
+        <location line="+246"/>
         <source>Browse...</source>
         <translation>浏览…</translation>
     </message>
@@ -974,35 +974,32 @@
         <translation type="vanished">可用配置</translation>
     </message>
     <message>
-        <location line="-37"/>
-        <location line="+419"/>
+        <location filename="../qt/llm_text.py" line="+61"/>
+        <location filename="../qt/settings_dialog.py" line="-47"/>
         <source>Connect ChatGPT</source>
         <translation>连接 ChatGPT</translation>
     </message>
     <message>
-        <location line="-450"/>
         <source>CHATGPT SUBSCRIPTION · {count}</source>
-        <translation>ChatGPT 订阅 · {count}</translation>
+        <translation type="vanished">ChatGPT 订阅 · {count}</translation>
     </message>
     <message>
-        <location line="-62"/>
+        <location filename="../qt/settings_dialog.py" line="-104"/>
         <source>Provider thinking</source>
         <translation>服务商思考设置</translation>
     </message>
     <message>
-        <location line="+22"/>
+        <location line="+21"/>
         <source>Use model</source>
         <translation>使用模型</translation>
     </message>
     <message>
-        <location line="+42"/>
         <source>PROVIDER FILES · {count}</source>
-        <translation>服务商文件 · {count}</translation>
+        <translation type="vanished">服务商文件 · {count}</translation>
     </message>
     <message>
-        <location line="+31"/>
         <source>Use ChatGPT subscription models</source>
-        <translation>使用 ChatGPT 订阅模型</translation>
+        <translation type="vanished">使用 ChatGPT 订阅模型</translation>
     </message>
     <message>
         <source>CONFIG DETAILS</source>
@@ -1013,18 +1010,17 @@
         <translation type="vanished">服务商文件</translation>
     </message>
     <message>
-        <location line="+411"/>
-        <location line="+19"/>
+        <location filename="../qt/llm_text.py" line="-3"/>
         <source>Unavailable</source>
         <translation>不可用</translation>
     </message>
     <message>
-        <location line="-17"/>
+        <location line="+1"/>
         <source>API key missing</source>
         <translation>缺少 API Key</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="+1"/>
         <source>File missing</source>
         <translation>文件缺失</translation>
     </message>
@@ -1033,12 +1029,12 @@
         <translation type="vanished">名称</translation>
     </message>
     <message>
-        <location line="-555"/>
+        <location filename="../qt/settings_dialog.py" line="-61"/>
         <source>Source</source>
         <translation>来源</translation>
     </message>
     <message>
-        <location line="+43"/>
+        <location line="+39"/>
         <source>Format</source>
         <translation>格式</translation>
     </message>
@@ -1052,14 +1048,13 @@
         <translation type="vanished">使用中</translation>
     </message>
     <message>
-        <location line="-62"/>
+        <location line="-61"/>
         <source>ACTIVE MODEL</source>
         <translation>当前模型</translation>
     </message>
     <message>
-        <location line="+0"/>
         <source>AVAILABLE MODELS</source>
-        <translation>可用模型</translation>
+        <translation type="vanished">可用模型</translation>
     </message>
     <message>
         <location line="+7"/>
@@ -1067,17 +1062,16 @@
         <translation>跟随项目默认</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Use the project&apos;s saved model and variant for this session</source>
-        <translation>此会话使用项目保存的模型和变体</translation>
+        <translation type="vanished">此会话使用项目保存的模型和变体</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+26"/>
         <source>MODEL SELECTION</source>
         <translation>模型选择</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="+6"/>
         <source>Current model</source>
         <translation>当前模型</translation>
     </message>
@@ -1087,22 +1081,34 @@
         <translation>状态</translation>
     </message>
     <message>
-        <location line="+6"/>
         <source>Variant</source>
-        <translation>变体</translation>
+        <translation type="vanished">变体</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Model variant</source>
-        <translation>模型变体</translation>
+        <translation type="vanished">模型变体</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Choose the exact runtime variant saved for this model</source>
-        <translation>选择并保存此模型使用的明确运行时变体</translation>
+        <translation type="vanished">选择并保存此模型使用的明确运行时变体</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="-41"/>
+        <source>PROVIDERS</source>
+        <translation>提供方</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Use the project&apos;s saved model and parameters for this session</source>
+        <translation>对此会话使用项目保存的模型和参数</translation>
+    </message>
+    <message>
+        <location line="+36"/>
+        <source>MODEL PARAMETERS</source>
+        <translation>模型参数</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>MODEL DETAILS</source>
         <translation>模型详情</translation>
     </message>
@@ -1132,12 +1138,31 @@
         <translation>凭据</translation>
     </message>
     <message>
-        <location line="+112"/>
-        <source>No Provider files added</source>
-        <translation>尚未添加服务商文件</translation>
+        <location line="+81"/>
+        <source>{provider} · {count}</source>
+        <translation>{provider} · {count}</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+5"/>
+        <source>Collapse provider</source>
+        <translation>收起提供方</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Expand provider</source>
+        <translation>展开提供方</translation>
+    </message>
+    <message>
+        <location line="+39"/>
+        <source>No models configured</source>
+        <translation>未配置模型</translation>
+    </message>
+    <message>
+        <source>No Provider files added</source>
+        <translation type="vanished">尚未添加服务商文件</translation>
+    </message>
+    <message>
+        <location line="+25"/>
         <location line="+1"/>
         <source>Provider JSON path</source>
         <translation>服务商 JSON 路径</translation>
@@ -1148,17 +1173,16 @@
         <translation>添加</translation>
     </message>
     <message>
-        <location line="+90"/>
         <source>Unavailable variant · {variant}</source>
-        <translation>变体不可用 · {variant}</translation>
+        <translation type="vanished">变体不可用 · {variant}</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location filename="../qt/llm_text.py" line="+65"/>
         <source>not selected</source>
         <translation>未选择</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location filename="../qt/settings_dialog.py" line="+124"/>
         <source>Available</source>
         <translation>可用</translation>
     </message>
@@ -1168,29 +1192,23 @@
         <translation>可用 · 缓存模型目录</translation>
     </message>
     <message>
-        <location line="+42"/>
-        <location line="+237"/>
         <source>Configured in Provider file</source>
-        <translation>由服务商文件配置</translation>
+        <translation type="vanished">由服务商文件配置</translation>
     </message>
     <message>
-        <location line="-235"/>
         <source>Provider default</source>
-        <translation>服务商默认</translation>
+        <translation type="vanished">服务商默认</translation>
     </message>
     <message>
-        <location line="+4"/>
-        <location line="+201"/>
         <source>Choose a variant</source>
-        <translation>选择变体</translation>
+        <translation type="vanished">选择变体</translation>
     </message>
     <message>
-        <location line="-199"/>
         <source>{variant} · Model default</source>
-        <translation>{variant} · 模型默认</translation>
+        <translation type="vanished">{variant} · 模型默认</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+72"/>
         <source>Failed to save Provider file metadata: {reason}</source>
         <translation>保存服务商文件元数据失败：{reason}</translation>
     </message>
@@ -1200,22 +1218,21 @@
         <translation>移除服务商文件失败：{reason}</translation>
     </message>
     <message>
-        <location line="+112"/>
+        <location line="+100"/>
         <source>Select Kimix Provider file</source>
         <translation>选择 Kimix 服务商文件</translation>
     </message>
     <message>
-        <location line="+27"/>
+        <location filename="../qt/llm_text.py" line="-63"/>
         <source>Model unavailable</source>
         <translation>模型不可用</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Variant unavailable</source>
-        <translation>变体不可用</translation>
+        <translation type="vanished">变体不可用</translation>
     </message>
     <message>
-        <location line="+15"/>
+        <location line="+55"/>
         <source>None ({value})</source>
         <translation>无（{value}）</translation>
     </message>
@@ -1250,32 +1267,116 @@
         <translation>最高（{value}）</translation>
     </message>
     <message>
-        <location line="+8"/>
         <source>Selected by Variant</source>
-        <translation>由变体选择</translation>
+        <translation type="vanished">由变体选择</translation>
     </message>
     <message>
-        <location line="+6"/>
+        <location line="-55"/>
         <source>stream on</source>
         <translation>流式输出开</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+1"/>
         <source>stream off</source>
         <translation>流式输出关</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+32"/>
+        <source>The saved model parameter is no longer recognized.</source>
+        <translation>保存的模型参数无法识别。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The saved model parameter value is no longer available.</source>
+        <translation>保存的模型参数值已不可用。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Choose a value for every model parameter before continuing.</source>
+        <translation>继续前请为每个模型参数选择一个值。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>200K tokens</source>
+        <translation>20 万个 token</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>1M tokens</source>
+        <translation>100 万个 token</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Unavailable value · {value}</source>
+        <translation>不可用的值 · {value}</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>effort {effort} · {stream}</source>
         <translation>强度 {effort} · {stream}</translation>
     </message>
     <message>
-        <location line="+15"/>
+        <location line="-43"/>
         <source>Kimix Provider file must be JSON: {path}</source>
         <translation>Kimix 服务商文件必须为 JSON：{path}</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="-22"/>
+        <source>Choose the exact value saved for this model parameter</source>
+        <translation>选择要为此模型参数保存的确切值</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Provider files</source>
+        <translation>Provider 文件</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Local OpenAI-compatible</source>
+        <translation>本地 OpenAI 兼容</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>ACP adapter</source>
+        <translation>ACP 适配器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Thinking effort</source>
+        <translation>思考强度</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Context window</source>
+        <translation>上下文窗口</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Unknown parameter</source>
+        <translation>未知参数</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Parameter value unavailable</source>
+        <translation>参数值不可用</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Choose a parameter value</source>
+        <translation>选择参数值</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Selected by model parameters</source>
+        <translation>由模型参数选择</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Managed by provider</source>
+        <translation>由提供方管理</translation>
+    </message>
+    <message>
+        <location line="+7"/>
         <source>Provider file does not exist: {path}</source>
         <translation>服务商文件不存在：{path}</translation>
     </message>
@@ -1310,17 +1411,25 @@
         <translation>此模型不可用于已连接的账号。</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="+18"/>
+        <source>Off ({value})</source>
+        <translation>关闭（{value}）</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>{value} · Model default</source>
+        <translation>{value} · 模型默认</translation>
+    </message>
+    <message>
         <source>The saved model variant is no longer available.</source>
-        <translation>保存的模型变体已不可用。</translation>
+        <translation type="vanished">保存的模型变体已不可用。</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Choose a model variant before using this configuration.</source>
-        <translation>使用此配置前请选择模型变体。</translation>
+        <translation type="vanished">使用此配置前请选择模型变体。</translation>
     </message>
     <message>
-        <location line="-621"/>
+        <location filename="../qt/settings_dialog.py" line="-488"/>
         <source>Context</source>
         <translation>上下文</translation>
     </message>
@@ -1344,7 +1453,7 @@
         <translation>移除</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="+6"/>
         <source>Close</source>
         <translation>关闭</translation>
     </message>
@@ -1358,17 +1467,15 @@
         <translation type="vanished">使用此配置</translation>
     </message>
     <message>
-        <location line="+54"/>
         <source>Collapse section</source>
-        <translation>收起分组</translation>
+        <translation type="vanished">收起分组</translation>
     </message>
     <message>
-        <location line="+1"/>
         <source>Expand section</source>
-        <translation>展开分组</translation>
+        <translation type="vanished">展开分组</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+105"/>
         <source>No subscription models available</source>
         <translation>没有可用的订阅模型</translation>
     </message>
@@ -1401,19 +1508,18 @@
         <translation type="vanished">此模型不可用于已连接的 ChatGPT 账号。</translation>
     </message>
     <message>
-        <location line="+486"/>
+        <location filename="../qt/llm_text.py" line="-29"/>
         <source>Connect ChatGPT to use this subscription model.</source>
         <translation>连接 ChatGPT 后可使用此订阅模型。</translation>
     </message>
     <message>
-        <location line="-330"/>
+        <location line="-43"/>
         <source>ChatGPT subscription</source>
         <translation>ChatGPT 订阅</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Provider file</source>
-        <translation>服务商文件</translation>
+        <translation type="vanished">服务商文件</translation>
     </message>
     <message>
         <source>Built-in</source>
@@ -1424,9 +1530,9 @@
         <translation type="vanished">ChatGPT OAuth</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+18"/>
+        <location filename="../qt/settings_dialog.py" line="+164"/>
         <location line="+4"/>
-        <location line="+281"/>
         <source>Not specified</source>
         <translation>未指定</translation>
     </message>
@@ -1455,7 +1561,7 @@
         <translation type="vanished">强度 {effort} · 流式输出关</translation>
     </message>
     <message>
-        <location line="-7"/>
+        <location line="+56"/>
         <source>not specified</source>
         <translation>未指定</translation>
     </message>
@@ -1464,7 +1570,7 @@
         <translation type="vanished">选择 Kimix 服务商配置</translation>
     </message>
     <message>
-        <location line="-68"/>
+        <location filename="../qt/settings_dialog.py" line="+182"/>
         <source>JSON files (*.json)</source>
         <translation>JSON 文件 (*.json)</translation>
     </message>
@@ -1497,12 +1603,12 @@
         <translation type="vanished">会话配置引用无效：{path}</translation>
     </message>
     <message>
-        <location line="+100"/>
+        <location filename="../qt/llm_text.py" line="-37"/>
         <source>No API key or OAuth credential is configured: {path}</source>
         <translation>未配置 API Key 或 OAuth 凭据：{path}</translation>
     </message>
     <message>
-        <location line="-24"/>
+        <location line="+26"/>
         <source>{count} tokens</source>
         <translation>{count} tokens</translation>
     </message>
@@ -1510,7 +1616,7 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../qt/main_window.py" line="+221"/>
+        <location filename="../qt/main_window.py" line="+218"/>
         <source>Select a valid LLM configuration to continue.</source>
         <translation>请选择一个可用的 LLM 配置以继续。</translation>
     </message>
@@ -1644,6 +1750,29 @@
         <location line="+2"/>
         <source>Open provider configuration</source>
         <translation>打开服务商配置</translation>
+    </message>
+</context>
+<context>
+    <name>ProviderConfigDialog</name>
+    <message>
+        <source>Provider</source>
+        <translation type="obsolete">服务商</translation>
+    </message>
+    <message>
+        <source>Model ID</source>
+        <translation type="obsolete">模型 ID</translation>
+    </message>
+    <message>
+        <source>Endpoint</source>
+        <translation type="obsolete">接口地址</translation>
+    </message>
+    <message>
+        <source>Cancel</source>
+        <translation type="obsolete">取消</translation>
+    </message>
+    <message>
+        <source>Not specified</source>
+        <translation type="obsolete">未指定</translation>
     </message>
 </context>
 <context>

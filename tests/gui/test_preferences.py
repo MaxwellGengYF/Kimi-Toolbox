@@ -26,7 +26,7 @@ def test_gui_config_store_round_trips_font_priorities(tmp_path) -> None:
         ("Cascadia Mono", "Consolas"), 17
     )
     assert orjson.loads(store_file.read_bytes()) == {
-        "version": 5,
+        "version": 6,
         "interface": {
             "font_families": ["Cascadia Mono", "Consolas"],
             "font_size": 17,
@@ -54,7 +54,7 @@ def test_preferences_written_before_language_existed_still_load(tmp_path) -> Non
         )
     )
 
-    assert KimixGuiConfigStore.VERSION == 5
+    assert KimixGuiConfigStore.VERSION == 6
     assert KimixGuiConfigStore(store_file).interface == InterfacePreferences(
         ("Consolas",), 15, "auto", "auto"
     )
@@ -80,7 +80,7 @@ def test_preferences_written_before_the_theme_key_existed_still_load(tmp_path) -
         )
     )
 
-    assert KimixGuiConfigStore.VERSION == 5
+    assert KimixGuiConfigStore.VERSION == 6
     assert KimixGuiConfigStore(store_file).interface == InterfacePreferences(
         ("Consolas",), 15, "zh_CN", "auto"
     )
@@ -165,7 +165,8 @@ def test_existing_gui_config_without_interface_preserves_llm_metadata(tmp_path) 
         work_dir: {
             "default_llm": {
                 "target": {"kind": "provider_file", "path": config_path},
-                "variant": {"kind": "configured"},
+                "parameters": {},
+                "pinned": True,
             }
         }
     }

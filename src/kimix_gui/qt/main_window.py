@@ -122,9 +122,6 @@ class MainWindow(QMainWindow):
         self.home: HomeView | None = None
         self.chat: ChatView | None = None
         self._toast = Toast(self)
-        self.controller.bridge.codex_auth_changed.connect(self._on_codex_auth_changed)
-        self.controller.bridge.codex_browser_challenge.connect(self._on_codex_browser_challenge)
-        self.controller.bridge.codex_catalog_changed.connect(self._on_codex_catalog_changed)
         # No key bindings here. Each page installs its own, scoped to its own focus
         # subtree, which is why there is no longer a set of handlers in this class that
         # begin by asking which page is showing. See ``qt/keys.py``.
@@ -277,24 +274,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.controller.note(message, severity, title)
         self._toast.show_message(message, title, severity=severity)
-
-    def _on_codex_auth_changed(self, snapshot: object) -> None:
-        from kimi_cli.auth.codex import CodexAuthSnapshot
-
-        if isinstance(snapshot, CodexAuthSnapshot):
-            self.controller.on_codex_auth_changed(snapshot)
-
-    def _on_codex_browser_challenge(self, challenge: object) -> None:
-        from kimi_cli.auth.codex import CodexBrowserChallenge
-
-        if isinstance(challenge, CodexBrowserChallenge):
-            self.controller.on_codex_browser_challenge(challenge)
-
-    def _on_codex_catalog_changed(self, catalog: object) -> None:
-        from kimi_cli.auth.codex import CodexModelCatalog
-
-        if isinstance(catalog, CodexModelCatalog):
-            self.controller.on_codex_catalog_changed(catalog)
 
     def closeEvent(self, event: object) -> None:
         self.controller.shutdown()

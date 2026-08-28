@@ -873,7 +873,7 @@
 <context>
     <name>KimixGuiApp</name>
     <message>
-        <location filename="../app.py" line="+311"/>
+        <location filename="../app.py" line="+250"/>
         <source>Current session · in use</source>
         <translation>Current session · in use</translation>
     </message>
@@ -886,12 +886,12 @@
         <translation type="vanished">Connect ChatGPT to use this subscription model.</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+18"/>
         <source>LLM configuration is unavailable</source>
         <translation>LLM configuration is unavailable</translation>
     </message>
     <message>
-        <location line="+46"/>
+        <location line="+47"/>
         <source>Session {id}</source>
         <translation>Session {id}</translation>
     </message>
@@ -901,17 +901,17 @@
         <translation>New sessions</translation>
     </message>
     <message>
-        <location line="+163"/>
+        <location line="+113"/>
         <source>Failed to save preferences: {reason}</source>
         <translation>Failed to save preferences: {reason}</translation>
     </message>
     <message>
-        <location line="+28"/>
+        <location line="+29"/>
         <source>Failed to save LLM configuration metadata: {reason}</source>
         <translation>Failed to save LLM configuration metadata: {reason}</translation>
     </message>
     <message>
-        <location line="+16"/>
+        <location line="+18"/>
         <source>Project default · {config}</source>
         <translation>Project default · {config}</translation>
     </message>
@@ -943,8 +943,8 @@
         <translation type="vanished">IN USE · {status}</translation>
     </message>
     <message>
-        <location filename="../qt/settings_dialog.py" line="+119"/>
-        <location line="+57"/>
+        <location filename="../qt/settings_dialog.py" line="+118"/>
+        <location line="+49"/>
         <source>LLM configuration</source>
         <translation>LLM configuration</translation>
     </message>
@@ -953,7 +953,7 @@
         <translation type="vanished">KIMIX PROVIDER CONFIG (.JSON)</translation>
     </message>
     <message>
-        <location line="+226"/>
+        <location line="+246"/>
         <source>Browse...</source>
         <translation>Browse...</translation>
     </message>
@@ -974,35 +974,32 @@
         <translation type="vanished">AVAILABLE CONFIGS</translation>
     </message>
     <message>
-        <location line="-37"/>
-        <location line="+419"/>
+        <location filename="../qt/llm_text.py" line="+61"/>
+        <location filename="../qt/settings_dialog.py" line="-47"/>
         <source>Connect ChatGPT</source>
         <translation>Connect ChatGPT</translation>
     </message>
     <message>
-        <location line="-450"/>
         <source>CHATGPT SUBSCRIPTION · {count}</source>
-        <translation>CHATGPT SUBSCRIPTION · {count}</translation>
+        <translation type="vanished">CHATGPT SUBSCRIPTION · {count}</translation>
     </message>
     <message>
-        <location line="-62"/>
+        <location filename="../qt/settings_dialog.py" line="-104"/>
         <source>Provider thinking</source>
         <translation>Provider thinking</translation>
     </message>
     <message>
-        <location line="+22"/>
+        <location line="+21"/>
         <source>Use model</source>
         <translation>Use model</translation>
     </message>
     <message>
-        <location line="+42"/>
         <source>PROVIDER FILES · {count}</source>
-        <translation>PROVIDER FILES · {count}</translation>
+        <translation type="vanished">PROVIDER FILES · {count}</translation>
     </message>
     <message>
-        <location line="+31"/>
         <source>Use ChatGPT subscription models</source>
-        <translation>Use ChatGPT subscription models</translation>
+        <translation type="vanished">Use ChatGPT subscription models</translation>
     </message>
     <message>
         <source>CONFIG DETAILS</source>
@@ -1013,18 +1010,17 @@
         <translation type="vanished">PROVIDER FILE</translation>
     </message>
     <message>
-        <location line="+411"/>
-        <location line="+19"/>
+        <location filename="../qt/llm_text.py" line="-3"/>
         <source>Unavailable</source>
         <translation>Unavailable</translation>
     </message>
     <message>
-        <location line="-17"/>
+        <location line="+1"/>
         <source>API key missing</source>
         <translation>API key missing</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="+1"/>
         <source>File missing</source>
         <translation>File missing</translation>
     </message>
@@ -1033,12 +1029,12 @@
         <translation type="vanished">Name</translation>
     </message>
     <message>
-        <location line="-555"/>
+        <location filename="../qt/settings_dialog.py" line="-61"/>
         <source>Source</source>
         <translation>Source</translation>
     </message>
     <message>
-        <location line="+43"/>
+        <location line="+39"/>
         <source>Format</source>
         <translation>Format</translation>
     </message>
@@ -1052,14 +1048,13 @@
         <translation type="vanished">IN USE</translation>
     </message>
     <message>
-        <location line="-62"/>
+        <location line="-61"/>
         <source>ACTIVE MODEL</source>
         <translation>ACTIVE MODEL</translation>
     </message>
     <message>
-        <location line="+0"/>
         <source>AVAILABLE MODELS</source>
-        <translation>AVAILABLE MODELS</translation>
+        <translation type="vanished">AVAILABLE MODELS</translation>
     </message>
     <message>
         <location line="+7"/>
@@ -1067,17 +1062,16 @@
         <translation>Follow project default</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Use the project&apos;s saved model and variant for this session</source>
-        <translation>Use the project&apos;s saved model and variant for this session</translation>
+        <translation type="vanished">Use the project&apos;s saved model and variant for this session</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+26"/>
         <source>MODEL SELECTION</source>
         <translation>MODEL SELECTION</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="+6"/>
         <source>Current model</source>
         <translation>Current model</translation>
     </message>
@@ -1087,22 +1081,38 @@
         <translation>Status</translation>
     </message>
     <message>
-        <location line="+6"/>
         <source>Variant</source>
-        <translation>Variant</translation>
+        <translation type="vanished">Variant</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Model variant</source>
-        <translation>Model variant</translation>
+        <translation type="vanished">Model variant</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Choose the exact runtime variant saved for this model</source>
-        <translation>Choose the exact runtime variant saved for this model</translation>
+        <translation type="vanished">Choose the exact runtime variant saved for this model</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="-41"/>
+        <source>PROVIDERS</source>
+        <translation>PROVIDERS</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Use the project&apos;s saved model and parameters for this session</source>
+        <translation>Use the project&apos;s saved model and parameters for this session</translation>
+    </message>
+    <message>
+        <source>Add custom model</source>
+        <translation type="vanished">Add custom model</translation>
+    </message>
+    <message>
+        <location line="+36"/>
+        <source>MODEL PARAMETERS</source>
+        <translation>MODEL PARAMETERS</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>MODEL DETAILS</source>
         <translation>MODEL DETAILS</translation>
     </message>
@@ -1132,12 +1142,31 @@
         <translation>Credential</translation>
     </message>
     <message>
-        <location line="+112"/>
-        <source>No Provider files added</source>
-        <translation>No Provider files added</translation>
+        <location line="+81"/>
+        <source>{provider} · {count}</source>
+        <translation>{provider} · {count}</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+5"/>
+        <source>Collapse provider</source>
+        <translation>Collapse provider</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Expand provider</source>
+        <translation>Expand provider</translation>
+    </message>
+    <message>
+        <location line="+39"/>
+        <source>No models configured</source>
+        <translation>No models configured</translation>
+    </message>
+    <message>
+        <source>No Provider files added</source>
+        <translation type="vanished">No Provider files added</translation>
+    </message>
+    <message>
+        <location line="+25"/>
         <location line="+1"/>
         <source>Provider JSON path</source>
         <translation>Provider JSON path</translation>
@@ -1148,17 +1177,16 @@
         <translation>Add</translation>
     </message>
     <message>
-        <location line="+90"/>
         <source>Unavailable variant · {variant}</source>
-        <translation>Unavailable variant · {variant}</translation>
+        <translation type="vanished">Unavailable variant · {variant}</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location filename="../qt/llm_text.py" line="+65"/>
         <source>not selected</source>
         <translation>not selected</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location filename="../qt/settings_dialog.py" line="+124"/>
         <source>Available</source>
         <translation>Available</translation>
     </message>
@@ -1168,31 +1196,41 @@
         <translation>Available · cached catalog</translation>
     </message>
     <message>
-        <location line="+42"/>
-        <location line="+237"/>
         <source>Configured in Provider file</source>
-        <translation>Configured in Provider file</translation>
+        <translation type="vanished">Configured in Provider file</translation>
     </message>
     <message>
-        <location line="-235"/>
         <source>Provider default</source>
-        <translation>Provider default</translation>
+        <translation type="vanished">Provider default</translation>
     </message>
     <message>
-        <location line="+4"/>
-        <location line="+201"/>
         <source>Choose a variant</source>
-        <translation>Choose a variant</translation>
+        <translation type="vanished">Choose a variant</translation>
     </message>
     <message>
-        <location line="-199"/>
         <source>{variant} · Model default</source>
-        <translation>{variant} · Model default</translation>
+        <translation type="vanished">{variant} · Model default</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+72"/>
         <source>Failed to save Provider file metadata: {reason}</source>
         <translation>Failed to save Provider file metadata: {reason}</translation>
+    </message>
+    <message>
+        <source>Not set</source>
+        <translation type="vanished">Not set</translation>
+    </message>
+    <message>
+        <source>Environment</source>
+        <translation type="vanished">Environment</translation>
+    </message>
+    <message>
+        <source>Environment variable</source>
+        <translation type="vanished">Environment variable</translation>
+    </message>
+    <message>
+        <source>Managed configuration</source>
+        <translation type="vanished">Managed configuration</translation>
     </message>
     <message>
         <location line="+19"/>
@@ -1200,22 +1238,21 @@
         <translation>Failed to remove Provider file: {reason}</translation>
     </message>
     <message>
-        <location line="+112"/>
+        <location line="+100"/>
         <source>Select Kimix Provider file</source>
         <translation>Select Kimix Provider file</translation>
     </message>
     <message>
-        <location line="+27"/>
+        <location filename="../qt/llm_text.py" line="-63"/>
         <source>Model unavailable</source>
         <translation>Model unavailable</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Variant unavailable</source>
-        <translation>Variant unavailable</translation>
+        <translation type="vanished">Variant unavailable</translation>
     </message>
     <message>
-        <location line="+15"/>
+        <location line="+55"/>
         <source>None ({value})</source>
         <translation>None ({value})</translation>
     </message>
@@ -1250,32 +1287,116 @@
         <translation>Maximum ({value})</translation>
     </message>
     <message>
-        <location line="+8"/>
         <source>Selected by Variant</source>
-        <translation>Selected by Variant</translation>
+        <translation type="vanished">Selected by Variant</translation>
     </message>
     <message>
-        <location line="+6"/>
+        <location line="-55"/>
         <source>stream on</source>
         <translation>stream on</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+1"/>
         <source>stream off</source>
         <translation>stream off</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+32"/>
+        <source>The saved model parameter is no longer recognized.</source>
+        <translation>The saved model parameter is no longer recognized.</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The saved model parameter value is no longer available.</source>
+        <translation>The saved model parameter value is no longer available.</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Choose a value for every model parameter before continuing.</source>
+        <translation>Choose a value for every model parameter before continuing.</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>200K tokens</source>
+        <translation>200K tokens</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>1M tokens</source>
+        <translation>1M tokens</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Unavailable value · {value}</source>
+        <translation>Unavailable value · {value}</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>effort {effort} · {stream}</source>
         <translation>effort {effort} · {stream}</translation>
     </message>
     <message>
-        <location line="+15"/>
+        <location line="-43"/>
         <source>Kimix Provider file must be JSON: {path}</source>
         <translation>Kimix Provider file must be JSON: {path}</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="-22"/>
+        <source>Choose the exact value saved for this model parameter</source>
+        <translation>Choose the exact value saved for this model parameter</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Provider files</source>
+        <translation>Provider files</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Local OpenAI-compatible</source>
+        <translation>Local OpenAI-compatible</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>ACP adapter</source>
+        <translation>ACP adapter</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Thinking effort</source>
+        <translation>Thinking effort</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Context window</source>
+        <translation>Context window</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Unknown parameter</source>
+        <translation>Unknown parameter</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Parameter value unavailable</source>
+        <translation>Parameter value unavailable</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Choose a parameter value</source>
+        <translation>Choose a parameter value</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Selected by model parameters</source>
+        <translation>Selected by model parameters</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Managed by provider</source>
+        <translation>Managed by provider</translation>
+    </message>
+    <message>
+        <location line="+7"/>
         <source>Provider file does not exist: {path}</source>
         <translation>Provider file does not exist: {path}</translation>
     </message>
@@ -1310,17 +1431,25 @@
         <translation>This model is not available for the connected account.</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="+18"/>
+        <source>Off ({value})</source>
+        <translation>Off ({value})</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>{value} · Model default</source>
+        <translation>{value} · Model default</translation>
+    </message>
+    <message>
         <source>The saved model variant is no longer available.</source>
-        <translation>The saved model variant is no longer available.</translation>
+        <translation type="vanished">The saved model variant is no longer available.</translation>
     </message>
     <message>
-        <location line="+3"/>
         <source>Choose a model variant before using this configuration.</source>
-        <translation>Choose a model variant before using this configuration.</translation>
+        <translation type="vanished">Choose a model variant before using this configuration.</translation>
     </message>
     <message>
-        <location line="-621"/>
+        <location filename="../qt/settings_dialog.py" line="-488"/>
         <source>Context</source>
         <translation>Context</translation>
     </message>
@@ -1344,7 +1473,7 @@
         <translation>Remove</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="+6"/>
         <source>Close</source>
         <translation>Close</translation>
     </message>
@@ -1358,17 +1487,15 @@
         <translation type="vanished">Use config</translation>
     </message>
     <message>
-        <location line="+54"/>
         <source>Collapse section</source>
-        <translation>Collapse section</translation>
+        <translation type="vanished">Collapse section</translation>
     </message>
     <message>
-        <location line="+1"/>
         <source>Expand section</source>
-        <translation>Expand section</translation>
+        <translation type="vanished">Expand section</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+105"/>
         <source>No subscription models available</source>
         <translation>No subscription models available</translation>
     </message>
@@ -1401,19 +1528,18 @@
         <translation type="vanished">This model is not available for the connected ChatGPT account.</translation>
     </message>
     <message>
-        <location line="+486"/>
+        <location filename="../qt/llm_text.py" line="-29"/>
         <source>Connect ChatGPT to use this subscription model.</source>
         <translation>Connect ChatGPT to use this subscription model.</translation>
     </message>
     <message>
-        <location line="-330"/>
+        <location line="-43"/>
         <source>ChatGPT subscription</source>
         <translation>ChatGPT subscription</translation>
     </message>
     <message>
-        <location line="+2"/>
         <source>Provider file</source>
-        <translation>Provider file</translation>
+        <translation type="vanished">Provider file</translation>
     </message>
     <message>
         <source>Built-in</source>
@@ -1424,9 +1550,9 @@
         <translation type="vanished">ChatGPT OAuth</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+18"/>
+        <location filename="../qt/settings_dialog.py" line="+164"/>
         <location line="+4"/>
-        <location line="+281"/>
         <source>Not specified</source>
         <translation>Not specified</translation>
     </message>
@@ -1455,7 +1581,7 @@
         <translation type="vanished">effort {effort} · stream off</translation>
     </message>
     <message>
-        <location line="-7"/>
+        <location line="+56"/>
         <source>not specified</source>
         <translation>not specified</translation>
     </message>
@@ -1464,7 +1590,7 @@
         <translation type="vanished">Select Kimix provider config</translation>
     </message>
     <message>
-        <location line="-68"/>
+        <location filename="../qt/settings_dialog.py" line="+182"/>
         <source>JSON files (*.json)</source>
         <translation>JSON files (*.json)</translation>
     </message>
@@ -1497,12 +1623,12 @@
         <translation type="vanished">Invalid session configuration reference: {path}</translation>
     </message>
     <message>
-        <location line="+100"/>
+        <location filename="../qt/llm_text.py" line="-37"/>
         <source>No API key or OAuth credential is configured: {path}</source>
         <translation>No API key or OAuth credential is configured: {path}</translation>
     </message>
     <message>
-        <location line="-24"/>
+        <location line="+26"/>
         <source>{count} tokens</source>
         <translation>{count} tokens</translation>
     </message>
@@ -1510,7 +1636,7 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../qt/main_window.py" line="+221"/>
+        <location filename="../qt/main_window.py" line="+218"/>
         <source>Select a valid LLM configuration to continue.</source>
         <translation>Select a valid LLM configuration to continue.</translation>
     </message>
@@ -1644,6 +1770,97 @@
         <location line="+2"/>
         <source>Open provider configuration</source>
         <translation>Open provider configuration</translation>
+    </message>
+</context>
+<context>
+    <name>ProviderConfigDialog</name>
+    <message>
+        <source>Add custom model</source>
+        <translation type="vanished">Add custom model</translation>
+    </message>
+    <message>
+        <source>Custom provider model</source>
+        <translation type="vanished">Custom provider model</translation>
+    </message>
+    <message>
+        <source>Provider metadata may be saved. The API key is placed in the selected environment variable for this process and is never serialized.</source>
+        <translation type="vanished">Provider metadata may be saved. The API key is placed in the selected environment variable for this process and is never serialized.</translation>
+    </message>
+    <message>
+        <source>Provider</source>
+        <translation type="obsolete">Provider</translation>
+    </message>
+    <message>
+        <source>Configuration name</source>
+        <translation type="vanished">Configuration name</translation>
+    </message>
+    <message>
+        <source>my-model</source>
+        <translation type="vanished">my-model</translation>
+    </message>
+    <message>
+        <source>Model ID</source>
+        <translation type="obsolete">Model ID</translation>
+    </message>
+    <message>
+        <source>model identifier sent to the provider</source>
+        <translation type="vanished">model identifier sent to the provider</translation>
+    </message>
+    <message>
+        <source>Endpoint</source>
+        <translation type="obsolete">Endpoint</translation>
+    </message>
+    <message>
+        <source>http://127.0.0.1:8000/v1</source>
+        <translation type="vanished">http://127.0.0.1:8000/v1</translation>
+    </message>
+    <message>
+        <source>API key environment variable</source>
+        <translation type="vanished">API key environment variable</translation>
+    </message>
+    <message>
+        <source>OPENAI_API_KEY</source>
+        <translation type="vanished">OPENAI_API_KEY</translation>
+    </message>
+    <message>
+        <source>API key (process only)</source>
+        <translation type="vanished">API key (process only)</translation>
+    </message>
+    <message>
+        <source>Optional</source>
+        <translation type="vanished">Optional</translation>
+    </message>
+    <message>
+        <source>Maximum context tokens</source>
+        <translation type="vanished">Maximum context tokens</translation>
+    </message>
+    <message>
+        <source>Maximum output tokens</source>
+        <translation type="vanished">Maximum output tokens</translation>
+    </message>
+    <message>
+        <source>Cancel</source>
+        <translation type="obsolete">Cancel</translation>
+    </message>
+    <message>
+        <source>Add model</source>
+        <translation type="vanished">Add model</translation>
+    </message>
+    <message>
+        <source>Not specified</source>
+        <translation type="obsolete">Not specified</translation>
+    </message>
+    <message>
+        <source>Provider, configuration name, and model ID are required.</source>
+        <translation type="vanished">Provider, configuration name, and model ID are required.</translation>
+    </message>
+    <message>
+        <source>Choose an environment variable for the API key.</source>
+        <translation type="vanished">Choose an environment variable for the API key.</translation>
+    </message>
+    <message>
+        <source>The API key environment variable name is invalid.</source>
+        <translation type="vanished">The API key environment variable name is invalid.</translation>
     </message>
 </context>
 <context>

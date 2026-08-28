@@ -3,9 +3,10 @@
 The point is the rendered widget text, not the presence of a ``.qm`` file: if this
 module passes, converting the remaining UI copy to ``tr()`` is mechanical work.
 
-Application ``.qm`` catalogs are committed package data. The localized behaviour tests
-retain a skip guard so a missing file reports one clear catalog failure instead of a
-large cascade; the catalog-presence test remains the hard failure.
+Application ``.qm`` catalogs are gitignored build output, rebuilt by
+``scripts/gui/build_translations.py``. The localized behaviour tests keep a skip guard so
+a missing file reports one clear catalog failure instead of a large cascade; the
+catalog-presence test in ``test_i18n.py`` remains the hard failure.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from kimix_gui.i18n import SUPPORTED_LANGUAGES
-from kimix_gui.llm import resolved_provider_file
+from kimix_gui.llm import AXIS_THINKING_EFFORT, resolved_provider_file
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.bridge import KimixBridge
 from kimix_gui.qt.chat_view import ChatView
@@ -81,6 +82,8 @@ def _provider_config(tmp_path: Path) -> Path:
                 "model": "test-model",
                 "name": "Test Model",
                 "max_context_size": 100_000,
+                "capabilities": ["thinking"],
+                "thinking_effort": "high",
                 "type": "openai_legacy",
                 "url": "https://example.test/v1",
                 "api_key": "test-key",
@@ -366,25 +369,30 @@ def test_llm_settings_dialog_renders_chinese_chrome(qtbot, chinese, tmp_path: Pa
     assert path_input.accessibleName() == "服务商 JSON 路径"
     assert find(dialog, "browse-config", QPushButton).text() == "浏览…"
     assert find(dialog, "load-config", QPushButton).text() == "添加"
-    assert widget_text(dialog, "config-sources-title") == "可用模型"
+    assert widget_text(dialog, "config-sources-title") == "提供方"
     assert widget_text(dialog, "config-details-title") == "模型选择"
-    assert widget_text(dialog, "selection-source") == "服务商文件"
+    assert widget_text(dialog, "selection-source") == "Provider 文件"
     assert widget_text(dialog, "selection-status") == "可用"
     chatgpt_group = find(dialog, "chatgpt-config-group", DisclosureHeader)
     provider_group = find(dialog, "provider-config-group", DisclosureHeader)
     assert chatgpt_group.text() == f"{DISCLOSURE_COLLAPSED}  ChatGPT 订阅 · 0"
-    assert provider_group.text() == f"{DISCLOSURE_EXPANDED}  服务商文件 · 1"
-    assert chatgpt_group.toolTip() == "展开分组"
-    assert provider_group.toolTip() == "收起分组"
+    assert provider_group.text() == f"{DISCLOSURE_EXPANDED}  Provider 文件 · 1"
+    assert chatgpt_group.toolTip() == "展开提供方"
+    assert provider_group.toolTip() == "收起提供方"
     assert [item.text() for item in dialog.model_items()] == ["Test Model"]
     assert find(dialog, "apply-settings", QPushButton).text() == "使用模型"
     assert find(dialog, "delete-config", QPushButton).text() == "移除"
     assert find(dialog, "cancel-settings", QPushButton).text() == "取消"
-    # ``_format_tokens`` is a module function, so its copy goes through
+    # ``format_tokens`` is a module function, so its copy goes through
     # ``QCoreApplication.translate`` instead of ``self.tr`` -- prove it lands too.
     assert widget_text(dialog, "model-context") == "100,000 tokens"
-    assert widget_text(dialog, "model-capabilities") == "未指定"
-    assert widget_text(dialog, "provider-thinking") == "由服务商文件配置"
+    assert widget_text(dialog, "model-capabilities") == "thinking"
+    assert widget_text(dialog, "provider-thinking") == "由模型参数选择"
+    assert widget_text(dialog, f"param-{AXIS_THINKING_EFFORT}-label") == "思考强度"
+    effort = dialog.parameter_picker(AXIS_THINKING_EFFORT)
+    assert effort is not None
+    assert effort.itemText(effort.currentIndex()) == "高（high） · 模型默认"
+    assert effort.accessibleDescription() == "选择要为此模型参数保存的确切值"
 
 
 @needs_catalog

@@ -79,6 +79,8 @@ def _provider_config(tmp_path: Path) -> Path:
                 "model": "test-model",
                 "name": "Test Model",
                 "max_context_size": 100_000,
+                "capabilities": ["thinking"],
+                "thinking_effort": "high",
                 "type": "openai_legacy",
                 "url": "https://example.test/v1",
                 "api_key": "test-key",
@@ -392,6 +394,11 @@ EXPECTED_PROPERTIES: dict[str, dict[str, str]] = {
     "config-details-title": {ROLE: Role.TITLE},
     "model-details-title": {ROLE: Role.OVERLINE},
     "provider-details-title": {ROLE: Role.OVERLINE},
+    "provider-card": {CARD: CardLevel.PANEL},
+    "empty-provider-card": {TONE: Tone.MUTED},
+    "model-parameters-title": {ROLE: Role.OVERLINE},
+ "param-thinking_effort": {STATE: "available"},
+    "param-thinking_effort-problem": {TONE: Tone.DANGER},
     "chatgpt-config-group": {VARIANT: Variant.DISCLOSURE},
     "provider-config-group": {VARIANT: Variant.DISCLOSURE},
     "apply-settings": {VARIANT: Variant.PRIMARY},
@@ -442,7 +449,6 @@ ELEMENT_STYLED: dict[str, tuple[type[QWidget], str, frozenset[str]]] = {
     "font-fallback": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "interface-language": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "interface-theme": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
-    "variant-picker": (QComboBox, "QComboBox", _OPAQUE_CONTROL_DECLARATIONS),
     "font-size": (QSpinBox, "QSpinBox", _OPAQUE_CONTROL_DECLARATIONS),
     "approval-payload": (QTextEdit, "QTextEdit", _OPAQUE_CONTROL_DECLARATIONS),
     # Secondary buttons: the bare QPushButton rule is their intentional look.
@@ -461,6 +467,7 @@ ELEMENT_STYLED: dict[str, tuple[type[QWidget], str, frozenset[str]]] = {
             "load-config",
             "manage-llm-settings",
             "open-settings",
+            "provider-model-row",
         )
     },
 }
@@ -476,6 +483,12 @@ NO_QSS_BY_DESIGN: dict[str, str] = {
     "dialog-footer": "layout-only button row; DialogFooter owns the order, not a look",
     "config-sources": "layout-only container",
     "provider-file-picker": "layout-only container inside the Provider files group",
+    "provider-card-body": "layout-only container inside one provider card",
+    "provider-cards": "scrolling viewport; provider cards own their surfaces",
+    "provider-cards-content": "layout-only host for provider cards",
+    "model-parameters": "layout-only container for metadata-driven parameter controls",
+       "param-thinking_effort-row": "layout-only parameter row",
+    "param-thinking_effort-label": "base label style paired with its picker",
     "detail-metadata": "layout-only container",
     "preferences-appearance": "layout-only page container",
     "preferences-models": "layout-only page container",
@@ -521,7 +534,6 @@ NO_QSS_BY_DESIGN: dict[str, str] = {
     "todo-progress": "custom paintEvent, colours read from tokens",
     "font-preview-text": "font is set per preview, that is the whole point",
     "inherit-project-default": "native checkbox; it carries selection semantics, not appearance",
-    "variant-picker-label": "base label next to the element-styled combo box",
 }
 
 
@@ -641,6 +653,11 @@ def test_the_two_full_size_dialogs_head_themselves_the_same_way(
     for name in ("model-details-title", "provider-details-title"):
         for widget in style_gallery[name]:
             assert widget.property(ROLE) == Role.OVERLINE, name
+
+
+def test_unavailable_parameter_style_is_axis_generic(stylesheet: str) -> None:
+    assert 'QComboBox[state="unavailable"]' in stylesheet
+    assert "model-parameter-picker" not in stylesheet
 
 
 def test_every_object_name_has_a_styling_decision(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -148,6 +149,16 @@ def _submit(qtbot, chat: ChatView, text: str) -> None:
     prompt.setFocus()
     prompt.setPlainText(text)
     prompt.submitted.emit(text)
+
+
+def test_default_session_factory_shares_catalog_provider_registry(tmp_path: Path) -> None:
+    app = KimixGuiApp(
+        SessionOptions(tmp_path),
+        config_store=_config_store(tmp_path),
+    )
+
+    assert isinstance(app._session_factory, partial)
+    assert app._session_factory.keywords["provider_registry"] is app._catalogs.registry
 
 
 def test_keyboard_submit_streams_into_transcript(qtbot, tmp_path: Path) -> None:

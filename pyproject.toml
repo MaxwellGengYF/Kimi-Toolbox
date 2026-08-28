@@ -80,6 +80,11 @@ default = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/kimix", "src/kimi_agent_sdk", "src/kimix_gui"]
 sources = ["src"]
+# Compiled Qt catalogs are gitignored build output (rebuild with
+# scripts/gui/build_translations.py). Hatchling skips VCS-ignored files, so name them
+# as artifacts to keep them in the wheel; without them tr() silently falls back to
+# English at runtime.
+artifacts = ["src/kimix_gui/translations/*.qm"]
 
 # The pure-Python ``kimix_native`` shim (``bin/kimix_native``) is the single
 # home of the pure-Python reference implementations that src/kimix re-exports

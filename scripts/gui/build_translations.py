@@ -1,8 +1,9 @@
-"""Refresh the translation catalogs committed inside the GUI package.
+"""Refresh the translation catalogs inside the GUI package.
 
 Not wired into pytest: run it after touching any ``tr()`` string, and once after a
-PySide6 upgrade that changes the Linguist output. Commit source and compiled catalogs
-together so clean builds contain both supported languages.
+PySide6 upgrade that changes the Linguist output. Only the ``.ts`` sources are tracked
+by git; the compiled ``.qm`` catalogs are gitignored build output, so rebuild them
+locally (and before packaging a wheel) instead of committing them.
 
 Examples:
     uv run python scripts/gui/build_translations.py                # update + release

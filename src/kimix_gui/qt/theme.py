@@ -495,7 +495,7 @@ QListWidget#preferences-categories, QListWidget#config-list {{
 QListWidget#preferences-categories::item, QListWidget#config-list::item {{
     padding: {z.settings_row_padding // 2}px {s.lg}px;
 }}
-QComboBox#variant-picker[state="unavailable"] {{
+QComboBox[state="unavailable"] {{
     border-color: {p.danger_border};
 }}
 """

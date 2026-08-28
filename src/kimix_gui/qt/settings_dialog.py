@@ -1,4 +1,4 @@
-"""LLM Provider, Model and Variant selection dialog."""
+"""Provider-grouped LLM configuration and parameter selection dialogs."""
 
 from __future__ import annotations
 
@@ -6,16 +6,18 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -24,25 +26,12 @@ from PySide6.QtWidgets import (
 
 from kimix_gui.design import DARK
 from kimix_gui.llm import (
-    PROBLEM_CREDENTIAL_MISSING,
-    PROBLEM_FILE_MISSING,
-    PROBLEM_INVALID_JSON,
-    PROBLEM_INVALID_PROVIDER_FILE,
-    PROBLEM_INVALID_SESSION_SELECTION,
     PROBLEM_LOGIN_REQUIRED,
     PROBLEM_MODEL_UNAVAILABLE,
-    PROBLEM_NOT_AN_OBJECT,
-    PROBLEM_NOT_JSON,
-    PROBLEM_PROVIDER_FILE_UNAVAILABLE,
-    PROBLEM_VARIANT_UNAVAILABLE,
-    PROBLEM_VARIANT_UNRESOLVED,
-    ChatGPTTarget,
     LLMInspectionError,
     LLMModelDescriptor,
-    LLMProblem,
     LLMSelection,
-    LLMVariantDescriptor,
-    LLMVariantKey,
+    ParameterAssignment,
     ProviderFileTarget,
     ResolvedLLMSelection,
     inspect_provider_file,
@@ -54,36 +43,39 @@ from kimix_gui.qt.components import (
     DialogFooter,
     DisclosureHeader,
     KeyValueList,
-    SettingsList,
-    VariantOption,
-    VariantPicker,
+    ParameterForm,
+    ParameterPicker,
 )
-from kimix_gui.qt.styling import Level, Role, Tone, Variant, style
+from kimix_gui.qt.llm_text import (
+    format_tokens,
+    problem_message,
+    provider_thinking_text,
+    provider_title,
+    short_problem,
+)
+from kimix_gui.qt.styling import CardLevel, Level, Role, Tone, Variant, style
 
 ModelInspector = Callable[[Path], LLMModelDescriptor]
 ProviderFileRegistrar = Callable[[ProviderFileTarget], None]
 ProviderFileRemover = Callable[[Path], None]
 
-CHATGPT_GROUP = "chatgpt"
-PROVIDER_FILE_GROUP = "provider_file"
-
-
-def _model_group(model: LLMModelDescriptor) -> str:
-    return CHATGPT_GROUP if isinstance(model.target, ChatGPTTarget) else PROVIDER_FILE_GROUP
-
-
 @dataclass(frozen=True, slots=True)
 class LLMSettingsResult:
+    """All metadata needed to commit one dialog selection."""
+
     selection: LLMSelection
     use_project_default: bool = False
 
 
-class ModelListItem(QListWidgetItem):
-    """One left-pane row per Model, independent of its Variant count."""
+class ModelListItem(QPushButton):
+    """One selectable model row nested inside a provider card."""
 
-    def __init__(self, model: LLMModelDescriptor) -> None:
-        super().__init__()
+    def __init__(self, model: LLMModelDescriptor, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.model_descriptor = model
+        self.setObjectName("provider-model-row")
+        self.setCheckable(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.refresh()
 
     def refresh(self) -> None:
@@ -91,9 +83,17 @@ class ModelListItem(QListWidgetItem):
         self.setText(label)
         self.setToolTip(label)
 
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        height = max(
+            DARK.sizing.settings_row_min_height,
+            self.fontMetrics().lineSpacing() * 2 + DARK.sizing.settings_row_padding,
+        )
+        return QSize(hint.width(), height)
+
 
 class LLMSettingsDialog(QDialog):
-    """Select a Model row and an exact Variant for one persistence scope."""
+    """Select a model card and exact values for every parameter it exposes."""
 
     applied = Signal(object)
     connect_chatgpt = Signal()
@@ -108,7 +108,6 @@ class LLMSettingsDialog(QDialog):
         inherits_project_default: bool = False,
         manage_library: bool = False,
         read_only: bool = False,
-        chatgpt_connected: bool = False,
         inspector: ModelInspector = inspect_provider_file,
         registrar: ProviderFileRegistrar | None = None,
         remover: ProviderFileRemover | None = None,
@@ -118,14 +117,13 @@ class LLMSettingsDialog(QDialog):
         self.setObjectName("settings-dialog")
         self.setWindowTitle(self.tr("LLM configuration"))
         self.setModal(True)
-        self.resize(920, 580)
+        self.resize(960, 620)
         self._current = current
         self._project_default = project_default
         self._inherits_project_default = inherits_project_default
         self._scope_label = scope_label
         self._manage_library = manage_library
         self._read_only = read_only
-        self._chatgpt_connected = chatgpt_connected
         self._inspector = inspector
         self._registrar = registrar
         self._remover = remover
@@ -138,14 +136,10 @@ class LLMSettingsDialog(QDialog):
         self._selected_selection: LLMSelection | None = None
         self._resolved_preview: ResolvedLLMSelection | None = None
         self._use_project_default = False
-        self._variant_keys: dict[str, LLMVariantKey] = {}
-        current_group = _model_group(current.model)
-        self._group_expanded = {
-            CHATGPT_GROUP: current_group == CHATGPT_GROUP,
-            PROVIDER_FILE_GROUP: current_group == PROVIDER_FILE_GROUP,
-        }
-        self._group_rows: dict[str, list[QListWidgetItem]] = {}
-        self._group_headers: dict[str, DisclosureHeader] = {}
+        self._model_buttons: dict[str, ModelListItem] = {}
+        self._provider_cards: dict[str, QFrame] = {}
+        current_provider = current.model.target.provider_id
+        self._provider_expanded: dict[str, bool] = {current_provider: True}
         self._narrow = False
         self._build()
         self._select_initial()
@@ -153,30 +147,27 @@ class LLMSettingsDialog(QDialog):
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.addLayout(self._header())
-
-        self._error = QLabel("")
+        self._error = QLabel("", self)
         self._error.setObjectName("settings-error")
         self._error.setWordWrap(True)
         style(self._error, tone=Tone.DANGER)
         root.addWidget(self._error)
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._splitter.setObjectName("settings-body")
         self._splitter.addWidget(self._sources_pane())
         self._splitter.addWidget(self._details_pane())
-        self._splitter.setSizes([330, 550])
+        self._splitter.setSizes([360, 600])
         root.addWidget(self._splitter, 1)
         root.addWidget(self._footer())
-
-        self._populate_list()
-        self._list.currentItemChanged.connect(self._on_current_changed)
+        self._populate_cards()
 
     def _header(self) -> QHBoxLayout:
         header = QHBoxLayout()
-        title = QLabel(self.tr("LLM configuration"))
+        title = QLabel(self.tr("LLM configuration"), self)
         title.setObjectName("settings-title")
         style(title, role=Role.DISPLAY, level=Level.TWO)
-        scope = QLabel(self._scope_label)
+        scope = QLabel(self._scope_label, self)
         scope.setObjectName("settings-scope")
         style(scope, tone=Tone.MUTED)
         header.addWidget(title)
@@ -185,43 +176,46 @@ class LLMSettingsDialog(QDialog):
         return header
 
     def _sources_pane(self) -> QWidget:
-        sources = QWidget()
+        sources = QWidget(self)
         sources.setObjectName("config-sources")
         layout = QVBoxLayout(sources)
-        title = QLabel(self.tr("ACTIVE MODEL") if self._read_only else self.tr("AVAILABLE MODELS"))
+        title = QLabel(self.tr("ACTIVE MODEL") if self._read_only else self.tr("PROVIDERS"))
         title.setObjectName("config-sources-title")
         style(title, role=Role.TITLE)
         layout.addWidget(title)
 
-        self._inherit = None
+        self._inherit: QCheckBox | None = None
         if self._project_default is not None and not self._read_only:
-            inherit = QCheckBox(self.tr("Follow project default"))
+            inherit = QCheckBox(self.tr("Follow project default"), sources)
             inherit.setObjectName("inherit-project-default")
             inherit.setAccessibleDescription(
-                self.tr("Use the project's saved model and variant for this session")
+                self.tr("Use the project's saved model and parameters for this session")
             )
             inherit.setChecked(self._inherits_project_default)
             inherit.toggled.connect(self._inherit_toggled)
             self._inherit = inherit
             layout.addWidget(inherit)
 
-        self._list = SettingsList()
-        self._list.setObjectName("config-list")
-        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        layout.addWidget(self._list)
+        self._cards_scroll = QScrollArea(sources)
+        self._cards_scroll.setObjectName("provider-cards")
+        self._cards_scroll.setWidgetResizable(True)
+        self._cards_host = QWidget(self._cards_scroll)
+        self._cards_host.setObjectName("provider-cards-content")
+        self._cards_layout = QVBoxLayout(self._cards_host)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._cards_scroll.setWidget(self._cards_host)
+        layout.addWidget(self._cards_scroll, 1)
         return sources
 
     def _details_pane(self) -> QWidget:
-        details = QWidget()
+        details = QWidget(self)
         details.setObjectName("config-details")
         layout = QVBoxLayout(details)
-
-        title = QLabel(self.tr("MODEL SELECTION"))
+        title = QLabel(self.tr("MODEL SELECTION"), details)
         title.setObjectName("config-details-title")
         style(title, role=Role.TITLE)
         layout.addWidget(title)
-
         self._summary_fields = KeyValueList(
             (
                 ("selection-model", self.tr("Current model")),
@@ -231,20 +225,16 @@ class LLMSettingsDialog(QDialog):
         )
         layout.addWidget(self._summary_fields)
 
-        variant_row = QHBoxLayout()
-        self._variant_label = QLabel(self.tr("Variant"))
-        self._variant_label.setObjectName("variant-picker-label")
-        self._variant_picker = VariantPicker()
-        self._variant_picker.setAccessibleName(self.tr("Model variant"))
-        self._variant_picker.setAccessibleDescription(
-            self.tr("Choose the exact runtime variant saved for this model")
-        )
-        self._variant_picker.key_activated.connect(self._variant_activated)
-        variant_row.addWidget(self._variant_label)
-        variant_row.addWidget(self._variant_picker, 1)
-        layout.addLayout(variant_row)
+        self._parameters_title = QLabel(self.tr("MODEL PARAMETERS"), details)
+        self._parameters_title.setObjectName("model-parameters-title")
+        style(self._parameters_title, role=Role.OVERLINE)
+        layout.addWidget(self._parameters_title)
+        self._parameter_form = ParameterForm(details)
+        self._parameter_form.setObjectName("model-parameters")
+        self._parameter_form.value_activated.connect(self._parameter_activated)
+        layout.addWidget(self._parameter_form)
 
-        model_title = QLabel(self.tr("MODEL DETAILS"))
+        model_title = QLabel(self.tr("MODEL DETAILS"), details)
         model_title.setObjectName("model-details-title")
         style(model_title, role=Role.OVERLINE)
         layout.addWidget(model_title)
@@ -259,7 +249,7 @@ class LLMSettingsDialog(QDialog):
         )
         layout.addWidget(self._model_fields)
 
-        provider_title = QLabel(self.tr("PROVIDER DETAILS"))
+        provider_title = QLabel(self.tr("PROVIDER DETAILS"), details)
         provider_title.setObjectName("provider-details-title")
         style(provider_title, role=Role.OVERLINE)
         layout.addWidget(provider_title)
@@ -277,21 +267,20 @@ class LLMSettingsDialog(QDialog):
         return details
 
     def _footer(self) -> DialogFooter:
-        self._delete = None
+        self._delete: QPushButton | None = None
         extra: list[QPushButton] = []
         if self._manage_library and not self._read_only:
-            delete = QPushButton(self.tr("Remove"))
+            delete = QPushButton(self.tr("Remove"), self)
             delete.setObjectName("delete-config")
             delete.setEnabled(False)
             delete.clicked.connect(self._remove_selected)
             self._delete = delete
             extra.append(delete)
-
-        close = QPushButton(self.tr("Close") if self._read_only else self.tr("Cancel"))
+        close = QPushButton(self.tr("Close") if self._read_only else self.tr("Cancel"), self)
         close.setObjectName("close-settings" if self._read_only else "cancel-settings")
-        self._apply = None
+        self._apply: QPushButton | None = None
         if not self._read_only:
-            apply_button = QPushButton(self.tr("Use model"))
+            apply_button = QPushButton(self.tr("Use model"), self)
             apply_button.setObjectName("apply-settings")
             style(apply_button, variant=Variant.PRIMARY)
             apply_button.setEnabled(False)
@@ -310,88 +299,110 @@ class LLMSettingsDialog(QDialog):
             Qt.Orientation.Vertical if narrow else Qt.Orientation.Horizontal
         )
 
-    def _populate_list(self) -> None:
-        selected_target = (
+    def _populate_cards(self) -> None:
+        selected_key = (
             target_key(self._selected_model.target) if self._selected_model is not None else None
         )
-        self._list.clear()
-        self._group_rows = {}
-        self._group_headers = {}
-        grouped: dict[str, list[ModelListItem]] = {
-            CHATGPT_GROUP: [],
-            PROVIDER_FILE_GROUP: [],
-        }
-        for model in sorted(self._models.values(), key=lambda item: item.priority):
-            grouped[_model_group(model)].append(ModelListItem(model))
-        self._add_group(CHATGPT_GROUP, grouped[CHATGPT_GROUP])
-        if grouped[PROVIDER_FILE_GROUP] or self._manage_library or self._read_only:
-            self._add_group(PROVIDER_FILE_GROUP, grouped[PROVIDER_FILE_GROUP])
-        if selected_target is not None:
-            self._select_target(selected_target)
+        while (item := self._cards_layout.takeAt(0)) is not None:
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._model_buttons.clear()
+        self._provider_cards.clear()
+        grouped: dict[str, list[LLMModelDescriptor]] = {}
+        for model in sorted(self._models.values(), key=lambda item: (item.priority, item.label)):
+            grouped.setdefault(model.target.provider_id, []).append(model)
+        provider_ids = list(grouped)
+        if self._manage_library and "provider_file" not in provider_ids:
+            provider_ids.append("provider_file")
+        if not self._read_only and "chatgpt" not in provider_ids:
+            provider_ids.insert(0, "chatgpt")
+        for provider_id in provider_ids:
+            self._add_provider_card(provider_id, grouped.get(provider_id, []))
+        self._cards_layout.addStretch()
+        if selected_key is not None:
+            self._select_target(selected_key)
 
-    def _add_group(self, group: str, items: list[ModelListItem]) -> None:
-        title = (
-            QCoreApplication.translate("LLMSettingsDialog", "CHATGPT SUBSCRIPTION · {count}")
-            if group == CHATGPT_GROUP
-            else QCoreApplication.translate("LLMSettingsDialog", "PROVIDER FILES · {count}")
-        ).format(count=len(items))
-        header_item = QListWidgetItem()
-        header_item.setFlags(Qt.ItemFlag.NoItemFlags)
-        self._list.addItem(header_item)
+    def _add_provider_card(
+        self,
+        provider_id: str,
+        models: list[LLMModelDescriptor],
+    ) -> None:
+        card = QFrame(self._cards_host)
+        card.setObjectName("provider-card")
+        card.setProperty("providerId", provider_id)
+        style(card, card=CardLevel.PANEL)
+        card_layout = QVBoxLayout(card)
+        expanded = self._provider_expanded.get(
+            provider_id,
+            provider_id == self._current.model.target.provider_id,
+        )
         header = DisclosureHeader(
-            title,
-            expanded=self._group_expanded[group],
-            expanded_tooltip=self.tr("Collapse section"),
-            collapsed_tooltip=self.tr("Expand section"),
-            parent=self._list,
+            self.tr("{provider} · {count}").format(
+                provider=provider_title(provider_id),
+                count=len(models),
+            ),
+            expanded=expanded,
+            expanded_tooltip=self.tr("Collapse provider"),
+            collapsed_tooltip=self.tr("Expand provider"),
+            parent=card,
         )
         header.setObjectName(
-            "chatgpt-config-group" if group == CHATGPT_GROUP else "provider-config-group"
+            "chatgpt-config-group"
+            if provider_id == "chatgpt"
+            else "provider-config-group"
         )
-        header.toggled.connect(
-            lambda expanded, source_group=group: self._set_group_expanded(
-                source_group,
-                expanded,
-            )
-        )
-        self._list.set_sized_item_widget(header_item, header)
-        self._group_headers[group] = header
+        card_layout.addWidget(header)
+        body = QWidget(card)
+        body.setObjectName("provider-card-body")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
 
-        rows: list[QListWidgetItem] = []
-        if group == CHATGPT_GROUP and not self._chatgpt_connected and not self._read_only:
-            action_item = QListWidgetItem()
-            action_item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._list.addItem(action_item)
-            login = QPushButton(self.tr("Connect ChatGPT"), self._list)
+        requires_login = not models or any(
+            model.problem is not None and model.problem.kind == PROBLEM_LOGIN_REQUIRED
+            for model in models
+        )
+        if provider_id == "chatgpt" and requires_login and not self._read_only:
+            login = QPushButton(self.tr("Connect ChatGPT"), body)
             login.setObjectName("connect-chatgpt-models")
-            login.setToolTip(self.tr("Use ChatGPT subscription models"))
-            login.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             style(login, variant=Variant.PRIMARY)
             login.clicked.connect(self.connect_chatgpt.emit)
-            self._list.set_sized_item_widget(action_item, login)
-            rows.append(action_item)
-        if group == PROVIDER_FILE_GROUP and self._manage_library and not self._read_only:
-            rows.append(self._add_provider_picker())
-        for item in items:
-            self._list.addItem(item)
-            rows.append(item)
-        if not items:
-            empty = QListWidgetItem(
-                self.tr("No subscription models available")
-                if group == CHATGPT_GROUP
-                else self.tr("No Provider files added")
-            )
-            empty.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._list.addItem(empty)
-            rows.append(empty)
-        self._group_rows[group] = rows
-        self._set_group_expanded(group, self._group_expanded[group])
+            body_layout.addWidget(login)
+        if provider_id == "provider_file" and self._manage_library and not self._read_only:
+            body_layout.addWidget(self._provider_file_picker(body))
 
-    def _add_provider_picker(self) -> QListWidgetItem:
-        item = QListWidgetItem()
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        self._list.addItem(item)
-        container = QWidget(self._list)
+        button_group = QButtonGroup(card)
+        button_group.setExclusive(True)
+        for model in models:
+            button = ModelListItem(model, body)
+            button.clicked.connect(lambda _checked=False, item=model: self._select_model(item))
+            button_group.addButton(button)
+            body_layout.addWidget(button)
+            self._model_buttons[target_key(model.target)] = button
+        if not models:
+            empty = QLabel(
+                self.tr("No subscription models available")
+                if provider_id == "chatgpt"
+                else self.tr("No models configured"),
+                body,
+            )
+            empty.setObjectName("empty-provider-card")
+            style(empty, tone=Tone.MUTED)
+            body_layout.addWidget(empty)
+        card_layout.addWidget(body)
+        body.setVisible(expanded)
+        header.toggled.connect(
+            lambda is_expanded, source=provider_id, panel=body: self._toggle_provider(
+                source,
+                panel,
+                is_expanded,
+            )
+        )
+        self._provider_cards[provider_id] = card
+        self._cards_layout.addWidget(card)
+
+    def _provider_file_picker(self, parent: QWidget) -> QWidget:
+        container = QWidget(parent)
         container.setObjectName("provider-file-picker")
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
@@ -410,19 +421,11 @@ class LLMSettingsDialog(QDialog):
         path_input.returnPressed.connect(lambda: self._add_path(Path(path_input.text())))
         browse.clicked.connect(self._browse_path)
         add.clicked.connect(lambda: self._add_path(Path(path_input.text())))
-        self._list.set_sized_item_widget(item, container)
-        return item
+        return container
 
-    def _set_group_expanded(self, group: str, expanded: bool) -> None:
-        self._group_expanded[group] = expanded
-        header = self._group_headers.get(group)
-        if header is not None and header.isChecked() != expanded:
-            header.setChecked(expanded)
-        for item in self._group_rows.get(group, ()):
-            item.setHidden(not expanded)
-            item_widget = self._list.itemWidget(item)
-            if item_widget is not None:
-                item_widget.setVisible(expanded)
+    def _toggle_provider(self, provider_id: str, body: QWidget, expanded: bool) -> None:
+        self._provider_expanded[provider_id] = expanded
+        body.setVisible(expanded)
 
     def _select_initial(self) -> None:
         if self._inherits_project_default and self._project_default is not None:
@@ -432,34 +435,36 @@ class LLMSettingsDialog(QDialog):
             self._show_resolved(self._current)
 
     def _select_target(self, key: str) -> bool:
-        for item in self.model_items():
-            if target_key(item.model_descriptor.target) == key:
-                group = _model_group(item.model_descriptor)
-                self._set_group_expanded(group, True)
-                self._list.setCurrentItem(item)
-                return True
-        return False
+        button = self._model_buttons.get(key)
+        if button is None:
+            return False
+        provider_id = button.model_descriptor.target.provider_id
+        card = self._provider_cards.get(provider_id)
+        if card is not None:
+            body = card.findChild(QWidget, "provider-card-body")
+            header = card.findChild(DisclosureHeader)
+            if body is not None:
+                body.setVisible(True)
+            if header is not None:
+                header.setChecked(True)
+            self._provider_expanded[provider_id] = True
+        button.setChecked(True)
+        self._select_model(button.model_descriptor)
+        return True
 
-    def _on_current_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if not isinstance(current, ModelListItem):
-            return
+    def _select_model(self, model: LLMModelDescriptor) -> None:
         if self._inherit is not None and self._inherit.isChecked():
             self._inherit.blockSignals(True)
             self._inherit.setChecked(False)
             self._inherit.blockSignals(False)
-        model = current.model_descriptor
         self._selected_model = model
         self._use_project_default = False
-        if target_key(model.target) == target_key(self._current.selection.target):
-            variant = self._current.selection.variant
-        else:
-            default_variant = model.default_variant
-            variant = default_variant.key if default_variant is not None else None
-        self._render_model(model, variant)
+        assignment = (
+            self._current.materialized_selection.parameters
+            if target_key(model.target) == target_key(self._current.selection.target)
+            else model.default_assignment
+        )
+        self._render_model(model, assignment)
 
     def _inherit_toggled(self, checked: bool) -> None:
         if checked:
@@ -467,84 +472,77 @@ class LLMSettingsDialog(QDialog):
             return
         current_key = target_key(self._current.selection.target)
         if not self._select_target(current_key) and self._selected_model is not None:
-            variant = self._selected_selection.variant if self._selected_selection else None
-            self._render_model(self._selected_model, variant)
+            assignment = (
+                self._selected_selection.parameters
+                if self._selected_selection is not None
+                else self._selected_model.default_assignment
+            )
+            self._render_model(self._selected_model, assignment)
 
     def _show_project_default(self) -> None:
         if self._project_default is None:
             return
-        self._list.clearSelection()
-        self._list.setCurrentItem(None)
+        for button in self._model_buttons.values():
+            button.setChecked(False)
         self._use_project_default = True
         self._render_model(
             self._project_default.model,
-            self._project_default.selection.variant,
+            self._project_default.materialized_selection.parameters,
         )
-        self._variant_picker.setEnabled(False)
+        self._parameter_form.set_controls_enabled(False)
 
     def _render_model(
         self,
         model: LLMModelDescriptor,
-        variant: LLMVariantKey | None,
+        assignment: ParameterAssignment,
     ) -> None:
         self._selected_model = model
-        self._variant_keys = {item.key.id: item.key for item in model.variants}
-        selected_key = variant.id if variant is not None else None
-        options = [VariantOption(item.key.id, self._variant_text(item)) for item in model.variants]
-        missing_label = self.tr("Unavailable variant · {variant}").format(
-            variant=selected_key or self.tr("not selected")
-        )
-        self._variant_picker.set_options(
-            options,
-            selected_key=selected_key,
-            missing_label=missing_label,
-        )
-        is_chatgpt = isinstance(model.target, ChatGPTTarget)
-        self._variant_label.setVisible(is_chatgpt)
-        self._variant_picker.setVisible(is_chatgpt)
-        self._variant_picker.setEnabled(
-            is_chatgpt and not self._read_only and model.problem is None
-        )
-
-        if variant is None:
-            fallback_selection = (
-                LLMSelection(model.target, model.variants[0].key)
-                if model.variants
-                else self._current.selection
-            )
-            self._selected_selection = None
-            resolved = ResolvedLLMSelection(
-                fallback_selection,
-                model,
-                None,
-                LLMProblem(PROBLEM_VARIANT_UNRESOLVED),
-            )
-        else:
-            selection = LLMSelection(model.target, variant)
-            self._selected_selection = selection
-            resolved = resolve_selection(selection, [model])
+        materialized = assignment
+        for parameter in model.parameters:
+            if materialized.get(parameter.axis) is None and parameter.default is not None:
+                materialized = materialized.with_value(parameter.axis, parameter.default.value)
+        selection = LLMSelection(model.target, materialized, pinned=True)
+        resolved = resolve_selection(selection, [model])
+        self._selected_selection = selection
+        self._render_parameter_controls(model, materialized, resolved)
         self._show_resolved(resolved)
+
+    def _render_parameter_controls(
+        self,
+        model: LLMModelDescriptor,
+        assignment: ParameterAssignment,
+        resolved: ResolvedLLMSelection,
+    ) -> None:
+        self._parameter_form.set_parameters(
+            model.parameters,
+            assignment,
+            resolved=resolved.resolved,
+            enabled=(
+                not self._read_only
+                and not self._use_project_default
+                and model.problem is None
+            ),
+        )
+        self._parameters_title.setVisible(bool(self._parameter_form.pickers))
 
     def _show_resolved(self, resolved: ResolvedLLMSelection) -> None:
         self._resolved_preview = resolved
         model = resolved.model
         problem = resolved.problem or model.problem
-        self._error.setText(llm_problem_message(problem))
+        parameter_problem = any(item.problem == problem for item in resolved.resolved)
+        self._error.setText("" if parameter_problem else problem_message(problem))
         self._summary_fields.set_value("selection-model", model.label)
         self._summary_fields.set_value(
             "selection-source",
-            self.tr("ChatGPT subscription")
-            if isinstance(model.target, ChatGPTTarget)
-            else self.tr("Provider file"),
+            provider_title(model.target.provider_id),
         )
-        status = self.tr("Available") if resolved.available else _short_problem(problem)
+        status = self.tr("Available") if resolved.available else short_problem(problem)
         if resolved.available and model.catalog_stale:
             status = self.tr("Available · cached catalog")
         self._summary_fields.set_value("selection-status", status)
-
         self._model_fields.set_value("model-id", model.model_id)
-        self._model_fields.set_value("model-context", _format_tokens(model.max_context_size))
-        self._model_fields.set_value("model-output", _format_tokens(model.max_tokens))
+        self._model_fields.set_value("model-context", format_tokens(model.max_context_size))
+        self._model_fields.set_value("model-output", format_tokens(model.max_tokens))
         self._model_fields.set_value(
             "model-capabilities",
             ", ".join(model.capabilities) or self.tr("Not specified"),
@@ -557,10 +555,7 @@ class LLMSettingsDialog(QDialog):
         self._provider_fields.set_value("provider-endpoint", model.endpoint)
         self._provider_fields.set_value("provider-credential", model.credential)
         self._provider_fields.set_value("provider-format", model.file_format)
-        self._provider_fields.set_value(
-            "provider-thinking",
-            _provider_thinking_text(model),
-        )
+        self._provider_fields.set_value("provider-thinking", provider_thinking_text(resolved))
         if self._apply is not None:
             self._apply.setEnabled(resolved.available)
         if self._delete is not None:
@@ -570,37 +565,28 @@ class LLMSettingsDialog(QDialog):
                 and target_key(model.target) != target_key(self._current.selection.target)
             )
 
-    def _variant_activated(self, key: str) -> None:
+    def _parameter_activated(self, axis: str, value: str) -> None:
         model = self._selected_model
-        variant = self._variant_keys.get(key)
-        if model is None or variant is None:
+        selection = self._selected_selection
+        if model is None or selection is None:
+            return
+        parameter = next((item for item in model.parameters if item.axis == axis), None)
+        if parameter is None or parameter.option(value) is None:
             return
         self._use_project_default = False
-        self._render_model(model, variant)
+        self._render_model(model, selection.parameters.with_value(axis, value))
 
-    def _variant_text(self, variant: LLMVariantDescriptor) -> str:
-        key = variant.key
-        if key.kind == "configured":
-            label = self.tr("Configured in Provider file")
-        elif key.kind == "provider_default":
-            label = self.tr("Provider default")
-        elif key.kind == "reasoning_effort":
-            label = _reasoning_effort_text(key.value or "")
-        else:
-            label = self.tr("Choose a variant")
-        if variant.is_default:
-            label = self.tr("{variant} · Model default").format(variant=label)
-        return label
+    def parameter_picker(self, axis: str) -> ParameterPicker | None:
+        return self._parameter_form.picker(axis)
 
     def _browse_start_directory(self) -> str:
-        if hasattr(self, "_path_input"):
-            text = self._path_input.text().strip()
-            if text:
-                expanded = Path(text).expanduser()
-                if expanded.is_dir():
-                    return str(expanded)
-                if expanded.parent.is_dir():
-                    return str(expanded.parent)
+        text = self._path_input.text().strip() if hasattr(self, "_path_input") else ""
+        if text:
+            expanded = Path(text).expanduser()
+            if expanded.is_dir():
+                return str(expanded)
+            if expanded.parent.is_dir():
+                return str(expanded.parent)
         return str(Path.home())
 
     def _browse_path(self) -> None:
@@ -612,7 +598,7 @@ class LLMSettingsDialog(QDialog):
         try:
             model = self._inspector(path)
         except LLMInspectionError as exc:
-            self._error.setText(llm_problem_message(exc.problem))
+            self._error.setText(problem_message(exc.problem))
             if self._apply is not None:
                 self._apply.setEnabled(False)
             return
@@ -628,8 +614,8 @@ class LLMSettingsDialog(QDialog):
             )
             return
         self._models[target_key(target)] = model
-        self._group_expanded[PROVIDER_FILE_GROUP] = True
-        self._populate_list()
+        self._provider_expanded["provider_file"] = True
+        self._populate_cards()
         self._select_target(target_key(target))
 
     def _remove_selected(self) -> None:
@@ -649,7 +635,7 @@ class LLMSettingsDialog(QDialog):
         self._models.pop(target_key(model.target), None)
         self._selected_model = None
         self._selected_selection = None
-        self._populate_list()
+        self._populate_cards()
         self._select_target(target_key(self._current.selection.target))
 
     def _apply_clicked(self) -> None:
@@ -657,7 +643,7 @@ class LLMSettingsDialog(QDialog):
         if resolved is None or not resolved.available:
             return
         selection = (
-            self._project_default.selection
+            self._project_default.materialized_selection
             if self._use_project_default and self._project_default is not None
             else self._selected_selection
         )
@@ -670,12 +656,11 @@ class LLMSettingsDialog(QDialog):
         self,
         models: Iterable[LLMModelDescriptor],
         *,
-        chatgpt_connected: bool,
         current: ResolvedLLMSelection | None = None,
         project_default: ResolvedLLMSelection | None = None,
         inherits_project_default: bool | None = None,
     ) -> None:
-        """Refresh catalog metadata without changing a stored Variant key."""
+        """Refresh provider catalogs without changing stored parameter assignments."""
 
         refreshed = {
             key: model
@@ -683,7 +668,6 @@ class LLMSettingsDialog(QDialog):
             if isinstance(model.target, ProviderFileTarget)
         }
         refreshed.update({target_key(model.target): model for model in models})
-
         current_selection = current.selection if current is not None else self._current.selection
         project_selection = (
             project_default.selection
@@ -695,22 +679,16 @@ class LLMSettingsDialog(QDialog):
         for selection in (current_selection, project_selection):
             if selection is None or target_key(selection.target) in refreshed:
                 continue
-            target = selection.target
-            if isinstance(target, ChatGPTTarget):
-                problem = PROBLEM_MODEL_UNAVAILABLE if chatgpt_connected else PROBLEM_LOGIN_REQUIRED
-                refreshed[target_key(target)] = unavailable_model(target, problem)
-            else:
-                previous = self._models.get(target_key(target))
-                if previous is not None:
-                    refreshed[target_key(target)] = previous
-
+            refreshed[target_key(selection.target)] = unavailable_model(
+                selection.target,
+                PROBLEM_MODEL_UNAVAILABLE,
+            )
         descriptors = tuple(refreshed.values())
         self._models = refreshed
-        self._chatgpt_connected = chatgpt_connected
         self._current = current or resolve_selection(current_selection, descriptors)
         if project_default is not None:
             self._project_default = project_default
-        elif self._project_default is not None:
+        elif self._project_default is not None and project_selection is not None:
             self._project_default = resolve_selection(project_selection, descriptors)
         if inherits_project_default is not None:
             self._inherits_project_default = inherits_project_default
@@ -718,7 +696,7 @@ class LLMSettingsDialog(QDialog):
                 self._inherit.blockSignals(True)
                 self._inherit.setChecked(inherits_project_default)
                 self._inherit.blockSignals(False)
-        self._populate_list()
+        self._populate_cards()
         if (
             self._use_project_default or self._inherits_project_default
         ) and self._project_default is not None:
@@ -728,10 +706,10 @@ class LLMSettingsDialog(QDialog):
 
     def select_provider_file(self, path: Path) -> bool:
         resolved = path.expanduser().resolve(strict=False)
-        for item in self.model_items():
-            target = item.model_descriptor.target
+        for button in self.model_items():
+            target = button.model_descriptor.target
             if isinstance(target, ProviderFileTarget) and target.path == resolved:
-                self._list.setCurrentItem(item)
+                self._select_target(target_key(target))
                 return True
         return False
 
@@ -745,11 +723,7 @@ class LLMSettingsDialog(QDialog):
         return self._selected_selection
 
     def model_items(self) -> list[ModelListItem]:
-        return [
-            item
-            for row in range(self._list.count())
-            if isinstance((item := self._list.item(row)), ModelListItem)
-        ]
+        return list(self._model_buttons.values())
 
 
 def pick_json_file(parent: QWidget | None, start_directory: str) -> Path | None:
@@ -760,119 +734,3 @@ def pick_json_file(parent: QWidget | None, start_directory: str) -> Path | None:
         QCoreApplication.translate("LLMSettingsDialog", "JSON files (*.json)"),
     )
     return Path(selected) if selected else None
-
-
-def llm_problem_message(problem: LLMProblem | None) -> str:
-    """Translate one machine-readable LLM problem at the Qt boundary."""
-
-    if problem is None:
-        return ""
-    template = _PROBLEM_TEMPLATES.get(problem.kind)
-    if template is None:
-        return str(problem)
-    return template().format(path=problem.path or "", reason=problem.reason)
-
-
-def _short_problem(problem: LLMProblem | None) -> str:
-    if problem is None:
-        return QCoreApplication.translate("LLMSettingsDialog", "Unavailable")
-    labels = {
-        PROBLEM_CREDENTIAL_MISSING: QCoreApplication.translate(
-            "LLMSettingsDialog", "API key missing"
-        ),
-        PROBLEM_FILE_MISSING: QCoreApplication.translate("LLMSettingsDialog", "File missing"),
-        PROBLEM_LOGIN_REQUIRED: QCoreApplication.translate("LLMSettingsDialog", "Connect ChatGPT"),
-        PROBLEM_MODEL_UNAVAILABLE: QCoreApplication.translate(
-            "LLMSettingsDialog", "Model unavailable"
-        ),
-        PROBLEM_VARIANT_UNAVAILABLE: QCoreApplication.translate(
-            "LLMSettingsDialog", "Variant unavailable"
-        ),
-        PROBLEM_VARIANT_UNRESOLVED: QCoreApplication.translate(
-            "LLMSettingsDialog", "Choose a variant"
-        ),
-    }
-    return labels.get(
-        problem.kind,
-        QCoreApplication.translate("LLMSettingsDialog", "Unavailable"),
-    )
-
-
-def _reasoning_effort_text(effort: str) -> str:
-    known = {
-        "none": lambda: QCoreApplication.translate("LLMSettingsDialog", "None ({value})"),
-        "minimal": lambda: QCoreApplication.translate("LLMSettingsDialog", "Minimal ({value})"),
-        "low": lambda: QCoreApplication.translate("LLMSettingsDialog", "Low ({value})"),
-        "medium": lambda: QCoreApplication.translate("LLMSettingsDialog", "Medium ({value})"),
-        "high": lambda: QCoreApplication.translate("LLMSettingsDialog", "High ({value})"),
-        "xhigh": lambda: QCoreApplication.translate("LLMSettingsDialog", "Extra high ({value})"),
-        "max": lambda: QCoreApplication.translate("LLMSettingsDialog", "Maximum ({value})"),
-    }
-    formatter = known.get(effort)
-    return formatter().format(value=effort) if formatter is not None else effort
-
-
-def _provider_thinking_text(model: LLMModelDescriptor) -> str:
-    if isinstance(model.target, ChatGPTTarget):
-        return QCoreApplication.translate("LLMSettingsDialog", "Selected by Variant")
-    effort = model.configured_reasoning_effort
-    stream = model.show_thinking_stream
-    if effort is None and stream is None:
-        return QCoreApplication.translate("LLMSettingsDialog", "Configured in Provider file")
-    stream_text = (
-        QCoreApplication.translate("LLMSettingsDialog", "stream on")
-        if stream
-        else QCoreApplication.translate("LLMSettingsDialog", "stream off")
-    )
-    return QCoreApplication.translate("LLMSettingsDialog", "effort {effort} · {stream}").format(
-        effort=effort or QCoreApplication.translate("LLMSettingsDialog", "not specified"),
-        stream=stream_text,
-    )
-
-
-def _format_tokens(value: int | None) -> str:
-    if value is None:
-        return QCoreApplication.translate("LLMSettingsDialog", "Not specified")
-    return QCoreApplication.translate("LLMSettingsDialog", "{count} tokens").format(
-        count=f"{value:,}"
-    )
-
-
-_PROBLEM_TEMPLATES: dict[str, Callable[[], str]] = {
-    PROBLEM_NOT_JSON: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Kimix Provider file must be JSON: {path}"
-    ),
-    PROBLEM_FILE_MISSING: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Provider file does not exist: {path}"
-    ),
-    PROBLEM_INVALID_JSON: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Invalid Provider JSON {path}: {reason}"
-    ),
-    PROBLEM_NOT_AN_OBJECT: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Provider JSON must contain an object: {path}"
-    ),
-    PROBLEM_INVALID_PROVIDER_FILE: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Invalid Kimix Provider file {path}: {reason}"
-    ),
-    PROBLEM_PROVIDER_FILE_UNAVAILABLE: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Provider file is unavailable: {path}"
-    ),
-    PROBLEM_CREDENTIAL_MISSING: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "No API key or OAuth credential is configured: {path}"
-    ),
-    PROBLEM_INVALID_SESSION_SELECTION: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Invalid session LLM selection: {path}"
-    ),
-    PROBLEM_LOGIN_REQUIRED: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Connect ChatGPT to use this subscription model."
-    ),
-    PROBLEM_MODEL_UNAVAILABLE: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "This model is not available for the connected account."
-    ),
-    PROBLEM_VARIANT_UNAVAILABLE: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "The saved model variant is no longer available."
-    ),
-    PROBLEM_VARIANT_UNRESOLVED: lambda: QCoreApplication.translate(
-        "LLMSettingsDialog", "Choose a model variant before using this configuration."
-    ),
-}

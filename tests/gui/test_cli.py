@@ -6,7 +6,7 @@ import pytest
 
 from kimix_gui import __main__ as gui_main
 from kimix_gui.backend import SessionOptions
-from kimix_gui.llm import CONFIGURED_VARIANT, ProviderFileTarget
+from kimix_gui.llm import EMPTY_ASSIGNMENT, ProviderFileTarget
 
 
 def run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> SessionOptions:
@@ -50,7 +50,7 @@ def test_cli_config_and_model_become_one_provider_file_selection(
 
     assert options.llm_selection is not None
     assert options.llm_selection.target == ProviderFileTarget(provider_file, "override-model")
-    assert options.llm_selection.variant == CONFIGURED_VARIANT
+    assert options.llm_selection.parameters == EMPTY_ASSIGNMENT
 
 
 def test_cli_without_provider_flags_leaves_saved_default_authoritative(

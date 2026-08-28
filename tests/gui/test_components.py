@@ -23,7 +23,18 @@ from PySide6.QtWidgets import (
 )
 
 from kimix_gui.design import DARK
-from kimix_gui.llm import resolved_provider_file
+from kimix_gui.llm import (
+    AXIS_CONTEXT_WINDOW,
+    AXIS_THINKING_EFFORT,
+    PROBLEM_PARAMETER_UNRESOLVED,
+    PROBLEM_PARAMETER_VALUE_UNAVAILABLE,
+    LLMProblem,
+    ParameterAssignment,
+    ParameterOption,
+    ParameterSpec,
+    ResolvedParameter,
+    resolved_provider_file,
+)
 from kimix_gui.preferences import InterfacePreferences
 from kimix_gui.qt.components import (
     DISCLOSURE_COLLAPSED,
@@ -32,6 +43,7 @@ from kimix_gui.qt.components import (
     DialogFooter,
     DisclosureHeader,
     KeyValueList,
+    ParameterForm,
     SettingsList,
 )
 from kimix_gui.qt.preferences_dialog import PreferencesDialog
@@ -195,6 +207,7 @@ BUTTONS_OUTSIDE_THE_FOOTER: dict[str, str] = {
     "connect-chatgpt-models": "source-pane action: starts the global OAuth dialog",
     "disconnect-chatgpt": "account-card action: disconnects the global account",
     "load-config": "acts on the path field it sits beside",
+    "provider-model-row": "content control: selects the model represented by its provider card",
     "manage-llm-settings": "page content: opens another dialog from the Models page",
     "refresh-codex-models": "account-card action: refreshes its model catalog",
 }
@@ -296,6 +309,67 @@ def test_disclosure_header_uses_the_shared_chat_glyphs(qtbot) -> None:
     assert header.label == "Subscription models"
     assert header.text() == f"{DISCLOSURE_EXPANDED}  Subscription models"
     assert header.accessibleName() == "Subscription models"
+
+
+def test_parameter_form_orders_axes_and_isolates_each_problem(qtbot) -> None:
+    thinking = ParameterSpec(
+        AXIS_THINKING_EFFORT,
+        (ParameterOption("low", is_default=True), ParameterOption("high")),
+        order=10,
+    )
+    context = ParameterSpec(
+        AXIS_CONTEXT_WINDOW,
+        (ParameterOption("200k", is_default=True), ParameterOption("1m")),
+        order=20,
+    )
+    problem = LLMProblem(
+        PROBLEM_PARAMETER_VALUE_UNAVAILABLE,
+        reason=f"{AXIS_CONTEXT_WINDOW}=retired",
+    )
+    form = ParameterForm()
+    qtbot.addWidget(form)
+
+    form.set_parameters(
+        (context, thinking),
+        ParameterAssignment(
+            {AXIS_THINKING_EFFORT: "high", AXIS_CONTEXT_WINDOW: "retired"}
+        ),
+        resolved=(
+            ResolvedParameter(
+                AXIS_THINKING_EFFORT,
+                thinking,
+                "high",
+                thinking.option("high"),
+            ),
+            ResolvedParameter(
+                AXIS_CONTEXT_WINDOW,
+                context,
+                "retired",
+                None,
+                problem,
+            ),
+        ),
+    )
+
+    assert not form.isHidden()
+    assert [picker.objectName() for picker in form.pickers] == [
+        f"param-{AXIS_THINKING_EFFORT}",
+        f"param-{AXIS_CONTEXT_WINDOW}",
+    ]
+    thinking_picker = form.picker(AXIS_THINKING_EFFORT)
+    context_picker = form.picker(AXIS_CONTEXT_WINDOW)
+    assert thinking_picker is not None and thinking_picker.selected_value() == "high"
+    assert context_picker is not None and context_picker.property("state") == "unavailable"
+    assert context_picker.itemText(1) == "200K tokens · Model default"
+    assert context_picker.itemText(2) == "1M tokens"
+    thinking_problem = form.problem_label(AXIS_THINKING_EFFORT)
+    context_problem = form.problem_label(AXIS_CONTEXT_WINDOW)
+    assert thinking_problem is not None and thinking_problem.isHidden()
+    assert context_problem is not None and "no longer available" in context_problem.text()
+
+    form.set_parameters((), ParameterAssignment())
+    assert form.isHidden()
+    assert form.pickers == ()
 
 
 def test_settings_list_reserves_styled_padding_for_item_widgets(qtbot) -> None:
@@ -419,3 +493,62 @@ def test_the_level_is_what_paints_the_card(qtbot, qapp) -> None:
     assert painted[CardLevel.PANEL] == DARK.palette.panel
     assert painted[CardLevel.FLOATING] == DARK.palette.surface
     assert painted[CardLevel.INSET] == DARK.palette.surface
+
+
+def test_parameter_picker_marks_disabled_and_unresolved_selections_unavailable(qtbot) -> None:
+    blocked_problem = LLMProblem(PROBLEM_PARAMETER_VALUE_UNAVAILABLE, reason="account")
+    blocked_spec = ParameterSpec(
+        AXIS_THINKING_EFFORT,
+        (
+            ParameterOption("low", is_default=True),
+            ParameterOption("high", problem=blocked_problem),
+        ),
+    )
+    blocked = ParameterForm()
+    qtbot.addWidget(blocked)
+    blocked.set_parameters(
+        (blocked_spec,),
+        ParameterAssignment({AXIS_THINKING_EFFORT: "high"}),
+        resolved=(
+            ResolvedParameter(
+                AXIS_THINKING_EFFORT,
+                blocked_spec,
+                "high",
+                blocked_spec.option("high"),
+                blocked_problem,
+            ),
+        ),
+    )
+
+    blocked_picker = blocked.picker(AXIS_THINKING_EFFORT)
+    assert blocked_picker is not None
+    assert blocked_picker.property("state") == "unavailable"
+
+    unresolved_spec = ParameterSpec(
+        AXIS_CONTEXT_WINDOW,
+        (ParameterOption("200k"), ParameterOption("1m")),
+    )
+    unresolved_problem = LLMProblem(
+        PROBLEM_PARAMETER_UNRESOLVED,
+        reason=AXIS_CONTEXT_WINDOW,
+    )
+    unresolved = ParameterForm()
+    qtbot.addWidget(unresolved)
+    unresolved.set_parameters(
+        (unresolved_spec,),
+        ParameterAssignment(),
+        resolved=(
+            ResolvedParameter(
+                AXIS_CONTEXT_WINDOW,
+                unresolved_spec,
+                None,
+                None,
+                unresolved_problem,
+            ),
+        ),
+    )
+
+    unresolved_picker = unresolved.picker(AXIS_CONTEXT_WINDOW)
+    assert unresolved_picker is not None
+    assert unresolved_picker.currentIndex() == -1
+    assert unresolved_picker.property("state") == "unavailable"

@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
+
+from kimix_gui.llm.axes import AXIS_THINKING_EFFORT, axis_sort_key
+from kimix_gui.llm.parameters import (
+    EMPTY_ASSIGNMENT,
+    ParameterAssignment,
+    ParameterOption,
+    ParameterSpec,
+    RuntimeOverrides,
+)
 
 PROBLEM_NOT_JSON = "not_json"
 PROBLEM_FILE_MISSING = "file_missing"
@@ -16,8 +25,9 @@ PROBLEM_CREDENTIAL_MISSING = "credential_missing"
 PROBLEM_INVALID_SESSION_SELECTION = "invalid_session_selection"
 PROBLEM_LOGIN_REQUIRED = "login_required"
 PROBLEM_MODEL_UNAVAILABLE = "model_unavailable"
-PROBLEM_VARIANT_UNAVAILABLE = "variant_unavailable"
-PROBLEM_VARIANT_UNRESOLVED = "variant_unresolved"
+PROBLEM_PARAMETER_UNKNOWN = "parameter_unknown"
+PROBLEM_PARAMETER_VALUE_UNAVAILABLE = "parameter_value_unavailable"
+PROBLEM_PARAMETER_UNRESOLVED = "parameter_unresolved"
 
 _PROBLEM_TEXT: dict[str, str] = {
     PROBLEM_NOT_JSON: "Kimix Provider file must be JSON: {path}",
@@ -30,8 +40,9 @@ _PROBLEM_TEXT: dict[str, str] = {
     PROBLEM_INVALID_SESSION_SELECTION: "Invalid session LLM selection: {path}",
     PROBLEM_LOGIN_REQUIRED: "Connect ChatGPT to use this subscription model.",
     PROBLEM_MODEL_UNAVAILABLE: "This model is not available for the connected account.",
-    PROBLEM_VARIANT_UNAVAILABLE: "The saved model variant is no longer available.",
-    PROBLEM_VARIANT_UNRESOLVED: "Choose a model variant before using this configuration.",
+    PROBLEM_PARAMETER_UNKNOWN: "The saved model parameter is not recognized.",
+    PROBLEM_PARAMETER_VALUE_UNAVAILABLE: "The saved model parameter value is no longer available.",
+    PROBLEM_PARAMETER_UNRESOLVED: "Choose a model parameter before using this configuration.",
 }
 
 
@@ -64,6 +75,20 @@ class LLMSelectionError(RuntimeError):
         self.problem = problem
 
 
+@runtime_checkable
+class ProviderTarget(Protocol):
+    """Stable structural identity owned by exactly one provider plugin."""
+
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def provider_id(self) -> str: ...
+
+    @property
+    def key(self) -> str: ...
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class ProviderFileTarget:
     """A user-owned Provider file and optional model override."""
@@ -85,6 +110,14 @@ class ProviderFileTarget:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "path", path.expanduser().resolve(strict=False))
         object.__setattr__(self, "model_override", normalized_override or None)
+
+    @property
+    def provider_id(self) -> str:
+        return "provider_file"
+
+    @property
+    def key(self) -> str:
+        return f"provider_file:{self.path}:{self.model_override or ''}"
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -108,78 +141,18 @@ class ChatGPTTarget:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "model", normalized)
 
-
-ProviderTarget = ProviderFileTarget | ChatGPTTarget
-
-VariantKind = Literal[
-    "configured",
-    "provider_default",
-    "reasoning_effort",
-    "legacy_default",
-]
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class LLMVariantKey:
-    """Stable, secret-free identity of one executable Model Variant."""
-
-    kind: VariantKind
-    value: str | None
-
-    def __init__(self, kind: VariantKind, value: str | None = None) -> None:
-        if kind not in {
-            "configured",
-            "provider_default",
-            "reasoning_effort",
-            "legacy_default",
-        }:
-            raise ValueError(f"Unknown Variant kind: {kind}")
-        normalized = value.strip() if value else None
-        if kind == "reasoning_effort":
-            if (
-                normalized is None
-                or len(normalized) > 64
-                or any(character.isspace() for character in normalized)
-            ):
-                raise ValueError("Reasoning effort must be a non-empty token")
-        elif normalized is not None:
-            raise ValueError(f"Variant {kind!r} does not accept a value")
-        object.__setattr__(self, "kind", kind)
-        object.__setattr__(self, "value", normalized)
+    @property
+    def provider_id(self) -> str:
+        return "chatgpt"
 
     @property
-    def id(self) -> str:
-        return f"{self.kind}/{self.value}" if self.value is not None else self.kind
-
-
-CONFIGURED_VARIANT = LLMVariantKey("configured")
-PROVIDER_DEFAULT_VARIANT = LLMVariantKey("provider_default")
-LEGACY_DEFAULT_VARIANT = LLMVariantKey("legacy_default")
-
-
-def reasoning_effort_variant(effort: str) -> LLMVariantKey:
-    return LLMVariantKey("reasoning_effort", effort)
-
-
-@dataclass(frozen=True, slots=True)
-class LLMRuntimeOptions:
-    """Runtime parameters represented by a Variant."""
-
-    reasoning_effort: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class LLMVariantDescriptor:
-    """Current catalog metadata for one Model Variant."""
-
-    key: LLMVariantKey
-    options: LLMRuntimeOptions = LLMRuntimeOptions()
-    is_default: bool = False
+    def key(self) -> str:
+        return f"chatgpt:{self.model}"
 
 
 @dataclass(frozen=True, slots=True)
 class LLMModelDescriptor:
-    """Refreshable, secret-free metadata for one Provider target."""
+    """Refreshable, secret-free metadata and parameter axes for one Provider target."""
 
     target: ProviderTarget
     model_id: str
@@ -193,11 +166,36 @@ class LLMModelDescriptor:
     capabilities: tuple[str, ...] = ()
     input_modalities: tuple[str, ...] = ()
     priority: int = 10_000
-    variants: tuple[LLMVariantDescriptor, ...] = ()
+    parameters: tuple[ParameterSpec, ...] = ()
     problem: LLMProblem | None = None
     catalog_stale: bool = False
-    configured_reasoning_effort: str | None = None
     show_thinking_stream: bool | None = None
+
+    def __post_init__(self) -> None:
+        axes = [parameter.axis for parameter in self.parameters]
+        if len(axes) != len(set(axes)):
+            raise ValueError("Model descriptor has duplicate parameter axes")
+        ordered = tuple(
+            sorted(
+                self.parameters,
+                key=lambda parameter: (
+                    parameter.order,
+                    *axis_sort_key(parameter.axis),
+                ),
+            )
+        )
+        if ordered != self.parameters:
+            object.__setattr__(self, "parameters", ordered)
+
+    @property
+    def default_assignment(self) -> ParameterAssignment:
+        """Return every currently declared default as a frozen assignment."""
+
+        return ParameterAssignment(
+            (parameter.axis, parameter.default.value)
+            for parameter in self.parameters
+            if parameter.default is not None
+        )
 
     @property
     def label(self) -> str:
@@ -207,121 +205,160 @@ class LLMModelDescriptor:
             return self.model_id
         if isinstance(self.target, ProviderFileTarget):
             return self.target.path.name
-        return self.target.model
+        if isinstance(self.target, ChatGPTTarget):
+            return self.target.model
+        return self.target.key
 
     @property
     def available(self) -> bool:
         return self.problem is None
 
-    @property
-    def default_variant(self) -> LLMVariantDescriptor | None:
-        return next((variant for variant in self.variants if variant.is_default), None)
-
 
 @dataclass(frozen=True, slots=True)
 class LLMSelection:
-    """Exact Provider target and Variant stored for a project or session."""
+    """A Provider target, free-form parameter assignment, and pinning state."""
 
     target: ProviderTarget
-    variant: LLMVariantKey
+    parameters: ParameterAssignment = EMPTY_ASSIGNMENT
+    pinned: bool = True
 
-    def __post_init__(self) -> None:
-        if isinstance(self.target, ProviderFileTarget):
-            if self.variant != CONFIGURED_VARIANT:
-                raise ValueError("Provider files only support the configured Variant")
-            return
-        if self.variant.kind not in {
-            "reasoning_effort",
-            "provider_default",
-            "legacy_default",
-        }:
-            raise ValueError(f"Invalid ChatGPT Variant: {self.variant.id}")
+
+@dataclass(frozen=True, slots=True)
+class ResolvedParameter:
+    """Resolution of one stored, defaulted, unknown, or unavailable parameter value."""
+
+    axis: str
+    spec: ParameterSpec | None
+    stored_value: str | None
+    option: ParameterOption | None
+    problem: LLMProblem | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedLLMSelection:
-    """An LLM selection matched against current Model and Variant metadata."""
+    """An LLM selection matched against current model and parameter metadata."""
 
     selection: LLMSelection
     model: LLMModelDescriptor
-    variant: LLMVariantDescriptor | None
+    materialized_selection: LLMSelection
+    resolved: tuple[ResolvedParameter, ...] = ()
+    needs_writeback: bool = False
     problem: LLMProblem | None = None
 
     @property
     def available(self) -> bool:
-        return self.problem is None and self.model.available and self.variant is not None
+        return (
+            self.problem is None
+            and self.model.available
+            and all(item.option is not None and item.problem is None for item in self.resolved)
+        )
 
     @property
     def label(self) -> str:
         return self.model.label
 
+    @property
+    def runtime(self) -> RuntimeOverrides:
+        overrides = RuntimeOverrides()
+        for item in self.resolved:
+            if item.option is not None and item.problem is None:
+                overrides = overrides.merge(item.option.overrides)
+        return overrides
+
 
 def target_key(target: ProviderTarget) -> str:
     """Return the stable identity used to match selections to Model metadata."""
 
-    if isinstance(target, ChatGPTTarget):
-        return f"chatgpt:{target.model}"
-    override = target.model_override or ""
-    return f"provider_file:{target.path}:{override}"
+    return target.key
 
 
 def selection_key(selection: LLMSelection) -> str:
-    return f"{target_key(selection.target)}:{selection.variant.id}"
+    """Return a key that distinguishes target, assignment, and deferred pinning state."""
+
+    pinned = "pinned" if selection.pinned else "unpinned"
+    return f"{target_key(selection.target)}:{selection.parameters.id}:{pinned}"
 
 
-def configured_selection(target: ProviderFileTarget) -> LLMSelection:
-    return LLMSelection(target, CONFIGURED_VARIANT)
+def configured_selection(target: ProviderTarget) -> LLMSelection:
+    """Build the configured, no-override selection for a Provider file."""
+
+    return LLMSelection(target)
 
 
 def chatgpt_selection(model: str, effort: str) -> LLMSelection:
-    return LLMSelection(ChatGPTTarget(model), reasoning_effort_variant(effort))
+    """Build an explicitly pinned ChatGPT thinking-effort selection."""
+
+    return LLMSelection(
+        ChatGPTTarget(model),
+        ParameterAssignment({AXIS_THINKING_EFFORT: effort}),
+    )
 
 
 def resolve_selection(
     selection: LLMSelection,
     models: tuple[LLMModelDescriptor, ...] | list[LLMModelDescriptor],
 ) -> ResolvedLLMSelection:
-    """Resolve without mutating or silently replacing the stored Variant."""
+    """Resolve each axis without discarding unavailable or unknown stored tokens."""
 
     key = target_key(selection.target)
     model = next((candidate for candidate in models if target_key(candidate.target) == key), None)
     if model is None:
         model = unavailable_model(selection.target, PROBLEM_MODEL_UNAVAILABLE)
-    if model.problem is not None:
-        return ResolvedLLMSelection(selection, model, None, model.problem)
-    if selection.variant == LEGACY_DEFAULT_VARIANT:
-        return ResolvedLLMSelection(
-            selection,
-            model,
-            None,
-            LLMProblem(PROBLEM_VARIANT_UNRESOLVED),
+    materialized = selection.parameters
+    resolved: list[ResolvedParameter] = []
+    parameter_problem: LLMProblem | None = None
+    known_axes = {spec.axis for spec in model.parameters}
+    for spec in model.parameters:
+        stored_value = selection.parameters.get(spec.axis)
+        option = spec.option(stored_value) if stored_value is not None else spec.default
+        if stored_value is None and option is not None:
+            materialized = materialized.with_value(spec.axis, option.value)
+        item_problem: LLMProblem | None
+        if option is None:
+            item_problem = LLMProblem(
+                PROBLEM_PARAMETER_VALUE_UNAVAILABLE
+                if stored_value is not None
+                else PROBLEM_PARAMETER_UNRESOLVED,
+                reason=f"{spec.axis}={stored_value}" if stored_value is not None else spec.axis,
+            )
+        else:
+            item_problem = option.problem
+        if parameter_problem is None and item_problem is not None:
+            parameter_problem = item_problem
+        resolved.append(
+            ResolvedParameter(spec.axis, spec, stored_value, option, item_problem)
         )
-    variant = next(
-        (candidate for candidate in model.variants if candidate.key == selection.variant),
-        None,
+
+    for axis, value in selection.parameters.entries:
+        if axis in known_axes:
+            continue
+        unknown_problem = LLMProblem(PROBLEM_PARAMETER_UNKNOWN, reason=f"{axis}={value}")
+        if parameter_problem is None:
+            parameter_problem = unknown_problem
+        resolved.append(ResolvedParameter(axis, None, value, None, unknown_problem))
+
+    pin_problem: LLMProblem | None = None
+    materialized_pinned = selection.pinned
+    if not selection.pinned:
+        if model.catalog_stale:
+            pin_problem = LLMProblem(PROBLEM_PARAMETER_UNRESOLVED, reason="catalog_stale")
+        elif model.problem is None and parameter_problem is None:
+            materialized_pinned = True
+    selection_problem = model.problem or parameter_problem or pin_problem
+    materialized_selection = LLMSelection(selection.target, materialized, materialized_pinned)
+    needs_writeback = (
+        selection_problem is None
+        and not model.catalog_stale
+        and materialized_selection != selection
     )
-    if variant is None:
-        return ResolvedLLMSelection(
-            selection,
-            model,
-            None,
-            LLMProblem(PROBLEM_VARIANT_UNAVAILABLE),
-        )
-    return ResolvedLLMSelection(selection, model, variant)
-
-
-def pin_legacy_default(
-    selection: LLMSelection,
-    model: LLMModelDescriptor,
-) -> LLMSelection | None:
-    """Replace a legacy default marker with the catalog's exact default Variant."""
-
-    if selection.variant != LEGACY_DEFAULT_VARIANT:
-        return selection
-    default_variant = model.default_variant
-    if default_variant is None:
-        return None
-    return LLMSelection(selection.target, default_variant.key)
+    return ResolvedLLMSelection(
+        selection=selection,
+        model=model,
+        materialized_selection=materialized_selection,
+        resolved=tuple(resolved),
+        needs_writeback=needs_writeback,
+        problem=selection_problem,
+    )
 
 
 def unavailable_model(target: ProviderTarget, kind: str, *, reason: str = "") -> LLMModelDescriptor:
@@ -330,9 +367,12 @@ def unavailable_model(target: ProviderTarget, kind: str, *, reason: str = "") ->
     if isinstance(target, ProviderFileTarget):
         path = target.path
         model_id = target.model_override or "Configuration unavailable"
-    else:
+    elif isinstance(target, ChatGPTTarget):
         path = None
         model_id = target.model
+    else:
+        path = None
+        model_id = target.key
     return LLMModelDescriptor(
         target=target,
         model_id=model_id,
@@ -340,6 +380,5 @@ def unavailable_model(target: ProviderTarget, kind: str, *, reason: str = "") ->
         endpoint="Unavailable",
         credential="Unavailable",
         file_format="JSON" if path else "Built-in",
-        variants=((LLMVariantDescriptor(CONFIGURED_VARIANT, is_default=True),) if path else ()),
         problem=LLMProblem(kind, path, reason),
     )

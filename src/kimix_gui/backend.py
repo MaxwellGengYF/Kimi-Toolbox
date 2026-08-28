@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from kimix import close_session_async
 
 try:
-    from kimix import create_session_async
+    from kimix import create_session_async  # type: ignore[attr-defined]
 except ImportError:  # Local Kimix-CLI-X revisions export the worker factory privately.
     from kimix import base as _kimix_base
     from kimix.utils import _create_session_async
@@ -32,20 +33,17 @@ except ImportError:  # Local Kimix-CLI-X revisions export the worker factory pri
 
 
 from kimi_cli.auth.codex import CodexAuthService, default_codex_auth_service
-from kimi_cli.llm_codex import CodexProviderLease
 
-from kimix_gui.chatgpt_provider import create_selected_codex_provider
 from kimix_gui.kimi_workdir import resolve_kimi_work_dir
 from kimix_gui.llm import (
-    CONFIGURED_VARIANT,
-    PROVIDER_DEFAULT_VARIANT,
-    ChatGPTTarget,
     LLMSelection,
     ProviderFileTarget,
+    RuntimeOverrides,
     configured_selection,
     default_provider_file_path,
-    load_provider_mapping,
 )
+from kimix_gui.llm.providers.base import RuntimeLease, SessionRuntime
+from kimix_gui.llm.registry import ProviderRegistry, default_provider_registry
 
 
 class SdkSession(Protocol):
@@ -80,13 +78,14 @@ class SessionOptions:
     work_dir: Path
     session_id: str | None = None
     llm_selection: LLMSelection | None = None
+    llm_runtime: RuntimeOverrides | None = None
     yolo: bool = False
 
 
 class ManagedSdkSession:
-    """Top-level SDK session that owns the final close of a shared Codex provider."""
+    """Top-level SDK session that owns an external provider lease."""
 
-    def __init__(self, session: SdkSession, lease: CodexProviderLease) -> None:
+    def __init__(self, session: SdkSession, lease: RuntimeLease) -> None:
         self._session = session
         self._lease = lease
         self._closed = False
@@ -125,7 +124,7 @@ class ManagedSdkSession:
             return
         self._closed = True
         try:
-            await close_session_async(self._session)
+            await close_session_async(cast(Any, self._session))
         finally:
             await self._lease.close()
 
@@ -140,65 +139,61 @@ async def create_sdk_session(
     options: SessionOptions,
     *,
     codex_service: CodexAuthService | None = None,
+    provider_registry: ProviderRegistry | None = None,
 ) -> SdkSession:
-    """Create or resume a session through Kimix's public Worker factory."""
+    """Create or resume a session through one provider-neutral runtime path."""
 
+    service = codex_service or default_codex_auth_service()
+    registry = provider_registry or default_provider_registry(service)
     work_dir = resolve_kimi_work_dir(options.work_dir)
     selection = options.llm_selection or configured_selection(
         ProviderFileTarget(default_provider_file_path())
     )
-    target = selection.target
-    session_id = options.session_id or new_session_id()
-    if isinstance(target, ChatGPTTarget):
-        if selection.variant.kind == "reasoning_effort":
-            reasoning_effort = selection.variant.value
-        elif selection.variant == PROVIDER_DEFAULT_VARIANT:
-            reasoning_effort = None
-        else:
-            raise ValueError(f"Invalid ChatGPT variant: {selection.variant.id}")
-        runtime = await create_selected_codex_provider(
-            codex_service or default_codex_auth_service(),
-            model_name=target.model,
-            session_id=session_id,
-            reasoning_effort=reasoning_effort,
+    if options.llm_runtime is None and selection.parameters.entries:
+        raise ValueError(
+            "Selections with parameters require resolved llm_runtime overrides"
         )
-        try:
-            session = await create_session_async(
-                work_dir=work_dir,
-                session_id=session_id,
-                resume=options.session_id is not None,
-                provider_dict=runtime.provider_dict,
-                model=target.model,
-                yolo=options.yolo,
-                chat_provider=runtime.provider,
-            )
-        except BaseException:
-            await runtime.lease.close()
-            raise
-        return ManagedSdkSession(session, runtime.lease)
-
-    if selection.variant != CONFIGURED_VARIANT:
-        raise ValueError(f"Invalid Provider file variant: {selection.variant.id}")
-    if not isinstance(target, ProviderFileTarget):
-        raise TypeError(f"Unsupported LLM target: {target!r}")
-    provider_dict = None
-    if target.path.is_file() or target.path != default_provider_file_path():
-        provider_dict = load_provider_mapping(target.path)
-    model = target.model_override
-    if provider_dict is not None and model is not None:
-        provider_dict["model"] = model
-    common: dict[str, Any] = {
-        "provider_dict": provider_dict,
-        "model": model,
-        "yolo": options.yolo,
-    }
-
-    return await create_session_async(
-        work_dir=work_dir,
+    overrides = options.llm_runtime or RuntimeOverrides()
+    session_id = options.session_id or new_session_id()
+    runtime = await registry.create_runtime(
+        selection.target,
         session_id=session_id,
-        resume=options.session_id is not None,
-        **common,
+        overrides=overrides,
     )
+    try:
+        session_kwargs: dict[str, Any] = {
+            "work_dir": work_dir,
+            "session_id": session_id,
+            "resume": options.session_id is not None,
+            "provider_dict": runtime.provider_dict,
+            "model": runtime.model,
+            "yolo": options.yolo,
+        }
+        if runtime.provider is not None:
+            session_kwargs["chat_provider"] = runtime.provider
+        session = await create_session_async(**session_kwargs)
+    except BaseException:
+        try:
+            await _close_failed_runtime(runtime)
+        except BaseException:
+            pass
+        raise
+    sdk_session = cast(SdkSession, session)
+    if runtime.lease is not None:
+        return ManagedSdkSession(sdk_session, runtime.lease)
+    return sdk_session
+
+
+async def _close_failed_runtime(runtime: SessionRuntime) -> None:
+    if runtime.lease is not None:
+        await runtime.lease.close()
+        return
+    close = getattr(runtime.provider, "aclose", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 async def close_sdk_session(session: SdkSession) -> None:
@@ -207,4 +202,4 @@ async def close_sdk_session(session: SdkSession) -> None:
     if isinstance(session, ManagedSdkSession):
         await session.close()
         return
-    await close_session_async(session)
+    await close_session_async(cast(Any, session))

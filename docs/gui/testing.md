@@ -30,8 +30,9 @@
 所有界面文案断言默认写英文。
 
 需要中文的测试自己调用 `set_active_language(qt_app, "zh_CN")`，并在 teardown 切回 `en`，参见
-`tests/gui/test_i18n_runtime.py` 的 `restore_english`。应用 `.qm` 与 `.ts` 一起提交，因此新检出即可
-验证中文渲染；翻译测试会在 catalog 丢失时直接失败。
+`tests/gui/test_i18n_runtime.py` 的 `restore_english`。应用 `.qm` 不进 git，新检出要先跑
+`uv run python scripts/gui/build_translations.py` 才能验证中文渲染；翻译测试会在 catalog 丢失时
+直接失败，并在消息里给出该命令。
 
 ## Posted 事件必须泵事件循环
 

@@ -197,6 +197,26 @@ def test_empty_result_never_uses_the_old_untranslated_placeholder() -> None:
     assert "SUMMARY_METADATA_LABELS" not in inspect.getsource(transcript_layout)
 
 
+def test_llm_parameter_layers_keep_translation_at_the_qt_boundary() -> None:
+    root = Path(__file__).resolve().parents[2] / "src" / "kimix_gui"
+    for relative in (
+        Path("llm") / "axes.py",
+        Path("llm") / "parameters.py",
+        Path("llm") / "domain.py",
+        Path("llm") / "providers" / "provider_file.py",
+        Path("llm") / "providers" / "chatgpt.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "PySide6" not in source
+        assert "QCoreApplication" not in source
+        assert ".translate(" not in source
+
+    presentation = (root / "qt" / "llm_text.py").read_text(encoding="utf-8")
+    assert "QCoreApplication.translate" in presentation
+    assert 'AXIS_THINKING_EFFORT' in presentation
+    assert 'AXIS_CONTEXT_WINDOW' in presentation
+
+
 def test_tests_run_under_an_english_locale() -> None:
     from PySide6.QtCore import QLocale
 

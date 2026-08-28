@@ -1,4 +1,7 @@
-"""Pure-layer language resolution plus the committed catalogue's completeness.
+"""Pure-layer language resolution plus catalogue completeness.
+
+The ``.ts`` sources are tracked; the compiled ``.qm`` catalogs are gitignored build
+output, so their presence test points at the build script rather than at a commit.
 
 Nothing here imports PySide6: ``resolve_language`` is the whole ``auto`` decision,
 so it stays coverable with plain pytest.
@@ -106,9 +109,18 @@ def test_every_supported_language_has_a_committed_source_catalog() -> None:
         assert (CATALOG_DIR / f"kimix_gui_{language}.ts").is_file()
 
 
-def test_every_supported_language_has_a_packaged_catalog() -> None:
+def test_every_supported_language_has_a_compiled_catalog() -> None:
+    """``.qm`` files are build output, so a fresh checkout has to run the script.
+
+    Missing catalogs are silent at runtime (``tr()`` falls back to English), which is
+    why this is a hard failure carrying the exact command instead of a skip.
+    """
+
     for language in SUPPORTED_LANGUAGES:
-        assert (CATALOG_DIR / f"kimix_gui_{language}.qm").is_file()
+        assert (CATALOG_DIR / f"kimix_gui_{language}.qm").is_file(), (
+            f"kimix_gui_{language}.qm is missing; run "
+            "uv run python scripts/gui/build_translations.py"
+        )
 
 
 @pytest.mark.parametrize("language", SUPPORTED_LANGUAGES)

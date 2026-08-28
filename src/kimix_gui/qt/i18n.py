@@ -9,8 +9,9 @@ from PySide6.QtCore import QCoreApplication, QLibraryInfo, QLocale, QTranslator
 from kimix_gui.i18n import DEFAULT_LANGUAGE, resolve_language
 from kimix_gui.preferences import InterfacePreferences
 
-# Where ``scripts/gui/build_translations.py`` writes the compiled catalogs. They are
-# committed inside the package so clean source checkouts and wheels carry them.
+# Where ``scripts/gui/build_translations.py`` writes the compiled catalogs. They live
+# inside the package (wheels pick them up as build artifacts) but are gitignored, so a
+# fresh checkout has none until the script runs.
 TRANSLATIONS_DIR = Path(__file__).resolve().parent.parent / "translations"
 
 # Basename prefix of the application catalogs (``kimix_gui_zh_CN.qm``).

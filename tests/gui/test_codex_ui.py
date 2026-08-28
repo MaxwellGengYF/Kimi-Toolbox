@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QPushButton, QWidget
 from kimix_gui.app import KimixGuiApp
 from kimix_gui.backend import SessionOptions
 from kimix_gui.llm import (
+    AXIS_THINKING_EFFORT,
     PROBLEM_MODEL_UNAVAILABLE,
     ChatGPTTarget,
     chatgpt_model_descriptor,
@@ -146,7 +147,6 @@ def test_builtin_chatgpt_model_applies_only_after_explicit_click(qtbot) -> None:
         models=(model,),
         scope_label="New sessions",
         manage_library=True,
-        chatgpt_connected=True,
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -158,7 +158,9 @@ def test_builtin_chatgpt_model_applies_only_after_explicit_click(qtbot) -> None:
     assert not find(dialog, "delete-config", QPushButton).isEnabled()
     assert widget_text(dialog, "model-context") == "272,000 tokens"
     assert widget_text(dialog, "model-output") == "128,000 tokens"
-    assert dialog._variant_picker.currentData() == "reasoning_effort/medium"
+    picker = dialog.parameter_picker(AXIS_THINKING_EFFORT)
+    assert picker is not None
+    assert picker.currentData() == "medium"
     find(dialog, "apply-settings", QPushButton).click()
 
     assert applied == [LLMSettingsResult(selection)]
@@ -174,7 +176,6 @@ def test_disconnected_model_picker_offers_login_without_making_model_available(
         current=reference,
         models=(model,),
         scope_label="New sessions",
-        chatgpt_connected=False,
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -195,10 +196,9 @@ def test_connected_account_marks_absent_saved_model_unavailable(qtbot) -> None:
         current=reference,
         models=(),
         scope_label="Saved session",
-        chatgpt_connected=True,
     )
     qtbot.addWidget(dialog)
-    dialog.set_models((), chatgpt_connected=True)
+    dialog.set_models(())
     dialog.show()
 
     assert "not available" in widget_text(dialog, "settings-error")
@@ -218,7 +218,7 @@ def test_saved_chatgpt_session_waits_for_initial_model_catalog(
             llm_selection=chatgpt_selection("account-only-model", "medium"),
         )
     )
-    app._pending_codex_startup = True
+    app._pending_catalog_startup = True
     started_with_available_model: list[bool] = []
     monkeypatch.setattr(
         app,
@@ -226,10 +226,10 @@ def test_saved_chatgpt_session_waits_for_initial_model_catalog(
         lambda: started_with_available_model.append(app.default_config.available),
     )
 
-    app.on_codex_auth_changed(CodexAuthSnapshot(9, AUTH_CONNECTED))
+    app.codex_controller.on_auth_changed(CodexAuthSnapshot(9, AUTH_CONNECTED))
 
     assert started_with_available_model == []
-    app.on_codex_catalog_changed(
+    app.codex_controller.on_catalog_changed(
         CodexModelCatalog(
             operation_id=9,
             models=(
@@ -263,9 +263,9 @@ def test_active_chatgpt_disconnect_requires_confirmation(qtbot, tmp_path) -> Non
     qtbot.addWidget(window)
     window.show()
     app.window = window  # type: ignore[assignment]
-    app.bridge = Bridge()  # type: ignore[assignment]
+    app.codex_controller._bridge = Bridge()  # type: ignore[assignment]
 
-    app.disconnect_chatgpt()
+    app.codex_controller.disconnect(parent=window)
     dialog = find(window, "disconnect-chatgpt-dialog")
     assert dialog.isVisible()
     assert calls == []

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,7 +19,14 @@ from kimix_gui.backend import (
     new_session_id,
 )
 from kimix_gui.llm import (
+    CatalogContext,
+    LLMModelDescriptor,
+    LLMSelection,
+    ParameterAssignment,
     ProviderFileTarget,
+    ProviderRegistry,
+    RuntimeOverrides,
+    SessionRuntime,
     chatgpt_selection,
     configured_selection,
     default_provider_file_path,
@@ -198,6 +206,7 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
         SessionOptions(
             tmp_path,
             llm_selection=chatgpt_selection("gpt-test-codex", "medium"),
+            llm_runtime=RuntimeOverrides(thinking_effort="medium"),
         ),
         codex_service=service,
     )
@@ -222,3 +231,94 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
     finally:
         await close_sdk_session(session)
         await service.aclose()
+
+
+@dataclass(frozen=True, slots=True)
+class PluginTarget:
+    name: str
+    kind: str = "plugin"
+    provider_id: str = "plugin"
+
+    @property
+    def key(self) -> str:
+        return f"plugin:{self.name}"
+
+
+class PluginProvider:
+    id = "plugin"
+
+    def __init__(self) -> None:
+        self.received: list[RuntimeOverrides] = []
+
+    def owns(self, target: object) -> bool:
+        return isinstance(target, PluginTarget)
+
+    def describe(
+        self,
+        target: object,
+        context: CatalogContext,
+    ) -> LLMModelDescriptor:
+        del context
+        assert isinstance(target, PluginTarget)
+        return LLMModelDescriptor(
+            target=target,
+            model_id=target.name,
+            provider_type=self.id,
+            endpoint="memory://plugin",
+            credential="None",
+            file_format="Plugin",
+        )
+
+    def list_models(self, context: CatalogContext) -> tuple[LLMModelDescriptor, ...]:
+        del context
+        return ()
+
+    async def create_runtime(
+        self,
+        target: object,
+        *,
+        session_id: str,
+        overrides: RuntimeOverrides,
+    ) -> SessionRuntime:
+        assert isinstance(target, PluginTarget)
+        assert session_id
+        self.received.append(overrides)
+        return SessionRuntime(
+            {"model": target.name, "type": "plugin"},
+            target.name,
+            None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_dispatches_third_party_parameters_without_axis_branches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = object()
+    received: dict[str, object] = {}
+
+    async def fake_create(**kwargs: object) -> object:
+        received.update(kwargs)
+        return created
+
+    monkeypatch.setattr(backend, "create_session_async", fake_create)
+    provider = PluginProvider()
+    runtime = RuntimeOverrides(generation_kwargs=(("plugin_mode", "fast"),))
+    selection = LLMSelection(
+        PluginTarget("plugin-model"),
+        ParameterAssignment({"plugin_axis": "fast"}),
+    )
+
+    result = await create_sdk_session(
+        SessionOptions(tmp_path, llm_selection=selection, llm_runtime=runtime),
+        provider_registry=ProviderRegistry((provider,)),
+    )
+
+    assert result is created
+    assert provider.received == [runtime]
+    assert received["provider_dict"] == {
+        "model": "plugin-model",
+        "type": "plugin",
+    }
+    assert received["model"] == "plugin-model"
