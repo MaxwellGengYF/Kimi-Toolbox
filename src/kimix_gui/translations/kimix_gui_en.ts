@@ -310,7 +310,7 @@
         <translation type="vanished">The sign-in code expired. Request a new code and try again.</translation>
     </message>
     <message>
-        <location line="+10"/>
+        <location line="+12"/>
         <source>Your ChatGPT sign-in expired. Sign in again to continue.</source>
         <translation>Your ChatGPT sign-in expired. Sign in again to continue.</translation>
     </message>
@@ -419,7 +419,7 @@
 <context>
     <name>DisconnectChatGPTDialog</name>
     <message>
-        <location filename="../qt/codex_dialog.py" line="-59"/>
+        <location filename="../qt/codex_dialog.py" line="-61"/>
         <source>Disconnect ChatGPT</source>
         <translation>Disconnect ChatGPT</translation>
     </message>
@@ -763,7 +763,7 @@
 <context>
     <name>KimixBridge</name>
     <message>
-        <location filename="../qt/bridge.py" line="+637"/>
+        <location filename="../qt/bridge.py" line="+677"/>
         <source>Failed to open session: {reason}</source>
         <translation>Failed to open session: {reason}</translation>
     </message>
@@ -1792,7 +1792,7 @@
 <context>
     <name>Transcript</name>
     <message>
-        <location filename="../qt/transcript.py" line="+909"/>
+        <location filename="../qt/transcript.py" line="+898"/>
         <source>Copy</source>
         <translation>Copy</translation>
     </message>

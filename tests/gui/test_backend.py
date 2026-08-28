@@ -175,6 +175,8 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
                 "access_token": access_token,
                 "refresh_token": "refresh-secret",
                 "expires_at": time.time() + 3_600,
+                "account_id": "account-test",
+                "credential_id": "credential-test",
                 "models": [
                     {
                         "slug": "gpt-test-codex",
@@ -185,6 +187,8 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
                         "default_reasoning_effort": "medium",
                     }
                 ],
+                "models_account_id": "account-test",
+                "models_credential_id": "credential-test",
             }
         )
     )
@@ -209,7 +213,7 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
         assert provider._session_id == session.id
         assert custom["provider_dict"]["api_key"] == "oauth-managed"
         assert custom["provider_dict"]["capabilities"] == ["thinking", "image_in"]
-        assert "max_tokens" not in custom["provider_dict"]
+        assert custom["provider_dict"]["max_tokens"] == 128_000
         assert custom["provider_dict"]["thinking_effort"] == "medium"
         assert access_token not in repr(custom["provider_dict"])
         assert inner._cli.soul.runtime.llm.max_context_size == 272_000

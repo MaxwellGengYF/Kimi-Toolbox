@@ -1,5 +1,6 @@
 """Tests for OAuth token refresh: retry with backoff and force refresh."""
 
+import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -11,11 +12,16 @@ from pydantic import SecretStr
 
 from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
+    AUTH_LOGIN_REQUIRED,
     CODEX_BASE_URL,
     CODEX_OAUTH_KEY,
+    PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
+    PROBLEM_LOGIN_REQUIRED,
+    CodexAuthError,
     CodexAuthSnapshot,
     CodexModel,
     CodexModelCatalog,
+    CodexProblem,
 )
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
@@ -861,7 +867,74 @@ async def test_login_codex_configures_shared_oauth_provider(tmp_path):
     assert config.model is not None
     assert config.model.model == "gpt-5.4"
     assert config.model.supported_efforts == {"low", "high"}
+    assert config.max_tokens == 128_000
     mock_save.assert_called_once_with(config)
+
+
+@pytest.mark.asyncio
+async def test_login_codex_does_not_report_success_for_terminal_snapshot(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    original_provider = config.provider
+    original_model = config.model
+    service = MagicMock()
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        problem = CodexProblem(PROBLEM_LOGIN_REQUIRED)
+        model = CodexModel(slug="fallback")
+        return (
+            CodexAuthSnapshot(
+                operation_id,
+                AUTH_LOGIN_REQUIRED,
+                problem=problem,
+            ),
+            CodexModelCatalog(operation_id, (model,), True, problem),
+        )
+
+    service.login = fake_login
+    with (
+        patch("kimi_cli.auth.oauth.default_codex_auth_service", return_value=service),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert [event.type for event in events] == ["verification_url", "waiting", "error"]
+    assert config.provider is original_provider
+    assert config.model is original_model
+    mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_closing_login_codex_generator_cancels_background_login(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    cancelled = asyncio.Event()
+    service = MagicMock()
+
+    async def fake_login(_operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    service.login = fake_login
+    generator = login_codex(config)
+    with patch("kimi_cli.auth.oauth.default_codex_auth_service", return_value=service):
+        event = await anext(generator)
+        assert event.type == "verification_url"
+        await generator.aclose()
+
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    service.cancel_login.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -889,3 +962,31 @@ async def test_logout_codex_clears_shared_provider(tmp_path):
     assert config.provider is None
     assert config.model is None
     mock_save.assert_called_once_with(config)
+
+
+@pytest.mark.asyncio
+async def test_logout_codex_preserves_config_when_credential_removal_fails(tmp_path):
+    config = _make_config()
+    config.provider = LLMProvider(
+        type="openai-codex",
+        base_url=CODEX_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    original_provider = config.provider
+    service = MagicMock()
+    service.disconnect = AsyncMock(
+        side_effect=CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE))
+    )
+
+    with (
+        patch("kimi_cli.auth.oauth.default_codex_auth_service", return_value=service),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in logout_codex(config)]
+
+    assert [event.type for event in events] == ["error"]
+    assert config.provider is original_provider
+    mock_save.assert_not_called()

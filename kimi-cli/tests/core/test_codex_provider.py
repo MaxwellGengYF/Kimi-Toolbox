@@ -34,6 +34,9 @@ class _CredentialService:
         suffix = len(self.calls)
         return CodexRuntimeCredentials(f"token-{suffix}", f"account-{suffix}", None)
 
+    async def invalidate_credentials(self, failed_access_token: str) -> None:
+        self.invalidated_access_token = failed_access_token
+
 
 @dataclass
 class _CatalogService(_CredentialService):
@@ -68,6 +71,7 @@ async def test_http_auth_overrides_static_token_and_replays_only_one_401() -> No
         )
 
     assert response.status_code == 200
+    assert not hasattr(service, "invalidated_access_token")
     assert seen == [
         ("Bearer token-1", "account-1", b"x"),
         ("Bearer token-2", "account-2", b"x"),
@@ -125,6 +129,7 @@ async def test_second_401_is_returned_without_another_auth_replay() -> None:
     assert response.status_code == 401
     assert requests == 2
     assert len(service.calls) == 2
+    assert service.invalidated_access_token == "token-2"
 
 
 @pytest.mark.asyncio
@@ -170,7 +175,7 @@ async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort()
         }
         assert runtime.provider._session_id == "session-id"
         assert runtime.provider_dict["max_context_size"] == 272_000
-        assert "max_tokens" not in runtime.provider_dict
+        assert runtime.provider_dict["max_tokens"] == 128_000
         assert runtime.model.max_tokens == 128_000
         assert runtime.provider_dict["thinking_effort"] == "medium"
         assert runtime.provider_dict["supported_efforts"] == [

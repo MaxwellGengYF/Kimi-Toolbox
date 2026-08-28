@@ -7,7 +7,9 @@ import pytest
 from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     AUTH_DISCONNECTED,
+    AUTH_LOGIN_REQUIRED,
     AUTH_RETRY_LATER,
+    PROBLEM_LOGIN_REQUIRED,
     PROBLEM_RATE_LIMITED,
     CodexAuthSnapshot,
     CodexBrowserChallenge,
@@ -270,6 +272,43 @@ def test_active_chatgpt_disconnect_requires_confirmation(qtbot, tmp_path) -> Non
 
     find(dialog, "confirm-disconnect-chatgpt", QPushButton).click()
     assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_initialize_publishes_auth_state_after_catalog_refresh() -> None:
+    snapshots = 0
+    problem = CodexProblem(PROBLEM_LOGIN_REQUIRED)
+
+    class Service:
+        async def snapshot(self, operation_id: int) -> CodexAuthSnapshot:
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 1:
+                return CodexAuthSnapshot(operation_id, AUTH_CONNECTED)
+            return CodexAuthSnapshot(
+                operation_id,
+                AUTH_LOGIN_REQUIRED,
+                problem=problem,
+            )
+
+        async def refresh_models(self, operation_id: int) -> CodexModelCatalog:
+            return CodexModelCatalog(operation_id, (CodexModel("cached"),), True, problem)
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(
+        session_factory=unused_factory,
+        codex_service=Service(),  # type: ignore[arg-type]
+    )
+    auth_states: list[str] = []
+    bridge.codex_auth_changed.connect(lambda snapshot: auth_states.append(snapshot.state))
+    operation_id = bridge._next_codex_operation()
+
+    await bridge._initialize_codex_locked(operation_id)
+
+    assert snapshots == 2
+    assert auth_states == [AUTH_LOGIN_REQUIRED]
 
 
 @pytest.mark.asyncio

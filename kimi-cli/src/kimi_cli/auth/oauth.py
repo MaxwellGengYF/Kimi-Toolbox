@@ -21,6 +21,7 @@ from pydantic import SecretStr
 
 from kimi_cli.auth import KIMI_CODE_PLATFORM_ID
 from kimi_cli.auth.codex import (
+    AUTH_CONNECTED,
     CODEX_OAUTH_KEY,
     CodexAuthError,
     CodexAuthService,
@@ -1184,64 +1185,86 @@ async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
             challenge_ready.set_result(challenge)
 
     login_task = asyncio.create_task(service.login(operation_id, _publish_challenge))
-    done, _pending = await asyncio.wait(
-        {challenge_ready, login_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    if challenge_ready in done:
-        challenge = challenge_ready.result()
-        yield OAuthEvent(
-            "verification_url",
-            challenge.authorization_url,
-            {"url": challenge.authorization_url},
-        )
-        try:
-            opened = await asyncio.to_thread(webbrowser.open, challenge.authorization_url)
-        except Exception as exc:
-            logger.warning("Failed to open Codex authorization URL: {error}", error=exc)
-            opened = False
-        if not opened:
-            yield OAuthEvent("info", "Open the authorization URL in your browser to continue.")
-        yield OAuthEvent("waiting", "Waiting for ChatGPT authorization...")
-
     try:
-        _snapshot, catalog = await login_task
-    except CodexAuthError as exc:
+        done, _pending = await asyncio.wait(
+            {challenge_ready, login_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if challenge_ready in done:
+            challenge = challenge_ready.result()
+            yield OAuthEvent(
+                "verification_url",
+                challenge.authorization_url,
+                {"url": challenge.authorization_url},
+            )
+            try:
+                opened = await asyncio.to_thread(webbrowser.open, challenge.authorization_url)
+            except Exception as exc:
+                logger.warning("Failed to open Codex authorization URL: {error}", error=exc)
+                opened = False
+            if not opened:
+                yield OAuthEvent("info", "Open the authorization URL in your browser to continue.")
+            yield OAuthEvent("waiting", "Waiting for ChatGPT authorization...")
+
+        try:
+            snapshot, catalog = await login_task
+        except CodexAuthError as exc:
+            yield OAuthEvent("error", f"Codex login failed: {exc.problem.code}")
+            return
+        except OSError, TimeoutError:
+            yield OAuthEvent("error", "Codex login failed: credential_store_unavailable")
+            return
+
+        if snapshot.state != AUTH_CONNECTED:
+            problem = snapshot.problem or catalog.problem
+            code = problem.code if problem is not None else snapshot.state
+            yield OAuthEvent("error", f"Codex login failed: {code}")
+            return
+        if not catalog.models:
+            yield OAuthEvent("error", "Codex login failed: invalid_response")
+            return
+
+        model = catalog.models[0]
+        inherit_max_tokens = config.model is None or config.max_tokens == config.model.max_tokens
+        capabilities: set[str] = {"thinking"}
+        modalities = {value.lower() for value in model.input_modalities}
+        if modalities & {"image", "images", "vision"}:
+            capabilities.add("image_in")
+        if modalities & {"video", "videos"}:
+            capabilities.add("video_in")
+        supported_efforts = {
+            effort
+            for effort in model.reasoning_efforts
+            if effort in {"low", "medium", "high", "xhigh", "max"}
+        }
+        config.provider = LLMProvider(
+            type="openai-codex",
+            base_url=CODEX_BASE_URL,
+            api_key=SecretStr(""),
+            oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+        )
+        model_data: dict[str, Any] = {
+            "model": model.slug,
+            "display_name": model.display_name,
+            "max_context_size": model.max_context_size,
+            "max_tokens": model.max_tokens,
+            "capabilities": capabilities,
+        }
+        if supported_efforts:
+            model_data["supported_efforts"] = supported_efforts
+        config.model = LLMModel(**model_data)
+        if inherit_max_tokens and model.max_tokens is not None:
+            config.max_tokens = model.max_tokens
+        save_config(config)
+        yield OAuthEvent("success", "Logged in to ChatGPT Codex successfully.")
+    finally:
         if not challenge_ready.done():
             challenge_ready.cancel()
-        yield OAuthEvent("error", f"Codex login failed: {exc.problem.code}")
-        return
-
-    model = catalog.models[0]
-    capabilities: set[str] = {"thinking"}
-    modalities = {value.lower() for value in model.input_modalities}
-    if modalities & {"image", "images", "vision"}:
-        capabilities.add("image_in")
-    if modalities & {"video", "videos"}:
-        capabilities.add("video_in")
-    supported_efforts = {
-        effort
-        for effort in model.reasoning_efforts
-        if effort in {"low", "medium", "high", "xhigh", "max"}
-    }
-    config.provider = LLMProvider(
-        type="openai-codex",
-        base_url=CODEX_BASE_URL,
-        api_key=SecretStr(""),
-        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
-    )
-    model_data: dict[str, Any] = {
-        "model": model.slug,
-        "display_name": model.display_name,
-        "max_context_size": model.max_context_size,
-        "max_tokens": model.max_tokens,
-        "capabilities": capabilities,
-    }
-    if supported_efforts:
-        model_data["supported_efforts"] = supported_efforts
-    config.model = LLMModel(**model_data)
-    save_config(config)
-    yield OAuthEvent("success", "Logged in to ChatGPT Codex successfully.")
+        if not login_task.done():
+            service.cancel_login(operation_id)
+            login_task.cancel()
+        with suppress(asyncio.CancelledError, CodexAuthError, OSError, TimeoutError):
+            await login_task
 
 
 async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
@@ -1254,7 +1277,14 @@ async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
         )
         return
 
-    await default_codex_auth_service().disconnect()
+    try:
+        await default_codex_auth_service().disconnect()
+    except CodexAuthError as exc:
+        yield OAuthEvent("error", f"Codex logout failed: {exc.problem.code}")
+        return
+    except OSError, TimeoutError:
+        yield OAuthEvent("error", "Codex logout failed: credential_store_unavailable")
+        return
     provider = config.provider
     if provider is not None and (
         provider.type == "openai-codex"

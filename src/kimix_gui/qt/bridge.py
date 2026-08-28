@@ -20,7 +20,10 @@ from kimi_cli.auth.codex import (
     AUTH_RETRY_LATER,
     PROBLEM_CALLBACK_UNAVAILABLE,
     PROBLEM_CANCELLED,
+    PROBLEM_CREDENTIAL_STORE_BUSY,
+    PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
     PROBLEM_LOGIN_REQUIRED,
+    PROBLEM_LOGIN_SUPERSEDED,
     PROBLEM_NETWORK,
     PROBLEM_RATE_LIMITED,
     PROBLEM_SERVER,
@@ -449,16 +452,27 @@ class KimixBridge(QObject):
     async def _initialize_codex_locked(self, operation_id: int) -> None:
         if not self._codex_operation_current(operation_id):
             return
-        snapshot = await self._codex_service.snapshot(operation_id)
+        try:
+            snapshot = await self._codex_service.snapshot(operation_id)
+            if snapshot.state == AUTH_CONNECTED:
+                catalog = await self._codex_service.refresh_models(operation_id)
+                snapshot = await self._codex_service.snapshot(operation_id)
+            else:
+                catalog = await self._codex_service.catalog(operation_id)
+        except CodexAuthError as exc:
+            if self._codex_operation_current(operation_id):
+                self.codex_auth_changed.emit(
+                    CodexAuthSnapshot(
+                        operation_id=operation_id,
+                        state=AUTH_RETRY_LATER,
+                        problem=exc.problem,
+                    )
+                )
+            return
         if not self._codex_operation_current(operation_id):
             return
         self.codex_auth_changed.emit(snapshot)
-        if snapshot.state == AUTH_CONNECTED:
-            catalog = await self._codex_service.refresh_models(operation_id)
-        else:
-            catalog = await self._codex_service.catalog(operation_id)
-        if self._codex_operation_current(operation_id):
-            self.codex_catalog_changed.emit(catalog)
+        self.codex_catalog_changed.emit(catalog)
 
     async def _connect_chatgpt(self, operation_id: int) -> None:
         async with self._codex_account_lock:
@@ -480,7 +494,13 @@ class KimixBridge(QObject):
         except CodexAuthError as exc:
             if not self._codex_operation_current(operation_id):
                 return
-            stored = await self._codex_service.snapshot(operation_id)
+            try:
+                stored = await self._codex_service.snapshot(operation_id)
+            except CodexAuthError:
+                stored = CodexAuthSnapshot(
+                    operation_id=operation_id,
+                    state=AUTH_RETRY_LATER,
+                )
             state = stored.state
             if exc.problem.code == PROBLEM_CANCELLED and state != AUTH_CONNECTED:
                 state = AUTH_DISCONNECTED
@@ -488,6 +508,9 @@ class KimixBridge(QObject):
                 state = AUTH_LOGIN_REQUIRED
             elif exc.problem.code in {
                 PROBLEM_CALLBACK_UNAVAILABLE,
+                PROBLEM_CREDENTIAL_STORE_BUSY,
+                PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
+                PROBLEM_LOGIN_SUPERSEDED,
                 PROBLEM_RATE_LIMITED,
                 PROBLEM_NETWORK,
                 PROBLEM_SERVER,
@@ -516,13 +539,23 @@ class KimixBridge(QObject):
     async def _refresh_codex_models_locked(self, operation_id: int) -> None:
         if not self._codex_operation_current(operation_id):
             return
-        catalog = await self._codex_service.refresh_models(operation_id)
+        try:
+            catalog = await self._codex_service.refresh_models(operation_id)
+            snapshot = await self._codex_service.snapshot(operation_id)
+        except CodexAuthError as exc:
+            if self._codex_operation_current(operation_id):
+                self.codex_auth_changed.emit(
+                    CodexAuthSnapshot(
+                        operation_id=operation_id,
+                        state=AUTH_RETRY_LATER,
+                        problem=exc.problem,
+                    )
+                )
+            return
         if not self._codex_operation_current(operation_id):
             return
         self.codex_catalog_changed.emit(catalog)
-        snapshot = await self._codex_service.snapshot(operation_id)
-        if self._codex_operation_current(operation_id):
-            self.codex_auth_changed.emit(snapshot)
+        self.codex_auth_changed.emit(snapshot)
 
     async def _disconnect_chatgpt(
         self,
@@ -558,7 +591,14 @@ class KimixBridge(QObject):
         if active:
             epoch = await self._release_session()
             self.session_closed.emit(epoch)
-        snapshot = await self._codex_service.disconnect(operation_id)
+        try:
+            snapshot = await self._codex_service.disconnect(operation_id)
+        except CodexAuthError as exc:
+            snapshot = CodexAuthSnapshot(
+                operation_id=operation_id,
+                state=AUTH_RETRY_LATER,
+                problem=exc.problem,
+            )
         if self._codex_operation_current(operation_id):
             self.codex_auth_changed.emit(snapshot)
 

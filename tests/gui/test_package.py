@@ -36,6 +36,23 @@ def test_packaging_exposes_gui_without_making_qt_mandatory() -> None:
     assert {"PySide6>=6.8", "pytest-qt>=4.5"} <= set(project["dependency-groups"]["dev"])
 
 
+def test_distribution_requires_the_matching_cli_release() -> None:
+    project = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))
+    cli_project = tomllib.loads(
+        (REPOSITORY / "kimi-cli" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    kosong_project = tomllib.loads(
+        (REPOSITORY / "kimi-cli" / "packages" / "kosong" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    cli_version = cli_project["project"]["version"]
+    kosong_version = kosong_project["project"]["version"]
+    assert f"kimi-cli-x>={cli_version}" in project["project"]["dependencies"]
+    assert f"kosong-x=={kosong_version}" in cli_project["project"]["dependencies"]
+
+
 def test_importing_the_optional_package_does_not_load_qt() -> None:
     completed = subprocess.run(
         [

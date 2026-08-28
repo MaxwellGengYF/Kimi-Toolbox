@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import os
 import secrets
@@ -20,6 +19,7 @@ from uuid import uuid4
 
 import httpx
 import orjson
+import pybase64
 
 from kimi_cli.constant import get_user_agent
 from kimi_cli.share import get_share_dir
@@ -37,7 +37,9 @@ BROWSER_LOGIN_TIMEOUT_SECONDS = 15 * 60
 BROWSER_CALLBACK_HOST = "127.0.0.1"
 BROWSER_CALLBACK_PORTS = (1455, 1457)
 BROWSER_CALLBACK_PATH = "/auth/callback"
-BROWSER_OAUTH_SCOPE = "openid profile email offline_access"
+BROWSER_OAUTH_SCOPE = (
+    "openid profile email offline_access api.connectors.read api.connectors.invoke"
+)
 # Codex deliberately uses a 272K active window for ChatGPT-backed sessions even
 # when the public API model supports a larger long-context window.  This mirrors
 # the bundled model metadata in the official Codex client, rather than the API
@@ -73,9 +75,20 @@ PROBLEM_LOGIN_REQUIRED = "login_required"
 PROBLEM_MODEL_UNAVAILABLE = "model_unavailable"
 PROBLEM_SERVER = "server_error"
 PROBLEM_CALLBACK_UNAVAILABLE = "callback_unavailable"
+PROBLEM_CREDENTIAL_STORE_BUSY = "credential_store_busy"
+PROBLEM_CREDENTIAL_STORE_UNAVAILABLE = "credential_store_unavailable"
+PROBLEM_LOGIN_SUPERSEDED = "login_superseded"
 
-_TERMINAL_TOKEN_ERRORS = {"invalid_grant", "invalid_token", "refresh_token_reused"}
+_TERMINAL_TOKEN_ERRORS = {
+    "invalid_grant",
+    "invalid_token",
+    "refresh_token_expired",
+    "refresh_token_invalidated",
+    "refresh_token_reused",
+}
 TERMINAL_AUTH_PROBLEMS = frozenset(_TERMINAL_TOKEN_ERRORS | {PROBLEM_LOGIN_REQUIRED})
+
+_LIFE_SCIENCES_STATE_SUFFIX = ".onboarding_entrypoint=life_sciences"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +205,7 @@ class CodexRuntimeCredentials:
     access_token: str = field(repr=False)
     account_id: str | None
     expires_at: float | None
+    credential_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +213,17 @@ class _StoredTokens:
     access_token: str = field(repr=False)
     refresh_token: str = field(repr=False)
     expires_at: float | None
+    account_id: str | None = None
+    credential_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CredentialWrite:
+    """An operation-owned credential write that can be rolled back safely."""
+
+    credential_id: str
+    previous_state: dict[str, Any] = field(repr=False)
+    previous_exists: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +276,7 @@ def _jwt_claims(token: str) -> Mapping[str, Any] | None:
         if len(pieces) < 2:
             return None
         payload = pieces[1] + "=" * (-len(pieces[1]) % 4)
-        decoded = orjson.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        decoded = orjson.loads(pybase64.urlsafe_b64decode(payload.encode("ascii")))
         return decoded if isinstance(decoded, dict) else None
     except ValueError, UnicodeError, orjson.JSONDecodeError:
         return None
@@ -294,11 +319,18 @@ class _CrossProcessLock:
         self._handle: Any = None
 
     async def acquire(self, timeout: float = CREDENTIAL_LOCK_TIMEOUT_SECONDS) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self._path.open("a+b")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            handle = self._path.open("a+b")
+        except OSError as exc:
+            raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)) from exc
         if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
+            try:
+                handle.write(b"\0")
+                handle.flush()
+            except OSError as exc:
+                handle.close()
+                raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)) from exc
         deadline = self._clock() + timeout
         while True:
             try:
@@ -316,7 +348,7 @@ class _CrossProcessLock:
             except OSError as exc:
                 if self._clock() >= deadline:
                     handle.close()
-                    raise TimeoutError("Timed out waiting for Codex credential lock") from exc
+                    raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_BUSY)) from exc
                 await self._sleep(0.05)
 
     def release(self) -> None:
@@ -386,7 +418,11 @@ class CodexAuthService:
     def cached_credentials(self) -> CodexRuntimeCredentials | None:
         """Read currently persisted credentials without performing network I/O."""
 
-        tokens = self._tokens_from_state(self._read_state())
+        state = self._read_state()
+        problem = self._problem_from_state(state)
+        if problem is not None and problem.code in TERMINAL_AUTH_PROBLEMS:
+            return None
+        tokens = self._tokens_from_state(state)
         return self._runtime_credentials(tokens) if tokens is not None else None
 
     async def aclose(self) -> None:
@@ -396,31 +432,7 @@ class CodexAuthService:
             await client.aclose()
 
     async def snapshot(self, operation_id: int = 0) -> CodexAuthSnapshot:
-        state = self._read_state()
-        tokens = self._tokens_from_state(state)
-        models = self._models_from_state(state)
-        problem = self._problem_from_state(state)
-        if problem is not None and problem.code in TERMINAL_AUTH_PROBLEMS:
-            auth_state = AUTH_LOGIN_REQUIRED
-        elif tokens is not None:
-            auth_state = AUTH_CONNECTED
-        elif problem is not None and problem.code in {
-            PROBLEM_CALLBACK_UNAVAILABLE,
-            PROBLEM_RATE_LIMITED,
-            PROBLEM_NETWORK,
-            PROBLEM_SERVER,
-        }:
-            auth_state = AUTH_RETRY_LATER
-        else:
-            auth_state = AUTH_DISCONNECTED
-        return CodexAuthSnapshot(
-            operation_id=operation_id,
-            state=auth_state,
-            model_count=len(models),
-            stale=bool(state.get("models_stale", not bool(state.get("models_updated_at")))),
-            expires_at=tokens.expires_at if tokens else None,
-            problem=problem,
-        )
+        return self._snapshot_from_state(self._read_state(), operation_id)
 
     def cancel_login(self, operation_id: int) -> None:
         self._cancelled_operations.add(operation_id)
@@ -435,9 +447,11 @@ class CodexAuthService:
     ) -> tuple[CodexAuthSnapshot, CodexModelCatalog]:
         async with self._get_lock("login"):
             self._raise_if_cancelled(operation_id)
+            baseline_tokens = self._tokens_from_state(self._read_state())
             cancel_event = asyncio.Event()
             self._cancel_events[operation_id] = cancel_event
             authorization: _BrowserAuthorization | None = None
+            credential_write: _CredentialWrite | None = None
             try:
                 authorization = await self._start_browser_authorization(operation_id)
                 callback_result = challenge_callback(authorization.challenge)
@@ -457,15 +471,30 @@ class CodexAuthService:
                     authorization.redirect_uri,
                 )
                 tokens = self._parse_token_payload(token_payload)
-                await self._save_tokens(tokens, operation_id=operation_id)
-                await self._abort_if_cancelled_after_credentials(operation_id)
+                credential_write = await self._save_tokens(tokens, operation_id=operation_id)
+                await self._abort_if_cancelled_after_credentials(
+                    operation_id,
+                    credential_write,
+                )
                 catalog = await self.refresh_models(operation_id)
-                await self._abort_if_cancelled_after_credentials(operation_id)
-                snapshot = await self.snapshot(operation_id)
-                return snapshot, catalog
+                await self._abort_if_cancelled_after_credentials(
+                    operation_id,
+                    credential_write,
+                )
+                return await self._finalize_login(
+                    operation_id,
+                    credential_write,
+                    catalog,
+                )
+            except asyncio.CancelledError:
+                if credential_write is not None:
+                    with suppress(CodexAuthError):
+                        await asyncio.shield(self._rollback_credential_write(credential_write))
+                raise
             except CodexAuthError as exc:
                 if exc.problem.code != PROBLEM_CANCELLED:
-                    await self._record_auth_problem(exc.problem)
+                    with suppress(CodexAuthError):
+                        await self._record_login_problem(exc.problem, baseline_tokens)
                 raise
             finally:
                 self._cancel_events.pop(operation_id, None)
@@ -478,8 +507,14 @@ class CodexAuthService:
             lock = self._file_lock()
             await lock.acquire()
             try:
-                with suppress(FileNotFoundError):
+                try:
                     self.auth_file.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise CodexAuthError(
+                        CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)
+                    ) from exc
             finally:
                 lock.release()
         return CodexAuthSnapshot(operation_id=operation_id, state=AUTH_DISCONNECTED)
@@ -495,9 +530,13 @@ class CodexAuthService:
             await lock.acquire()
             try:
                 state = self._read_state()
+                problem = self._problem_from_state(state)
+                if problem is not None and problem.code in TERMINAL_AUTH_PROBLEMS:
+                    raise CodexAuthError(problem)
                 tokens = self._tokens_from_state(state)
                 if tokens is None:
                     raise CodexAuthError(CodexProblem(PROBLEM_LOGIN_REQUIRED))
+                tokens = self._ensure_credential_identity(state, tokens)
                 if failed_access_token is not None and tokens.access_token != failed_access_token:
                     return self._runtime_credentials(tokens)
                 should_refresh = force_refresh or self._token_needs_refresh(tokens)
@@ -508,9 +547,24 @@ class CodexAuthService:
             finally:
                 lock.release()
 
+    async def invalidate_credentials(self, failed_access_token: str) -> None:
+        """Discard exactly the credential rejected after a one-time 401 replay."""
+
+        async with self._get_lock("refresh"):
+            lock = self._file_lock()
+            await lock.acquire()
+            try:
+                state = self._read_state()
+                tokens = self._tokens_from_state(state)
+                if tokens is None or tokens.access_token != failed_access_token:
+                    return
+                self._write_terminal_problem(state, CodexProblem(PROBLEM_LOGIN_REQUIRED))
+            finally:
+                lock.release()
+
     async def catalog(self, operation_id: int = 0) -> CodexModelCatalog:
         state = self._read_state()
-        models = self._models_from_state(state)
+        models = self._models_for_credentials(state, self._tokens_from_state(state))
         if models:
             return CodexModelCatalog(
                 operation_id=operation_id,
@@ -522,9 +576,11 @@ class CodexAuthService:
 
     async def refresh_models(self, operation_id: int = 0) -> CodexModelCatalog:
         access_token: str | None = None
+        credential_id: str | None = None
         try:
             credentials = await self.ensure_credentials()
             access_token = credentials.access_token
+            credential_id = credentials.credential_id
             headers = {"Authorization": f"Bearer {credentials.access_token}"}
             if credentials.account_id:
                 headers["ChatGPT-Account-ID"] = credentials.account_id
@@ -539,6 +595,7 @@ class CodexAuthService:
                     failed_access_token=credentials.access_token,
                 )
                 access_token = credentials.access_token
+                credential_id = credentials.credential_id
                 headers["Authorization"] = f"Bearer {credentials.access_token}"
                 if credentials.account_id:
                     headers["ChatGPT-Account-ID"] = credentials.account_id
@@ -550,11 +607,14 @@ class CodexAuthService:
                     timeout=20.0,
                 )
             response.raise_for_status()
-            payload = response.json()
+            payload = orjson.loads(response.content)
             models = parse_model_catalog(payload)
             if not models:
                 raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
-            if not await self._save_model_cache(models, expected_access_token=access_token):
+            if not await self._save_model_cache(
+                models,
+                expected_credential_id=credential_id,
+            ):
                 raise CodexAuthError(CodexProblem(PROBLEM_LOGIN_REQUIRED))
             return CodexModelCatalog(operation_id, models, False)
         except CodexAuthError as exc:
@@ -562,6 +622,7 @@ class CodexAuthService:
                 operation_id,
                 exc.problem,
                 expected_access_token=access_token,
+                expected_credential_id=credential_id,
             )
         except httpx.HTTPStatusError as exc:
             problem = self._http_problem(exc.response)
@@ -569,12 +630,14 @@ class CodexAuthService:
                 operation_id,
                 problem,
                 expected_access_token=access_token,
+                expected_credential_id=credential_id,
             )
         except httpx.HTTPError, OSError, ValueError, orjson.JSONDecodeError:
             return await self._stale_catalog(
                 operation_id,
                 CodexProblem(PROBLEM_NETWORK),
                 expected_access_token=access_token,
+                expected_credential_id=credential_id,
             )
 
     async def _start_browser_authorization(
@@ -671,10 +734,7 @@ class CodexAuthService:
                 return
             params = parse_qs(parsed.query, keep_blank_values=True)
             received_state = _single_query_value(params, "state")
-            if received_state is None or not secrets.compare_digest(
-                received_state,
-                expected_state,
-            ):
+            if received_state is None or not _oauth_state_matches(received_state, expected_state):
                 await _write_callback_response(writer, 400)
                 return
             if callback.done():
@@ -762,33 +822,109 @@ class CodexAuthService:
             raise CodexAuthError(self._token_problem(response))
         return self._json_object(response)
 
-    async def _save_tokens(self, tokens: _StoredTokens, *, operation_id: int) -> None:
+    async def _save_tokens(
+        self,
+        tokens: _StoredTokens,
+        *,
+        operation_id: int,
+    ) -> _CredentialWrite:
         async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
                 self._raise_if_cancelled(operation_id)
+                previous_exists = self.auth_file.exists()
                 state = self._read_state()
+                previous_state = dict(state)
+                credential_id = uuid4().hex
                 state.update(
                     {
                         "version": AUTH_STORE_VERSION,
                         "access_token": tokens.access_token,
                         "refresh_token": tokens.refresh_token,
                         "expires_at": tokens.expires_at,
+                        "account_id": tokens.account_id,
+                        "credential_id": credential_id,
                         "last_refresh_at": self._clock(),
                     }
                 )
+                for key in (
+                    "models",
+                    "models_account_id",
+                    "models_credential_id",
+                    "models_stale",
+                    "models_updated_at",
+                ):
+                    state.pop(key, None)
                 state.pop("last_error", None)
                 self._write_state(state)
+                return _CredentialWrite(credential_id, previous_state, previous_exists)
             finally:
                 lock.release()
 
-    async def _abort_if_cancelled_after_credentials(self, operation_id: int) -> None:
+    async def _abort_if_cancelled_after_credentials(
+        self,
+        operation_id: int,
+        credential_write: _CredentialWrite,
+    ) -> None:
         if operation_id not in self._cancelled_operations:
             return
         self._cancelled_operations.discard(operation_id)
-        await self.disconnect(operation_id)
+        await self._rollback_credential_write(credential_write)
         raise CodexAuthError(CodexProblem(PROBLEM_CANCELLED))
+
+    async def _rollback_credential_write(self, credential_write: _CredentialWrite) -> None:
+        """Restore the prior state only while this operation still owns the file."""
+
+        async with self._get_lock("refresh"):
+            lock = self._file_lock()
+            await lock.acquire()
+            try:
+                self._restore_credential_write(self._read_state(), credential_write)
+            finally:
+                lock.release()
+
+    async def _finalize_login(
+        self,
+        operation_id: int,
+        credential_write: _CredentialWrite,
+        catalog: CodexModelCatalog,
+    ) -> tuple[CodexAuthSnapshot, CodexModelCatalog]:
+        """Commit one login result only while its credential generation is current."""
+
+        async with self._get_lock("refresh"):
+            lock = self._file_lock()
+            await lock.acquire()
+            try:
+                state = self._read_state()
+                if state.get("credential_id") != credential_write.credential_id:
+                    raise CodexAuthError(CodexProblem(PROBLEM_LOGIN_SUPERSEDED))
+                snapshot = self._snapshot_from_state(state, operation_id)
+                if snapshot.state != AUTH_CONNECTED:
+                    problem = snapshot.problem or CodexProblem(PROBLEM_LOGIN_REQUIRED)
+                    self._restore_credential_write(state, credential_write)
+                    raise CodexAuthError(problem)
+                return snapshot, catalog
+            finally:
+                lock.release()
+
+    def _restore_credential_write(
+        self,
+        state: Mapping[str, Any],
+        credential_write: _CredentialWrite,
+    ) -> bool:
+        if state.get("credential_id") != credential_write.credential_id:
+            return False
+        if credential_write.previous_exists:
+            self._write_state(credential_write.previous_state)
+            return True
+        try:
+            self.auth_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)) from exc
+        return True
 
     async def _refresh_tokens(
         self,
@@ -802,7 +938,7 @@ class CodexAuthService:
         try:
             response = await self._http().post(
                 TOKEN_URL,
-                data={
+                json={
                     "grant_type": "refresh_token",
                     "client_id": CODEX_CLIENT_ID,
                     "refresh_token": tokens.refresh_token,
@@ -822,12 +958,30 @@ class CodexAuthService:
             raise CodexAuthError(problem)
         payload = self._json_object(response)
         refreshed = self._parse_token_payload(payload, previous=tokens)
+        if refreshed.account_id != tokens.account_id:
+            refreshed = _StoredTokens(
+                refreshed.access_token,
+                refreshed.refresh_token,
+                refreshed.expires_at,
+                refreshed.account_id,
+                uuid4().hex,
+            )
+            for key in (
+                "models",
+                "models_account_id",
+                "models_credential_id",
+                "models_stale",
+                "models_updated_at",
+            ):
+                state.pop(key, None)
         state.update(
             {
                 "version": AUTH_STORE_VERSION,
                 "access_token": refreshed.access_token,
                 "refresh_token": refreshed.refresh_token,
                 "expires_at": refreshed.expires_at,
+                "account_id": refreshed.account_id,
+                "credential_id": refreshed.credential_id,
                 "last_refresh_at": self._clock(),
             }
         )
@@ -841,17 +995,39 @@ class CodexAuthService:
         *,
         previous: _StoredTokens | None = None,
     ) -> _StoredTokens:
-        access = payload.get("access_token")
-        refresh = payload.get("refresh_token")
-        if not isinstance(access, str) or not access:
-            raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
-        if not isinstance(refresh, str) or not refresh:
-            refresh = previous.refresh_token if previous is not None else ""
+        access_value = payload.get("access_token")
+        refresh_value = payload.get("refresh_token")
+        id_token_value = payload.get("id_token")
+        access = access_value if isinstance(access_value, str) and access_value else None
+        refresh = refresh_value if isinstance(refresh_value, str) and refresh_value else None
+        id_token = id_token_value if isinstance(id_token_value, str) and id_token_value else None
+
+        if previous is None:
+            if access is None or refresh is None or id_token is None:
+                raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
+            if _jwt_claims(id_token) is None:
+                raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
+            account_id = extract_chatgpt_account_id(id_token)
+            credential_id = None
+        else:
+            if access is None:
+                raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
+            refresh = refresh or previous.refresh_token
+            if id_token is not None:
+                if _jwt_claims(id_token) is None:
+                    raise CodexAuthError(CodexProblem(PROBLEM_INVALID_RESPONSE))
+                account_id = extract_chatgpt_account_id(id_token)
+            else:
+                account_id = previous.account_id
+            credential_id = previous.credential_id or uuid4().hex
+
         expires_at = token_expiry(access)
         expires_in = _positive_number(payload.get("expires_in"))
         if expires_at is None and expires_in is not None:
             expires_at = self._clock() + expires_in
-        return _StoredTokens(access, refresh, expires_at)
+        elif access == (previous.access_token if previous is not None else None):
+            expires_at = previous.expires_at if previous is not None else expires_at
+        return _StoredTokens(access, refresh, expires_at, account_id, credential_id)
 
     def _token_needs_refresh(self, tokens: _StoredTokens) -> bool:
         return tokens.expires_at is not None and (
@@ -862,8 +1038,9 @@ class CodexAuthService:
     def _runtime_credentials(tokens: _StoredTokens) -> CodexRuntimeCredentials:
         return CodexRuntimeCredentials(
             tokens.access_token,
-            extract_chatgpt_account_id(tokens.access_token),
+            tokens.account_id,
             tokens.expires_at,
+            tokens.credential_id,
         )
 
     async def _stale_catalog(
@@ -872,13 +1049,29 @@ class CodexAuthService:
         problem: CodexProblem,
         *,
         expected_access_token: str | None,
+        expected_credential_id: str | None,
     ) -> CodexModelCatalog:
         await self._record_catalog_problem(
             problem,
             expected_access_token=expected_access_token,
+            expected_credential_id=expected_credential_id,
         )
         state = self._read_state()
-        models = self._models_from_state(state)
+        tokens = self._tokens_from_state(state)
+        models = self._models_for_credentials(state, tokens)
+        current_credential_id = (
+            tokens.credential_id if tokens is not None else state.get("credential_id")
+        )
+        if expected_credential_id is not None and current_credential_id != expected_credential_id:
+            current_problem = self._problem_from_state(state)
+            if not models:
+                return fallback_catalog(operation_id, current_problem)
+            return CodexModelCatalog(
+                operation_id,
+                models,
+                bool(state.get("models_stale", not bool(state.get("models_updated_at")))),
+                current_problem,
+            )
         if not models:
             return fallback_catalog(operation_id, problem)
         return CodexModelCatalog(operation_id, models, True, problem)
@@ -887,7 +1080,7 @@ class CodexAuthService:
         self,
         models: tuple[CodexModel, ...],
         *,
-        expected_access_token: str,
+        expected_credential_id: str | None,
     ) -> bool:
         async with self._get_lock("refresh"):
             lock = self._file_lock()
@@ -895,12 +1088,15 @@ class CodexAuthService:
             try:
                 state = self._read_state()
                 tokens = self._tokens_from_state(state)
-                if tokens is None or not _tokens_belong_to_same_account(
-                    expected_access_token,
-                    tokens.access_token,
+                if (
+                    tokens is None
+                    or expected_credential_id is None
+                    or tokens.credential_id != expected_credential_id
                 ):
                     return False
                 state["models"] = [_model_to_data(model) for model in models[:MAX_CACHED_MODELS]]
+                state["models_account_id"] = tokens.account_id
+                state["models_credential_id"] = tokens.credential_id
                 state["models_updated_at"] = self._clock()
                 state["models_stale"] = False
                 state.pop("last_error", None)
@@ -914,6 +1110,7 @@ class CodexAuthService:
         problem: CodexProblem,
         *,
         expected_access_token: str | None,
+        expected_credential_id: str | None,
     ) -> None:
         async with self._get_lock("refresh"):
             lock = self._file_lock()
@@ -921,12 +1118,20 @@ class CodexAuthService:
             try:
                 state = self._read_state()
                 tokens = self._tokens_from_state(state)
-                if tokens is None:
-                    return
-                if expected_access_token is not None and not _tokens_belong_to_same_account(
-                    expected_access_token,
-                    tokens.access_token,
+                if (
+                    tokens is None
+                    or expected_credential_id is None
+                    or tokens.credential_id != expected_credential_id
                 ):
+                    return
+                if problem.code in TERMINAL_AUTH_PROBLEMS:
+                    if (
+                        expected_access_token is None
+                        or tokens.access_token != expected_access_token
+                    ):
+                        return
+                    state["models_stale"] = True
+                    self._write_terminal_problem(state, problem)
                     return
                 state["models_stale"] = True
                 self._set_problem(state, problem)
@@ -934,44 +1139,56 @@ class CodexAuthService:
             finally:
                 lock.release()
 
-    async def _record_auth_problem(self, problem: CodexProblem) -> None:
+    async def _record_login_problem(
+        self,
+        problem: CodexProblem,
+        baseline_tokens: _StoredTokens | None,
+    ) -> None:
+        """Record a failed login only when no existing credential can be harmed."""
+
         async with self._get_lock("refresh"):
             lock = self._file_lock()
             await lock.acquire()
             try:
                 state = self._read_state()
-                if problem.code in _TERMINAL_TOKEN_ERRORS | {PROBLEM_LOGIN_REQUIRED}:
-                    self._write_terminal_problem(state, problem)
-                else:
-                    self._set_problem(state, problem)
-                    self._write_state(state)
+                current_tokens = self._tokens_from_state(state)
+                if _credential_identity(current_tokens) != _credential_identity(baseline_tokens):
+                    return
+                if baseline_tokens is not None:
+                    return
+                self._set_problem(state, problem)
+                self._write_state(state)
             finally:
                 lock.release()
 
     def _read_state(self) -> dict[str, Any]:
         try:
             loaded = orjson.loads(self.auth_file.read_bytes())
-        except OSError, orjson.JSONDecodeError:
+        except FileNotFoundError, orjson.JSONDecodeError:
             return {"version": AUTH_STORE_VERSION}
+        except OSError as exc:
+            raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)) from exc
         if not isinstance(loaded, dict) or loaded.get("version") != AUTH_STORE_VERSION:
             return {"version": AUTH_STORE_VERSION}
         return dict(loaded)
 
     def _write_state(self, state: Mapping[str, Any]) -> None:
-        self.auth_file.parent.mkdir(parents=True, exist_ok=True)
-        self._limit_permissions(self.auth_file.parent, directory=True)
         temporary = self.auth_file.with_name(f".{self.auth_file.name}.{uuid4().hex}.tmp")
         payload = orjson.dumps(dict(state), option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE)
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
+            self.auth_file.parent.mkdir(parents=True, exist_ok=True)
+            self._limit_permissions(self.auth_file.parent, directory=True)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.auth_file)
             self._limit_permissions(self.auth_file, directory=False)
+        except OSError as exc:
+            raise CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE)) from exc
         finally:
-            with suppress(FileNotFoundError):
+            with suppress(OSError):
                 temporary.unlink()
 
     @staticmethod
@@ -986,11 +1203,80 @@ class CodexAuthService:
         expiry = state.get("expires_at")
         if not isinstance(access, str) or not access:
             return None
+        account_id = state.get("account_id")
+        credential_id = state.get("credential_id")
         return _StoredTokens(
             access,
             refresh if isinstance(refresh, str) else "",
             float(expiry) if isinstance(expiry, int | float) else token_expiry(access),
+            account_id
+            if isinstance(account_id, str) and account_id
+            else extract_chatgpt_account_id(access),
+            credential_id if isinstance(credential_id, str) and credential_id else None,
         )
+
+    def _ensure_credential_identity(
+        self,
+        state: dict[str, Any],
+        tokens: _StoredTokens,
+    ) -> _StoredTokens:
+        """Assign ownership metadata when adopting a pre-ownership credential file."""
+
+        credential_id = tokens.credential_id
+        changed = False
+        if credential_id is None:
+            credential_id = uuid4().hex
+            state["credential_id"] = credential_id
+            changed = True
+        if tokens.account_id is not None and state.get("account_id") != tokens.account_id:
+            state["account_id"] = tokens.account_id
+            changed = True
+
+        if self._models_from_state(state) and not state.get("models_credential_id"):
+            models_account_id = state.get("models_account_id")
+            if not (
+                isinstance(models_account_id, str)
+                and models_account_id
+                and models_account_id != tokens.account_id
+            ):
+                state["models_credential_id"] = credential_id
+                if tokens.account_id is not None:
+                    state["models_account_id"] = tokens.account_id
+                changed = True
+
+        if changed:
+            self._write_state(state)
+        return _StoredTokens(
+            tokens.access_token,
+            tokens.refresh_token,
+            tokens.expires_at,
+            tokens.account_id,
+            credential_id,
+        )
+
+    @classmethod
+    def _models_for_credentials(
+        cls,
+        state: Mapping[str, Any],
+        tokens: _StoredTokens | None,
+    ) -> tuple[CodexModel, ...]:
+        models = cls._models_from_state(state)
+        if tokens is None or not models:
+            return models
+        owner = state.get("models_credential_id")
+        if tokens.credential_id is None:
+            if isinstance(owner, str) and owner:
+                return ()
+        elif owner != tokens.credential_id:
+            return ()
+        models_account_id = state.get("models_account_id")
+        if (
+            isinstance(models_account_id, str)
+            and models_account_id
+            and models_account_id != tokens.account_id
+        ):
+            return ()
+        return models
 
     @staticmethod
     def _models_from_state(state: Mapping[str, Any]) -> tuple[CodexModel, ...]:
@@ -1003,6 +1289,40 @@ class CodexAuthService:
             if isinstance(item, dict) and (model := _model_from_data(item)) is not None
         )
         return models
+
+    @classmethod
+    def _snapshot_from_state(
+        cls,
+        state: Mapping[str, Any],
+        operation_id: int,
+    ) -> CodexAuthSnapshot:
+        tokens = cls._tokens_from_state(state)
+        models = cls._models_for_credentials(state, tokens)
+        problem = cls._problem_from_state(state)
+        if problem is not None and problem.code in TERMINAL_AUTH_PROBLEMS:
+            auth_state = AUTH_LOGIN_REQUIRED
+        elif tokens is not None:
+            auth_state = AUTH_CONNECTED
+        elif problem is not None and problem.code in {
+            PROBLEM_CALLBACK_UNAVAILABLE,
+            PROBLEM_CREDENTIAL_STORE_BUSY,
+            PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
+            PROBLEM_LOGIN_SUPERSEDED,
+            PROBLEM_RATE_LIMITED,
+            PROBLEM_NETWORK,
+            PROBLEM_SERVER,
+        }:
+            auth_state = AUTH_RETRY_LATER
+        else:
+            auth_state = AUTH_DISCONNECTED
+        return CodexAuthSnapshot(
+            operation_id=operation_id,
+            state=auth_state,
+            model_count=len(models),
+            stale=bool(state.get("models_stale", not bool(state.get("models_updated_at")))),
+            expires_at=tokens.expires_at if tokens else None,
+            problem=problem,
+        )
 
     @staticmethod
     def _problem_from_state(state: Mapping[str, Any]) -> CodexProblem | None:
@@ -1024,6 +1344,7 @@ class CodexAuthService:
         state.pop("access_token", None)
         state.pop("refresh_token", None)
         state.pop("expires_at", None)
+        state.pop("account_id", None)
         self._set_problem(state, problem)
         self._write_state(state)
 
@@ -1072,13 +1393,15 @@ class CodexAuthService:
     def _token_problem(self, response: httpx.Response) -> CodexProblem:
         code = ""
         try:
-            payload = response.json()
+            payload = orjson.loads(response.content)
             if isinstance(payload, dict):
                 raw = payload.get("error")
                 if isinstance(raw, dict):
                     raw = raw.get("code") or raw.get("type")
+                if not isinstance(raw, str):
+                    raw = payload.get("code")
                 if isinstance(raw, str):
-                    code = raw
+                    code = raw.strip().lower()
         except ValueError:
             pass
         if response.status_code in (401, 403) and code not in _TERMINAL_TOKEN_ERRORS:
@@ -1126,7 +1449,7 @@ def _build_authorization_url(*, redirect_uri: str, code_challenge: str, state: s
 
 
 def _base64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+    return pybase64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
 def _single_query_value(params: Mapping[str, list[str]], key: str) -> str | None:
@@ -1134,6 +1457,15 @@ def _single_query_value(params: Mapping[str, list[str]], key: str) -> str | None
     if values is None or len(values) != 1:
         return None
     return values[0]
+
+
+def _oauth_state_matches(received: str, expected: str) -> bool:
+    if secrets.compare_digest(received, expected):
+        return True
+    if not received.endswith(_LIFE_SCIENCES_STATE_SUFFIX):
+        return False
+    state = received[: -len(_LIFE_SCIENCES_STATE_SUFFIX)]
+    return secrets.compare_digest(state, expected)
 
 
 async def _write_callback_response(
@@ -1410,11 +1742,10 @@ def _positive_number(value: object) -> float | None:
     return None
 
 
-def _tokens_belong_to_same_account(expected: str, actual: str) -> bool:
-    if expected == actual:
-        return True
-    expected_account = extract_chatgpt_account_id(expected)
-    return bool(expected_account and expected_account == extract_chatgpt_account_id(actual))
+def _credential_identity(tokens: _StoredTokens | None) -> tuple[str | None, str] | None:
+    if tokens is None:
+        return None
+    return tokens.credential_id, tokens.access_token
 
 
 def _parse_retry_after(value: str | None) -> float | None:

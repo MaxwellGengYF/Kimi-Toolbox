@@ -323,6 +323,8 @@ def codex_problem_message(problem: CodexProblem | None) -> str:
         PROBLEM_LOGIN_REQUIRED,
         "invalid_grant",
         "invalid_token",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
         "refresh_token_reused",
     }:
         return QCoreApplication.translate(

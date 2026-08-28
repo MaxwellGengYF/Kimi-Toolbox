@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 import orjson
+import pybase64
 import pytest
 
 from kimi_cli.auth.codex import (
@@ -26,7 +26,10 @@ from kimi_cli.auth.codex import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     PROBLEM_CALLBACK_UNAVAILABLE,
     PROBLEM_CANCELLED,
+    PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
+    PROBLEM_INVALID_RESPONSE,
     PROBLEM_LOGIN_REQUIRED,
+    PROBLEM_LOGIN_SUPERSEDED,
     PROBLEM_RATE_LIMITED,
     PROBLEM_TIMEOUT,
     TOKEN_URL,
@@ -41,7 +44,7 @@ from kimi_cli.auth.codex import (
 
 
 def _jwt(*, exp: int = 10_000, account_id: str = "acct-1") -> str:
-    payload = base64.urlsafe_b64encode(
+    payload = pybase64.urlsafe_b64encode(
         orjson.dumps(
             {
                 "exp": exp,
@@ -52,7 +55,13 @@ def _jwt(*, exp: int = 10_000, account_id: str = "acct-1") -> str:
     return f"header.{payload.decode()}.signature"
 
 
-def _write_tokens(path: Path, access: str, refresh: str = "refresh-1") -> None:
+def _write_tokens(
+    path: Path,
+    access: str,
+    refresh: str = "refresh-1",
+    *,
+    credential_id: str = "credential-1",
+) -> None:
     path.write_bytes(
         orjson.dumps(
             {
@@ -60,6 +69,8 @@ def _write_tokens(path: Path, access: str, refresh: str = "refresh-1") -> None:
                 "access_token": access,
                 "refresh_token": refresh,
                 "expires_at": 100,
+                "account_id": extract_chatgpt_account_id(access),
+                "credential_id": credential_id,
             }
         )
     )
@@ -102,7 +113,7 @@ async def test_browser_flow_uses_pkce_callback_exchanges_and_fetches_models(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, str, object]] = []
-    access = _jwt()
+    access = _jwt(account_id="access-token-account")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         body: object = request.content.decode()
@@ -110,7 +121,11 @@ async def test_browser_flow_uses_pkce_callback_exchanges_and_fetches_models(
         if str(request.url) == TOKEN_URL:
             return httpx.Response(
                 200,
-                json={"access_token": access, "refresh_token": "refresh-token"},
+                json={
+                    "id_token": _jwt(account_id="acct-1"),
+                    "access_token": access,
+                    "refresh_token": "refresh-token",
+                },
             )
         if str(request.url) == CODEX_MODELS_URL:
             assert request.headers["ChatGPT-Account-ID"] == "acct-1"
@@ -176,7 +191,7 @@ async def test_browser_flow_uses_pkce_callback_exchanges_and_fetches_models(
     assert token_form["redirect_uri"] == authorization_query["redirect_uri"]
     verifier = token_form["code_verifier"][0]
     expected_challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+        pybase64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
         .rstrip(b"=")
         .decode("ascii")
     )
@@ -197,7 +212,11 @@ async def test_browser_callback_rejects_wrong_state_then_accepts_expected_state(
         if str(request.url) == TOKEN_URL:
             return httpx.Response(
                 200,
-                json={"access_token": _jwt(), "refresh_token": "refresh"},
+                json={
+                    "id_token": _jwt(),
+                    "access_token": _jwt(),
+                    "refresh_token": "refresh",
+                },
             )
         if str(request.url) == CODEX_MODELS_URL:
             return httpx.Response(200, json={"models": [{"slug": "model"}]})
@@ -210,8 +229,17 @@ async def test_browser_callback_rejects_wrong_state_then_accepts_expected_state(
     )
 
     async def complete(challenge: CodexBrowserChallenge) -> None:
+        query = parse_qs(urlsplit(challenge.authorization_url).query)
+        expected_state = query["state"][0]
         assert await _send_browser_callback(challenge, state="wrong-state") == 400
-        assert await _send_browser_callback(challenge) == 200
+        assert await _send_browser_callback(challenge, state=f"{expected_state}.unexpected") == 400
+        assert (
+            await _send_browser_callback(
+                challenge,
+                state=f"{expected_state}.onboarding_entrypoint=life_sciences",
+            )
+            == 200
+        )
 
     snapshot, _catalog = await service.login(8, complete)
     await service.aclose()
@@ -279,7 +307,11 @@ async def test_cancel_during_model_refresh_removes_just_created_credentials(
         if str(request.url) == TOKEN_URL:
             return httpx.Response(
                 200,
-                json={"access_token": _jwt(), "refresh_token": "refresh"},
+                json={
+                    "id_token": _jwt(),
+                    "access_token": _jwt(),
+                    "refresh_token": "refresh",
+                },
             )
         if str(request.url) == CODEX_MODELS_URL:
             model_request_started.set()
@@ -347,7 +379,7 @@ async def test_browser_flow_reports_when_local_callback_ports_are_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_token_exchange_401_requires_login_and_clears_old_tokens(tmp_path: Path) -> None:
+async def test_failed_new_code_exchange_preserves_existing_credentials(tmp_path: Path) -> None:
     auth_file = tmp_path / "auth.json"
     _write_tokens(auth_file, _jwt())
 
@@ -367,10 +399,10 @@ async def test_token_exchange_401_requires_login_and_clears_old_tokens(tmp_path:
     await service.aclose()
 
     assert caught.value.problem.code == PROBLEM_LOGIN_REQUIRED
-    assert snapshot.state == AUTH_LOGIN_REQUIRED
+    assert snapshot.state == AUTH_CONNECTED
     state = orjson.loads(auth_file.read_bytes())
-    assert "access_token" not in state
-    assert "refresh_token" not in state
+    assert state["access_token"] == _jwt()
+    assert state["refresh_token"] == "refresh-1"
 
 
 @pytest.mark.asyncio
@@ -384,11 +416,21 @@ async def test_refresh_rotates_token_and_a_second_service_adopts_it(tmp_path: Pa
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal refresh_calls
         assert str(request.url) == TOKEN_URL
+        assert request.headers["Content-Type"] == "application/json"
+        assert orjson.loads(request.content) == {
+            "client_id": CODEX_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": "refresh-1",
+        }
         refresh_calls += 1
         await asyncio.sleep(0)
         return httpx.Response(
             200,
-            json={"access_token": new_access, "refresh_token": "refresh-2"},
+            json={
+                "id_token": _jwt(exp=20_000, account_id="new-account"),
+                "access_token": new_access,
+                "refresh_token": "refresh-2",
+            },
         )
 
     transport = httpx.MockTransport(handler)
@@ -405,10 +447,51 @@ async def test_refresh_rotates_token_and_a_second_service_adopts_it(tmp_path: Pa
     assert {item.account_id for item in credentials} == {"new-account"}
     state = orjson.loads(auth_file.read_bytes())
     assert state["refresh_token"] == "refresh-2"
+    assert state["credential_id"] != "credential-1"
 
 
 @pytest.mark.asyncio
-async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(tmp_path: Path) -> None:
+async def test_refresh_response_requires_a_new_access_token(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    old_access = _jwt(exp=100)
+    _write_tokens(auth_file, old_access)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == TOKEN_URL
+        return httpx.Response(
+            200,
+            json={"refresh_token": "rotated-refresh", "expires_in": 3_600},
+        )
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        clock=lambda: 1_000,
+    )
+    with pytest.raises(CodexAuthError) as caught:
+        await service.ensure_credentials(force_refresh=True)
+    await service.aclose()
+
+    state = orjson.loads(auth_file.read_bytes())
+    assert caught.value.problem.code == PROBLEM_INVALID_RESPONSE
+    assert state["access_token"] == old_access
+    assert state["refresh_token"] == "refresh-1"
+
+
+@pytest.mark.parametrize(
+    "backend_code",
+    [
+        "invalid_grant",
+        "refresh_token_expired",
+        "REFRESH_TOKEN_INVALIDATED",
+        "refresh_token_reused",
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(
+    tmp_path: Path,
+    backend_code: str,
+) -> None:
     auth_file = tmp_path / "auth.json"
     _write_tokens(auth_file, _jwt(exp=100))
     state = orjson.loads(auth_file.read_bytes())
@@ -416,7 +499,7 @@ async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(tmp_path
     auth_file.write_bytes(orjson.dumps(state))
 
     async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(400, json={"error": {"code": backend_code}})
 
     service = CodexAuthService(
         auth_file,
@@ -429,10 +512,10 @@ async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(tmp_path
     catalog = await service.catalog()
     await service.aclose()
 
-    assert caught.value.problem.code == "invalid_grant"
+    assert caught.value.problem.code == backend_code.lower()
     assert snapshot.state == AUTH_LOGIN_REQUIRED
     assert [model.slug for model in catalog.models] == ["cached"]
-    persisted = auth_file.read_text(encoding="utf-8")
+    persisted = orjson.loads(auth_file.read_bytes())
     assert "access_token" not in persisted
     assert "refresh_token" not in persisted
 
@@ -498,7 +581,11 @@ async def test_model_network_failure_uses_cache_then_exact_fallback(tmp_path: Pa
                 "access_token": _jwt(),
                 "refresh_token": "refresh",
                 "expires_at": 10_000,
+                "account_id": "acct-1",
+                "credential_id": "credential-cache",
                 "models": [{"slug": "cached-account-model", "priority": 1}],
+                "models_account_id": "acct-1",
+                "models_credential_id": "credential-cache",
             }
         )
     )
@@ -527,6 +614,87 @@ async def test_model_network_failure_uses_cache_then_exact_fallback(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_superseded_catalog_refresh_returns_current_catalog_state(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    old_access = _jwt(exp=10_000, account_id="shared-account")
+    _write_tokens(auth_file, old_access, credential_id="old-credential")
+    state = orjson.loads(auth_file.read_bytes())
+    state["expires_at"] = 10_000
+    auth_file.write_bytes(orjson.dumps(state))
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == CODEX_MODELS_URL
+        request_started.set()
+        await release_request.wait()
+        return httpx.Response(200, json={"models": [{"slug": "late-old-model"}]})
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        clock=lambda: 1_000,
+    )
+    task = asyncio.create_task(service.refresh_models(16))
+    await request_started.wait()
+
+    newer_access = _jwt(exp=20_000, account_id="shared-account")
+    _write_tokens(auth_file, newer_access, credential_id="newer-credential")
+    newer_state = orjson.loads(auth_file.read_bytes())
+    newer_state.update(
+        {
+            "expires_at": 20_000,
+            "models": [{"slug": "current-model"}],
+            "models_account_id": "shared-account",
+            "models_credential_id": "newer-credential",
+            "models_updated_at": 2_000,
+            "models_stale": False,
+        }
+    )
+    auth_file.write_bytes(orjson.dumps(newer_state))
+    release_request.set()
+    catalog = await task
+    await service.aclose()
+
+    assert [model.slug for model in catalog.models] == ["current-model"]
+    assert catalog.stale is False
+    assert catalog.problem is None
+    assert orjson.loads(auth_file.read_bytes()) == newer_state
+
+
+@pytest.mark.asyncio
+async def test_legacy_credentials_adopt_cached_model_ownership(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    access = _jwt(exp=10_000, account_id="legacy-account")
+    auth_file.write_bytes(
+        orjson.dumps(
+            {
+                "version": 1,
+                "access_token": access,
+                "refresh_token": "legacy-refresh",
+                "expires_at": 10_000,
+                "models": [{"slug": "legacy-model"}],
+            }
+        )
+    )
+    service = CodexAuthService(auth_file, clock=lambda: 1_000)
+
+    before = await service.snapshot()
+    credentials = await service.ensure_credentials()
+    catalog = await service.catalog()
+    await service.aclose()
+
+    state = orjson.loads(auth_file.read_bytes())
+    assert before.state == AUTH_CONNECTED
+    assert before.model_count == 1
+    assert credentials.account_id == "legacy-account"
+    assert isinstance(state["credential_id"], str)
+    assert state["models_credential_id"] == state["credential_id"]
+    assert state["models_account_id"] == "legacy-account"
+    assert [model.slug for model in catalog.models] == ["legacy-model"]
+
+
+@pytest.mark.asyncio
 async def test_inflight_catalog_refresh_does_not_recreate_disconnected_store(
     tmp_path: Path,
 ) -> None:
@@ -538,6 +706,8 @@ async def test_inflight_catalog_refresh_does_not_recreate_disconnected_store(
                 "access_token": _jwt(),
                 "refresh_token": "refresh",
                 "expires_at": 10_000,
+                "account_id": "acct-1",
+                "credential_id": "credential-inflight",
             }
         )
     )
@@ -587,10 +757,321 @@ async def test_login_required_problem_overrides_stored_access_token(tmp_path: Pa
     service = CodexAuthService(auth_file, clock=lambda: 1_000)
 
     snapshot = await service.snapshot()
+    cached = service.cached_credentials()
+    with pytest.raises(CodexAuthError) as caught:
+        await service.ensure_credentials()
     await service.disconnect()
 
     assert snapshot.state == AUTH_LOGIN_REQUIRED
+    assert cached is None
+    assert caught.value.problem.code == PROBLEM_LOGIN_REQUIRED
     assert not auth_file.exists()
+
+
+@pytest.mark.parametrize(
+    "token_payload",
+    [
+        {"access_token": _jwt(), "refresh_token": "refresh"},
+        {"id_token": _jwt(), "access_token": _jwt()},
+        {"id_token": "opaque", "access_token": _jwt(), "refresh_token": "refresh"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_initial_token_response_requires_complete_oidc_tokens(
+    tmp_path: Path,
+    token_payload: dict[str, str],
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == TOKEN_URL
+        return httpx.Response(200, json=token_payload)
+
+    service = CodexAuthService(
+        tmp_path / "auth.json",
+        transport=httpx.MockTransport(handler),
+        callback_ports=(0,),
+    )
+
+    with pytest.raises(CodexAuthError) as caught:
+        await service.login(20, _send_browser_callback)
+    await service.aclose()
+
+    assert caught.value.problem.code == PROBLEM_INVALID_RESPONSE
+    state = orjson.loads((tmp_path / "auth.json").read_bytes())
+    assert "access_token" not in state
+    assert "refresh_token" not in state
+
+
+@pytest.mark.asyncio
+async def test_terminal_catalog_failure_restores_previous_credentials(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    previous_access = _jwt(account_id="previous-account")
+    _write_tokens(auth_file, previous_access, "previous-refresh", credential_id="previous-id")
+    previous_state = orjson.loads(auth_file.read_bytes())
+    previous_state.update(
+        {
+            "models": [{"slug": "previous-model"}],
+            "models_account_id": "previous-account",
+            "models_credential_id": "previous-id",
+        }
+    )
+    auth_file.write_bytes(orjson.dumps(previous_state))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id="new-account"),
+                    "access_token": _jwt(account_id="new-account"),
+                    "refresh_token": "new-refresh",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            return httpx.Response(403)
+        raise AssertionError(str(request.url))
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        callback_ports=(0,),
+    )
+    with pytest.raises(CodexAuthError) as caught:
+        await service.login(20, _send_browser_callback)
+    await service.aclose()
+
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert caught.value.problem.code == PROBLEM_LOGIN_REQUIRED
+    assert persisted == previous_state
+
+
+@pytest.mark.asyncio
+async def test_superseded_login_cannot_publish_or_overwrite_newer_credentials(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    model_request_started = asyncio.Event()
+    release_model_request = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id="shared-account"),
+                    "access_token": _jwt(exp=20_000, account_id="shared-account"),
+                    "refresh_token": "operation-refresh",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            model_request_started.set()
+            await release_model_request.wait()
+            return httpx.Response(200, json={"models": [{"slug": "late-old-model"}]})
+        raise AssertionError(str(request.url))
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        callback_ports=(0,),
+    )
+    login_task = asyncio.create_task(service.login(21, _send_browser_callback))
+    await model_request_started.wait()
+
+    newer_access = _jwt(exp=30_000, account_id="shared-account")
+    _write_tokens(
+        auth_file,
+        newer_access,
+        "newer-refresh",
+        credential_id="newer-credential",
+    )
+    newer_state = orjson.loads(auth_file.read_bytes())
+    newer_state.update(
+        {
+            "models": [{"slug": "newer-model"}],
+            "models_account_id": "shared-account",
+            "models_credential_id": "newer-credential",
+        }
+    )
+    auth_file.write_bytes(orjson.dumps(newer_state))
+    release_model_request.set()
+
+    with pytest.raises(CodexAuthError) as caught:
+        await login_task
+    await service.aclose()
+
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert caught.value.problem.code == PROBLEM_LOGIN_SUPERSEDED
+    assert persisted["access_token"] == newer_access
+    assert persisted["credential_id"] == "newer-credential"
+    assert persisted["models"] == [{"slug": "newer-model"}]
+
+
+@pytest.mark.asyncio
+async def test_account_changing_refresh_supersedes_inflight_login_and_catalog(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    model_request_started = asyncio.Event()
+    release_model_request = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            if request.headers["Content-Type"].startswith("application/json"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "id_token": _jwt(account_id="account-b"),
+                        "access_token": _jwt(exp=30_000, account_id="account-b"),
+                        "refresh_token": "refresh-b",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id="account-a"),
+                    "access_token": _jwt(exp=20_000, account_id="account-a"),
+                    "refresh_token": "refresh-a",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            model_request_started.set()
+            await release_model_request.wait()
+            return httpx.Response(200, json={"models": [{"slug": "account-a-only"}]})
+        raise AssertionError(str(request.url))
+
+    transport = httpx.MockTransport(handler)
+    login_service = CodexAuthService(
+        auth_file,
+        transport=transport,
+        callback_ports=(0,),
+        clock=lambda: 1_000,
+    )
+    refresh_service = CodexAuthService(auth_file, transport=transport, clock=lambda: 1_000)
+    login_task = asyncio.create_task(login_service.login(22, _send_browser_callback))
+    await model_request_started.wait()
+    login_generation = orjson.loads(auth_file.read_bytes())["credential_id"]
+
+    refreshed = await refresh_service.ensure_credentials(force_refresh=True)
+    release_model_request.set()
+    with pytest.raises(CodexAuthError) as caught:
+        await login_task
+    await login_service.aclose()
+    await refresh_service.aclose()
+
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert caught.value.problem.code == PROBLEM_LOGIN_SUPERSEDED
+    assert refreshed.account_id == "account-b"
+    assert refreshed.credential_id != login_generation
+    assert persisted["account_id"] == "account-b"
+    assert persisted["credential_id"] == refreshed.credential_id
+    assert "models" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_new_account_never_inherits_previous_account_model_cache(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    account_a_access = _jwt(account_id="account-a")
+    _write_tokens(auth_file, account_a_access, credential_id="credential-a")
+    state = orjson.loads(auth_file.read_bytes())
+    state.update(
+        {
+            "models": [{"slug": "account-a-only"}],
+            "models_account_id": "account-a",
+            "models_credential_id": "credential-a",
+        }
+    )
+    auth_file.write_bytes(orjson.dumps(state))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id="account-b"),
+                    "access_token": _jwt(account_id="account-b"),
+                    "refresh_token": "refresh-b",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            raise httpx.ConnectError("offline", request=request)
+        raise AssertionError(str(request.url))
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        callback_ports=(0,),
+    )
+    snapshot, catalog = await service.login(21, _send_browser_callback)
+    await service.aclose()
+
+    assert snapshot.state == AUTH_CONNECTED
+    assert "account-a-only" not in {model.slug for model in catalog.models}
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert persisted["account_id"] == "account-b"
+    assert "models" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_cancelled_login_does_not_delete_newer_process_credentials(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    model_request_started = asyncio.Event()
+    release_models = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id="account-a"),
+                    "access_token": _jwt(account_id="account-a"),
+                    "refresh_token": "refresh-a",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            model_request_started.set()
+            await release_models.wait()
+            return httpx.Response(200, json={"models": [{"slug": "model-a"}]})
+        raise AssertionError(str(request.url))
+
+    service = CodexAuthService(
+        auth_file,
+        transport=httpx.MockTransport(handler),
+        callback_ports=(0,),
+    )
+    login_task = asyncio.create_task(service.login(22, _send_browser_callback))
+    await model_request_started.wait()
+    account_b_access = _jwt(account_id="account-b")
+    _write_tokens(
+        auth_file,
+        account_b_access,
+        "refresh-b",
+        credential_id="credential-b",
+    )
+    service.cancel_login(22)
+    release_models.set()
+
+    with pytest.raises(CodexAuthError) as caught:
+        await login_task
+    await service.aclose()
+
+    assert caught.value.problem.code == PROBLEM_CANCELLED
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert persisted["access_token"] == account_b_access
+    assert persisted["refresh_token"] == "refresh-b"
+    assert persisted["credential_id"] == "credential-b"
+
+
+@pytest.mark.asyncio
+async def test_credential_store_failures_are_sanitized_domain_errors(tmp_path: Path) -> None:
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("blocked", encoding="utf-8")
+    service = CodexAuthService(blocked_parent / "auth.json")
+
+    with pytest.raises(CodexAuthError) as caught:
+        await service.disconnect()
+    await service.aclose()
+
+    assert caught.value.problem.code == PROBLEM_CREDENTIAL_STORE_UNAVAILABLE
+    assert str(blocked_parent) not in str(caught.value)
 
 
 def test_model_catalog_filters_hidden_sorts_deduplicates_and_keeps_codex_only() -> None:

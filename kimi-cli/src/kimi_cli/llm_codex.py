@@ -86,7 +86,9 @@ class CodexRequestAuth(httpx.Auth):
             failed_access_token=credentials.access_token,
         )
         self._apply(request, credentials.access_token, credentials.account_id)
-        yield request
+        retry_response = yield request
+        if retry_response.status_code == 401:
+            await retry_response.aread()
 
     @staticmethod
     def _apply(request: httpx.Request, access_token: str, account_id: str | None) -> None:
@@ -264,6 +266,7 @@ async def create_codex_provider(
         "name": model.display_name or model.slug,
         "model": model.slug,
         "max_context_size": model.max_context_size,
+        "max_tokens": model.max_tokens,
         "capabilities": capabilities,
         "type": "openai-codex",
         "url": CODEX_BASE_URL,
