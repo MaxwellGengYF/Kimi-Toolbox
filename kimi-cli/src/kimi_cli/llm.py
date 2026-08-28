@@ -471,6 +471,13 @@ def create_llm(
     # provider can force its temperature based on the same decision that later
     # drives with_thinking().
     capabilities = derive_model_capabilities(model)
+    # A configured non-"off" thinking effort implies thinking should be on when
+    # the caller did not make an explicit decision (thinking is None). This is
+    # what makes configs like `C:/dev/ds_cmdcode.json` (`thinking_effort: "high"`
+    # + `capabilities: ["thinking"]`, no `default_thinking`) emit reasoning
+    # blocks even when create_llm is called without a `thinking` argument.
+    if thinking is None and thinking_effort not in (None, "off") and "thinking" in capabilities:
+        thinking = True
     thinking_on = "always_thinking" in capabilities or (
         thinking is True and "thinking" in capabilities
     )
@@ -544,8 +551,16 @@ def create_llm(
                 max_tokens = model.max_context_size
             if max_tokens is not None:
                 max_tokens_int = int(max_tokens)
-                gen_kwargs["max_tokens"] = max_tokens_int
-                gen_kwargs["max_completion_tokens"] = max_tokens_int
+                # OpenAI's Chat Completions API (and many compatible backends)
+                # rejects requests that include both ``max_tokens`` and
+                # ``max_completion_tokens``.  For reasoning models we need
+                # ``max_completion_tokens`` (it counts reasoning tokens); for
+                # non-reasoning models we keep the legacy ``max_tokens`` for the
+                # broadest compatibility with older endpoints.
+                if thinking_on:
+                    gen_kwargs["max_completion_tokens"] = max_tokens_int
+                else:
+                    gen_kwargs["max_tokens"] = max_tokens_int
             if temperature is not None:
                 gen_kwargs["temperature"] = float(temperature)
             if top_p is None:

@@ -32,6 +32,6 @@ Monorepo with 6 Python packages managed by `uv` workspace.
 
 ## Optional Deps
 
-`kimix[office]`: pymupdf, pdfplumber, python-docx · `kimix[image_process]`: pillow, pytesseract · `kosong-x[contrib]`: anthropic, google-genai.
+`kimix[office]`: pymupdf, python-docx · `kimix[image_process]`: pillow · `kosong-x[contrib]`: anthropic, google-genai.
 
 Full TOML block templates (`[build-system]`, `[project]`, `[tool.ruff]`, `[tool.pyright]`, etc.): read `references/pyproject-reference.md`.

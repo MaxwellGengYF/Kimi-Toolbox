@@ -626,6 +626,52 @@ def extract_reasoning_from_content(
     return reasoning, visible
 
 
+def extract_reasoning_text(message_or_delta: object, reasoning_key: str | None) -> str | None:
+    """Extract reasoning text from an OpenAI-compatible message/delta object.
+
+    Backends disagree on which field carries reasoning content:
+
+    * DeepSeek/Moonshot-style: ``reasoning_content`` (the configured key).
+    * Command Code (``api.commandcode.ai``): ``reasoning`` (plain string) and
+      ``reasoning_details`` (list of ``{"type": "reasoning.text", "text": ...}``
+      blocks, Anthropic-style).
+
+    The configured ``reasoning_key`` is tried first, then the ``reasoning`` /
+    ``reasoning_details`` fallbacks, so providers that return reasoning under a
+    different field still surface a ``ThinkPart`` (rendered as the ``[thinking]``
+    block). Returns ``None`` when no field carries text, and also when
+    ``reasoning_key`` is falsy (``""`` explicitly disables reasoning).
+    """
+    if not reasoning_key:
+        return None
+
+    def _text(value: object) -> str | None:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for block in value:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                else:
+                    text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+            return "".join(parts) if parts else None
+        return None
+
+    value = getattr(message_or_delta, reasoning_key, None)
+    if (text := _text(value)) is not None:
+        return text
+    value = getattr(message_or_delta, "reasoning", None)
+    if (text := _text(value)) is not None:
+        return text
+    value = getattr(message_or_delta, "reasoning_details", None)
+    if (text := _text(value)) is not None:
+        return text
+    return None
+
+
 def is_effectively_empty_content_parts(content: Sequence[ContentPart]) -> bool:
     """Return True if *content* contains no visible text.
 
@@ -798,14 +844,15 @@ class OpenAICompatibleStreamedMessage(BaseStreamedMessage):
         self._id = response.id
         self._usage = response.usage
         message = response.choices[0].message
-        reasoning_key = self._reasoning_key
-        reasoning_content = getattr(message, reasoning_key, None) if reasoning_key else None
+        # Backends disagree on which field carries reasoning content (e.g.
+        # ``reasoning_content`` for DeepSeek/Moonshot, ``reasoning`` for Command
+        # Code), so fall back across the known fields.
+        reasoning_content = extract_reasoning_text(message, self._reasoning_key)
         # Yield on presence, not truthiness: an explicitly empty
         # reasoning_content must round-trip as an empty ThinkPart so the
         # next request passes the field back (Moonshot rejects thinking-mode
         # histories whose assistant messages lost their reasoning field).
         if reasoning_content is not None:
-            assert isinstance(reasoning_content, str)
             yield ThinkPart(think=reasoning_content)
         if message.content:
             yield TextPart(text=message.content)
@@ -848,12 +895,10 @@ class OpenAICompatibleStreamedMessage(BaseStreamedMessage):
                 delta = chunk.choices[0].delta
 
                 # extract reasoning / thinking content
-                reasoning_key = self._reasoning_key
-                reasoning_content = getattr(delta, reasoning_key, None) if reasoning_key else None
+                reasoning_content = extract_reasoning_text(delta, self._reasoning_key)
                 # Same presence-vs-truthiness rule as the non-stream path:
                 # preserve an explicitly empty reasoning_content delta.
                 if reasoning_content is not None:
-                    assert isinstance(reasoning_content, str)
                     yield ThinkPart(think=reasoning_content)
 
                 # extract text content

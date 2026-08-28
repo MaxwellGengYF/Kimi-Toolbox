@@ -189,6 +189,51 @@ def test_create_llm_openai_legacy_without_session_id(monkeypatch):
     assert "user" not in llm.chat_provider._generation_kwargs
 
 
+def test_create_llm_openai_legacy_thinking_uses_max_completion_tokens(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="deepseek-v4-flash-0731",
+        max_context_size=1000000,
+        capabilities={"thinking"},
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, max_tokens=384000, thinking_effort="max")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider._generation_kwargs["max_completion_tokens"] == 384000
+    assert "max_tokens" not in llm.chat_provider._generation_kwargs
+
+
+def test_create_llm_openai_legacy_non_thinking_uses_max_tokens(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, max_tokens=16384)
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider._generation_kwargs["max_tokens"] == 16384
+    assert "max_completion_tokens" not in llm.chat_provider._generation_kwargs
+
+
 def test_create_llm_openai_responses_with_session_id():
     provider = LLMProvider(
         type="openai_responses",
@@ -674,6 +719,83 @@ def test_create_llm_default_thinking_effort_is_max_openai_legacy():
     assert isinstance(llm.chat_provider, OpenAILegacy)
     # Default thinking effort should be 'max' (the highest level)
     assert llm.chat_provider.thinking_effort == "max"
+
+
+def test_create_llm_thinking_effort_enables_thinking_when_thinking_unset():
+    """Regression: a config like ``C:/dev/ds_cmdcode.json`` that sets
+    ``thinking_effort: "high"`` and capabilities ``["thinking"]`` (but no
+    explicit ``default_thinking``) must enable thinking even when
+    ``create_llm`` is called without an explicit ``thinking`` argument.
+
+    Before the fix the provider stayed in default mode (``thinking_effort``
+    property ``None``), so the request went out with ``thinking.type:
+    "disabled"`` and the backend returned no reasoning content.
+    """
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="deepseek/deepseek-v4-flash",
+        max_context_size=1024000,
+        max_tokens=131072,
+        capabilities={"thinking"},
+    )
+
+    llm = create_llm(provider, model, thinking_effort="high")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider.thinking_effort == "high"
+
+
+def test_create_llm_thinking_effort_off_does_not_enable_thinking():
+    """``thinking_effort: "off"`` must never flip thinking on when no explicit
+    ``thinking`` argument is given."""
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="deepseek/deepseek-v4-flash",
+        max_context_size=1024000,
+        max_tokens=131072,
+        capabilities={"thinking"},
+    )
+
+    llm = create_llm(provider, model, thinking_effort="off")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider.thinking_effort != "high"
+    assert llm.chat_provider.thinking_effort is None
+
+
+def test_create_llm_explicit_thinking_false_overrides_thinking_effort():
+    """An explicit ``thinking=False`` must disable thinking even when the
+    config carries a non-``off`` ``thinking_effort``."""
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="deepseek/deepseek-v4-flash",
+        max_context_size=1024000,
+        max_tokens=131072,
+        capabilities={"thinking"},
+    )
+
+    llm = create_llm(provider, model, thinking=False, thinking_effort="high")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider.thinking_effort == "off"
 
 
 def test_create_llm_supported_efforts_clamps_xhigh():

@@ -42,8 +42,8 @@ Workspace sources in root: `kimi-cli-x`, `kimi-agent-sdk-x`, `kosong-x`, `pykaos
 
 ## Optional Deps
 
-- `kimix[office]`: `pymupdf`, `pdfplumber`, `python-docx`
-- `kimix[image_process]`: `pillow`, `pytesseract`
+- `kimix[office]`: `pymupdf`, `python-docx`
+- `kimix[image_process]`: `pillow`
 - `kosong-x[contrib]`: `anthropic`, `google-genai`
 
 ## Block Templates
@@ -87,8 +87,8 @@ Feature flags installable as `pkg[extra]`.
 
 ```toml
 [project.optional-dependencies]
-office = ["pymupdf>=1.23.0", "pdfplumber>=0.10.0", "python-docx>=1.1.0"]
-image_process = ["pillow>=10.0.0", "pytesseract>=0.3.10"]
+office = ["pymupdf>=1.23.0", "python-docx>=1.1.0"]
+image_process = ["pillow>=10.0.0"]
 ```
 
 ### `[dependency-groups]`

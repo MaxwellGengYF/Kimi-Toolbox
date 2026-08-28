@@ -5,6 +5,14 @@ import unicodedata
 import uuid as _uuid
 from pathlib import Path
 
+from kimix.native_loader import (
+    get_module as _native_get_module,
+    use_native as _native_use_native,
+)
+
+# Resolved once at import time (stable runtime: result never changes).
+_NATIVE_TEXT = _native_get_module("text")
+
 
 # ---------------------------------------------------------------------------
 # Text safety: clean hidden/invisible characters and prevent tokenization failures
@@ -21,6 +29,11 @@ def clean_text(text: str, keep_newlines: bool = True) -> str:
     """
     if not isinstance(text, str):
         text = str(text)
+
+    # Native acceleration: kimix_native.text.clean_text (bit-identical ANSI
+    # zero-width/control strip + NFC normalize + strip).
+    if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
+        return _NATIVE_TEXT.clean_text(text, keep_newlines)
 
     # Step 1: Remove zero-width and format characters explicitly
     text = re.sub(

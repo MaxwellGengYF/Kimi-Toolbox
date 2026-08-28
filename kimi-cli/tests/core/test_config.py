@@ -113,6 +113,50 @@ def test_load_config_supported_efforts_rejects_off():
         )
 
 
+def test_load_config_thinking_effort_implies_default_thinking():
+    """A config that sets a thinking effort (e.g. ``thinking_effort: "high"``)
+    must default to thinking enabled, matching the expectation behind
+    ``C:/dev/ds_cmdcode.json`` (capabilities ``["thinking"]`` +
+    ``thinking_effort: "high"``, no explicit ``default_thinking``).
+    """
+    config = load_config_from_string(
+        '{"thinking_effort": "high", '
+        '"model": {"model": "deepseek/deepseek-v4-flash", "max_context_size": 1024000, "max_tokens": 131072, "capabilities": ["thinking"]}, '
+        '"provider": {"type": "openai_legacy", "base_url": "https://api.commandcode.ai/provider/v1", "api_key": "k"}}'
+    )
+    assert config.default_thinking is True
+
+
+def test_load_config_thinking_effort_off_keeps_default_thinking_false():
+    """``thinking_effort: "off"`` is an explicit disable and must not flip
+    ``default_thinking`` on."""
+    config = load_config_from_string(
+        '{"thinking_effort": "off", '
+        '"model": {"model": "m", "max_context_size": 1000, "capabilities": ["thinking"]}, '
+        '"provider": {"type": "openai_legacy", "base_url": "https://example.com", "api_key": "k"}}'
+    )
+    assert config.default_thinking is False
+
+
+def test_load_config_explicit_default_thinking_false_wins_over_effort():
+    """An explicit ``default_thinking: false`` must override the implication
+    derived from ``thinking_effort``."""
+    config = load_config_from_string(
+        '{"default_thinking": false, "thinking_effort": "high", '
+        '"model": {"model": "m", "max_context_size": 1000, "capabilities": ["thinking"]}, '
+        '"provider": {"type": "openai_legacy", "base_url": "https://example.com", "api_key": "k"}}'
+    )
+    assert config.default_thinking is False
+
+
+def test_load_config_no_thinking_effort_keeps_default_thinking_false():
+    config = load_config_from_string(
+        '{"model": {"model": "m", "max_context_size": 1000, "capabilities": ["thinking"]}, '
+        '"provider": {"type": "openai_legacy", "base_url": "https://example.com", "api_key": "k"}}'
+    )
+    assert config.default_thinking is False
+
+
 def test_load_config_prune_ratios_valid():
     """Default prune ratios satisfy: prune_target <= prune_trigger < compaction_trigger."""
     config = load_config_from_string("{}")

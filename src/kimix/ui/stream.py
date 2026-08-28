@@ -1035,10 +1035,10 @@ def _handle_think_part(wire_msg: ThinkPart, output_function: Callable[[str, Mess
             output_function(think_content, MessageType.Thinking)
         if _stream._state != StreamPrintState.Thinking:
             _stream.colorful_print_word(
-                f"[Think] {think_content}", fg=Color.BRIGHT_CYAN, require_new_line=True)
+                f"[Think] {think_content}", fg=Color.BRIGHT_CYAN, require_new_line=True, flush=True)
         else:
             _stream.colorful_print_word(
-                f"{think_content}", fg=Color.BRIGHT_CYAN, require_new_line=False)
+                f"{think_content}", fg=Color.BRIGHT_CYAN, require_new_line=False, flush=True)
         _stream._state = StreamPrintState.Thinking
 
 

@@ -232,6 +232,51 @@ _colorful_print = True
 _print_func: Callable = print
 
 
+def _resolve_native_print() -> Callable | None:
+    """Resolve ``runtime_py.print.native_print`` (no ``kimix_native.print`` shim yet).
+
+    The compiled extension is reached through the shim's ``_native`` handle —
+    the same handle every ``kimix_native.<kernel>`` shim binds. Returns None
+    when native is unavailable or the runtime predates the print submodule, in
+    which case printing stays on the builtin ``print``.
+    """
+    try:
+        import kimix_native as _kn
+        native = getattr(_kn, "_native", None)
+        if native is None:
+            return None
+        return getattr(getattr(native, "print", None), "native_print", None)
+    except Exception:
+        return None
+
+
+_NATIVE_PRINT = _resolve_native_print()
+
+
+def _native_print_func(
+    *values: object,
+    sep: str | None = " ",
+    end: str | None = "\n",
+    file: Any = None,
+    flush: bool = False,
+) -> None:
+    """Native ``print`` — thin forwarder; all logic lives in C++ now.
+
+    The binding used to receive pre-formatted bytes; it has since absorbed
+    the whole builtin-print contract (``str()`` coercion, ``sep``/``end``
+    joining with the usual ``None`` defaults, ``surrogatepass`` UTF-8
+    encoding and the non-stdout fallback to ``builtins.print``), so this
+    wrapper only forwards the arguments to keep the hot path at one hop.
+    Writes go through ``runtime_py.print.native_print`` — GIL released,
+    fflushed when ``flush=True``.
+    """
+    _NATIVE_PRINT(*values, sep=sep, end=end, file=file, flush=flush)
+
+
+if _native_use_native("PRINT") and _NATIVE_PRINT is not None:
+    _print_func = _native_print_func
+
+
 def print(*values: object, sep: str | None = " ", end: str | None = "\n", file: Any = None, flush: bool = False):
     _print_func(*values, sep=sep, end=end, file=file, flush=flush)
 
