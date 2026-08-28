@@ -182,6 +182,51 @@ def test_create_llm_openai_legacy_without_session_id(monkeypatch):
     assert "user" not in llm.chat_provider._generation_kwargs
 
 
+def test_create_llm_openai_legacy_thinking_uses_max_completion_tokens(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="deepseek-v4-flash-0731",
+        max_context_size=1000000,
+        capabilities={"thinking"},
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, max_tokens=384000, thinking_effort="max")
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider._generation_kwargs["max_completion_tokens"] == 384000
+    assert "max_tokens" not in llm.chat_provider._generation_kwargs
+
+
+def test_create_llm_openai_legacy_non_thinking_uses_max_tokens(monkeypatch):
+    from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
+
+    provider = LLMProvider(
+        type="openai_legacy",
+        base_url="https://api.openai.com/v1",
+        api_key=SecretStr("test-key"),
+    )
+    model = LLMModel(
+        model="gpt-4o",
+        max_context_size=128000,
+    )
+    monkeypatch.delenv("KIMI_MODEL_TOP_P", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_MAX_TOKENS", raising=False)
+
+    llm = create_llm(provider, model, max_tokens=16384)
+    assert llm is not None
+    assert isinstance(llm.chat_provider, OpenAILegacy)
+    assert llm.chat_provider._generation_kwargs["max_tokens"] == 16384
+    assert "max_completion_tokens" not in llm.chat_provider._generation_kwargs
+
+
 def test_create_llm_openai_responses_with_session_id():
     provider = LLMProvider(
         type="openai_responses",

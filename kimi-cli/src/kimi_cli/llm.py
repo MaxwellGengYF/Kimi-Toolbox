@@ -539,8 +539,16 @@ def create_llm(
                 max_tokens = model.max_context_size
             if max_tokens is not None:
                 max_tokens_int = int(max_tokens)
-                gen_kwargs["max_tokens"] = max_tokens_int
-                gen_kwargs["max_completion_tokens"] = max_tokens_int
+                # OpenAI's Chat Completions API (and many compatible backends)
+                # rejects requests that include both ``max_tokens`` and
+                # ``max_completion_tokens``.  For reasoning models we need
+                # ``max_completion_tokens`` (it counts reasoning tokens); for
+                # non-reasoning models we keep the legacy ``max_tokens`` for the
+                # broadest compatibility with older endpoints.
+                if thinking_on:
+                    gen_kwargs["max_completion_tokens"] = max_tokens_int
+                else:
+                    gen_kwargs["max_tokens"] = max_tokens_int
             if temperature is not None:
                 gen_kwargs["temperature"] = float(temperature)
             if top_p is None:
