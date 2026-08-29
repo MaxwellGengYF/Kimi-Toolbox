@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import orjson
@@ -13,18 +13,16 @@ from kosong.message import Message
 from kosong.tooling import Tool
 
 from kimi_cli.auth.codex import (
-    CodexModel,
     CodexRequestAuth,
     CodexRuntimeCredentials,
 )
-from kimi_cli.codex_context import CODEX_LOOP_CONTROL_KEYS, codex_trigger_point
-from kimi_cli.llm_codex import (
+from kimi_cli.codex_context import (
     CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
     CODEX_AUTO_COMPACT_PERCENT,
     CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
-    CodexProviderLease,
+    CODEX_LOOP_CONTROL_KEYS,
     codex_loop_control,
-    create_codex_provider,
+    codex_trigger_point,
 )
 from kimi_cli.soul.compaction import should_auto_compact
 
@@ -58,15 +56,6 @@ class _CredentialFixture:
         rejected_credentials: CodexRuntimeCredentials,
     ) -> None:
         self.invalidated_access_token = rejected_credentials.access_token
-
-
-@dataclass
-class _CatalogFixture(_CredentialFixture):
-    model: CodexModel
-
-    async def resolve_model(self, model_name: str) -> CodexModel:
-        assert model_name == self.model.slug
-        return self.model
 
 
 @pytest.mark.asyncio
@@ -185,76 +174,6 @@ async def test_each_request_resolves_fresh_credentials() -> None:
 
     assert authorizations == ["Bearer token-1", "Bearer token-2"]
     assert service.calls == [(False, None), (False, None)]
-
-
-@pytest.mark.asyncio
-async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort(
-    monkeypatch,
-) -> None:
-    model = CodexModel(
-        "gpt-test",
-        max_context_size=272_000,
-        max_tokens=128_000,
-        reasoning_efforts=("low", "medium", "high", "xhigh"),
-        default_reasoning_effort="medium",
-    )
-    service = _CatalogFixture([], model)
-
-    monkeypatch.setattr(
-        "kimi_cli.llm_codex.resolve_codex_model",
-        service.resolve_model,
-    )
-    runtime = await create_codex_provider(
-        model_name=model.slug,
-        session_id="session-id",
-        thinking=False,
-    )
-    try:
-        assert type(runtime.provider) is OpenAICodex
-        assert runtime.provider._generation_kwargs == {
-            "reasoning_effort": "medium",
-        }
-        assert runtime.provider._session_id == "session-id"
-        assert runtime.provider._own_http_client is False
-        assert runtime.provider_dict["max_context_size"] == 272_000
-        assert runtime.provider_dict["max_tokens"] == 128_000
-        assert runtime.model.max_tokens == 128_000
-        assert runtime.provider_dict["thinking_effort"] == "medium"
-        assert runtime.provider_dict["supported_efforts"] == [
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        ]
-    finally:
-        await runtime.lease.close()
-
-
-@pytest.mark.asyncio
-async def test_provider_maps_official_ultra_mode_to_max_wire_effort(monkeypatch) -> None:
-    model = CodexModel(
-        "gpt-test",
-        reasoning_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
-        default_reasoning_effort="low",
-    )
-    service = _CatalogFixture([], model)
-
-    monkeypatch.setattr(
-        "kimi_cli.llm_codex.resolve_codex_model",
-        service.resolve_model,
-    )
-    runtime = await create_codex_provider(
-        model_name=model.slug,
-        session_id="session-id",
-        thinking=True,
-    )
-    try:
-        assert runtime.provider._generation_kwargs["reasoning_effort"] == "max"
-        assert runtime.provider_dict["thinking_effort"] == "max"
-        assert runtime.provider_dict["supported_efforts"][-1] == "max"
-        assert "ultra" not in runtime.provider_dict["supported_efforts"]
-    finally:
-        await runtime.lease.close()
 
 
 @pytest.mark.asyncio
@@ -386,24 +305,6 @@ async def test_provider_maps_sequential_kimix_mode_to_official_parallel_flag() -
 
 
 @pytest.mark.asyncio
-async def test_provider_lease_closes_shared_transport_exactly_once() -> None:
-    class Provider:
-        closes = 0
-
-        async def shutdown(self) -> None:
-            self.closes += 1
-
-    provider = Provider()
-    lease = CodexProviderLease(cast(Any, provider))
-
-    await lease.close()
-    await lease.close()
-
-    assert provider.closes == 1
-    assert lease.closed is True
-
-
-@pytest.mark.asyncio
 async def test_child_close_keeps_shared_transport_until_top_level_shutdown() -> None:
     http_client = httpx.AsyncClient()
     provider = OpenAICodex(
@@ -523,32 +424,6 @@ def test_codex_loop_control_skipped_for_unknown_window() -> None:
     assert codex_loop_control(-1) == {}
 
 
-@pytest.mark.asyncio
-async def test_provider_dict_carries_codex_loop_control(monkeypatch) -> None:
-    model = CodexModel(
-        "gpt-test",
-        max_context_size=272_000,
-        max_tokens=128_000,
-        reasoning_efforts=("low", "medium", "high"),
-        default_reasoning_effort="medium",
-    )
-    service = _CatalogFixture([], model)
-
-    monkeypatch.setattr(
-        "kimi_cli.llm_codex.resolve_codex_model",
-        service.resolve_model,
-    )
-    runtime = await create_codex_provider(
-        model_name=model.slug,
-        session_id="session-id",
-        thinking=False,
-    )
-    try:
-        assert runtime.provider_dict["loop_control"] == codex_loop_control(272_000)
-    finally:
-        await runtime.lease.close()
-
-
 @pytest.mark.parametrize("max_context_size", [128_000, 272_000, 400_000, 1_000_000])
 def test_codex_trigger_point_matches_the_reference_transcription(max_context_size: int) -> None:
     assert codex_trigger_point(max_context_size) == _codex_trigger_point(max_context_size)
@@ -558,14 +433,3 @@ def test_codex_loop_control_only_touches_declared_keys() -> None:
     """The advertised key set must match what the helper actually returns."""
 
     assert set(codex_loop_control(272_000)) == set(CODEX_LOOP_CONTROL_KEYS)
-
-
-def test_llm_codex_reexports_the_shared_accounting() -> None:
-    """``llm_codex`` and ``config`` must not drift apart on these numbers."""
-
-    from kimi_cli import codex_context
-
-    assert codex_loop_control is codex_context.codex_loop_control
-    assert CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT == 95
-    assert CODEX_AUTO_COMPACT_PERCENT == 90
-    assert CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS == 16_384

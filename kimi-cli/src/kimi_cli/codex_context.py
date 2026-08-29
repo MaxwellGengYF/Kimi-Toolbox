@@ -18,9 +18,8 @@ and the provider's ``_generation_kwargs`` carries no ``max_tokens`` key. Letting
 ``max_tokens`` shrink the input window would reserve ~129k tokens on a 272k
 model to protect a request field that is never sent.
 
-This module is intentionally dependency-free so both the provider factory
-(:mod:`kimi_cli.llm_codex`) and the config layer (:mod:`kimi_cli.config`) can
-use it without an import cycle.
+This module is intentionally dependency-free so the config layer
+(:mod:`kimi_cli.config`) and tests can use it without an import cycle.
 """
 
 from __future__ import annotations

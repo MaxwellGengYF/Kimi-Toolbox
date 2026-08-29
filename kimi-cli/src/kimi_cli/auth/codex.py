@@ -16,7 +16,7 @@ import secrets
 import stat
 import threading
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
@@ -130,6 +130,34 @@ class CodexBrowserChallenge:
     operation_id: int
     authorization_url: str = field(repr=False)
     expires_at: float
+
+
+_KIMIX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def kimix_reasoning_effort(effort: str | None) -> str | None:
+    """Map one Codex catalog effort onto the Kimix thinking-effort domain.
+
+    Official Codex exposes Ultra as a client mode: inference still receives
+    ``max``. ``none`` / ``off`` / unknown labels are dropped.
+    """
+
+    if effort == "ultra":
+        return "max"
+    if effort in _KIMIX_REASONING_EFFORTS:
+        return effort
+    return None
+
+
+def kimix_reasoning_efforts(efforts: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate catalog efforts after :func:`kimix_reasoning_effort`."""
+
+    mapped: list[str] = []
+    for effort in efforts:
+        wire_effort = kimix_reasoning_effort(effort)
+        if wire_effort is not None and wire_effort not in mapped:
+            mapped.append(wire_effort)
+    return tuple(mapped)
 
 
 @dataclass(frozen=True, slots=True)

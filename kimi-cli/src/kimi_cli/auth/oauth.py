@@ -26,6 +26,7 @@ from kimi_cli.auth.codex import (
     CodexAuthError,
     CodexLoginOperation,
     disconnect_codex,
+    kimix_reasoning_efforts,
 )
 from kimi_cli.auth.platforms import (
     ModelInfo,
@@ -1229,11 +1230,7 @@ async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
             capabilities.add("image_in")
         if modalities & {"video", "videos"}:
             capabilities.add("video_in")
-        supported_efforts = {
-            effort
-            for effort in model.reasoning_efforts
-            if effort in {"low", "medium", "high", "xhigh", "max"}
-        }
+        supported_efforts = set(kimix_reasoning_efforts(model.reasoning_efforts))
         config.provider = LLMProvider(
             type="openai-codex",
             base_url=CODEX_BASE_URL,

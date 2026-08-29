@@ -901,6 +901,44 @@ async def test_login_codex_configures_shared_oauth_provider(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_login_codex_maps_ultra_effort_to_max(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    operations = []
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        model = CodexModel(
+            slug="gpt-5.6-sol",
+            display_name="GPT-5.6-Sol",
+            reasoning_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
+            default_reasoning_effort="low",
+        )
+        return (
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (model,), False),
+        )
+
+    with (
+        patch(
+            "kimi_cli.auth.oauth.CodexLoginOperation",
+            side_effect=_codex_login_factory(fake_login, operations),
+        ),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config"),
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert any(event.type == "success" for event in events)
+    assert config.model is not None
+    assert config.model.supported_efforts == {"low", "medium", "high", "xhigh", "max"}
+    assert "ultra" not in config.model.supported_efforts
+
+
+@pytest.mark.asyncio
 async def test_login_codex_does_not_report_success_for_terminal_snapshot(tmp_path):
     config = _make_config()
     config.source_file = tmp_path / "config.toml"

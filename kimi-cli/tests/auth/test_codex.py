@@ -48,6 +48,8 @@ from kimi_cli.auth.codex import (
     ensure_codex_credentials,
     extract_chatgpt_account_id,
     fallback_catalog,
+    kimix_reasoning_effort,
+    kimix_reasoning_efforts,
     parse_model_catalog,
     refresh_codex_models,
 )
@@ -1453,6 +1455,18 @@ def test_fallback_catalog_uses_official_codex_runtime_profiles() -> None:
     assert models["gpt-5.6-terra"].default_reasoning_effort == "medium"
     assert models["gpt-5.3-codex-spark"].default_reasoning_effort == "high"
     assert models["gpt-5.3-codex-spark"].input_modalities == ("text",)
+
+
+def test_kimix_reasoning_effort_maps_ultra_and_drops_unknown() -> None:
+    assert kimix_reasoning_effort("ultra") == "max"
+    assert kimix_reasoning_effort("high") == "high"
+    assert kimix_reasoning_effort("none") is None
+    assert kimix_reasoning_effort("off") is None
+    assert kimix_reasoning_effort("future-effort") is None
+    assert kimix_reasoning_effort(None) is None
+    assert kimix_reasoning_efforts(
+        ("low", "ultra", "none", "ultra", "max", "future-effort")
+    ) == ("low", "max")
 
 
 @pytest.mark.asyncio

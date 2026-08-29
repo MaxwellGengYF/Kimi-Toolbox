@@ -281,6 +281,36 @@ async def test_create_llm_codex_oauth_uses_canonical_provider():
     await cast(OpenAICodex, llm.chat_provider).aclose()
 
 
+@pytest.mark.asyncio
+async def test_create_llm_codex_applies_thinking_effort():
+    provider = LLMProvider(
+        type="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    model = LLMModel(
+        model="gpt-5.4",
+        max_context_size=272_000,
+        capabilities={"thinking"},
+        supported_efforts={"low", "medium", "high", "xhigh"},
+    )
+
+    llm = create_llm(
+        provider,
+        model,
+        session_id="session-1",
+        thinking=True,
+        thinking_effort="medium",
+    )
+
+    assert llm is not None
+    assert type(llm.chat_provider) is OpenAICodex
+    assert llm.chat_provider._own_http_client is True
+    assert llm.chat_provider._generation_kwargs["reasoning_effort"] == "medium"
+    await cast(OpenAICodex, llm.chat_provider).aclose()
+
+
 def test_augment_provider_with_env_vars_xai(monkeypatch):
     provider = LLMProvider(
         type="xai",

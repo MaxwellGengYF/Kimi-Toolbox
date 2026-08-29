@@ -781,6 +781,32 @@ class Config(BaseModel):
             self.max_tokens = self.model.max_tokens
         return self
 
+    @model_validator(mode="after")
+    def apply_official_codex_loop_control(self) -> Self:
+        """Fill Codex compaction numbers for the official ChatGPT backend.
+
+        Only keys the user did not set are written, so an explicit
+        ``loop_control`` field still wins. Custom ``openai-codex`` proxies
+        (a different ``base_url``) keep the generic defaults.
+        """
+        provider = self.provider
+        model = self.model
+        if provider is None or model is None or provider.type != "openai-codex":
+            return self
+        from kimi_cli.auth.codex import CODEX_BASE_URL
+        from kimi_cli.codex_context import codex_loop_control
+
+        if provider.base_url.rstrip("/") != CODEX_BASE_URL.rstrip("/"):
+            return self
+        updates = {
+            key: value
+            for key, value in codex_loop_control(model.max_context_size or 0).items()
+            if key not in self.loop_control.model_fields_set
+        }
+        if updates:
+            self.loop_control = self.loop_control.model_copy(update=updates)
+        return self
+
 
 def get_config_file() -> Path:
     """Get the configuration file path."""

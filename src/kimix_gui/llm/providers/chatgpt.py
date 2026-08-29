@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, cast
+from typing import Any
 
-from kimi_cli.auth.codex import CodexModel
-from kimi_cli.llm_codex import create_codex_provider
+from pydantic import SecretStr
+
+from kimi_cli.auth.codex import (
+    CODEX_BASE_URL,
+    CODEX_OAUTH_KEY,
+    CodexModel,
+    kimix_reasoning_effort,
+    kimix_reasoning_efforts,
+    resolve_codex_model,
+)
+from kimi_cli.config import LLMModel, LLMProvider, OAuthRef
+from kimi_cli.llm import create_llm
 
 from kimix_gui.llm.axes import AXIS_THINKING_EFFORT, ORDER_THINKING_EFFORT
 from kimix_gui.llm.domain import (
@@ -27,9 +37,6 @@ from kimix_gui.llm.providers.base import (
     SessionRuntime,
     apply_overrides,
 )
-
-if TYPE_CHECKING:
-    from kosong.chat_provider.codex import OpenAICodex
 
 _KNOWN_REASONING_EFFORTS = frozenset(
     {"low", "medium", "high", "xhigh", "max"}
@@ -135,6 +142,16 @@ def chatgpt_models(
     )
 
 
+def _chatgpt_capabilities(model: CodexModel) -> set[str]:
+    capabilities: set[str] = {"thinking"}
+    modalities = {value.lower() for value in model.input_modalities}
+    if modalities & {"image", "images", "vision"}:
+        capabilities.add("image_in")
+    if modalities & {"video", "videos"}:
+        capabilities.add("video_in")
+    return capabilities
+
+
 class ChatGPTProviderKind(ProviderKind):
     """Provider implementation for the managed ChatGPT subscription."""
 
@@ -180,40 +197,72 @@ class ChatGPTProviderKind(ProviderKind):
     ) -> SessionRuntime:
         if not isinstance(target, ChatGPTTarget):
             raise TypeError(f"Unsupported ChatGPT target: {target!r}")
-        runtime = await create_codex_provider(
-            model_name=target.model,
-            session_id=session_id,
-            thinking=False,
-        )
+        catalog_model = await resolve_codex_model(target.model)
+        available = kimix_reasoning_efforts(catalog_model.reasoning_efforts)
+        available_set = set(available)
         effort = overrides.thinking_effort
-        if effort is not None:
-            parameter = reasoning_effort_parameter(
-                runtime.model.reasoning_efforts,
-                runtime.model.default_reasoning_effort,
-            )
-            available = {option.value for option in parameter.options} if parameter else set()
-            if effort not in available:
-                await runtime.lease.close()
-                raise LLMSelectionError(
-                    LLMProblem(
-                        PROBLEM_PARAMETER_VALUE_UNAVAILABLE,
-                        reason=f"{AXIS_THINKING_EFFORT}={effort}",
-                    )
+        if effort is None:
+            effort = kimix_reasoning_effort(catalog_model.default_reasoning_effort)
+        elif effort not in available_set:
+            raise LLMSelectionError(
+                LLMProblem(
+                    PROBLEM_PARAMETER_VALUE_UNAVAILABLE,
+                    reason=f"{AXIS_THINKING_EFFORT}={effort}",
                 )
-        generic = SessionRuntime(
-            provider_dict=dict(runtime.provider_dict),
+            )
+
+        capabilities = _chatgpt_capabilities(catalog_model)
+        provider_config = LLMProvider(
+            type="openai-codex",
+            base_url=CODEX_BASE_URL,
+            api_key=SecretStr(""),
+            oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+        )
+        model_data: dict[str, Any] = {
+            "model": catalog_model.slug,
+            "display_name": catalog_model.display_name,
+            "max_context_size": catalog_model.max_context_size,
+            "max_tokens": catalog_model.max_tokens,
+            "capabilities": capabilities,
+        }
+        if available:
+            model_data["supported_efforts"] = set(available)
+        llm_model = LLMModel(**model_data)
+        llm = create_llm(
+            provider_config,
+            llm_model,
+            thinking=True,
+            session_id=session_id,
+            thinking_effort=effort,
+        )
+        chat_provider = None if llm is None else llm.chat_provider
+        provider_dict: dict[str, Any] = {
+            "name": catalog_model.display_name or catalog_model.slug,
+            "model": catalog_model.slug,
+            "max_context_size": catalog_model.max_context_size,
+            "max_tokens": catalog_model.max_tokens,
+            "capabilities": list(capabilities),
+            "type": "openai-codex",
+            "url": CODEX_BASE_URL,
+            "api_key": "oauth-managed",
+        }
+        if available:
+            provider_dict["supported_efforts"] = list(available)
+        if effort in _KNOWN_REASONING_EFFORTS:
+            provider_dict["thinking_effort"] = effort
+        runtime = SessionRuntime(
+            provider_dict=provider_dict,
             model=target.model,
-            provider=runtime.provider,
-            lease=runtime.lease,
+            provider=chat_provider,
         )
         try:
-            resolved = apply_overrides(generic, overrides)
-            if resolved.provider is not None:
-                runtime.lease.provider = cast("OpenAICodex", resolved.provider)
-            return resolved
+            return apply_overrides(runtime, overrides)
         except BaseException:
-            try:
-                await runtime.lease.close()
-            except BaseException:
-                pass
+            if chat_provider is not None:
+                aclose = getattr(chat_provider, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except BaseException:
+                        pass
             raise
