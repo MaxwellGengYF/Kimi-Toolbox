@@ -16,14 +16,7 @@ from kimi_cli.auth.codex import (
     CodexRequestAuth,
     CodexRuntimeCredentials,
 )
-from kimi_cli.codex_context import (
-    CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
-    CODEX_AUTO_COMPACT_PERCENT,
-    CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
-    CODEX_LOOP_CONTROL_KEYS,
-    codex_loop_control,
-    codex_trigger_point,
-)
+from kimi_cli.config import codex_loop_control
 from kimi_cli.soul.compaction import should_auto_compact
 
 
@@ -326,20 +319,15 @@ async def test_child_close_keeps_shared_transport_until_top_level_shutdown() -> 
 
 
 def _codex_trigger_point(max_context_size: int) -> int:
-    """The token count at which openai/codex forces compaction.
+    """Independent transcription of openai/codex ``token_limit_reached``.
 
-    Recomputed here from the mirrored constants rather than calling
-    ``codex_trigger_point``, so the shipped helper is checked against an
-    independent transcription of ``codex-rs/core/src/session/context_window.rs``::
-
-        token_limit_reached = scope_tokens >= auto_compact_token_limit + fallback_buffer
-                           || active_tokens >= context_window * effective_percent / 100
+    ``codex-rs/core/src/session/context_window.rs``:
+        usable = context * 95 / 100
+        auto_compact = context * 90 / 100 + 16_384
+        trigger = min(usable, auto_compact)
     """
-    usable = max_context_size * CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT // 100
-    buffered = (
-        max_context_size * CODEX_AUTO_COMPACT_PERCENT // 100
-        + CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS
-    )
+    usable = max_context_size * 95 // 100
+    buffered = max_context_size * 90 // 100 + 16_384
     return min(usable, buffered)
 
 
@@ -424,12 +412,9 @@ def test_codex_loop_control_skipped_for_unknown_window() -> None:
     assert codex_loop_control(-1) == {}
 
 
-@pytest.mark.parametrize("max_context_size", [128_000, 272_000, 400_000, 1_000_000])
-def test_codex_trigger_point_matches_the_reference_transcription(max_context_size: int) -> None:
-    assert codex_trigger_point(max_context_size) == _codex_trigger_point(max_context_size)
-
-
 def test_codex_loop_control_only_touches_declared_keys() -> None:
-    """The advertised key set must match what the helper actually returns."""
-
-    assert set(codex_loop_control(272_000)) == set(CODEX_LOOP_CONTROL_KEYS)
+    assert set(codex_loop_control(272_000)) == {
+        "reserved_context_size",
+        "compaction_trigger_ratio",
+        "compact_reminder_threshold",
+    }

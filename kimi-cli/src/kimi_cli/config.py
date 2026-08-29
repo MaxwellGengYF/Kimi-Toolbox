@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 import orjson
 import regex as re
@@ -246,6 +246,28 @@ class LLMModel(BaseModel):
             self.max_tokens = self.max_context_size // 4
 
         return self
+
+
+def codex_loop_control(max_context_size: int) -> dict[str, Any]:
+    """``LoopControl`` fields that match official Codex compaction points.
+
+    openai/codex: usable window = 95% of context, auto-compact at 90% plus a
+    16_384 token buffer. The Codex backend rejects output-token limits, so
+    ``reserved_context_size`` is that buffered limit (not ``max_tokens``).
+    Unknown windows return ``{}``.
+    """
+    if max_context_size <= 0:
+        return {}
+
+    auto_compact_limit = max_context_size * 90 // 100
+    buffered_limit = auto_compact_limit + 16_384
+    reminder_at = max(0, auto_compact_limit - 6_144)
+    return {
+        "reserved_context_size": max(1_000, buffered_limit),
+        "compaction_trigger_ratio": 0.95,
+        "compact_reminder_threshold": min(0.95, max(0.5, reminder_at / max_context_size)),
+    }
+
 
 class LoopControl(BaseModel):
     """Agent loop control configuration."""
@@ -794,7 +816,6 @@ class Config(BaseModel):
         if provider is None or model is None or provider.type != "openai-codex":
             return self
         from kimi_cli.auth.codex import CODEX_BASE_URL
-        from kimi_cli.codex_context import codex_loop_control
 
         if provider.base_url.rstrip("/") != CODEX_BASE_URL.rstrip("/"):
             return self

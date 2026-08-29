@@ -292,7 +292,6 @@ def test_official_codex_applies_loop_control_defaults():
     import json
 
     from kimi_cli.auth.codex import CODEX_BASE_URL
-    from kimi_cli.codex_context import codex_loop_control
 
     config = load_config_from_string(
         json.dumps(
@@ -310,12 +309,11 @@ def test_official_codex_applies_loop_control_defaults():
             }
         )
     )
-    expected = codex_loop_control(272000)
-    assert config.loop_control.reserved_context_size == expected["reserved_context_size"]
-    assert config.loop_control.compaction_trigger_ratio == expected["compaction_trigger_ratio"]
-    assert config.loop_control.compact_reminder_threshold == expected[
-        "compact_reminder_threshold"
-    ]
+    assert config.loop_control.reserved_context_size == 261_184
+    assert config.loop_control.compaction_trigger_ratio == 0.95
+    assert config.loop_control.compact_reminder_threshold == pytest.approx(
+        238_656 / 272_000
+    )
 
 
 def test_custom_codex_url_keeps_default_loop_control():
@@ -341,7 +339,6 @@ def test_official_codex_preserves_explicit_reserved_context_size():
     import json
 
     from kimi_cli.auth.codex import CODEX_BASE_URL
-    from kimi_cli.codex_context import codex_loop_control
 
     config = load_config_from_string(
         json.dumps(
@@ -356,9 +353,8 @@ def test_official_codex_preserves_explicit_reserved_context_size():
             }
         )
     )
-    expected = codex_loop_control(272000)
     assert config.loop_control.reserved_context_size == 30000
-    assert config.loop_control.compaction_trigger_ratio == expected["compaction_trigger_ratio"]
-    assert config.loop_control.compact_reminder_threshold == expected[
-        "compact_reminder_threshold"
-    ]
+    assert config.loop_control.compaction_trigger_ratio == 0.95
+    assert config.loop_control.compact_reminder_threshold == pytest.approx(
+        238_656 / 272_000
+    )

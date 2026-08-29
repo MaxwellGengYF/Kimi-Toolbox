@@ -330,7 +330,7 @@ class TestShouldAutoCompact:
         """``reserved_context_size >= max_context_size * trigger_ratio`` makes the
         ratio rule the only trigger, independent of ``max_tokens``.
 
-        This is the invariant ``kimi_cli.codex_context.codex_loop_control`` relies
+        This is the invariant ``kimi_cli.config.codex_loop_control`` relies
         on: the reservation is capped at ``max_context_size -
         reserved_context_size``, so a high floor collapses it and removes
         ``max_tokens`` / ``tool_call_buffer_tokens`` from the decision. The Codex
