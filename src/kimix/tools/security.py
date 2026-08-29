@@ -11,37 +11,36 @@ the Python tool both rely on:
 - :func:`validate_workdir` — reject control characters and shell
   metacharacters in a user-supplied working directory.
 
-Uses only the standard library plus ``regex`` (imported as ``re``), so the
-module is cheap to import even from the light ``kimix.tools`` namespace.
+The pure-Python algorithm for each helper lives once, in the canonical
+``kimix_native.tools`` shim (``_compat_*`` fallbacks).  This module keeps the
+public API and the native fast-path dispatch and delegates the pure-Python
+fallback to the shim, so there is exactly one copy of each algorithm.
 """
 
-import regex as re
-
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TOOLS = _native_get_module("tools")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_TOOLS = None
+
+
+def _compat_tools():
+    global _COMPAT_TOOLS
+    if _COMPAT_TOOLS is None:
+        _COMPAT_TOOLS = _native_get_compat("tools")
+    return _COMPAT_TOOLS
 
 __all__ = [
     "redact_sensitive_output",
     "scrub_child_env",
     "validate_workdir",
 ]
-
-
-# ── Child environment scrubbing ────────────────────────────────────────────
-
-_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
-                      "AUTH", "DSN", "WEBHOOK", "CREDS", "BEARER", "APIKEY")
-
-_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM", "TMP", "TEMP", "SHELL",
-                      "LOGNAME", "XDG_", "PYTHON", "VIRTUAL_ENV", "CONDA", "KIMIX_", "PROCESSOR_",
-                      "PROGRAMFILES", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "SYSTEM",
-                      "WINDIR", "COMSPEC", "PATHEXT", "NUMBER_OF_PROCESSORS", "OS", "COMPUTERNAME",
-                      "USERPROFILE", "TZ", "PWD", "SHLVL", "SSH_", "GIT_", "UV_", "PIP_")
 
 
 def scrub_child_env(env: dict[str, str]) -> dict[str, str]:
@@ -63,58 +62,7 @@ def scrub_child_env(env: dict[str, str]) -> dict[str, str]:
         name.isascii() for name in env
     ):
         return _NATIVE_TOOLS.scrub_child_env(env)
-    if not env:
-        return {}
-    scrubbed: dict[str, str] = {}
-    for name, value in env.items():
-        upper = name.upper()
-        if any(upper.startswith(prefix) for prefix in _SAFE_ENV_PREFIXES):
-            scrubbed[name] = value
-        elif any(substring in upper for substring in _SECRET_SUBSTRINGS):
-            continue
-        else:
-            scrubbed[name] = value
-    return scrubbed
-
-
-# ── Output redaction (moved verbatim from kimix/tools/file/bash/output_enhance.py) ──
-
-_REDACTED = "[REDACTED]"
-
-# JSON Web Tokens (header.payload.signature, header starts "eyJ").
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}")
-# PEM private keys (RSA / EC / OPENSSH / DSA / ENCRYPTED variants).
-_PEM_RE = re.compile(
-    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"
-    r".*?"
-    r"-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
-    re.DOTALL,
-)
-# GitHub classic tokens (ghp_ / gho_ / ghu_ / ghr_ / ghs_) and PATs.
-_GITHUB_TOKEN_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")
-_GITHUB_PAT_RE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}")
-# GitLab personal access tokens.
-_GITLAB_TOKEN_RE = re.compile(r"glpat-[A-Za-z0-9_-]{15,}")
-# AWS access key IDs.
-_AWS_KEY_RE = re.compile(r"AKIA[0-9A-Z]{16}")
-# Authorization / API key headers.
-_AUTH_HEADER_RE = re.compile(
-    r"(?i)(authorization|x-api-key|apikey|proxy-authorization)"
-    r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
-)
-# URL userinfo (https://user:pass@host) — keep the scheme, mask credentials.
-_URL_USERINFO_RE = re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@")
-# password= / secret: / api_key= style assignments (min value length 6).
-_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key)"
-    r"\s*[=:]\s*(['\"]?)[^\s'\";]{6,}\2"
-)
-# Generic high-entropy bearer tokens.
-_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}")
-
-
-def _mask_userinfo(match: re.Match[str]) -> str:
-    return match.group(1) + _REDACTED + "@"
+    return _compat_tools()._compat_scrub_child_env(env)
 
 
 def redact_sensitive_output(output: str) -> str:
@@ -128,26 +76,7 @@ def redact_sensitive_output(output: str) -> str:
         return output
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and output.isascii():
         return _NATIVE_TOOLS.redact_sensitive_output(output)
-    output = _URL_USERINFO_RE.sub(_mask_userinfo, output)
-    output = _JWT_RE.sub(_REDACTED, output)
-    output = _PEM_RE.sub(_REDACTED, output)
-    output = _GITHUB_PAT_RE.sub(_REDACTED, output)
-    output = _GITHUB_TOKEN_RE.sub(_REDACTED, output)
-    output = _GITLAB_TOKEN_RE.sub(_REDACTED, output)
-    output = _AWS_KEY_RE.sub(_REDACTED, output)
-    output = _AUTH_HEADER_RE.sub(_REDACTED, output)
-    output = _ASSIGNMENT_RE.sub(_REDACTED, output)
-    output = _BEARER_RE.sub(_REDACTED, output)
-    return output
-
-
-# ── Workdir validation (moved verbatim from kimix/tools/file/bash/safety.py) ──
-
-# Characters allowed in a ``cwd``/``workdir`` value: alphanumerics plus
-# spaces, underscore, dot, dash, backslash, forward slash, colon and tilde.
-_WORKDIR_ALLOWED = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _.-\\/:~"
-)
+    return _compat_tools()._compat_redact_sensitive_output(output)
 
 
 def validate_workdir(workdir: str | None) -> str | None:
@@ -157,9 +86,6 @@ def validate_workdir(workdir: str | None) -> str | None:
     " ' * ? ! { }``).  ``None``/empty input is always safe.  On rejection
     returns an error message naming the first offending character.
     """
-    if not workdir:
-        return None
-    for char in workdir:
-        if char not in _WORKDIR_ALLOWED:
-            return f"Invalid workdir: character {char!r} is not allowed."
-    return None
+    # Pure-Python delegation (the original had no native fast path): the
+    # algorithm lives once in the shim's _compat_validate_workdir.
+    return _compat_tools()._compat_validate_workdir(workdir)

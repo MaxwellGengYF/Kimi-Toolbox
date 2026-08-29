@@ -5,13 +5,24 @@ import unicodedata
 import uuid as _uuid
 from pathlib import Path
 
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TEXT = _native_get_module("text")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_TEXT = None
+
+
+def _compat_text():
+    global _COMPAT_TEXT
+    if _COMPAT_TEXT is None:
+        _COMPAT_TEXT = _native_get_compat("text")
+    return _COMPAT_TEXT
 
 
 # ---------------------------------------------------------------------------
@@ -34,26 +45,7 @@ def clean_text(text: str, keep_newlines: bool = True) -> str:
     # zero-width/control strip + NFC normalize + strip).
     if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
         return _NATIVE_TEXT.clean_text(text, keep_newlines)
-
-    # Step 1: Remove zero-width and format characters explicitly
-    text = re.sub(
-        r"[\u200b\u200c\u200d\u2060\u00ad\ufeff"
-        r"\u200e\u200f\u202a-\u202e\u2066-\u2069]",
-        "",
-        text,
-    )
-
-    # Step 2: Remove control characters (C0/C1), optionally keep \\n\\r\\t
-    if keep_newlines:
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
-    else:
-        text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", text)
-
-    # Step 3: Normalize Unicode (NFC) to collapse spoofed glyphs
-    text = unicodedata.normalize("NFC", text)
-
-    # Step 4: Strip leading/trailing whitespace artifacts
-    return text.strip()
+    return _compat_text()._compat_clean_text(text, keep_newlines)
 
 
 def _strip_invalid_unicode(text: str) -> str:

@@ -75,7 +75,7 @@ def test_consumers_work_after_restore():
 
     if os.path.isfile(os.path.join(_BIN, _NATIVE_FILE)):
         # Reload the loader module so it re-resolves the staged binaries.
-        import kimix.native_loader as xn
+        import kimi_cli.native_loader as xn
 
         importlib.reload(xn)
         assert xn.NATIVE_AVAILABLE is True

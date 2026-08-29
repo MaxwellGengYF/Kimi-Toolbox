@@ -27,36 +27,10 @@ import json
 import orjson
 
 from . import _native, use_native
+from ._common import _enc, _compact
 
 # ---------------------------------------------------------------------------
 # Encoding helpers (bytes-in/bytes-out contract like the rest of the module)
-# ---------------------------------------------------------------------------
-
-
-def _enc(s: str) -> bytes:
-    return s.encode("utf-8", "surrogatepass")
-
-
-def _dec(b: bytes) -> str:
-    return b.decode("utf-8", "surrogatepass")
-
-
-def _compact(obj) -> bytes:
-    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
-
-    Falls back to the stdlib serializer for values orjson rejects (lone
-    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
-    """
-    try:
-        return orjson.dumps(obj)
-    except (TypeError, ValueError):
-        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8", "surrogatepass"
-        )
-
-
-# ---------------------------------------------------------------------------
-# _compat -- pure-Python mirrors (same semantics as the kernels)
 # ---------------------------------------------------------------------------
 
 

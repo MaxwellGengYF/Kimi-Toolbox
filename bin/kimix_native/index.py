@@ -19,6 +19,7 @@ from __future__ import annotations
 import unicodedata
 
 from . import _native, use_native
+from ._common import _enc, _dec
 
 # ---------------------------------------------------------------------------
 # _compat — pure-Python mirrors (reference algorithms + plan 004 contract)
@@ -303,14 +304,6 @@ class _CompatInvertedIndex:
 # ---------------------------------------------------------------------------
 # Public API (native with _compat fallback)
 # ---------------------------------------------------------------------------
-
-
-def _enc(s: str) -> bytes:
-    return s.encode("utf-8", "surrogatepass")
-
-
-def _dec(b: bytes) -> str:
-    return b.decode("utf-8", "surrogatepass")
 
 
 class NgramTokenizer:

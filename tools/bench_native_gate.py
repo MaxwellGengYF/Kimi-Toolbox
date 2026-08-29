@@ -5,7 +5,7 @@ Compares three hot-path shapes on the SAME kernel ("SEARCH"):
 * ``old``      — the pre-optimization implementation: per-call ``.upper()``
                  allocation + sentinel lookup + NATIVE_AVAILABLE/_shim checks
                  (reconstructed inline for comparison).
-* ``new``      — the optimized ``kimix.native_loader``: precomputed import-time
+* ``new``      — the optimized ``kimi_cli.native_loader``: precomputed import-time
                  tables, single dict hit per call.
 * ``hoisted``  — what the hot call sites now do: the module is resolved once at
                  import time (``_NATIVE_SEARCH = get_module("search")``), so the
@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib
 import timeit
 
-import kimix.native_loader as knl
+import kimi_cli.native_loader as knl
 
 _N = 300_000
 

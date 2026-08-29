@@ -28,7 +28,7 @@ def test_dev_fallback_defaults_to_sibling_kimix_base(monkeypatch):
     """Without $KIMIX_BASE the dev-only fallback is the sibling kimix-base repo
     (no absolute path baked in)."""
     monkeypatch.delenv("KIMIX_BASE", raising=False)
-    from kimix.native_loader import _candidate_dirs, _dev_base
+    from kimi_cli.native_loader import _candidate_dirs, _dev_base
 
     assert _dev_base() == os.path.join(os.path.dirname(_REPO_ROOT), "kimix-base")
     dirs = _candidate_dirs()
@@ -44,7 +44,7 @@ def test_kimix_base_env_repoints_dev_fallback(monkeypatch):
     """$KIMIX_BASE overrides the sibling default for the dev-only fallback."""
     fake = os.path.join("some", "other", "kimix-base")
     monkeypatch.setenv("KIMIX_BASE", fake)
-    from kimix.native_loader import _candidate_dirs, _dev_base
+    from kimi_cli.native_loader import _candidate_dirs, _dev_base
 
     assert _dev_base() == fake
     dirs = _candidate_dirs()
@@ -57,7 +57,7 @@ def test_kimix_native_path_still_short_circuits(monkeypatch):
     """KIMIX_NATIVE_PATH is the explicit override and ignores KIMIX_BASE."""
     monkeypatch.setenv("KIMIX_NATIVE_PATH", os.path.join("explicit", "native"))
     monkeypatch.setenv("KIMIX_BASE", os.path.join("other", "kimix-base"))
-    from kimix.native_loader import _candidate_dirs
+    from kimi_cli.native_loader import _candidate_dirs
 
     assert _candidate_dirs() == [os.path.join("explicit", "native")]
 

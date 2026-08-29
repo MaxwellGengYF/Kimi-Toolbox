@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from kimix.native_loader import NATIVE_AVAILABLE
+from kimi_cli.native_loader import NATIVE_AVAILABLE
 
 pytestmark = pytest.mark.skipif(
     not NATIVE_AVAILABLE,
@@ -194,7 +194,7 @@ PARSER_CLASSES = [
 
 @pytest.mark.parametrize("lang,cls_name,_,module_name", PARSER_CLASSES)
 def test_parser_equivalence(lang, cls_name, _, module_name):
-    import kimix.native_loader as nl
+    import kimi_cli.native_loader as nl
 
     parser_cls = __import__(
         f"kimix.parser.{module_name}", fromlist=[cls_name]
@@ -455,7 +455,7 @@ def test_fuzzy_functions_equivalence(a, b):
 
 def test_jaro_winkler_nondefault_prefix_keeps_python():
     """max_prefix != 4 must stay on the pure-Python path."""
-    import kimix.native_loader as nl
+    import kimi_cli.native_loader as nl
     from kimix import retrieval as mod
 
     restore = _force_gate(mod, True)
@@ -478,7 +478,7 @@ def test_jaro_winkler_nondefault_prefix_keeps_python():
 
 def test_input_immutability_native_calls():
     """Native calls must not mutate caller-owned bytes/str/lists."""
-    import kimix.native_loader as nl
+    import kimi_cli.native_loader as nl
     from kimix.tools.common import _dedup_output, filter_output
 
     text = "line1\nline2\n\x1b[31mred\x1b[0m\r\nline4"
@@ -498,7 +498,7 @@ def test_thread_safety_smoke():
     single-threaded result and must not deadlock (GIL-release smoke)."""
     import threading
 
-    import kimix.native_loader as nl
+    import kimi_cli.native_loader as nl
     from kimix.tools.common import filter_output
 
     corpus = ["\x1b[31mred\x1b[0m line " + str(i) for i in range(200)]

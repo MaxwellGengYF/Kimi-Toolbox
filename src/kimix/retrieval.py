@@ -17,11 +17,13 @@ import xxhash
 from numpy.typing import NDArray
 
 try:  # native acceleration (optional; failure-tolerant for isolated envs)
-    from kimix.native_loader import (
+    from kimi_cli.native_loader import (
+        get_compat as _native_get_compat,
         get_module as _native_get_module,
         use_native as _native_use_native,
     )
 except Exception:  # pragma: no cover
+    _native_get_compat = lambda name: None
     _native_get_module = lambda name: None
     _native_use_native = lambda kernel: False
 
@@ -32,6 +34,16 @@ except Exception:  # pragma: no cover
 # instead of two function calls and two dict lookups.
 _NATIVE_INDEX = _native_get_module("index")
 _NATIVE_SEARCH = _native_get_module("search")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_SEARCH = None
+
+
+def _compat_search():
+    global _COMPAT_SEARCH
+    if _COMPAT_SEARCH is None:
+        _COMPAT_SEARCH = _native_get_compat("search")
+    return _COMPAT_SEARCH
 
 _EMPTY_DOCS: NDArray[np.int32] = np.array([], dtype=np.int32)
 _EMPTY_TFS: NDArray[np.float64] = np.array([], dtype=np.float64)
@@ -1202,42 +1214,7 @@ def jaro_similarity(s: str, t: str) -> float:
     # Native acceleration: kimix_native.search.jaro_similarity.
     if _native_use_native("SEARCH") and _NATIVE_SEARCH is not None:
         return _NATIVE_SEARCH.jaro_similarity(s, t)
-    if s == t:
-        return 1.0
-    len_s, len_t = len(s), len(t)
-    if len_s == 0 or len_t == 0:
-        return 0.0
-    match_distance = max(len_s, len_t) // 2 - 1
-    s_matches = [False] * len_s
-    t_matches = [False] * len_t
-    matches = 0
-    for i in range(len_s):
-        start = max(0, i - match_distance)
-        end = min(i + match_distance + 1, len_t)
-        for j in range(start, end):
-            if t_matches[j] or s[i] != t[j]:
-                continue
-            s_matches[i] = True
-            t_matches[j] = True
-            matches += 1
-            break
-    if matches == 0:
-        return 0.0
-    transpositions = 0
-    k = 0
-    for i in range(len_s):
-        if not s_matches[i]:
-            continue
-        while not t_matches[k]:
-            k += 1
-        if s[i] != t[k]:
-            transpositions += 1
-        k += 1
-    return (
-        matches / len_s
-        + matches / len_t
-        + (matches - transpositions / 2) / matches
-    ) / 3.0
+    return _compat_search()._compat_jaro_similarity(s, t)
 
 
 @functools.lru_cache(maxsize=65536)
@@ -1265,30 +1242,15 @@ def sorensen_dice_coefficient(s: str, t: str) -> float:
     # Native acceleration: kimix_native.search.sorensen_dice.
     if _native_use_native("SEARCH") and _NATIVE_SEARCH is not None:
         return _NATIVE_SEARCH.sorensen_dice(s, t)
-    if not s and not t:
-        return 1.0
-    if not s or not t:
-        return 0.0
-    s_bigrams = {s[i : i + 2] for i in range(len(s) - 1)}
-    t_bigrams = {t[i : i + 2] for i in range(len(t) - 1)}
-    intersection = len(s_bigrams & t_bigrams)
-    denom = len(s_bigrams) + len(t_bigrams)
-    return 0.0 if denom == 0 else 2.0 * intersection / denom
+    return _compat_search()._compat_sorensen_dice(s, t)
 
 
-@functools.lru_cache(maxsize=65536)
 def ngram_overlap(s: str, t: str, n: int = 2) -> float:
     """Return n-gram overlap ratio (intersection / union)."""
     # Native acceleration: kimix_native.search.ngram_overlap.
     if _native_use_native("SEARCH") and _NATIVE_SEARCH is not None:
         return _NATIVE_SEARCH.ngram_overlap(s, t, n)
-    if not s or not t:
-        return 0.0
-    s_grams = {s[i : i + n] for i in range(len(s) - n + 1)} if len(s) >= n else {s}
-    t_grams = {t[i : i + n] for i in range(len(t) - n + 1)} if len(t) >= n else {t}
-    union = s_grams | t_grams
-    if not union:
-        return 0.0
+    return _compat_search()._compat_ngram_overlap(s, t, n)
     return len(s_grams & t_grams) / len(union)
 
 

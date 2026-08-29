@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from kimix import native_loader
+from kimi_cli import native_loader
 from kimix.cli_impl import core
 
 

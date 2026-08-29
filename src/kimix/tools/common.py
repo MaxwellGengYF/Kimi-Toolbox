@@ -17,8 +17,8 @@ from typing import Any
 import orjson
 
 from kimi_agent_sdk import ToolReturnValue
-
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
@@ -253,6 +253,24 @@ def _build_long_param_retry_msg(
 # Resolved once at import time: the runtime environment is stable, so
 # ``_native_get_module("stream")`` can never change while the process lives.
 _NATIVE_STREAM = _native_get_module("stream")
+# Pure-Python reference implementations (canonical copies live in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_STREAM = None
+_COMPAT_SHELL = None
+
+
+def _compat_stream():
+    global _COMPAT_STREAM
+    if _COMPAT_STREAM is None:
+        _COMPAT_STREAM = _native_get_compat("stream")
+    return _COMPAT_STREAM
+
+
+def _compat_shell():
+    global _COMPAT_SHELL
+    if _COMPAT_SHELL is None:
+        _COMPAT_SHELL = _native_get_compat("_shell_compat")
+    return _COMPAT_SHELL
 
 
 # ── Standard Error Helpers ────────────────────────────────────────────────
@@ -460,16 +478,6 @@ def _is_known_rtk_command(name: str) -> bool:
     return name.lower() in _RTK_KNOWN_COMMANDS
 
 
-# ANSI escape sequences (colored text, cursor movement, OSC/DCS/PM/APC strings)
-_ANSI_ESCAPE_RE = re.compile(
-    r"\x1B(?:"
-    r"\][^\x07\x1B]*(?:\x07|\x1B\\)|"  # OSC sequences (BEL or ST terminated)
-    r"[P^_][^\x07\x1B]*(?:\x07|\x1B\\)|"  # DCS / PM / APC sequences
-    r"[@-Z\\-_]|"              # Single-character Fe sequences
-    r"\[[0-?]*[ -/]*[@-~]"      # CSI sequences
-    r")"
-)
-
 def filter_output(text: str) -> str:
     """Process process pipeline stdout.
 
@@ -490,9 +498,7 @@ def filter_output(text: str) -> str:
     # ANSI-strip + CRLF normalize).
     if _native_use_native("STREAM") and _NATIVE_STREAM is not None:
         return _NATIVE_STREAM.filter_output(text)
-    text = _ANSI_ESCAPE_RE.sub("", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return text
+    return _compat_stream()._compat_filter_output(text)
 
 
 from kimi_cli.session import Session
@@ -1166,103 +1172,22 @@ def _truncate_lines(
 
 def _find_ansi_c_end(cmd: str, start: int) -> int:
     """Return the index AFTER the closing ``'`` of a ``$'...'`` region."""
-    i = start
-    length = len(cmd)
-    while i < length:
-        c = cmd[i]
-        if c == "\\" and i + 1 < length:
-            i += 2
-        elif c == "'":
-            return i + 1
-        else:
-            i += 1
-    return -1
+    return _compat_shell()._find_ansi_c_end(cmd, start)
 
 
 def _find_backtick_end(cmd: str, start: int) -> int:
     """Return the index AFTER the closing backtick of a `` `...` `` region."""
-    i = start
-    length = len(cmd)
-    while i < length:
-        c = cmd[i]
-        if c == "\\" and i + 1 < length:
-            i += 2
-        elif c == "`":
-            return i + 1
-        else:
-            i += 1
-    return -1
+    return _compat_shell()._find_backtick_end(cmd, start)
 
 
 def _find_dq_end(cmd: str, start: int) -> int:
     """Return the index AFTER the closing ``"`` of a double-quoted region."""
-    i = start
-    length = len(cmd)
-    while i < length:
-        c = cmd[i]
-        if c == "\\" and i + 1 < length and cmd[i + 1] in ('"', "\\", "$", "`"):
-            i += 2
-        elif c == '"':
-            return i + 1
-        elif c == "$" and i + 1 < length and cmd[i + 1] == "(":
-            end = _find_matching_paren(cmd, i + 1)
-            if end == -1:
-                return -1
-            i = end + 1
-        elif c == "$" and i + 1 < length and cmd[i + 1] == "'":
-            end = _find_ansi_c_end(cmd, i + 2)
-            if end == -1:
-                return -1
-            i = end
-        elif c == "`":
-            end = _find_backtick_end(cmd, i + 1)
-            if end == -1:
-                return -1
-            i = end
-        else:
-            i += 1
-    return -1
+    return _compat_shell()._find_dq_end(cmd, start)
 
 
 def _find_matching_paren(cmd: str, open_pos: int) -> int:
     """Return the index of the ``)`` matching the ``(`` at ``cmd[open_pos]``."""
-    assert cmd[open_pos] == "("
-    depth = 1
-    i = open_pos + 1
-    length = len(cmd)
-    while i < length:
-        c = cmd[i]
-        if c == "'":
-            end = cmd.find("'", i + 1)
-            if end == -1:
-                return -1
-            i = end + 1
-        elif c == '"':
-            end = _find_dq_end(cmd, i + 1)
-            if end == -1:
-                return -1
-            i = end
-        elif c == "`":
-            end = _find_backtick_end(cmd, i + 1)
-            if end == -1:
-                return -1
-            i = end
-        elif c == "$" and i + 1 < length and cmd[i + 1] == "'":
-            end = _find_ansi_c_end(cmd, i + 2)
-            if end == -1:
-                return -1
-            i = end
-        elif c == "$" and i + 1 < length and cmd[i + 1] == "(":
-            depth += 1
-            i += 2
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-            i += 1
-        else:
-            i += 1
-    return -1
+    return _compat_shell()._find_matching_paren(cmd, open_pos)
 
 
 def _split_shell_segments(command: str) -> list[tuple[str, str]]:

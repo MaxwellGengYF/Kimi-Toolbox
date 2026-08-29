@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, override
 
 from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
@@ -98,9 +99,15 @@ _OUTPUT_MODE_MAP: dict[str, Literal["files_with_matches", "count_matches", "cont
 }
 
 
-# Matches a regex ``\n`` escape (odd number of backslashes before ``n``).
-# Even backslashes, e.g. ``\\n``, mean a literal backslash+n search.
-_REGEX_NEWLINE_ESCAPE_RE = re.compile(r"(?<!\\)(?:\\\\)*\\n")
+# Pure-Python reference implementation of the pattern newline helpers.
+_COMPAT_TOOLS = None
+
+
+def _compat_tools():
+    global _COMPAT_TOOLS
+    if _COMPAT_TOOLS is None:
+        _COMPAT_TOOLS = _native_get_compat("tools")
+    return _COMPAT_TOOLS
 
 
 def _pattern_has_regex_newline(pattern: str) -> bool:
@@ -114,7 +121,7 @@ def _pattern_has_regex_newline(pattern: str) -> bool:
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and pattern.isascii():
         return _NATIVE_TOOLS.pattern_has_regex_newline(pattern)
-    return "\n" in pattern or bool(_REGEX_NEWLINE_ESCAPE_RE.search(pattern))
+    return _compat_tools()._compat_pattern_has_regex_newline(pattern)
 
 
 def _multiline_pattern(pattern: str) -> str:
@@ -128,14 +135,7 @@ def _multiline_pattern(pattern: str) -> str:
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and pattern.isascii():
         return _NATIVE_TOOLS.multiline_pattern(pattern)
-    if "\n" not in pattern and not _REGEX_NEWLINE_ESCAPE_RE.search(pattern):
-        return pattern
-    # Normalize explicit CRLF in the pattern, then rewrite real newlines and
-    # regex ``\n`` escapes to ``\r?\n``.  Lambdas keep the replacement text
-    # literal (re.sub would otherwise interpret ``\r``/``\n`` escapes).
-    p = pattern.replace("\r\n", "\n")
-    p = _REGEX_NEWLINE_ESCAPE_RE.sub(lambda _m: r"\r?\n", p)
-    return p.replace("\n", r"\r?\n")
+    return _compat_tools()._compat_multiline_pattern(pattern)
 
 
 class Params(BaseModel):

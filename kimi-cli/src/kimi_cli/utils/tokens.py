@@ -1,31 +1,29 @@
 from __future__ import annotations
 
-import regex as re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TEXT = _native_get_module("text")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_TEXT = None
+
+
+def _compat_text():
+    global _COMPAT_TEXT
+    if _COMPAT_TEXT is None:
+        _COMPAT_TEXT = _native_get_compat("text")
+    return _COMPAT_TEXT
 
 if TYPE_CHECKING:
     from kosong.message import Message
-
-
-# Regex to detect CJK characters
-_CJK_RE = re.compile(
-    "[\u4e00-\u9fff"
-    "\u3400-\u4dbf"
-    "\U00020000-\U0002ebef"
-    "\uac00-\ud7af"
-    "\u3040-\u309f"
-    "\u30a0-\u30ff"
-    "\uff00-\uffef]"
-)
 
 
 def _is_cjk_text(text: str, threshold: float = 0.15) -> bool:
@@ -33,10 +31,7 @@ def _is_cjk_text(text: str, threshold: float = 0.15) -> bool:
     # Native acceleration: kimix_native.text.is_cjk_text (bit-identical).
     if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
         return _NATIVE_TEXT.is_cjk_text(text, threshold)
-    if not text:
-        return False
-    cjk_count = len(_CJK_RE.findall(text))
-    return cjk_count / len(text) > threshold
+    return _compat_text()._compat_is_cjk_text(text, threshold)
 
 
 def _estimate_chars_tokens(text: str) -> int:
@@ -52,16 +47,7 @@ def _estimate_chars_tokens(text: str) -> int:
     # Native acceleration: kimix_native.text.estimate_chars_tokens.
     if _native_use_native("TEXT") and _NATIVE_TEXT is not None:
         return _NATIVE_TEXT.estimate_chars_tokens(text)
-    total = len(text)
-    ascii_count = sum(1 for c in text if ord(c) < 128)
-    ascii_ratio = ascii_count / total
-
-    if ascii_ratio > 0.95:
-        return max(1, total // 4)
-    if _is_cjk_text(text):
-        return max(1, total // 3)
-    # Mixed / code
-    return max(1, int(total / 3.5))
+    return _compat_text()._compat_estimate(text)
 
 
 def count_tokens(text: str, model: str | None = None) -> int:

@@ -10,7 +10,6 @@ from __future__ import annotations
 import functools
 import io
 import os
-import regex as re
 import sys
 import threading
 import time
@@ -19,13 +18,24 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_STREAM = _native_get_module("stream")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_STREAM = None
+
+
+def _compat_stream():
+    global _COMPAT_STREAM
+    if _COMPAT_STREAM is None:
+        _COMPAT_STREAM = _native_get_compat("stream")
+    return _COMPAT_STREAM
 
 _threads: list[threading.Thread] = []
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -164,16 +174,6 @@ GRAY_LIGHT = Color256(250)
 TRUE_GRAY = TrueColor(128, 128, 128)
 
 
-_ANSI_ESCAPE = re.compile(
-    r"\x1B(?:"
-    r"\][^\x07\x1B]*(?:\x07|\x1B\\)|"  # OSC sequences (BEL or ST terminated)
-    r"[P^_][^\x07\x1B]*(?:\x07|\x1B\\)|"  # DCS / PM / APC sequences
-    r"[@-Z\\-_]|"              # Single-character Fe sequences
-    r"\[[0-?]*[ -/]*[@-~]"      # CSI sequences
-    r")"
-)
-
-
 def _strip_ansi(text: str) -> str:
     if "\x1b" not in text:
         return text
@@ -181,7 +181,7 @@ def _strip_ansi(text: str) -> str:
     # ANSI escape pattern; the pure-Python body below is unchanged.
     if _native_use_native("STREAM") and _NATIVE_STREAM is not None:
         return _NATIVE_STREAM.strip_ansi(text)
-    return _ANSI_ESCAPE.sub("", text)
+    return _compat_stream()._ANSI_ESCAPE_RE.sub("", text)
 
 
 def _sgr_end(word: str, i: int, end: int) -> int:

@@ -103,7 +103,7 @@ _NATIVE_CODE = r"""
 import sys
 import time
 
-import kimix.native_loader as n
+import kimi_cli.native_loader as n
 import kimix.ui.printing as p
 
 assert n.NATIVE_AVAILABLE, "native runtime should be available"

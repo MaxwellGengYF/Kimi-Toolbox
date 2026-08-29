@@ -8,7 +8,7 @@ re-exports them so there is exactly one copy of the parser logic.
 
 from __future__ import annotations
 
-from kimix.native_loader import get_compat as _native_get_compat
+from kimi_cli.native_loader import get_compat as _native_get_compat
 
 # The canonical pure-Python implementation (the historical body of this
 # module) lives in the kimix_native shim so there is exactly one copy of the
@@ -48,9 +48,9 @@ def native_parse_result(
         source_code: source text to parse.
     """
     try:
-        from kimix.native_loader import get_module, use_native
+        from kimi_cli.native_loader import get_module, use_native
     except Exception:
-        # kimix.native_loader unavailable (e.g. kimix-base's isolated
+        # kimi_cli.native_loader unavailable (e.g. kimix-base's isolated
         # reference-test env loads this file into a synthetic package):
         # run the pure-Python body unchanged.
         return None

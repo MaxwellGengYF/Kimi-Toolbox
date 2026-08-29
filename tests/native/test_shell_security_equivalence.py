@@ -20,7 +20,7 @@ import io
 
 import pytest
 
-from kimix.native_loader import NATIVE_AVAILABLE
+from kimi_cli.native_loader import NATIVE_AVAILABLE
 
 pytestmark = pytest.mark.skipif(
     not NATIVE_AVAILABLE,

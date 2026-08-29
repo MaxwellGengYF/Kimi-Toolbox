@@ -21,7 +21,7 @@ in exactly one place.
 
 from __future__ import annotations
 
-from kimix.native_loader import get_compat as _native_get_compat
+from kimi_cli.native_loader import get_compat as _native_get_compat
 
 # The canonical pure-Python implementation (the historical body of this
 # module) lives in the kimix_native shim so there is exactly one copy of the

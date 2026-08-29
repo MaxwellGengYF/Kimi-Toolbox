@@ -1,105 +1,27 @@
 from __future__ import annotations
 
 import os
-import regex as re
 import subprocess
 from pathlib import Path
 
 from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_GLOB = _native_get_module("glob")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_GLOB = None
 
-_IGNORED_NAMES: frozenset[str] = frozenset(
-    (
-        # vcs metadata
-        ".DS_Store",
-        ".bzr",
-        ".git",
-        ".hg",
-        ".svn",
-        # tooling caches
-        ".build",
-        ".cache",
-        ".coverage",
-        ".fleet",
-        ".gradle",
-        ".idea",
-        ".ipynb_checkpoints",
-        ".pnpm-store",
-        ".pytest_cache",
-        ".pub-cache",
-        ".ruff_cache",
-        ".swiftpm",
-        ".tox",
-        ".venv",
-        ".vs",
-        ".vscode",
-        ".yarn",
-        ".yarn-cache",
-        # js / frontend
-        ".next",
-        ".nuxt",
-        ".parcel-cache",
-        ".svelte-kit",
-        ".turbo",
-        ".vercel",
-        "node_modules",
-        # python packaging
-        "__pycache__",
-        "build",
-        "coverage",
-        "dist",
-        "htmlcov",
-        "pip-wheel-metadata",
-        "venv",
-        # java / jvm
-        ".mvn",
-        "out",
-        "target",
-        # dotnet / native
-        "bin",
-        "cmake-build-debug",
-        "cmake-build-release",
-        "obj",
-        # bazel / buck
-        "bazel-bin",
-        "bazel-out",
-        "bazel-testlogs",
-        "buck-out",
-        # misc artifacts
-        ".dart_tool",
-        ".serverless",
-        ".stack-work",
-        ".terraform",
-        ".terragrunt-cache",
-        "DerivedData",
-        "Pods",
-        "deps",
-        "tmp",
-        "vendor",
-    )
-)
 
-_IGNORED_PATTERNS: re.Pattern[str] = re.compile(
-    r"|".join(
-        (
-            r".*_cache$",
-            r".*-cache$",
-            r".*\.egg-info$",
-            r".*\.dist-info$",
-            r".*\.py[co]$",
-            r".*\.class$",
-            r".*\.sw[po]$",
-            r".*~$",
-            r".*\.(?:tmp|bak)$",
-        )
-    ),
-    re.IGNORECASE,
-)
+def _compat_glob():
+    global _COMPAT_GLOB
+    if _COMPAT_GLOB is None:
+        _COMPAT_GLOB = _native_get_compat("glob")
+    return _COMPAT_GLOB
 
 _GIT_LS_FILES_TIMEOUT = 5
 
@@ -113,9 +35,7 @@ def is_ignored(name: str) -> bool:
     """Return *True* if *name* should be excluded from file mention results."""
     if not name:
         return True
-    if name in _IGNORED_NAMES:
-        return True
-    return bool(_IGNORED_PATTERNS.fullmatch(name))
+    return _compat_glob()._compat_is_ignored_name(name)
 
 
 def detect_git(root: Path) -> bool:

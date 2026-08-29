@@ -42,12 +42,22 @@ import xxhash
 from rapidfuzz import fuzz
 
 from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
-
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TOOLS = _native_get_module("tools")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_TOOLS = None
+
+
+def _compat_tools():
+    global _COMPAT_TOOLS
+    if _COMPAT_TOOLS is None:
+        _COMPAT_TOOLS = _native_get_compat("tools")
+    return _COMPAT_TOOLS
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -180,11 +190,10 @@ _ZERO_WIDTH = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff\u180e]")
 # C0 controls to strip: everything except \t(09) \n(0a) \r(0d — left for Stage 2)
 _C0_STRIP = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-# Stage 2 — ANSI / OSC escape sequences
-_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
+# Stage 2 — ANSI / OSC escape sequences (now delegated to the shim via
+# strip_control_noise; the patterns live once in kimix_native.tools).
 
+# Stage 3 — whitespace patterns
 # Stage 3 — whitespace patterns
 # A4 collapses *internal* space runs only — leading indentation is never
 # touched (log-kind text can contain code blocks, e.g. ``cat file.py``).
@@ -196,7 +205,7 @@ _TIMESTAMP_START = re.compile(
 )
 
 # Stage 5 — line-number pattern (ReadFile ``{n:6d}\t``)
-_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+# (renumber_lines now delegates to the shim; _LINENO_RE lives in kimix_native.tools.)
 
 # Stage 6 — banner detection
 # Keyword must be followed by whitespace or EOL (not ``.``/``:``), so grep
@@ -259,21 +268,7 @@ def strip_control_noise(text: str) -> str:
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
         return _NATIVE_TOOLS.compress_strip_control_noise(text)
-    text = _ANSI_CSI.sub("", text)
-    text = _ANSI_OSC.sub("", text)
-    text = _ANSI_OTHER.sub("", text)
-    # CR progress-bar collapse: within each line keep only the segment
-    # after the last \r (the final rendered frame).
-    if "\r" in text:
-        lines = text.split("\n")
-        result: list[str] = []
-        for line in lines:
-            if "\r" in line:
-                result.append(line.rsplit("\r", 1)[-1])
-            else:
-                result.append(line)
-        text = "\n".join(result)
-    return text
+    return _compat_tools()._compat_compress_strip_control_noise(text)
 
 
 
@@ -387,35 +382,12 @@ def _factor_common_indent(
 def renumber_lines(text: str) -> str:
     """Compact fixed-width line numbers ("  42\\t" -> "42\\t").
 
-    Only fires when *every* substantial line matches ^\\s*\\d+\\t
+    Only fires when *every* substantial line matches ^\s*\d+\t
     (ReadFile-style output).  The bijection is preserved exactly.
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
         return _NATIVE_TOOLS.compress_renumber_lines(text)
-    lines = text.split("\n")
-
-    substantial = 0
-    numbered = 0
-    for ln in lines:
-        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
-            continue
-        substantial += 1
-        if _LINENO_RE.match(ln):
-            numbered += 1
-
-    if substantial == 0 or numbered < substantial:
-        return text
-
-    new_lines: list[str] = []
-    for ln in lines:
-        m = _LINENO_RE.match(ln)
-        if m:
-            num = int(m.group(1))
-            rest = ln[m.end():]
-            new_lines.append(f"{num}\t{rest}")
-        else:
-            new_lines.append(ln)
-    return "\n".join(new_lines)
+    return _compat_tools()._compat_compress_renumber_lines(text)
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from kosong.utils.typing import JsonType
 from kimi_cli import logger
 from kimi_cli.exception import InvalidToolError, MCPRuntimeError
 from kimi_cli.hooks.engine import HookEngine
+from kimi_cli.native_loader import get_compat as _native_get_compat
 from kimi_cli.safety_check import sanitize_for_tokenizer
 from kimi_cli.tools import SkipThisTool, resolve_tool_class
 from kimi_cli.tools.utils import repair_tool_arguments
@@ -58,6 +59,16 @@ from kimi_cli.wire.types import (
     ToolReturnValue,
     VideoURLPart,
 )
+
+# Pure-Python reference implementation of canonical JSON sorting (shim-owned).
+_COMPAT_CODEC = None
+
+
+def _compat_codec():
+    global _COMPAT_CODEC
+    if _COMPAT_CODEC is None:
+        _COMPAT_CODEC = _native_get_compat("codec")
+    return _COMPAT_CODEC
 
 if TYPE_CHECKING:
     import mcp
@@ -772,12 +783,8 @@ def _make_diff_args_reminder(tool_name: str, call_count: int) -> str:
 
 
 def _sort_json_value(value: object) -> object:
-    if isinstance(value, list):
-        return [_sort_json_value(item) for item in cast("list[object]", value)]
-    if isinstance(value, dict):
-        value_dict = cast("dict[str, object]", value)
-        return {key: _sort_json_value(value_dict[key]) for key in sorted(value_dict)}
-    return value
+    """Recursively sort JSON values for canonical serialization (shim-owned)."""
+    return _compat_codec()._sort_json_value(value)
 
 
 def _canonical_tool_arguments(arguments: Any) -> str:

@@ -59,13 +59,13 @@ from __future__ import annotations
 
 import sys
 
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
     get_compat as _native_get_compat,
 )
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
     get_module as _native_get_module,
 )
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
     use_native as _native_use_native,
 )
 

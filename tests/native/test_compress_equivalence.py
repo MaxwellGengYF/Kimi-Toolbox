@@ -16,15 +16,21 @@ from typing import Any
 import pytest
 
 # Ensure we test the local kimi-cli source tree, not an installed wheel.
+# kimi-cli/src also contains a nested `kimix` helper package, so put the real
+# `src/` (root kimix package) on top of it — otherwise `import kimix.*` in
+# sibling tests would resolve to the nested package.
 _KIMI_CLI_SRC = os.path.join(os.path.dirname(__file__), "..", "..", "kimi-cli", "src")
 if os.path.isdir(_KIMI_CLI_SRC) and _KIMI_CLI_SRC not in sys.path:
     sys.path.insert(0, _KIMI_CLI_SRC)
+_SRC = os.path.join(os.path.dirname(__file__), "..", "..", "src")
+if os.path.isdir(_SRC) and _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 import importlib.util
 
 
 _NATIVE_LOADER_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "src", "kimix", "native_loader.py"
+    os.path.dirname(__file__), "..", "..", "kimi-cli", "src", "kimi_cli", "native_loader.py"
 )
 
 

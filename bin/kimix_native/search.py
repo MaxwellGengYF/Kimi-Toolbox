@@ -19,21 +19,9 @@ import struct
 from collections import Counter
 
 from . import _native, use_native
+from ._common import _enc, _dec
 
 _XXH3_SEED = 2**61 - 1
-
-
-def _enc(s: str) -> bytes:
-    return s.encode("utf-8", "surrogatepass")
-
-
-def _dec(b: bytes) -> str:
-    return b.decode("utf-8", "surrogatepass")
-
-
-# ---------------------------------------------------------------------------
-# _compat — pure-Python mirrors
-# ---------------------------------------------------------------------------
 
 
 def _compat_hash64(data: bytes, seed: int = _XXH3_SEED) -> int:

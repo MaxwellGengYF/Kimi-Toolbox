@@ -12,7 +12,7 @@ BackgroundOutputFormatter = Callable[
     Awaitable[tuple[str, str, str | None, str | None, bool]],
 ]
 
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
     get_module as _native_get_module,
     use_native as _native_use_native,
 )

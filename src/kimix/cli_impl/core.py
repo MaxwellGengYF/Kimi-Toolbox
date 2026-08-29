@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import kimix.base as base
-from kimix import native_loader
+from kimi_cli import native_loader
 from kimix.base import sync_all
 from kimix.ui.printing import (
     print_debug,
@@ -31,7 +31,7 @@ def _check_native() -> None:
     Linux & macOS, wrapped by the ``kimix_native`` shim) is an OPTIONAL
     acceleration. When it loads, an info
     log confirms it is enabled; when the binary is missing or the library is
-    invalid, ``kimix.native_loader`` falls back to pure Python and a concise
+    invalid, ``kimi_cli.native_loader`` falls back to pure Python and a concise
     warning is logged through ``kimix.ui.printing`` so the fallback does not
     go unnoticed. ``KIMIX_NATIVE=0`` (explicit opt-out) prints nothing.
     """

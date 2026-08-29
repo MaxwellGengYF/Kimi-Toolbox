@@ -77,6 +77,7 @@ import regex as re
 import orjson
 
 from . import _native, use_native
+from ._common import _enc, _compact
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
@@ -88,28 +89,6 @@ HASH_SEED = 0
 # they wrapped measured <2x faster than Python and were removed; the kept
 # tools kernel still needs these pure-Python helpers).
 # ---------------------------------------------------------------------------
-
-
-def _enc(s: str) -> bytes:
-    return s.encode("utf-8", "surrogatepass")
-
-
-def _dec(b: bytes) -> str:
-    return b.decode("utf-8", "surrogatepass")
-
-
-def _compact(obj) -> bytes:
-    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
-
-    Falls back to the stdlib serializer for values orjson rejects (lone
-    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
-    """
-    try:
-        return orjson.dumps(obj)
-    except (TypeError, ValueError):
-        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8", "surrogatepass"
-        )
 
 
 def _compat_indent2(obj) -> bytes:
@@ -950,7 +929,6 @@ def _compat_is_expected_exit(command: str, exit_code: int | None) -> bool:
     )
 
 
-
 def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
     """Exact mirror of output_enhance.py::annotate_failure (78-114)."""
     if not output:
@@ -1024,6 +1002,9 @@ def bounded_append(content: str, text: str, cap: int) -> tuple[str, bool]:
 def command_detection_variants(command: str) -> list[str]:
     """Deobfuscation variants used to defeat quoting tricks (at most 3)."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.command_detection_variants(command)
         return _native.tools.command_detection_variants(command)
     return _compat_command_detection_variants(command)
 
@@ -1031,6 +1012,9 @@ def command_detection_variants(command: str) -> list[str]:
 def detect_hardline_command(command: str) -> tuple[bool, str | None]:
     """(True, description) when *command* matches a hardline pattern."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell and hasattr(shell, "detect_hardline_command"):
+            return shell.detect_hardline_command(command)
         return _native.tools.detect_hardline_command(command)
     return _compat_detect_hardline_command(command)
 
@@ -1038,6 +1022,9 @@ def detect_hardline_command(command: str) -> tuple[bool, str | None]:
 def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
     """Single entry point: detector over every deobfuscation variant."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.check_hardline_blocked(command)
         return _native.tools.check_hardline_blocked(command)
     return _compat_check_hardline_blocked(command)
 
@@ -1045,6 +1032,9 @@ def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
 def foreground_background_guidance(command: str) -> str | None:
     """Hint when *command* looks long-lived, else None (quotes ignored)."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.foreground_background_guidance(command)
         return _native.tools.foreground_background_guidance(command)
     return _compat_foreground_background_guidance(command)
 
@@ -1057,28 +1047,29 @@ def base_command_name(command: str) -> str:
 
 
 def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
-    """Explain a non-zero exit code for well-known commands, else None.
-
-    Pure-Python implementation: the compiled kernel predates the SIGPIPE
-    rule, so the pipeline-truncation meaning is decided by the compat mirror
-    to stay identical under every execution mode.
-    """
+    """Explain a non-zero exit code for well-known commands, else None."""
+    if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.interpret_exit_code(command, exit_code)
     return _compat_interpret_exit_code(command, exit_code)
 
 
 def is_expected_exit(command: str, exit_code: int | None) -> bool:
-    """True when *exit_code* is a normal, expected outcome for *command*.
-
-    Pure-Python implementation: the compiled kernel does not expose this
-    helper, so the compat mirror is the single source of truth.
-    """
+    """True when *exit_code* is a normal, expected outcome for *command*."""
+    if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.is_expected_exit(command, exit_code)
     return _compat_is_expected_exit(command, exit_code)
-
 
 
 def annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
     """Single actionable hint for common failure signatures, else None."""
     if use_native("TOOLS") and _native is not None and output.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.annotate_failure(output, command, exit_code)
         return _native.tools.annotate_failure(output, command, exit_code)
     return _compat_annotate_failure(output, command, exit_code)
 
@@ -1342,159 +1333,6 @@ _ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
 
 
-def _cfg_get(config, name: str, default):
-    """Read a config field from a dataclass or a dict."""
-    if config is None:
-        return default
-    if isinstance(config, dict):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
-def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
-                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
-    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
-    threshold / max-unit gate from intra_line_dedup so it is a drop-in
-    per-line compressor."""
-    if len(line) <= threshold:
-        return line
-    n = len(line)
-    if n < 6:
-        return line
-    max_u = min(n // 3, max_unit)
-    for p in range(1, max_u + 1):
-        if n % p != 0:
-            continue
-        unit = line[:p]
-        if unit * (n // p) == line:
-            repeats = n // p
-            elided = n - p
-            marker = f" ×{repeats} [+{elided} chars elided]"
-            if len(unit) + len(marker) < n:
-                return f"{unit}{marker}"
-            return line
-    return line
-
-
-def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
-    """Exact mirror of micro_compress.py::_factor_common_indent.
-    Returns (new_lines, common_prefix) where common_prefix is empty when no
-    factor happened."""
-    non_blank = [ln for ln in lines if ln.strip()]
-    if len(non_blank) < 2:
-        return lines, ""
-
-    common = non_blank[0][:_MAX_INDENT_SCAN]
-    for ln in non_blank[1:]:
-        stripped = ln.lstrip(" \t")
-        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
-        n = min(len(common), len(indent))
-        i = 0
-        while i < n and common[i] == indent[i]:
-            i += 1
-        common = common[:i]
-        if not common:
-            break
-
-    if not common or len(common) < 4:
-        return lines, ""
-
-    prefix_len = len(common)
-    new_lines = [
-        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
-    ]
-    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
-
-
-def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
-                                        config=None) -> str:
-    """Exact mirror of micro_compress.py::collapse_whitespace."""
-    lines = text.split("\n")
-
-    # A2 — strip trailing whitespace
-    if _cfg_get(config, "strip_trailing_ws", True):
-        if kind == "code":
-            lines = [ln.rstrip(" ") for ln in lines]
-        else:
-            lines = [ln.rstrip() for ln in lines]
-
-    # A1 — collapse blank-line runs
-    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
-    if max_blanks >= 0:
-        collapsed: list[str] = []
-        blank_run = 0
-        for ln in lines:
-            if ln.strip() == "":
-                blank_run += 1
-                if blank_run <= max_blanks:
-                    collapsed.append("")
-            else:
-                blank_run = 0
-                collapsed.append(ln)
-        lines = collapsed
-
-    # A3 — factor common indentation (non-code, non-lossless-only)
-    if (
-        _cfg_get(config, "common_indent_factor", True)
-        and kind != "code"
-        and not _cfg_get(config, "lossless_only", False)
-    ):
-        lines, _ = _compat_factor_common_indent(lines)
-
-    # A4 — collapse internal space runs (prose/log only)
-    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
-        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
-
-    return "\n".join(lines)
-
-
-def _compat_compress_renumber_lines(text: str) -> str:
-    """Exact mirror of micro_compress.py::renumber_lines."""
-    lines = text.split("\n")
-
-    substantial = 0
-    numbered = 0
-    for ln in lines:
-        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
-            continue
-        substantial += 1
-        if _LINENO_RE.match(ln):
-            numbered += 1
-
-    if substantial == 0 or numbered < substantial:
-        return text
-
-    new_lines: list[str] = []
-    for ln in lines:
-        m = _LINENO_RE.match(ln)
-        if m:
-            num = int(m.group(1))
-            rest = ln[m.end():]
-            new_lines.append(f"{num}\t{rest}")
-        else:
-            new_lines.append(ln)
-    return "\n".join(new_lines)
-
-
-def _compat_compress_strip_control_noise(text: str) -> str:
-    """Exact mirror of micro_compress.py::strip_control_noise."""
-    text = _ANSI_CSI.sub("", text)
-    text = _ANSI_OSC.sub("", text)
-    text = _ANSI_OTHER.sub("", text)
-    if "\r" in text:
-        lines = text.split("\n")
-        result: list[str] = []
-        for ln in lines:
-            if "\r" in ln:
-                result.append(ln.rsplit("\r", 1)[-1])
-            else:
-                result.append(ln)
-        text = "\n".join(result)
-    return text
-
-
-
-
 # ---------------------------------------------------------------------------
 # Micro-compression kernels (plan 016)
 # ---------------------------------------------------------------------------
@@ -1730,3 +1568,67 @@ def compress_strip_control_noise(text: str) -> str:
     if use_native("TOOLS") and _native is not None and text.isascii():
         return _native.tools.compress_strip_control_noise(text)
     return _compat_compress_strip_control_noise(text)
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool kernels (runtime_py.builtin_tools.*)
+# ---------------------------------------------------------------------------
+
+# Cached access to the new built-in tool submodules.  These are populated
+# lazily so the shim stays importable when an older runtime_py lacks them.
+_builtin_shell = None
+_builtin_file = None
+_builtin_web = None
+
+
+def _get_builtin_shell():
+    global _builtin_shell
+    if _builtin_shell is None and _native is not None:
+        try:
+            _builtin_shell = _native.builtin_tools.shell
+        except AttributeError:
+            _builtin_shell = False
+    return _builtin_shell
+
+def truncate_lines(
+    output: str, max_lines: int, preserve_errors: bool = True, error_context_lines: int = 2
+) -> str:
+    """Fold output to max_lines while preserving error context."""
+    shell = _get_builtin_shell()
+    if shell and use_native("TOOLS") and output.isascii():
+        return shell.truncate_lines(output, max_lines, preserve_errors, error_context_lines)
+    return output
+
+
+def _get_builtin_file():
+    global _builtin_file
+    if _builtin_file is None and _native is not None:
+        try:
+            _builtin_file = _native.builtin_tools.file
+        except AttributeError:
+            _builtin_file = False
+    return _builtin_file
+
+
+def fnmatch_match(pattern: str, text: str, case_insensitive: bool = True) -> bool:
+    """Full-string fnmatch match (mirrors CPython fnmatch.fnmatchcase)."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.fnmatch_match(pattern, text, case_insensitive)
+    return False
+
+
+def match_path_pattern(pattern: str, rel_path: str, case_insensitive: bool = True) -> bool:
+    """Parse a path glob pattern and match a relative path string."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.match_path_pattern(pattern, rel_path, case_insensitive)
+    return False
+
+
+def is_unsafe_recursive_pattern(pattern: str) -> bool:
+    """True for patterns like '**' / '**/*' that recursively match everything."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.is_unsafe_recursive_pattern(pattern)
+    return False

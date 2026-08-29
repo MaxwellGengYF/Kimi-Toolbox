@@ -45,7 +45,7 @@ def test_consumers_work_without_native():
 def test_loader_fallback_subprocess():
     """A fresh interpreter with the native runtime disabled degrades gracefully."""
     code = (
-        "import kimix.native_loader as n; "
+        "import kimi_cli.native_loader as n; "
         "print('AVAILABLE=%s' % n.NATIVE_AVAILABLE); "
         "print('VERSION=%s' % n.version())"
     )

@@ -1,7 +1,7 @@
 
 from kimi_agent_sdk import CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel, Field
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
     get_module as _native_get_module,
     use_native as _native_use_native,
 )

@@ -16,7 +16,7 @@ one place."""
 
 from __future__ import annotations
 
-from kimix.native_loader import get_compat as _native_get_compat
+from kimi_cli.native_loader import get_compat as _native_get_compat
 from kimix.parser.base import ParseResult, native_parse_result
 
 # The canonical pure-Python implementation (the historical body of this

@@ -26,13 +26,24 @@ import sys
 
 import regex as re
 
-from kimix.native_loader import (
+from kimi_cli.native_loader import (
+    get_compat as _native_get_compat,
     get_module as _native_get_module,
     use_native as _native_use_native,
 )
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TOOLS = _native_get_module("tools")
+# Pure-Python reference implementation (canonical copy lives in the shim);
+# resolved lazily to avoid an import-time dependency on the shim package.
+_COMPAT_TOOLS = None
+
+
+def _compat_tools():
+    global _COMPAT_TOOLS
+    if _COMPAT_TOOLS is None:
+        _COMPAT_TOOLS = _native_get_compat("tools")
+    return _COMPAT_TOOLS
 
 __all__ = [
     "check_hardline_blocked",
@@ -58,16 +69,7 @@ def command_detection_variants(command: str) -> list[str]:
     ``detect_hardline_command`` is run over every variant so that any single
     variant spelling that matches a hardline pattern is caught.
     """
-    if not command or not command.strip():
-        return []
-    collapsed = " ".join(command.split())
-    deobfuscated = re.sub(r"[\\'\"]", "", collapsed).lower()
-    lowered = collapsed.lower()
-    variants: list[str] = []
-    for variant in (collapsed, deobfuscated, lowered):
-        if variant and variant not in variants:
-            variants.append(variant)
-    return variants or [collapsed]
+    return _compat_tools()._compat_command_detection_variants(command)
 
 
 def _segment_tokens(text: str, start: int) -> list[str]:
@@ -76,78 +78,13 @@ def _segment_tokens(text: str, start: int) -> list[str]:
     The scan stops at shell separators (``;``, ``&&``, ``||``, ``|``, newline)
     so that a later segment's tokens cannot satisfy an earlier command's rule.
     """
-    tail = text[start:]
-    tail = re.split(r";|\|\||&&|\||\n", tail, maxsplit=1)[0]
-    return tail.split()
+    return _compat_tools()._compat_segment_tokens(text, start)
 
 
 def _looks_like_flag(token: str) -> bool:
     """Return True when *token* is an option flag (``-rf``, ``--recursive``,
     or Windows ``/s``-style switches).  A bare ``/`` (the root path) is not."""
-    if token.startswith("-") and len(token) > 1:
-        return True
-    if token.startswith("/") and len(token) > 1 and token[1:].isalpha():
-        return True
-    return False
-
-
-def _collect_flags(tokens: list[str]) -> set[str]:
-    """Collect short/long flag letters (r/f/s/q) from option tokens."""
-    flags: set[str] = set()
-    for token in tokens:
-        if not _looks_like_flag(token):
-            continue
-        core = token.lstrip("-/")
-        if not core:
-            continue
-        if "recursive" in core:
-            flags.add("r")
-        if "force" in core:
-            flags.add("f")
-        for char in core:
-            if char in "rfsq":
-                flags.add(char)
-    return flags
-
-
-def _rm_target_is_protected(target: str) -> bool:
-    """Return True when *target* is a protected root/home path.
-
-    Handles ``/``, ``/*``, ``/.``-style collapses, ``~``, ``$HOME`` /
-    ``${HOME}``, and Windows drive roots (``C:\\``, ``C:\\*``, ``C:``).
-    Deeper paths (``/tmp/build``, ``C:\\Windows``) are never protected.
-    """
-    t = target.strip().strip("\"'").lower()
-    t = t.replace("${home}", "$home")
-    if t.rstrip("/\\") in ("~", "$home"):
-        return True
-    # Windows drive root, optionally with trailing separator and/or glob.
-    if re.match(r"^[a-z]:[\\/]?(?:[\\/]?\*)?$", t):
-        return True
-    if t.startswith("/"):
-        parts = [p for p in t.split("/") if p not in ("", ".", "..")]
-        if not parts or parts == ["*"]:
-            return True
-    return False
-
-
-def _detect_recursive_delete(text: str) -> str | None:
-    """Detect recursive/forced deletes of protected roots (``rm``/``rmdir``/``del``)."""
-    for match in re.finditer(r"\b(rm|rmdir|del)(?:\.exe)?\b", text):
-        command_word = match.group(1)
-        tokens = _segment_tokens(text, match.end())
-        flags = _collect_flags(tokens)
-        if command_word == "rm" and not ({"r", "f"} & flags):
-            continue
-        if command_word == "rmdir" and not ({"r", "s"} & flags):
-            continue
-        if command_word == "del" and not ({"r", "f", "s"} & flags):
-            continue
-        targets = [t for t in tokens if not _looks_like_flag(t)]
-        for target in targets:
-            if _rm_target_is_protected(target):
-                return f"Recursive delete of protected root/home (`{target}`)"
-    return None
+    return _compat_tools()._compat_looks_like_flag(token)
 
 
 def detect_hardline_command(command: str) -> tuple[bool, str | None]:
@@ -157,50 +94,7 @@ def detect_hardline_command(command: str) -> tuple[bool, str | None]:
     should additionally run :func:`command_detection_variants` (see
     :func:`check_hardline_blocked`) to defeat quote/escape obfuscation.
     """
-    if not command or not command.strip():
-        return False, None
-    text = " ".join(command.split()).lower()
-
-    # 1. Recursive delete of root / home / Windows drive root.
-    desc = _detect_recursive_delete(text)
-    if desc is not None:
-        return True, desc
-
-    # 2. Disk formatting (mkfs.* formats devices).
-    if re.search(r"\bmkfs(?:\.\w+)?\b", text):
-        return True, "Disk formatting command (`mkfs`) is blocked"
-
-    # 3. dd writing to a raw device (of=/dev/sd*, nvme*, disk*, rdisk*).
-    if re.search(r"\bdd\b", text) and re.search(
-        r"\bof=/dev/(?:sd|nvme|disk|rdisk)[a-z0-9]*", text
-    ):
-        return True, "`dd` writing to a raw device is blocked"
-
-    # 4. System power commands: shutdown / reboot / poweroff / halt.
-    first = text.split()[0] if text.split() else ""
-    if first in ("shutdown", "reboot", "poweroff", "halt"):
-        return True, f"System `{first}` command is blocked"
-
-    # 5. Fork bomb: `:(){ :|:& };:`
-    if re.search(r":\(\)\{", text) and re.search(r":\|:&", text):
-        return True, "Fork bomb pattern detected"
-
-    # 6. kill targeting PID 1 (or $PPID — kills the parent shell).
-    for match in re.finditer(r"\bkill(?:\.exe)?\b", text):
-        tokens = _segment_tokens(text, match.end())
-        targets = [t for t in tokens if not _looks_like_flag(t)]
-        for target in targets:
-            if target == "1" or target == "$ppid":
-                return True, "`kill` targeting PID 1 (or `$PPID`) is blocked"
-
-    # 7. Windows: format <drive>: and del /f /s /q <drive>:\*.
-    for match in re.finditer(r"\bformat(?:\.exe)?\b", text):
-        tokens = _segment_tokens(text, match.end())
-        for target in tokens:
-            if re.match(r"^[a-z]:[\\/]?$", target):
-                return True, "Windows `format` on a drive is blocked"
-
-    return False, None
+    return _compat_tools()._compat_detect_hardline_command(command)
 
 
 def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
@@ -212,43 +106,12 @@ def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and command.isascii():
         return _NATIVE_TOOLS.check_hardline_blocked(command)
-    for variant in command_detection_variants(command):
-        blocked, desc = detect_hardline_command(variant)
-        if blocked:
-            return True, desc
-    return False, None
+    return _compat_tools()._compat_check_hardline_blocked(command)
 
 
 # ``validate_workdir`` moved to :mod:`kimix.tools.security`; re-exported
 # here for compatibility with existing shell-tool callers.
 from kimix.tools.security import validate_workdir as validate_workdir  # noqa: F401
-
-
-_LONG_RUNNING_PATTERNS = [
-    r"\b(?:npm|pnpm|yarn|bun)\s+run\s+(?:dev|start|serve|watch)\b",
-    r"\bnext\s+dev\b",
-    r"\bvite\b",
-    r"\bnodemon\b",
-    r"\buvicorn\b",
-    r"\bgunicorn\b",
-    r"\bpython\s+-m\s+http\.server\b",
-    r"\bdocker\s+compose\s+up\b",
-    r"\bdocker-compose\s+up\b",
-    r"&\s*$",
-    r"\bnohup\b",
-    r"\bsetsid\b",
-]
-
-_FG_BG_HINT = (
-    "Long-running process detected. Consider mode='send' (background) + "
-    "TaskOutput to avoid blocking on timeout."
-)
-
-
-def _strip_quoted(text: str) -> str:
-    """Remove single/double-quoted spans so keywords inside strings do not
-    false-positive the long-running detection."""
-    return re.sub(r"'[^']*'|\"[^\"]*\"", " ", text)
 
 
 def foreground_background_guidance(command: str) -> str | None:
@@ -262,11 +125,7 @@ def foreground_background_guidance(command: str) -> str | None:
         return None
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and command.isascii():
         return _NATIVE_TOOLS.foreground_background_guidance(command)
-    stripped = _strip_quoted(command)
-    text = " ".join(stripped.split())
-    if any(re.search(pattern, text) for pattern in _LONG_RUNNING_PATTERNS):
-        return _FG_BG_HINT
-    return None
+    return _compat_tools()._compat_foreground_background_guidance(command)
 
 
 # ── Self-kill guard ──────────────────────────────────────────────────────────

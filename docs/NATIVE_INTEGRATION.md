@@ -41,8 +41,8 @@ bit-identical outputs.
    `kimix_native` shim package is tracked by git (not ignored), so it is never
    synced. Idempotent; run it before every test/bench run.
 
-3. **Load**: `kimix/native_loader.py` (re-exported by
-   `kimi_cli/native_loader.py`) resolves the shim in this order:
+3. **Load**: kimi_cli/native_loader.py (the single home of the loader logic;
+   kimix consumers import it directly) resolves the shim in this order:
 
    | priority | location |
    |---|---|
@@ -65,16 +65,15 @@ resolution is computed once at loader import time** and stored in
 precomputed tables. The steady-state hot path is a single dict lookup with
 no per-call `.upper()` allocation and no repeated availability checks:
 
-- `kimix/native_loader.py`: `_KERNEL_TABLE` (each known kernel under its
-  upper/lower/title spellings) and `_MODULE_TABLE` (each known submodule
-  resolved to its module object or `None`) are built once by
-  `_build_kernel_table()` / `_build_module_table()`; unknown kernel/module
-  names fall back to the shim / `importlib` and are memoized into the same
-  tables. `kernel_module(kernel)` is a combined one-lookup accessor for new
-  hot code.
-- `kimi-cli/native_loader.py`: delegates straight to the shared kimix
-  loader (its own per-call cache layer was removed — the precomputed tables
-  make it redundant); `kernel_module` is exposed eagerly.
+- kimi_cli/native_loader.py: _KERNEL_TABLE (each known kernel under its
+  upper/lower/title spellings) and _MODULE_TABLE (each known submodule
+  resolved to its module object or None) are built once by
+  _build_kernel_table() / _build_module_table(); unknown kernel/module
+  names fall back to the shim / importlib and are memoized into the same
+  tables. kernel_module(kernel) is a combined one-lookup accessor for new
+  hot code. The loader is self-contained (standard library only) and never
+  imports the kimix package, so kimix and kimi_cli consumers can both
+  import it without a circular import.
 - Hot call sites hoist the module resolution to import time
   (`_NATIVE_TEXT = _native_get_module("text")` once per module) and check
   `if _native_use_native("TEXT") and _NATIVE_TEXT is not None:` per item —
@@ -111,7 +110,7 @@ Each hot function keeps its old body and gains a lazy gate. New code should
 hoist the module resolution to import time and keep the per-item gate check:
 
 ```python
-from kimix.native_loader import get_module as _native_get_module, use_native as _native_use_native
+from kimi_cli.native_loader import get_module as _native_get_module, use_native as _native_use_native
 
 # Resolved once at import time (stable runtime: result never changes).
 _NATIVE_TEXT = _native_get_module("text")
@@ -270,14 +269,14 @@ version config files are touched — never hard-code the version anywhere else.
 | repo | file | role |
 |---|---|---|
 | kimix-base | `version.txt` (root) | **single source of truth** (`X.Y.Z`). `publish.py`, `bootstrap.py` and the Python shim all read it; `src/xmake.lua` generates the C++ `kimix_version.h` header from it at build time, so `runtime_py.version()` reports `kimix-runtime <version>`. |
-| kimi-agent | `KIMIX_NATIVE_VERSION` (root) | fallback marker read by `native_loader._fallback_version()` and synced by `install.py`. Keep the file **without a trailing newline** (matches git history). |
+| kimi-agent | KIMIX_NATIVE_VERSION (root) | fallback marker read by native_loader._fallback_version() (kimi_cli/native_loader.py) and synced by install.py. Keep the file **without a trailing newline** (matches git history). |
 | kimi-agent | `install.py` → `KIMIX_BASE_VERSION` | used for the GitHub release download URL and binary verification; `_sync_kimix_native_version(KIMIX_BASE_VERSION)` rewrites `KIMIX_NATIVE_VERSION` during install. |
 
 ### Minimal-change workflow
 
-That is the whole diff. Do **not** edit `bin/kimix_native/__init__.py` (it reads
-`version.txt` at runtime), `src/kimix/native_loader.py` or
-`kimi-cli/src/kimi_cli/native_loader.py` (they read `KIMIX_NATIVE_VERSION`).
+That is the whole diff. Do **not** edit bin/kimix_native/init.py (it reads
+version.txt at runtime) or kimi-cli/src/kimi_cli/native_loader.py (it reads
+KIMIX_NATIVE_VERSION).
 
 ### Rebuild + re-stage (the version is baked into the binary)
 

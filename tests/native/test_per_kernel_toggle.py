@@ -30,7 +30,7 @@ ALL_KERNELS = [
 
 def _run(env_extra: dict[str, str]) -> dict[str, bool]:
     code = (
-        "import kimix.native_loader as n;"
+        "import kimi_cli.native_loader as n;"
         "print({%s})"
         % ", ".join(f"{k!r}: n.use_native({k!r})" for k in ALL_KERNELS)
     )
