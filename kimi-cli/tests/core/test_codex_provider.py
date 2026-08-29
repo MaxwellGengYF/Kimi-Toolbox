@@ -12,14 +12,17 @@ from kosong.chat_provider.codex import OpenAICodex
 from kosong.message import Message
 from kosong.tooling import Tool
 
-from kimi_cli.auth.codex import CodexModel, CodexModelCatalog, CodexRuntimeCredentials
+from kimi_cli.auth.codex import (
+    CodexModel,
+    CodexRequestAuth,
+    CodexRuntimeCredentials,
+)
 from kimi_cli.codex_context import CODEX_LOOP_CONTROL_KEYS, codex_trigger_point
 from kimi_cli.llm_codex import (
     CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
     CODEX_AUTO_COMPACT_PERCENT,
     CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
     CodexProviderLease,
-    CodexRequestAuth,
     codex_loop_control,
     create_codex_provider,
 )
@@ -27,29 +30,43 @@ from kimi_cli.soul.compaction import should_auto_compact
 
 
 @dataclass
-class _CredentialService:
+class _CredentialFixture:
     calls: list[tuple[bool, str | None]]
 
     async def ensure_credentials(
         self,
         *,
         force_refresh: bool = False,
-        failed_access_token: str | None = None,
+        rejected_credentials: CodexRuntimeCredentials | None = None,
     ) -> CodexRuntimeCredentials:
-        self.calls.append((force_refresh, failed_access_token))
+        rejected_token = (
+            rejected_credentials.access_token
+            if rejected_credentials is not None
+            else None
+        )
+        self.calls.append((force_refresh, rejected_token))
         suffix = len(self.calls)
-        return CodexRuntimeCredentials(f"token-{suffix}", f"account-{suffix}", None)
+        return CodexRuntimeCredentials(
+            f"token-{suffix}",
+            f"account-{suffix}",
+            None,
+            f"generation-{suffix}",
+        )
 
-    async def invalidate_credentials(self, failed_access_token: str) -> None:
-        self.invalidated_access_token = failed_access_token
+    async def invalidate_credentials(
+        self,
+        rejected_credentials: CodexRuntimeCredentials,
+    ) -> None:
+        self.invalidated_access_token = rejected_credentials.access_token
 
 
 @dataclass
-class _CatalogService(_CredentialService):
+class _CatalogFixture(_CredentialFixture):
     model: CodexModel
 
-    async def catalog(self) -> CodexModelCatalog:
-        return CodexModelCatalog(0, (self.model,), False)
+    async def resolve_model(self, model_name: str) -> CodexModel:
+        assert model_name == self.model.slug
+        return self.model
 
 
 @pytest.mark.asyncio
@@ -66,10 +83,13 @@ async def test_http_auth_overrides_static_token_and_replays_only_one_401() -> No
         )
         return httpx.Response(401 if len(seen) == 1 else 200, content=b"ok")
 
-    service = _CredentialService([])
+    service = _CredentialFixture([])
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        auth=CodexRequestAuth(service),  # type: ignore[arg-type]
+        auth=CodexRequestAuth(
+            service.ensure_credentials,
+            service.invalidate_credentials,
+        ),
         headers={"Authorization": "Bearer oauth-managed"},
     ) as client:
         response = await client.post(
@@ -101,11 +121,14 @@ async def test_successful_stream_is_not_pre_read_by_auth() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
 
-    service = _CredentialService([])
+    service = _CredentialFixture([])
     async with (
         httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
-            auth=CodexRequestAuth(service),  # type: ignore[arg-type]
+            auth=CodexRequestAuth(
+                service.ensure_credentials,
+                service.invalidate_credentials,
+            ),
         ) as client,
         client.stream("POST", "https://example.test", content=b"body") as response,
     ):
@@ -125,10 +148,13 @@ async def test_second_401_is_returned_without_another_auth_replay() -> None:
         requests += 1
         return httpx.Response(401)
 
-    service = _CredentialService([])
+    service = _CredentialFixture([])
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        auth=CodexRequestAuth(service),  # type: ignore[arg-type]
+        auth=CodexRequestAuth(
+            service.ensure_credentials,
+            service.invalidate_credentials,
+        ),
     ) as client:
         response = await client.post("https://example.test", content=b"replayable")
 
@@ -146,10 +172,13 @@ async def test_each_request_resolves_fresh_credentials() -> None:
         authorizations.append(request.headers["Authorization"])
         return httpx.Response(200)
 
-    service = _CredentialService([])
+    service = _CredentialFixture([])
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        auth=CodexRequestAuth(service),  # type: ignore[arg-type]
+        auth=CodexRequestAuth(
+            service.ensure_credentials,
+            service.invalidate_credentials,
+        ),
     ) as client:
         await client.get("https://example.test/one")
         await client.get("https://example.test/two")
@@ -159,7 +188,9 @@ async def test_each_request_resolves_fresh_credentials() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort() -> None:
+async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort(
+    monkeypatch,
+) -> None:
     model = CodexModel(
         "gpt-test",
         max_context_size=272_000,
@@ -167,10 +198,13 @@ async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort()
         reasoning_efforts=("low", "medium", "high", "xhigh"),
         default_reasoning_effort="medium",
     )
-    service = _CatalogService([], model)
+    service = _CatalogFixture([], model)
 
+    monkeypatch.setattr(
+        "kimi_cli.llm_codex.resolve_codex_model",
+        service.resolve_model,
+    )
     runtime = await create_codex_provider(
-        cast(Any, service),
         model_name=model.slug,
         session_id="session-id",
         thinking=False,
@@ -197,16 +231,19 @@ async def test_provider_keeps_output_limit_as_metadata_and_uses_default_effort()
 
 
 @pytest.mark.asyncio
-async def test_provider_maps_official_ultra_mode_to_max_wire_effort() -> None:
+async def test_provider_maps_official_ultra_mode_to_max_wire_effort(monkeypatch) -> None:
     model = CodexModel(
         "gpt-test",
         reasoning_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
         default_reasoning_effort="low",
     )
-    service = _CatalogService([], model)
+    service = _CatalogFixture([], model)
 
+    monkeypatch.setattr(
+        "kimi_cli.llm_codex.resolve_codex_model",
+        service.resolve_model,
+    )
     runtime = await create_codex_provider(
-        cast(Any, service),
         model_name=model.slug,
         session_id="session-id",
         thinking=True,
@@ -487,7 +524,7 @@ def test_codex_loop_control_skipped_for_unknown_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_dict_carries_codex_loop_control() -> None:
+async def test_provider_dict_carries_codex_loop_control(monkeypatch) -> None:
     model = CodexModel(
         "gpt-test",
         max_context_size=272_000,
@@ -495,10 +532,13 @@ async def test_provider_dict_carries_codex_loop_control() -> None:
         reasoning_efforts=("low", "medium", "high"),
         default_reasoning_effort="medium",
     )
-    service = _CatalogService([], model)
+    service = _CatalogFixture([], model)
 
+    monkeypatch.setattr(
+        "kimi_cli.llm_codex.resolve_codex_model",
+        service.resolve_model,
+    )
     runtime = await create_codex_provider(
-        cast(Any, service),
         model_name=model.slug,
         session_id="session-id",
         thinking=False,

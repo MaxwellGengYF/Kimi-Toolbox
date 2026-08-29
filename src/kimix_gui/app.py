@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import cast
 
-from kimi_cli.auth.codex import CodexAuthService
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -58,15 +57,13 @@ class KimixGuiApp:
         history_loader: HistoryLoader | None = None,
         config_store: KimixGuiConfigStore | None = None,
         session_deleter: SessionDeleter | None = None,
-        codex_service: CodexAuthService | None = None,
     ) -> None:
         self._options = options
-        self._codex_service = codex_service or CodexAuthService()
         self._session_loader = session_loader
         self._history_loader = history_loader
         self._session_deleter = session_deleter
         self._config_store = config_store or KimixGuiConfigStore()
-        provider_registry = default_provider_registry(self._codex_service)
+        provider_registry = default_provider_registry()
         self._catalogs = ModelCatalogService(
             provider_registry,
             self._config_store,
@@ -77,7 +74,6 @@ class KimixGuiApp:
         resolved_session_factory = (
             partial(
                 create_sdk_session,
-                codex_service=self._codex_service,
                 provider_registry=provider_registry,
             )
             if session_factory is create_sdk_session
@@ -103,7 +99,6 @@ class KimixGuiApp:
             history_loader=history_loader,
             session_loader=session_loader,
             session_deleter=session_deleter,
-            codex_service=self._codex_service,
         )
         self.window: MainWindow | None = None
         self.codex_controller = CodexController(

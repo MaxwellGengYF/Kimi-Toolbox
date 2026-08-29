@@ -1,17 +1,12 @@
 """Tests for OAuthManager: resolve_api_key and ensure_fresh behavior."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import SecretStr
 
-from kimi_cli.auth.codex import (
-    CODEX_OAUTH_KEY,
-    CodexAuthError,
-    CodexProblem,
-    CodexRuntimeCredentials,
-)
+from kimi_cli.auth.codex import CODEX_OAUTH_KEY
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
     OAuthManager,
@@ -81,40 +76,38 @@ def test_resolve_api_key_returns_oauth_token_when_available():
 
 
 @pytest.mark.asyncio
-async def test_codex_branch_resolves_and_refreshes_shared_credentials():
-    initial = CodexRuntimeCredentials("codex-access", "account-1", 2_000)
-    refreshed = CodexRuntimeCredentials("codex-refreshed", "account-1", 4_000)
-    service = MagicMock()
-    service.cached_credentials.return_value = initial
-    service.ensure_credentials = AsyncMock(return_value=refreshed)
+async def test_codex_auth_is_not_cached_or_refreshed_by_oauth_manager():
     config = _make_codex_config()
-    oauth = OAuthManager(config, codex_service=service)
-
-    assert oauth.resolve_api_key(config.provider.api_key, config.provider.oauth) == "codex-access"
-
-    await oauth.ensure_fresh(force=True)
-
-    service.ensure_credentials.assert_awaited_once_with(force_refresh=True)
-    assert (
-        oauth.resolve_api_key(config.provider.api_key, config.provider.oauth) == "codex-refreshed"
-    )
-
-
-@pytest.mark.asyncio
-async def test_codex_branch_maps_rejected_refresh_to_unauthorized():
-    service = MagicMock()
-    service.cached_credentials.return_value = CodexRuntimeCredentials(
-        "codex-access",
-        "account-1",
-        2_000,
-    )
-    service.ensure_credentials = AsyncMock(
-        side_effect=CodexAuthError(CodexProblem("invalid_grant"))
-    )
-    oauth = OAuthManager(_make_codex_config(), codex_service=service)
-
-    with pytest.raises(OAuthUnauthorized, match="Codex login is required"):
+    with patch("kimi_cli.auth.oauth.load_tokens") as load_tokens:
+        oauth = OAuthManager(config)
         await oauth.ensure_fresh(force=True)
+        resolved = oauth.resolve_api_key(
+            SecretStr("provider-owned"),
+            config.provider.oauth,
+        )
+
+    load_tokens.assert_not_called()
+    assert oauth.get_cached_access_token(CODEX_OAUTH_KEY) is None
+    assert resolved == "provider-owned"
+
+
+def test_custom_oauth_ref_still_resolves_its_persisted_token():
+    config = _make_config(with_oauth=False)
+    token = OAuthToken(
+        access_token="plugin-access",
+        refresh_token="plugin-refresh",
+        expires_at=0.0,
+        scope="",
+        token_type="Bearer",
+    )
+    ref = OAuthRef(storage="file", key="oauth/plugin")
+    oauth = OAuthManager(config)
+
+    with patch("kimi_cli.auth.oauth.load_tokens", return_value=token) as load_tokens:
+        resolved = oauth.resolve_api_key(SecretStr("fallback"), ref)
+
+    load_tokens.assert_called_once_with(ref)
+    assert resolved == "plugin-access"
 
 
 def test_resolve_api_key_falls_back_to_api_key_when_no_token():

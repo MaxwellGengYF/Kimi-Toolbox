@@ -7,7 +7,6 @@ import threading
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from functools import partial
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -28,10 +27,14 @@ from kimi_cli.auth.codex import (
     PROBLEM_RATE_LIMITED,
     PROBLEM_SERVER,
     CodexAuthError,
-    CodexAuthService,
     CodexAuthSnapshot,
     CodexBrowserChallenge,
+    CodexLoginOperation,
     CodexProblem,
+    codex_account_state,
+    disconnect_codex_account,
+    initialize_codex_account,
+    refresh_codex_account,
 )
 from PySide6.QtCore import QObject, Signal
 
@@ -231,22 +234,17 @@ class KimixBridge(QObject):
         session_loader: SessionLoader | None = None,
         session_deleter: SessionDeleter | None = None,
         on_session_opened: SessionOpenedCallback | None = None,
-        codex_service: CodexAuthService | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._codex_service = codex_service or CodexAuthService()
-        self._session_factory = (
-            partial(create_sdk_session, codex_service=self._codex_service)
-            if session_factory is create_sdk_session
-            else session_factory
-        )
+        self._session_factory = session_factory
         self._history_loader = history_loader
         self._session_loader = session_loader
         self._session_deleter = session_deleter
         self._on_session_opened = on_session_opened
         self._codex_operation = 0
         self._codex_account_lock = asyncio.Lock()
+        self._active_codex_login: CodexLoginOperation | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
@@ -375,16 +373,30 @@ class KimixBridge(QObject):
 
     def connect_chatgpt(self) -> int:
         operation_id = self._next_codex_operation()
+        login_operation = CodexLoginOperation(
+            operation_id,
+            self._publish_codex_browser_challenge,
+        )
+        with self._lock:
+            stale = operation_id != self._codex_operation
+            if not stale:
+                self._active_codex_login = login_operation
+        if stale:
+            login_operation.cancel()
         self.codex_auth_changed.emit(
             CodexAuthSnapshot(operation_id=operation_id, state=AUTH_CONNECTING)
         )
-        self.submit(self._connect_chatgpt(operation_id))
+        self.submit(self._connect_chatgpt(login_operation))
         return operation_id
 
     def cancel_chatgpt_login(self, operation_id: int) -> None:
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._codex_service.cancel_login, operation_id)
+        with self._lock:
+            if operation_id != self._codex_operation:
+                return
+            operation = self._active_codex_login
+            if operation is None or operation.operation_id != operation_id:
+                return
+        operation.cancel()
 
     def refresh_codex_models(self) -> int:
         operation_id = self._next_codex_operation()
@@ -436,8 +448,11 @@ class KimixBridge(QObject):
                 self._completed += 1
 
     async def _shutdown(self) -> None:
+        with self._lock:
+            login_operation = self._active_codex_login
+        if login_operation is not None:
+            login_operation.cancel()
         await self._release_session()
-        await self._codex_service.aclose()
         loop = self._loop
         if loop is not None:
             loop.stop()
@@ -453,12 +468,7 @@ class KimixBridge(QObject):
         if not self._codex_operation_current(operation_id):
             return
         try:
-            snapshot = await self._codex_service.snapshot(operation_id)
-            if snapshot.state == AUTH_CONNECTED:
-                catalog = await self._codex_service.refresh_models(operation_id)
-                snapshot = await self._codex_service.snapshot(operation_id)
-            else:
-                catalog = await self._codex_service.catalog(operation_id)
+            account = await initialize_codex_account(operation_id)
         except CodexAuthError as exc:
             if self._codex_operation_current(operation_id):
                 self.codex_auth_changed.emit(
@@ -471,36 +481,52 @@ class KimixBridge(QObject):
             return
         if not self._codex_operation_current(operation_id):
             return
-        self.codex_auth_changed.emit(snapshot)
-        self.codex_catalog_changed.emit(catalog)
+        self.codex_auth_changed.emit(account.snapshot)
+        self.codex_catalog_changed.emit(account.catalog)
 
-    async def _connect_chatgpt(self, operation_id: int) -> None:
-        async with self._codex_account_lock:
-            await self._connect_chatgpt_locked(operation_id)
+    async def _publish_codex_browser_challenge(
+        self,
+        challenge: CodexBrowserChallenge,
+    ) -> None:
+        if self._codex_operation_current(challenge.operation_id):
+            self.codex_browser_challenge.emit(challenge)
 
-    async def _connect_chatgpt_locked(self, operation_id: int) -> None:
-        if not self._codex_operation_current(operation_id):
-            return
-
-        async def publish_challenge(challenge: CodexBrowserChallenge) -> None:
-            if self._codex_operation_current(operation_id):
-                self.codex_browser_challenge.emit(challenge)
-
+    async def _connect_chatgpt(self, login_operation: CodexLoginOperation) -> None:
         try:
-            snapshot, catalog = await self._codex_service.login(
-                operation_id,
-                publish_challenge,
-            )
+            async with self._codex_account_lock:
+                await self._connect_chatgpt_locked(login_operation)
+        finally:
+            with self._lock:
+                if self._active_codex_login is login_operation:
+                    self._active_codex_login = None
+
+    async def _connect_chatgpt_locked(
+        self,
+        login_operation: CodexLoginOperation,
+    ) -> None:
+        operation_id = login_operation.operation_id
+        if not self._codex_operation_current(operation_id):
+            login_operation.cancel()
+            return
+        try:
+            snapshot, catalog = await login_operation.run()
         except CodexAuthError as exc:
             if not self._codex_operation_current(operation_id):
                 return
             try:
-                stored = await self._codex_service.snapshot(operation_id)
+                account = await codex_account_state(operation_id)
+                stored = account.snapshot
             except CodexAuthError:
+                account = None
                 stored = CodexAuthSnapshot(
                     operation_id=operation_id,
                     state=AUTH_RETRY_LATER,
                 )
+            if stored.state == AUTH_CONNECTED:
+                if account is not None:
+                    self.codex_catalog_changed.emit(account.catalog)
+                self.codex_auth_changed.emit(stored)
+                return
             state = stored.state
             if exc.problem.code == PROBLEM_CANCELLED and state != AUTH_CONNECTED:
                 state = AUTH_DISCONNECTED
@@ -540,8 +566,7 @@ class KimixBridge(QObject):
         if not self._codex_operation_current(operation_id):
             return
         try:
-            catalog = await self._codex_service.refresh_models(operation_id)
-            snapshot = await self._codex_service.snapshot(operation_id)
+            account = await refresh_codex_account(operation_id)
         except CodexAuthError as exc:
             if self._codex_operation_current(operation_id):
                 self.codex_auth_changed.emit(
@@ -554,8 +579,8 @@ class KimixBridge(QObject):
             return
         if not self._codex_operation_current(operation_id):
             return
-        self.codex_catalog_changed.emit(catalog)
-        self.codex_auth_changed.emit(snapshot)
+        self.codex_catalog_changed.emit(account.catalog)
+        self.codex_auth_changed.emit(account.snapshot)
 
     async def _disconnect_chatgpt(
         self,
@@ -591,21 +616,32 @@ class KimixBridge(QObject):
         if active:
             epoch = await self._release_session()
             self.session_closed.emit(epoch)
+            if not self._codex_operation_current(operation_id):
+                return
         try:
-            snapshot = await self._codex_service.disconnect(operation_id)
+            account = await disconnect_codex_account(operation_id)
         except CodexAuthError as exc:
-            snapshot = CodexAuthSnapshot(
-                operation_id=operation_id,
-                state=AUTH_RETRY_LATER,
-                problem=exc.problem,
-            )
+            if self._codex_operation_current(operation_id):
+                self.codex_auth_changed.emit(
+                    CodexAuthSnapshot(
+                        operation_id=operation_id,
+                        state=AUTH_RETRY_LATER,
+                        problem=exc.problem,
+                    )
+                )
+            return
         if self._codex_operation_current(operation_id):
-            self.codex_auth_changed.emit(snapshot)
+            self.codex_catalog_changed.emit(account.catalog)
+            self.codex_auth_changed.emit(account.snapshot)
 
     def _next_codex_operation(self) -> int:
         with self._lock:
             self._codex_operation += 1
-            return self._codex_operation
+            operation_id = self._codex_operation
+            login_operation = self._active_codex_login
+        if login_operation is not None and login_operation.operation_id != operation_id:
+            login_operation.cancel()
+        return operation_id
 
     def _codex_operation_current(self, operation_id: int) -> bool:
         with self._lock:
@@ -621,7 +657,7 @@ class KimixBridge(QObject):
         *,
         fields: tuple[ActivityField, ...] = (),
     ) -> StartEntry:
-        blocks = [TextBlock(text)]
+        blocks: list[TextBlock | FieldListBlock] = [TextBlock(text)]
         if fields:
             blocks.append(FieldListBlock(fields))
         return StartEntry(

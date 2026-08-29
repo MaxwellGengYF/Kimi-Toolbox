@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING, cast
 
-from kimi_cli.auth.codex import CodexAuthService, CodexModel
+from kimi_cli.auth.codex import CodexModel
 from kimi_cli.llm_codex import create_codex_provider
 
 from kimix_gui.llm.axes import AXIS_THINKING_EFFORT, ORDER_THINKING_EFFORT
@@ -26,6 +27,9 @@ from kimix_gui.llm.providers.base import (
     SessionRuntime,
     apply_overrides,
 )
+
+if TYPE_CHECKING:
+    from kosong.chat_provider.codex import OpenAICodex
 
 _KNOWN_REASONING_EFFORTS = frozenset(
     {"low", "medium", "high", "xhigh", "max"}
@@ -137,9 +141,6 @@ class ChatGPTProviderKind(ProviderKind):
     id = "chatgpt"
     catalog_managed = True
 
-    def __init__(self, service: CodexAuthService) -> None:
-        self._service = service
-
     def owns(self, target: ProviderTarget) -> bool:
         return isinstance(target, ChatGPTTarget)
 
@@ -180,7 +181,6 @@ class ChatGPTProviderKind(ProviderKind):
         if not isinstance(target, ChatGPTTarget):
             raise TypeError(f"Unsupported ChatGPT target: {target!r}")
         runtime = await create_codex_provider(
-            self._service,
             model_name=target.model,
             session_id=session_id,
             thinking=False,
@@ -209,7 +209,7 @@ class ChatGPTProviderKind(ProviderKind):
         try:
             resolved = apply_overrides(generic, overrides)
             if resolved.provider is not None:
-                runtime.lease.provider = resolved.provider
+                runtime.lease.provider = cast("OpenAICodex", resolved.provider)
             return resolved
         except BaseException:
             try:

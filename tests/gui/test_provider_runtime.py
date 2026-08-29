@@ -68,12 +68,12 @@ async def test_chatgpt_plugin_applies_the_exact_catalog_parameter(
     )
     calls: list[dict[str, object]] = []
 
-    async def fake_create(_service: object, **kwargs: object) -> CodexProviderRuntime:
+    async def fake_create(**kwargs: object) -> CodexProviderRuntime:
         calls.append(kwargs)
         return runtime
 
     monkeypatch.setattr(chatgpt_provider, "create_codex_provider", fake_create)
-    result = await ChatGPTProviderKind(cast(Any, object())).create_runtime(
+    result = await ChatGPTProviderKind().create_runtime(
         ChatGPTTarget("gpt-test"),
         session_id="session-1",
         overrides=RuntimeOverrides(thinking_effort=selected),
@@ -108,12 +108,12 @@ async def test_chatgpt_plugin_rejects_a_removed_parameter_value(
         )
     )
 
-    async def fake_create(_service: object, **_kwargs: object) -> CodexProviderRuntime:
+    async def fake_create(**_kwargs: object) -> CodexProviderRuntime:
         return runtime
 
     monkeypatch.setattr(chatgpt_provider, "create_codex_provider", fake_create)
     with pytest.raises(LLMSelectionError) as caught:
-        await ChatGPTProviderKind(cast(Any, object())).create_runtime(
+        await ChatGPTProviderKind().create_runtime(
             ChatGPTTarget("gpt-test"),
             session_id="session-1",
             overrides=RuntimeOverrides(thinking_effort="retired-effort"),
@@ -130,11 +130,11 @@ async def test_chatgpt_plugin_passes_future_generic_runtime_overrides(
 ) -> None:
     runtime, original_provider, lease = runtime_for(CodexModel("plain-model"))
 
-    async def fake_create(_service: object, **_kwargs: object) -> CodexProviderRuntime:
+    async def fake_create(**_kwargs: object) -> CodexProviderRuntime:
         return runtime
 
     monkeypatch.setattr(chatgpt_provider, "create_codex_provider", fake_create)
-    result = await ChatGPTProviderKind(cast(Any, object())).create_runtime(
+    result = await ChatGPTProviderKind().create_runtime(
         ChatGPTTarget("plain-model"),
         session_id="session-1",
         overrides=RuntimeOverrides(
@@ -217,13 +217,13 @@ async def test_chatgpt_plugin_closes_lease_when_override_application_fails(
         ),
     )
 
-    async def fake_create(_service: object, **_kwargs: object) -> CodexProviderRuntime:
+    async def fake_create(**_kwargs: object) -> CodexProviderRuntime:
         return runtime
 
     monkeypatch.setattr(chatgpt_provider, "create_codex_provider", fake_create)
 
     with pytest.raises(RuntimeError, match="override failed"):
-        await ChatGPTProviderKind(cast(Any, object())).create_runtime(
+        await ChatGPTProviderKind().create_runtime(
             ChatGPTTarget("gpt-test"),
             session_id="session-1",
             overrides=RuntimeOverrides(thinking_effort="high"),

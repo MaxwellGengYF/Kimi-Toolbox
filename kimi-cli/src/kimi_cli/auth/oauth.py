@@ -24,11 +24,8 @@ from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
     CODEX_OAUTH_KEY,
     CodexAuthError,
-    CodexAuthService,
-    default_codex_auth_service,
-)
-from kimi_cli.auth.codex import (
-    TERMINAL_AUTH_PROBLEMS as CODEX_TERMINAL_AUTH_PROBLEMS,
+    CodexLoginOperation,
+    disconnect_codex,
 )
 from kimi_cli.auth.platforms import (
     ModelInfo,
@@ -1175,7 +1172,6 @@ async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
 
     from kimi_cli.auth.codex import CODEX_BASE_URL
 
-    service = default_codex_auth_service()
     loop = asyncio.get_running_loop()
     challenge_ready: asyncio.Future[Any] = loop.create_future()
     operation_id = uuid.uuid4().int
@@ -1184,7 +1180,8 @@ async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
         if not challenge_ready.done():
             challenge_ready.set_result(challenge)
 
-    login_task = asyncio.create_task(service.login(operation_id, _publish_challenge))
+    login_operation = CodexLoginOperation(operation_id, _publish_challenge)
+    login_task = asyncio.create_task(login_operation.run())
     try:
         done, _pending = await asyncio.wait(
             {challenge_ready, login_task},
@@ -1261,8 +1258,7 @@ async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
         if not challenge_ready.done():
             challenge_ready.cancel()
         if not login_task.done():
-            service.cancel_login(operation_id)
-            login_task.cancel()
+            login_operation.cancel()
         with suppress(asyncio.CancelledError, CodexAuthError, OSError, TimeoutError):
             await login_task
 
@@ -1278,7 +1274,7 @@ async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
         return
 
     try:
-        await default_codex_auth_service().disconnect()
+        await disconnect_codex()
     except CodexAuthError as exc:
         yield OAuthEvent("error", f"Codex logout failed: {exc.problem.code}")
         return
@@ -1297,14 +1293,8 @@ async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
 
 
 class OAuthManager:
-    def __init__(
-        self,
-        config: Config,
-        *,
-        codex_service: CodexAuthService | None = None,
-    ) -> None:
+    def __init__(self, config: Config) -> None:
         self._config = config
-        self._codex_service = codex_service
         # Cache access tokens only; refresh tokens are always read from persisted storage.
         self._access_tokens: dict[str, str] = {}
         # ``asyncio.Lock`` binds to the running event loop on first acquire and
@@ -1373,12 +1363,7 @@ class OAuthManager:
             save_config(self._config)
 
     def _load_initial_tokens(self) -> None:
-        for ref in self._iter_oauth_refs():
-            if ref.key == CODEX_OAUTH_KEY:
-                credentials = self._get_codex_service().cached_credentials()
-                if credentials is not None:
-                    self._access_tokens[ref.key] = credentials.access_token
-                continue
+        for ref in self._iter_known_oauth_refs():
             token = load_tokens(ref)
             if token and not self._should_suppress_persisted_token(ref, token):
                 self._cache_access_token(ref, token)
@@ -1426,19 +1411,18 @@ class OAuthManager:
         return _common_headers()
 
     def resolve_api_key(self, api_key: SecretStr, oauth: OAuthRef | None) -> str:
+        if oauth and oauth.key == CODEX_OAUTH_KEY:
+            # Codex request auth is file-authoritative and must not leak into
+            # this session-scoped token cache. Other custom OAuth refs retain
+            # their historical persisted-token resolution behavior.
+            return api_key.get_secret_value()
         if oauth:
             token = self._access_tokens.get(oauth.key)
             if token is None:
-                if oauth.key == CODEX_OAUTH_KEY:
-                    credentials = self._get_codex_service().cached_credentials()
-                    if credentials is not None:
-                        token = credentials.access_token
-                        self._access_tokens[oauth.key] = token
-                else:
-                    persisted = load_tokens(oauth)
-                    if persisted and not self._should_suppress_persisted_token(oauth, persisted):
-                        self._cache_access_token(oauth, persisted)
-                        token = self._access_tokens.get(oauth.key)
+                persisted = load_tokens(oauth)
+                if persisted and not self._should_suppress_persisted_token(oauth, persisted):
+                    self._cache_access_token(oauth, persisted)
+                    token = self._access_tokens.get(oauth.key)
             if token:
                 return token
             logger.warning(
@@ -1448,17 +1432,9 @@ class OAuthManager:
             )
         return api_key.get_secret_value()
 
-    _KNOWN_OAUTH_KEYS: set[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY, CODEX_OAUTH_KEY})
-
-    def _get_codex_service(self) -> CodexAuthService:
-        if self._codex_service is None:
-            self._codex_service = default_codex_auth_service()
-        return self._codex_service
-
-    def codex_service(self) -> CodexAuthService:
-        """Return the Codex OAuth service owned by this manager."""
-
-        return self._get_codex_service()
+    # Codex owns request-time authentication in ``auth.codex`` and must never
+    # enter this session-scoped cache.  Only Kimi/xAI use OAuthManager.
+    _KNOWN_OAUTH_KEYS: frozenset[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY})
 
     def _iter_known_oauth_refs(self) -> list[OAuthRef]:
         """Return configured OAuth refs for providers we know how to refresh."""
@@ -1481,36 +1457,7 @@ class OAuthManager:
                 attempt a refresh.  Used after receiving a 401 from the server.
         """
         for ref in self._iter_known_oauth_refs():
-            if ref.key == CODEX_OAUTH_KEY:
-                await self._ensure_fresh_codex(ref, runtime, force=force)
-            else:
-                await self._ensure_fresh_single_ref(ref, runtime, force=force)
-
-    async def _ensure_fresh_codex(
-        self,
-        ref: OAuthRef,
-        runtime: Runtime | None,
-        *,
-        force: bool,
-    ) -> None:
-        try:
-            credentials = await self._get_codex_service().ensure_credentials(force_refresh=force)
-        except CodexAuthError as exc:
-            if exc.problem.code in CODEX_TERMINAL_AUTH_PROBLEMS:
-                self._access_tokens.pop(ref.key, None)
-                self._apply_access_token(ref, runtime, "")
-                if force:
-                    raise OAuthUnauthorized("Codex login is required.") from exc
-                return
-            if force:
-                raise OAuthError(str(exc)) from exc
-            logger.warning(
-                "Failed to refresh Codex OAuth token: {error}",
-                error=exc,
-            )
-            return
-        self._access_tokens[ref.key] = credentials.access_token
-        self._apply_access_token(ref, runtime, credentials.access_token)
+            await self._ensure_fresh_single_ref(ref, runtime, force=force)
 
     async def _ensure_fresh_single_ref(
         self, ref: OAuthRef, runtime: Runtime | None = None, *, force: bool = False
@@ -1716,12 +1663,6 @@ class OAuthManager:
             assert isinstance(runtime.llm.chat_provider, XAI), "Expected XAI chat provider"
             fallback_api_key = provider.api_key.get_secret_value()
             runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
-        elif ref.key == CODEX_OAUTH_KEY:
-            from kosong.chat_provider.codex import OpenAICodex
-
-            if isinstance(runtime.llm.chat_provider, OpenAICodex):
-                fallback_api_key = provider.api_key.get_secret_value()
-                runtime.llm.chat_provider.client.api_key = access_token or fallback_api_key
 
 
 if __name__ == "__main__":

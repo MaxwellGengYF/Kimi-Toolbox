@@ -7,7 +7,6 @@ from typing import Any, cast
 
 import orjson
 import pytest
-from kimi_cli.auth.codex import CodexAuthService
 
 from kimix_gui.llm import (
     AXIS_CONTEXT_WINDOW,
@@ -47,8 +46,7 @@ def test_legacy_llm_modules_are_removed_and_app_uses_catalog_services() -> None:
 
 
 def test_default_registry_dispatches_every_builtin_target(tmp_path: Path) -> None:
-    service = CodexAuthService(tmp_path / "codex.json")
-    registry = default_provider_registry(service)
+    registry = default_provider_registry()
 
     assert tuple(provider.id for provider in registry.providers) == (
         "chatgpt",

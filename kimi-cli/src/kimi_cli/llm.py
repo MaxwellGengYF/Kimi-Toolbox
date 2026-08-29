@@ -461,8 +461,15 @@ def create_llm(
     assert not thinking_effort or thinking_effort in LEGAL_THINKING_EFFORT, (
         "thinking_effort must be `off`, `low`, `medium`, `high`, `xhigh` and `max`"
     )
+    codex_oauth = False
+    if provider.type == "openai-codex" and provider.oauth is not None:
+        from kimi_cli.auth.codex import CODEX_OAUTH_KEY
+
+        codex_oauth = provider.oauth.key == CODEX_OAUTH_KEY
     resolved_api_key = (
-        oauth.resolve_api_key(provider.api_key, provider.oauth)
+        "oauth-managed"
+        if codex_oauth
+        else oauth.resolve_api_key(provider.api_key, provider.oauth)
         if oauth and provider.oauth
         else provider.api_key.get_secret_value()
     )
@@ -758,8 +765,7 @@ def create_llm(
             import httpx
             from kosong.chat_provider.codex import OpenAICodex
 
-            from kimi_cli.auth.codex import CODEX_OAUTH_KEY, extract_chatgpt_account_id
-            from kimi_cli.llm_codex import CodexRequestAuth
+            from kimi_cli.auth.codex import CodexRequestAuth, extract_chatgpt_account_id
 
             codex_headers = {
                 "User-Agent": get_user_agent(),
@@ -769,13 +775,9 @@ def create_llm(
                 codex_headers.update(provider.custom_headers)
             codex_client_kwargs: dict[str, object] = {}
             codex_api_key = resolved_api_key
-            if provider.oauth is not None and provider.oauth.key == CODEX_OAUTH_KEY and oauth:
-                codex_service = oauth.codex_service()
-                credentials = codex_service.cached_credentials()
-                if credentials is not None and credentials.account_id:
-                    codex_headers["ChatGPT-Account-ID"] = credentials.account_id
+            if codex_oauth:
                 codex_client_kwargs["http_client"] = httpx.AsyncClient(
-                    auth=CodexRequestAuth(codex_service),
+                    auth=CodexRequestAuth(),
                     headers=codex_headers,
                 )
                 codex_api_key = "oauth-managed"

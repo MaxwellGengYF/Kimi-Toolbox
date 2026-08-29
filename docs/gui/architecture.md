@@ -19,7 +19,7 @@ Python >= 3.14，并由仓库根部的 uv 环境统一管理。
 
 | 模块 | 职责 |
 |---|---|
-| `app.py` | `KimixGuiApp`：home / chat 路由、活动会话快照与 bridge 接线；模型目录和 Codex 编排分别委托给专用服务 |
+| `app.py` | `KimixGuiApp`：home / chat 路由、活动会话快照与 bridge 接线；模型目录委托 `ModelCatalogService`，Codex UI 编排委托 controller/bridge |
 | `backend.py` | `SessionOptions` + `create_sdk_session()`；按共享 `ProviderRegistry` 创建运行时，再包装 `kimix.create_session_async()` |
 | `design/` | 与框架无关的设计 token：`palette.py` / `categories.py` / `scale.py` / `theme.py`（`DARK`） |
 | `i18n.py` | 纯函数 `resolve_language(preference, system_locale)` + 支持语言常量 |
@@ -79,9 +79,18 @@ feature 与 generation kwargs 必须同时反映在请求 provider 和脱敏 met
 Provider file 只在文件能力与模型元数据能证明支持时公开轴；未知 Provider 不猜测，也不做远端探测。
 
 ChatGPT Codex 仍不是 GUI 私有认证实现。浏览器 OAuth、共享凭据、刷新、模型目录和 Kimix 自己的
-`thinking: bool` 推导保留在 `kimi-cli`；`llm/providers/chatgpt.py` 只把目录转成通用参数元数据并创建
-运行时，`qt/codex_controller.py` 负责对话框/bridge 编排和过期 operation 过滤。OAuth token 始终由
-核心刷新，既不跨进 Qt 线程，也不进入 GUI metadata。
+`thinking: bool` 推导保留在 `kimi-cli`。核心的 connect/snapshot/refresh/disconnect/catalog/init API
+每次都创建独立 operation context，在跨进程锁内重新读取权威凭据文件，并在结束时关闭自己的短生命周期
+HTTP client；不存在进程级 auth service、默认单例或内存 credential/session cache。初始化和刷新 API
+从同一次最终加锁读取返回 authentication snapshot + account-bound catalog，避免混合两个 credential
+代际。登录写入在同一文件保存扁平化的回滚基线，取消嵌套登录也不会复活已被 supersede 的凭据；模型目录
+刷新用持久化 request revision 做 compare-and-swap，迟到响应不能覆盖较新的目录。每个运行时请求由
+`CodexRequestAuth` 从文件解析凭据，且只有它拥有一次 401 refresh-and-replay，`KimiSoul` 不再重复重试。
+
+`llm/providers/chatgpt.py` 只把目录转成通用参数元数据并创建运行时，`qt/codex_controller.py` 负责
+对话框/bridge 编排和过期 operation 过滤。bridge 只在登录运行期间保留可取消的 `CodexLoginOperation`
+handle；刷新、断开或新的账号操作会取消该 handle。OAuth token 既不跨进 Qt 线程，也不进入 GUI
+metadata。
 
 表里没有的模块就是不存在的模块：`src/kimix_gui/screens/`（Textual 时代的残壳）与
 `qt/app.py`（5 行 re-export，零 importer）都已删除，`KimixGuiApp` 从 `kimix_gui.app` 导。

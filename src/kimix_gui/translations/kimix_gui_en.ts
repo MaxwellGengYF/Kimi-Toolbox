@@ -763,7 +763,7 @@
 <context>
     <name>KimixBridge</name>
     <message>
-        <location filename="../qt/bridge.py" line="+677"/>
+        <location filename="../qt/bridge.py" line="+713"/>
         <source>Failed to open session: {reason}</source>
         <translation>Failed to open session: {reason}</translation>
     </message>
@@ -873,7 +873,7 @@
 <context>
     <name>KimixGuiApp</name>
     <message>
-        <location filename="../app.py" line="+250"/>
+        <location filename="../app.py" line="+245"/>
         <source>Current session · in use</source>
         <translation>Current session · in use</translation>
     </message>

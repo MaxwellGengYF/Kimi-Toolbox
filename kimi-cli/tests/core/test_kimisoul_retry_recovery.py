@@ -24,7 +24,7 @@ from kimi_cli.llm import LLM
 from kimi_cli.soul import SessionRestartRequired, run_soul
 from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.context import Context
-from kimi_cli.soul.kimisoul import KimiSoul, _RETRY_WAIT
+from kimi_cli.soul.kimisoul import _RETRY_WAIT, KimiSoul
 from kimi_cli.utils.aioqueue import QueueShutDown
 from kimi_cli.wire import Wire
 from kimi_cli.wire.types import StepBegin, StepRetry
@@ -482,6 +482,94 @@ async def test_step_connection_recovery_then_401_triggers_oauth_refresh(
     assert context.history[-1].extract_text(" ").strip() == "auth recovered"
     assert len(refresh_mock.await_args_list) == 2
     assert any(call.kwargs.get("force") is True for call in refresh_mock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_codex_401_is_not_replayed_by_outer_recovery(
+    runtime: Runtime,
+    tmp_path: Path,
+) -> None:
+    codex_provider = LLMProvider(
+        type="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key="oauth/openai-codex"),
+    )
+    codex_model = LLMModel(model="gpt-5.4", max_context_size=272_000)
+    runtime.config.provider = codex_provider
+    runtime.config.model = codex_model
+    chat_provider = StatusErrorThenSuccessProvider(status_code=401)
+    llm = LLM(
+        chat_provider=chat_provider,
+        max_context_size=272_000,
+        capabilities=set(),
+        model_config=codex_model,
+        provider_config=codex_provider,
+    )
+    soul, _context = _make_soul(runtime, llm, tmp_path)
+    refresh_mock = AsyncMock()
+    runtime.oauth.ensure_fresh = refresh_mock
+    attempts = 0
+
+    async def rejected_request() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise APIStatusError(401, "Codex request auth already replayed this request")
+
+    with pytest.raises(APIStatusError, match="already replayed"):
+        await soul._run_with_connection_recovery(
+            "Codex generation",
+            rejected_request,
+            chat_provider=chat_provider,
+        )
+
+    assert attempts == 1
+    refresh_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_custom_codex_oauth_401_uses_outer_recovery(
+    runtime: Runtime,
+    tmp_path: Path,
+) -> None:
+    custom_provider = LLMProvider(
+        type="openai-codex",
+        base_url="https://codex-proxy.test/v1",
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key="oauth/kimi-code"),
+    )
+    custom_model = LLMModel(model="proxy-model", max_context_size=100_000)
+    runtime.config.provider = custom_provider
+    runtime.config.model = custom_model
+    chat_provider = StatusErrorThenSuccessProvider(status_code=401)
+    llm = LLM(
+        chat_provider=chat_provider,
+        max_context_size=100_000,
+        capabilities=set(),
+        model_config=custom_model,
+        provider_config=custom_provider,
+    )
+    soul, _context = _make_soul(runtime, llm, tmp_path)
+    refresh_mock = AsyncMock()
+    runtime.oauth.ensure_fresh = refresh_mock
+    attempts = 0
+
+    async def request() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise APIStatusError(401, "refresh through generic OAuth")
+        return "recovered"
+
+    result = await soul._run_with_connection_recovery(
+        "custom Codex generation",
+        request,
+        chat_provider=chat_provider,
+    )
+
+    assert result == "recovered"
+    assert attempts == 2
+    refresh_mock.assert_awaited_once_with(soul._runtime, force=True)
 
 
 # ---------------------------------------------------------------------------

@@ -6,11 +6,16 @@ import time
 import pytest
 from kimi_cli.auth.codex import (
     AUTH_CONNECTED,
+    AUTH_CONNECTING,
     AUTH_DISCONNECTED,
     AUTH_LOGIN_REQUIRED,
     AUTH_RETRY_LATER,
+    PROBLEM_CANCELLED,
     PROBLEM_LOGIN_REQUIRED,
+    PROBLEM_LOGIN_SUPERSEDED,
     PROBLEM_RATE_LIMITED,
+    CodexAccountState,
+    CodexAuthError,
     CodexAuthSnapshot,
     CodexBrowserChallenge,
     CodexModel,
@@ -275,70 +280,73 @@ def test_active_chatgpt_disconnect_requires_confirmation(qtbot, tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_initialize_publishes_auth_state_after_catalog_refresh() -> None:
-    snapshots = 0
+async def test_initialize_publishes_one_atomic_account_state(monkeypatch) -> None:
+    calls = 0
     problem = CodexProblem(PROBLEM_LOGIN_REQUIRED)
 
-    class Service:
-        async def snapshot(self, operation_id: int) -> CodexAuthSnapshot:
-            nonlocal snapshots
-            snapshots += 1
-            if snapshots == 1:
-                return CodexAuthSnapshot(operation_id, AUTH_CONNECTED)
-            return CodexAuthSnapshot(
+    async def initialize(operation_id: int) -> CodexAccountState:
+        nonlocal calls
+        calls += 1
+        return CodexAccountState(
+            CodexAuthSnapshot(
                 operation_id,
                 AUTH_LOGIN_REQUIRED,
                 problem=problem,
-            )
+            ),
+            CodexModelCatalog(
+                operation_id,
+                (CodexModel("cached"),),
+                True,
+                problem,
+            ),
+        )
 
-        async def refresh_models(self, operation_id: int) -> CodexModelCatalog:
-            return CodexModelCatalog(operation_id, (CodexModel("cached"),), True, problem)
+    monkeypatch.setattr("kimix_gui.qt.bridge.initialize_codex_account", initialize)
 
     async def unused_factory(_options: SessionOptions):
         raise AssertionError("session factory should not run")
 
-    bridge = KimixBridge(
-        session_factory=unused_factory,
-        codex_service=Service(),  # type: ignore[arg-type]
-    )
+    bridge = KimixBridge(session_factory=unused_factory)
     auth_states: list[str] = []
     bridge.codex_auth_changed.connect(lambda snapshot: auth_states.append(snapshot.state))
     operation_id = bridge._next_codex_operation()
 
     await bridge._initialize_codex_locked(operation_id)
 
-    assert snapshots == 2
+    assert calls == 1
     assert auth_states == [AUTH_LOGIN_REQUIRED]
 
 
 @pytest.mark.asyncio
-async def test_account_operations_serialize_refresh_before_disconnect() -> None:
+async def test_account_operations_serialize_refresh_before_disconnect(monkeypatch) -> None:
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
     events: list[str] = []
 
-    class Service:
-        async def refresh_models(self, operation_id: int) -> CodexModelCatalog:
-            events.append("refresh-started")
-            refresh_started.set()
-            await release_refresh.wait()
-            events.append("refresh-saved")
-            return CodexModelCatalog(operation_id, (CodexModel("model"),), False)
+    async def refresh_account(operation_id: int) -> CodexAccountState:
+        events.append("refresh-started")
+        refresh_started.set()
+        await release_refresh.wait()
+        events.append("refresh-saved")
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (CodexModel("model"),), False),
+        )
 
-        async def snapshot(self, operation_id: int) -> CodexAuthSnapshot:
-            return CodexAuthSnapshot(operation_id, AUTH_CONNECTED)
+    async def disconnect(operation_id: int) -> CodexAccountState:
+        events.append("disconnected")
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED),
+            CodexModelCatalog(operation_id, (), True),
+        )
 
-        async def disconnect(self, operation_id: int) -> CodexAuthSnapshot:
-            events.append("disconnected")
-            return CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED)
+    monkeypatch.setattr("kimix_gui.qt.bridge.refresh_codex_account", refresh_account)
+    monkeypatch.setattr("kimix_gui.qt.bridge.disconnect_codex_account", disconnect)
 
     async def unused_factory(_options: SessionOptions):
         raise AssertionError("session factory should not run")
 
-    bridge = KimixBridge(
-        session_factory=unused_factory,
-        codex_service=Service(),  # type: ignore[arg-type]
-    )
+    bridge = KimixBridge(session_factory=unused_factory)
     refresh_operation = bridge._next_codex_operation()
     refresh_task = asyncio.create_task(bridge._refresh_codex_models(refresh_operation))
     await refresh_started.wait()
@@ -351,3 +359,262 @@ async def test_account_operations_serialize_refresh_before_disconnect() -> None:
     await asyncio.gather(refresh_task, disconnect_task)
 
     assert events == ["refresh-started", "refresh-saved", "disconnected"]
+
+
+@pytest.mark.asyncio
+async def test_superseded_disconnect_stops_after_releasing_active_session(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+    disconnect_calls: list[int] = []
+
+    async def release_session() -> int:
+        release_started.set()
+        await finish_release.wait()
+        return 7
+
+    async def disconnect(operation_id: int) -> CodexAccountState:
+        disconnect_calls.append(operation_id)
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED),
+            CodexModelCatalog(operation_id, (), True),
+        )
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(session_factory=unused_factory)
+    bridge._session = object()  # type: ignore[assignment]
+    bridge._options = SessionOptions(
+        tmp_path,
+        llm_selection=chatgpt_selection("gpt-5.4", "medium"),
+    )
+    monkeypatch.setattr(bridge, "_release_session", release_session)
+    monkeypatch.setattr("kimix_gui.qt.bridge.disconnect_codex_account", disconnect)
+    operation_id = bridge._next_codex_operation()
+    task = asyncio.create_task(
+        bridge._disconnect_chatgpt_locked(operation_id, close_active_session=True)
+    )
+    await release_started.wait()
+
+    bridge._next_codex_operation()
+    finish_release.set()
+    await task
+
+    assert disconnect_calls == []
+
+
+@pytest.mark.asyncio
+async def test_successful_disconnect_publishes_matching_stale_catalog(monkeypatch) -> None:
+    async def disconnect(operation_id: int) -> CodexAccountState:
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED),
+            CodexModelCatalog(
+                operation_id,
+                (CodexModel("fallback-model"),),
+                True,
+            ),
+        )
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    monkeypatch.setattr("kimix_gui.qt.bridge.disconnect_codex_account", disconnect)
+    bridge = KimixBridge(session_factory=unused_factory)
+    snapshots: list[CodexAuthSnapshot] = []
+    catalogs: list[CodexModelCatalog] = []
+    bridge.codex_auth_changed.connect(snapshots.append)
+    bridge.codex_catalog_changed.connect(catalogs.append)
+    operation_id = bridge._next_codex_operation()
+
+    await bridge._disconnect_chatgpt_locked(operation_id, close_active_session=False)
+
+    assert [snapshot.state for snapshot in snapshots] == [AUTH_DISCONNECTED]
+    assert [model.slug for model in catalogs[0].models] == ["fallback-model"]
+    assert catalogs[0].operation_id == snapshots[0].operation_id
+    assert catalogs[0].stale is True
+
+
+@pytest.mark.asyncio
+async def test_bridge_can_cancel_login_before_worker_starts_operation(
+    monkeypatch,
+) -> None:
+    instances: list[object] = []
+
+    class LoginOperation:
+        def __init__(self, operation_id: int, _challenge_callback) -> None:
+            self.operation_id = operation_id
+            self.cancelled = False
+            instances.append(self)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        async def run(self):
+            assert self.cancelled
+            raise CodexAuthError(CodexProblem(PROBLEM_CANCELLED))
+
+    async def account_state(operation_id: int) -> CodexAccountState:
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED),
+            CodexModelCatalog(operation_id, (), True),
+        )
+
+    monkeypatch.setattr("kimix_gui.qt.bridge.CodexLoginOperation", LoginOperation)
+    monkeypatch.setattr("kimix_gui.qt.bridge.codex_account_state", account_state)
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(session_factory=unused_factory)
+    submitted: list[object] = []
+    monkeypatch.setattr(bridge, "submit", submitted.append)
+    auth_states: list[str] = []
+    bridge.codex_auth_changed.connect(lambda value: auth_states.append(value.state))
+
+    operation_id = bridge.connect_chatgpt()
+    bridge.cancel_chatgpt_login(operation_id)
+    assert len(submitted) == 1
+    await submitted[0]  # type: ignore[misc]
+
+    assert len(instances) == 1
+    assert instances[0].cancelled is True  # type: ignore[attr-defined]
+    assert bridge._active_codex_login is None
+    assert auth_states == [AUTH_CONNECTING, AUTH_DISCONNECTED]
+
+
+@pytest.mark.asyncio
+async def test_superseded_login_publishes_connected_authoritative_account(
+    monkeypatch,
+) -> None:
+    class LoginOperation:
+        def __init__(self, operation_id: int) -> None:
+            self.operation_id = operation_id
+
+        async def run(self):
+            raise CodexAuthError(CodexProblem(PROBLEM_LOGIN_SUPERSEDED))
+
+    async def account_state(operation_id: int) -> CodexAccountState:
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED, model_count=1),
+            CodexModelCatalog(
+                operation_id,
+                (CodexModel("external-account-model"),),
+                False,
+            ),
+        )
+
+    monkeypatch.setattr("kimix_gui.qt.bridge.codex_account_state", account_state)
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(session_factory=unused_factory)
+    auth_snapshots: list[CodexAuthSnapshot] = []
+    catalogs: list[CodexModelCatalog] = []
+    bridge.codex_auth_changed.connect(auth_snapshots.append)
+    bridge.codex_catalog_changed.connect(catalogs.append)
+    operation_id = bridge._next_codex_operation()
+
+    await bridge._connect_chatgpt_locked(LoginOperation(operation_id))  # type: ignore[arg-type]
+
+    assert [snapshot.state for snapshot in auth_snapshots] == [AUTH_CONNECTED]
+    assert [model.slug for model in catalogs[0].models] == ["external-account-model"]
+    assert auth_snapshots[0].problem is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_supersedes_queued_login_and_clears_its_handle(
+    monkeypatch,
+) -> None:
+    instances: list[object] = []
+
+    class LoginOperation:
+        def __init__(self, operation_id: int, _challenge_callback) -> None:
+            self.operation_id = operation_id
+            self.cancelled = False
+            instances.append(self)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        async def run(self):
+            raise AssertionError("a superseded queued login must not run")
+
+    async def refresh(operation_id: int) -> CodexAccountState:
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (CodexModel("model"),), False),
+        )
+
+    monkeypatch.setattr("kimix_gui.qt.bridge.CodexLoginOperation", LoginOperation)
+    monkeypatch.setattr("kimix_gui.qt.bridge.refresh_codex_account", refresh)
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(session_factory=unused_factory)
+    submitted: list[object] = []
+    monkeypatch.setattr(bridge, "submit", submitted.append)
+
+    bridge.connect_chatgpt()
+    bridge.refresh_codex_models()
+    assert len(submitted) == 2
+    await submitted[0]  # type: ignore[misc]
+    await submitted[1]  # type: ignore[misc]
+
+    assert len(instances) == 1
+    assert instances[0].cancelled is True  # type: ignore[attr-defined]
+    assert bridge._active_codex_login is None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancels_active_login_before_waiting_for_account_lock(
+    monkeypatch,
+) -> None:
+    login_started = asyncio.Event()
+    login_cancelled = asyncio.Event()
+    cancellation_calls = 0
+
+    class LoginOperation:
+        def __init__(self, operation_id: int, _challenge_callback) -> None:
+            self.operation_id = operation_id
+
+        def cancel(self) -> None:
+            nonlocal cancellation_calls
+            cancellation_calls += 1
+            login_cancelled.set()
+
+        async def run(self):
+            login_started.set()
+            await login_cancelled.wait()
+            raise CodexAuthError(CodexProblem(PROBLEM_CANCELLED))
+
+    async def disconnect(operation_id: int) -> CodexAccountState:
+        return CodexAccountState(
+            CodexAuthSnapshot(operation_id, AUTH_DISCONNECTED),
+            CodexModelCatalog(operation_id, (), True),
+        )
+
+    monkeypatch.setattr("kimix_gui.qt.bridge.CodexLoginOperation", LoginOperation)
+    monkeypatch.setattr("kimix_gui.qt.bridge.disconnect_codex_account", disconnect)
+
+    async def unused_factory(_options: SessionOptions):
+        raise AssertionError("session factory should not run")
+
+    bridge = KimixBridge(session_factory=unused_factory)
+    submitted: list[object] = []
+    monkeypatch.setattr(bridge, "submit", submitted.append)
+
+    bridge.connect_chatgpt()
+    login_task = asyncio.create_task(submitted.pop(0))  # type: ignore[arg-type]
+    await login_started.wait()
+    bridge.disconnect_chatgpt()
+    disconnect_task = asyncio.create_task(submitted.pop(0))  # type: ignore[arg-type]
+
+    await asyncio.gather(login_task, disconnect_task)
+
+    assert cancellation_calls == 1
+    assert bridge._active_codex_login is None

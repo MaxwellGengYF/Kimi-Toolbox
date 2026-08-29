@@ -32,8 +32,6 @@ except ImportError:  # Local Kimix-CLI-X revisions export the worker factory pri
             _kimix_base._default_yolo = previous_yolo
 
 
-from kimi_cli.auth.codex import CodexAuthService, default_codex_auth_service
-
 from kimix_gui.kimi_workdir import resolve_kimi_work_dir
 from kimix_gui.llm import (
     LLMSelection,
@@ -138,13 +136,11 @@ def new_session_id() -> str:
 async def create_sdk_session(
     options: SessionOptions,
     *,
-    codex_service: CodexAuthService | None = None,
     provider_registry: ProviderRegistry | None = None,
 ) -> SdkSession:
     """Create or resume a session through one provider-neutral runtime path."""
 
-    service = codex_service or default_codex_auth_service()
-    registry = provider_registry or default_provider_registry(service)
+    registry = provider_registry or default_provider_registry()
     work_dir = resolve_kimi_work_dir(options.work_dir)
     selection = options.llm_selection or configured_selection(
         ProviderFileTarget(default_provider_file_path())

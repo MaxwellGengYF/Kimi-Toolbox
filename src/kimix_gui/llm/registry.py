@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
 
-from kimi_cli.auth.codex import CodexAuthService, CodexAuthSnapshot, CodexModelCatalog
+from kimi_cli.auth.codex import CodexAuthSnapshot, CodexModelCatalog
 
 from kimix_gui.llm.domain import (
     LLMModelDescriptor,
@@ -103,12 +103,12 @@ class ProviderRegistry:
         )
 
 
-def default_provider_registry(codex_service: CodexAuthService) -> ProviderRegistry:
-    """Build the built-in registry around the process's shared Codex service."""
+def default_provider_registry() -> ProviderRegistry:
+    """Build the built-in provider registry without mutable auth dependencies."""
 
     return ProviderRegistry(
         (
-            ChatGPTProviderKind(codex_service),
+            ChatGPTProviderKind(),
             ProviderFileProviderKind(),
         )
     )

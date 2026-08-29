@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import cast
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from inline_snapshot import snapshot
@@ -12,7 +11,7 @@ from kosong.chat_provider.xai import XAI
 from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
 from pydantic import SecretStr
 
-from kimi_cli.auth.codex import CODEX_OAUTH_KEY, CodexRuntimeCredentials
+from kimi_cli.auth.codex import CODEX_OAUTH_KEY
 from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, OpenAISettings, Services
 from kimi_cli.llm import augment_provider_with_env_vars, create_llm
@@ -266,14 +265,7 @@ async def test_create_llm_codex_oauth_uses_canonical_provider():
         capabilities={"thinking"},
     )
     config = Config(provider=provider, model=model, services=Services())
-    service = MagicMock()
-    service.cached_credentials.return_value = CodexRuntimeCredentials(
-        "codex-access",
-        "account-1",
-        2_000,
-    )
-    service.ensure_credentials = AsyncMock()
-    oauth = OAuthManager(config, codex_service=service)
+    oauth = OAuthManager(config)
 
     llm = create_llm(provider, model, session_id="session-1", oauth=oauth)
 
@@ -285,7 +277,6 @@ async def test_create_llm_codex_oauth_uses_canonical_provider():
     assert llm.chat_provider._client_kwargs["default_headers"] == {
         "User-Agent": "KimiCLI/kimix",
         "originator": "kimix",
-        "ChatGPT-Account-ID": "account-1",
     }
     await cast(OpenAICodex, llm.chat_provider).aclose()
 

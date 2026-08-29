@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import orjson
 import pytest
-from kimi_cli.auth.codex import CODEX_BASE_URL, CodexAuthService
+from kimi_cli.auth.codex import CODEX_AUTH_FILENAME, CODEX_BASE_URL
 
 from kimix_gui import backend
 from kimix_gui.backend import (
@@ -165,7 +165,9 @@ async def test_session_factory_loads_worker_execution_tools(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_token(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
     payload = base64.urlsafe_b64encode(
         orjson.dumps(
             {
@@ -175,7 +177,7 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
         )
     ).rstrip(b"=")
     access_token = f"header.{payload.decode()}.signature"
-    auth_file = tmp_path / "codex-auth.json"
+    auth_file = tmp_path / CODEX_AUTH_FILENAME
     auth_file.write_bytes(
         orjson.dumps(
             {
@@ -200,15 +202,12 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
             }
         )
     )
-    service = CodexAuthService(auth_file)
-
     session = await create_sdk_session(
         SessionOptions(
             tmp_path,
             llm_selection=chatgpt_selection("gpt-test-codex", "medium"),
             llm_runtime=RuntimeOverrides(thinking_effort="medium"),
         ),
-        codex_service=service,
     )
     try:
         runtime_session = cast(Any, session)
@@ -230,7 +229,6 @@ async def test_chatgpt_session_uses_managed_codex_provider_without_persisting_to
         assert provider._generation_kwargs["reasoning_effort"] == "medium"
     finally:
         await close_sdk_session(session)
-        await service.aclose()
 
 
 @dataclass(frozen=True, slots=True)

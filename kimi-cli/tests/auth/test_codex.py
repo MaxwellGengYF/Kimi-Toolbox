@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -34,13 +35,93 @@ from kimi_cli.auth.codex import (
     PROBLEM_TIMEOUT,
     TOKEN_URL,
     CodexAuthError,
-    CodexAuthService,
+    CodexAuthOptions,
     CodexBrowserChallenge,
+    CodexLoginOperation,
     CodexProblem,
+    CodexRequestAuth,
+    CodexRuntimeCredentials,
+    TransportFactory,
+    codex_auth_snapshot,
+    codex_model_catalog,
+    disconnect_codex,
+    ensure_codex_credentials,
     extract_chatgpt_account_id,
     fallback_catalog,
     parse_model_catalog,
+    refresh_codex_models,
 )
+
+
+class _CodexHarness:
+    """Test-only convenience wrapper around the public file-authoritative API."""
+
+    def __init__(
+        self,
+        auth_file: Path,
+        *,
+        transport_factory: TransportFactory | None = None,
+        clock=time.time,
+        monotonic=time.monotonic,
+        sleep=asyncio.sleep,
+        callback_ports: tuple[int, ...] = (1455, 1457),
+        login_timeout: float = 15 * 60,
+    ) -> None:
+        self.options = CodexAuthOptions(
+            auth_file=auth_file,
+            transport_factory=transport_factory,
+            clock=clock,
+            monotonic=monotonic,
+            sleep=sleep,
+            callback_ports=callback_ports,
+            login_timeout=login_timeout,
+        )
+        self._logins: dict[int, CodexLoginOperation] = {}
+
+    async def snapshot(self, operation_id: int = 0):
+        return await codex_auth_snapshot(operation_id, options=self.options)
+
+    async def login(self, operation_id: int, challenge_callback):
+        operation = CodexLoginOperation(
+            operation_id,
+            challenge_callback,
+            options=self.options,
+        )
+        self._logins[operation_id] = operation
+        try:
+            return await operation.run()
+        finally:
+            self._logins.pop(operation_id, None)
+
+    def cancel_login(self, operation_id: int) -> None:
+        operation = self._logins.get(operation_id)
+        if operation is not None:
+            operation.cancel()
+
+    async def disconnect(self, operation_id: int = 0):
+        return await disconnect_codex(operation_id, options=self.options)
+
+    async def ensure_credentials(
+        self,
+        *,
+        force_refresh: bool = False,
+        rejected_credentials: CodexRuntimeCredentials | None = None,
+    ):
+        return await ensure_codex_credentials(
+            force_refresh=force_refresh,
+            rejected_credentials=rejected_credentials,
+            options=self.options,
+        )
+
+    async def catalog(self, operation_id: int = 0):
+        return await codex_model_catalog(operation_id, options=self.options)
+
+    async def refresh_models(self, operation_id: int = 0):
+        return await refresh_codex_models(operation_id, options=self.options)
+
+    async def aclose(self) -> None:
+        # Every public operation owns and closes its own HTTP client.
+        return None
 
 
 def _jwt(*, exp: int = 10_000, account_id: str = "acct-1") -> str:
@@ -150,9 +231,9 @@ async def test_browser_flow_uses_pkce_callback_exchanges_and_fetches_models(
             )
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         tmp_path / "auth.json",
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
         callback_ports=(0,),
     )
@@ -222,9 +303,9 @@ async def test_browser_callback_rejects_wrong_state_then_accepts_expected_state(
             return httpx.Response(200, json={"models": [{"slug": "model"}]})
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         tmp_path / "auth.json",
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
 
@@ -249,7 +330,7 @@ async def test_browser_callback_rejects_wrong_state_then_accepts_expected_state(
 
 @pytest.mark.asyncio
 async def test_browser_callback_access_denied_is_a_cancelled_login(tmp_path: Path) -> None:
-    service = CodexAuthService(tmp_path / "auth.json", callback_ports=(0,))
+    service = _CodexHarness(tmp_path / "auth.json", callback_ports=(0,))
 
     async def deny(challenge: CodexBrowserChallenge) -> None:
         assert await _send_browser_callback(challenge, code=None, error="access_denied") == 400
@@ -264,7 +345,7 @@ async def test_browser_callback_access_denied_is_a_cancelled_login(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_browser_flow_can_be_cancelled_from_challenge(tmp_path: Path) -> None:
-    service = CodexAuthService(tmp_path / "auth.json", callback_ports=(0,))
+    service = _CodexHarness(tmp_path / "auth.json", callback_ports=(0,))
 
     def cancel(challenge: CodexBrowserChallenge) -> None:
         service.cancel_login(challenge.operation_id)
@@ -279,7 +360,7 @@ async def test_browser_flow_can_be_cancelled_from_challenge(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_browser_flow_cancel_wakes_an_active_callback_wait(tmp_path: Path) -> None:
     challenge_ready = asyncio.Event()
-    service = CodexAuthService(tmp_path / "auth.json", callback_ports=(0,))
+    service = _CodexHarness(tmp_path / "auth.json", callback_ports=(0,))
 
     def published(_challenge: CodexBrowserChallenge) -> None:
         challenge_ready.set()
@@ -319,9 +400,9 @@ async def test_cancel_during_model_refresh_removes_just_created_credentials(
             return httpx.Response(200, json={"models": [{"slug": "model"}]})
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     task = asyncio.create_task(service.login(8, _send_browser_callback))
@@ -339,7 +420,7 @@ async def test_cancel_during_model_refresh_removes_just_created_credentials(
 
 @pytest.mark.asyncio
 async def test_browser_flow_times_out_while_waiting_for_callback(tmp_path: Path) -> None:
-    service = CodexAuthService(
+    service = _CodexHarness(
         tmp_path / "auth.json",
         callback_ports=(0,),
         login_timeout=0.01,
@@ -364,7 +445,7 @@ async def test_browser_flow_reports_when_local_callback_ports_are_unavailable(
 
     monkeypatch.setattr(asyncio, "start_server", unavailable)
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         tmp_path / "auth.json",
         callback_ports=(1455, 1457),
     )
@@ -388,9 +469,9 @@ async def test_failed_new_code_exchange_preserves_existing_credentials(tmp_path:
             return httpx.Response(401, json={"error": "unauthorized"})
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     with pytest.raises(CodexAuthError) as caught:
@@ -433,12 +514,37 @@ async def test_refresh_rotates_token_and_a_second_service_adopts_it(tmp_path: Pa
             },
         )
 
-    transport = httpx.MockTransport(handler)
-    first = CodexAuthService(auth_file, transport=transport, clock=lambda: 1_000)
-    second = CodexAuthService(auth_file, transport=transport, clock=lambda: 1_000)
+    def transport_factory() -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+    first = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
+    second = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
     credentials = await asyncio.gather(
-        first.ensure_credentials(force_refresh=True, failed_access_token=old_access),
-        second.ensure_credentials(force_refresh=True, failed_access_token=old_access),
+        first.ensure_credentials(
+            force_refresh=True,
+            rejected_credentials=CodexRuntimeCredentials(
+                old_access,
+                "old-account",
+                100,
+                "credential-1",
+            ),
+        ),
+        second.ensure_credentials(
+            force_refresh=True,
+            rejected_credentials=CodexRuntimeCredentials(
+                old_access,
+                "old-account",
+                100,
+                "credential-1",
+            ),
+        ),
     )
     await first.aclose()
     await second.aclose()
@@ -448,6 +554,52 @@ async def test_refresh_rotates_token_and_a_second_service_adopts_it(tmp_path: Pa
     state = orjson.loads(auth_file.read_bytes())
     assert state["refresh_token"] == "refresh-2"
     assert state["credential_id"] != "credential-1"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_read_waits_for_authoritative_refresh_write(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    old_access = _jwt(exp=100, account_id="old-account")
+    new_access = _jwt(exp=20_000, account_id="new-account")
+    _write_tokens(auth_file, old_access)
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == TOKEN_URL
+        refresh_started.set()
+        await release_refresh.wait()
+        return httpx.Response(
+            200,
+            json={
+                "id_token": _jwt(exp=20_000, account_id="new-account"),
+                "access_token": new_access,
+                "refresh_token": "refresh-2",
+            },
+        )
+
+    refreshing = _CodexHarness(
+        auth_file,
+        transport_factory=lambda: httpx.MockTransport(handler),
+        clock=lambda: 1_000,
+    )
+    reading = _CodexHarness(auth_file, clock=lambda: 1_000)
+    refresh_task = asyncio.create_task(refreshing.ensure_credentials(force_refresh=True))
+    await refresh_started.wait()
+    snapshot_task = asyncio.create_task(reading.snapshot(19))
+    await asyncio.sleep(0.1)
+
+    assert not snapshot_task.done()
+
+    release_refresh.set()
+    credentials, snapshot = await asyncio.gather(refresh_task, snapshot_task)
+    await refreshing.aclose()
+    await reading.aclose()
+
+    assert credentials.access_token == new_access
+    assert snapshot.operation_id == 19
+    assert snapshot.state == AUTH_CONNECTED
+    assert snapshot.expires_at == 20_000
 
 
 @pytest.mark.asyncio
@@ -463,9 +615,9 @@ async def test_refresh_response_requires_a_new_access_token(tmp_path: Path) -> N
             json={"refresh_token": "rotated-refresh", "expires_in": 3_600},
         )
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
     with pytest.raises(CodexAuthError) as caught:
@@ -501,9 +653,9 @@ async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": {"code": backend_code}})
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
     with pytest.raises(CodexAuthError) as caught:
@@ -514,8 +666,11 @@ async def test_terminal_refresh_error_clears_tokens_but_retains_catalog(
 
     assert caught.value.problem.code == backend_code.lower()
     assert snapshot.state == AUTH_LOGIN_REQUIRED
+    assert snapshot.stale is True
     assert [model.slug for model in catalog.models] == ["cached"]
+    assert catalog.stale is True
     persisted = orjson.loads(auth_file.read_bytes())
+    assert persisted["models_stale"] is True
     assert "access_token" not in persisted
     assert "refresh_token" not in persisted
 
@@ -529,9 +684,9 @@ async def test_temporary_refresh_error_keeps_credentials(tmp_path: Path) -> None
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
     with pytest.raises(CodexAuthError):
@@ -552,9 +707,9 @@ async def test_refresh_rate_limit_keeps_credentials_and_retry_hint(tmp_path: Pat
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "9"})
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
     with pytest.raises(CodexAuthError) as caught:
@@ -589,9 +744,9 @@ async def test_model_network_failure_uses_cache_then_exact_fallback(tmp_path: Pa
             }
         )
     )
-    cached_service = CodexAuthService(
+    cached_service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(offline),
+        transport_factory=lambda: httpx.MockTransport(offline),
         clock=lambda: 1_000,
     )
     cached = await cached_service.refresh_models(12)
@@ -600,9 +755,9 @@ async def test_model_network_failure_uses_cache_then_exact_fallback(tmp_path: Pa
     state = orjson.loads(auth_file.read_bytes())
     state.pop("models")
     auth_file.write_bytes(orjson.dumps(state))
-    fallback_service = CodexAuthService(
+    fallback_service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(offline),
+        transport_factory=lambda: httpx.MockTransport(offline),
         clock=lambda: 1_000,
     )
     fallback = await fallback_service.refresh_models(13)
@@ -611,6 +766,54 @@ async def test_model_network_failure_uses_cache_then_exact_fallback(tmp_path: Pa
     assert cached.stale is True
     assert [model.slug for model in cached.models] == ["cached-account-model"]
     assert [model.slug for model in fallback.models] == list(DEFAULT_CODEX_MODELS)
+
+
+@pytest.mark.asyncio
+async def test_model_refresh_delegates_its_single_401_replay_to_request_auth(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    old_access = _jwt(exp=10_000, account_id="account-1")
+    new_access = _jwt(exp=20_000, account_id="account-1")
+    _write_tokens(auth_file, old_access)
+    state = orjson.loads(auth_file.read_bytes())
+    state["expires_at"] = 10_000
+    auth_file.write_bytes(orjson.dumps(state))
+    model_tokens: list[str] = []
+    refresh_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal refresh_calls
+        if str(request.url) == TOKEN_URL:
+            refresh_calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(exp=20_000, account_id="account-1"),
+                    "access_token": new_access,
+                    "refresh_token": "refresh-2",
+                },
+            )
+        assert str(request.url) == CODEX_MODELS_URL
+        token = request.headers["Authorization"]
+        model_tokens.append(token)
+        if token == f"Bearer {old_access}":
+            return httpx.Response(401)
+        assert token == f"Bearer {new_access}"
+        return httpx.Response(200, json={"models": [{"slug": "after-refresh"}]})
+
+    service = _CodexHarness(
+        auth_file,
+        transport_factory=lambda: httpx.MockTransport(handler),
+        clock=lambda: 1_000,
+    )
+    catalog = await service.refresh_models(20)
+    await service.aclose()
+
+    assert refresh_calls == 1
+    assert model_tokens == [f"Bearer {old_access}", f"Bearer {new_access}"]
+    assert [model.slug for model in catalog.models] == ["after-refresh"]
+    assert orjson.loads(auth_file.read_bytes())["access_token"] == new_access
 
 
 @pytest.mark.asyncio
@@ -630,9 +833,9 @@ async def test_superseded_catalog_refresh_returns_current_catalog_state(tmp_path
         await release_request.wait()
         return httpx.Response(200, json={"models": [{"slug": "late-old-model"}]})
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
     task = asyncio.create_task(service.refresh_models(16))
@@ -663,6 +866,60 @@ async def test_superseded_catalog_refresh_returns_current_catalog_state(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_late_same_generation_refresh_cannot_overwrite_newer_catalog(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    access = _jwt(exp=10_000, account_id="shared-account")
+    _write_tokens(auth_file, access, credential_id="shared-credential")
+    state = orjson.loads(auth_file.read_bytes())
+    state["expires_at"] = 10_000
+    auth_file.write_bytes(orjson.dumps(state))
+    first_request_started = asyncio.Event()
+    release_first_request = asyncio.Event()
+    request_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        assert str(request.url) == CODEX_MODELS_URL
+        request_count += 1
+        if request_count == 1:
+            first_request_started.set()
+            await release_first_request.wait()
+            return httpx.Response(200, json={"models": [{"slug": "older-response"}]})
+        return httpx.Response(200, json={"models": [{"slug": "newer-response"}]})
+
+    def transport_factory() -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+
+    first = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
+    second = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
+    first_task = asyncio.create_task(first.refresh_models(17))
+    await first_request_started.wait()
+    newer_catalog = await second.refresh_models(18)
+    release_first_request.set()
+    superseded_catalog = await first_task
+    await first.aclose()
+    await second.aclose()
+
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert [model.slug for model in newer_catalog.models] == ["newer-response"]
+    assert [model.slug for model in superseded_catalog.models] == ["newer-response"]
+    assert superseded_catalog.stale is False
+    assert superseded_catalog.problem is None
+    assert [model["slug"] for model in persisted["models"]] == ["newer-response"]
+    assert "_models_refresh_id" not in persisted
+
+
+@pytest.mark.asyncio
 async def test_legacy_credentials_adopt_cached_model_ownership(tmp_path: Path) -> None:
     auth_file = tmp_path / "auth.json"
     access = _jwt(exp=10_000, account_id="legacy-account")
@@ -677,7 +934,7 @@ async def test_legacy_credentials_adopt_cached_model_ownership(tmp_path: Path) -
             }
         )
     )
-    service = CodexAuthService(auth_file, clock=lambda: 1_000)
+    service = _CodexHarness(auth_file, clock=lambda: 1_000)
 
     before = await service.snapshot()
     credentials = await service.ensure_credentials()
@@ -720,12 +977,12 @@ async def test_inflight_catalog_refresh_does_not_recreate_disconnected_store(
         await release_response.wait()
         return httpx.Response(200, json={"models": [{"slug": "late-model"}]})
 
-    refreshing = CodexAuthService(
+    refreshing = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         clock=lambda: 1_000,
     )
-    disconnecting = CodexAuthService(auth_file, clock=lambda: 1_000)
+    disconnecting = _CodexHarness(auth_file, clock=lambda: 1_000)
     task = asyncio.create_task(refreshing.refresh_models(14))
     await request_started.wait()
 
@@ -754,16 +1011,14 @@ async def test_login_required_problem_overrides_stored_access_token(tmp_path: Pa
             }
         )
     )
-    service = CodexAuthService(auth_file, clock=lambda: 1_000)
+    service = _CodexHarness(auth_file, clock=lambda: 1_000)
 
     snapshot = await service.snapshot()
-    cached = service.cached_credentials()
     with pytest.raises(CodexAuthError) as caught:
         await service.ensure_credentials()
     await service.disconnect()
 
     assert snapshot.state == AUTH_LOGIN_REQUIRED
-    assert cached is None
     assert caught.value.problem.code == PROBLEM_LOGIN_REQUIRED
     assert not auth_file.exists()
 
@@ -785,9 +1040,9 @@ async def test_initial_token_response_requires_complete_oidc_tokens(
         assert str(request.url) == TOKEN_URL
         return httpx.Response(200, json=token_payload)
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         tmp_path / "auth.json",
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
 
@@ -830,9 +1085,9 @@ async def test_terminal_catalog_failure_restores_previous_credentials(tmp_path: 
             return httpx.Response(403)
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     with pytest.raises(CodexAuthError) as caught:
@@ -868,9 +1123,9 @@ async def test_superseded_login_cannot_publish_or_overwrite_newer_credentials(
             return httpx.Response(200, json={"models": [{"slug": "late-old-model"}]})
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     login_task = asyncio.create_task(service.login(21, _send_browser_callback))
@@ -906,6 +1161,75 @@ async def test_superseded_login_cannot_publish_or_overwrite_newer_credentials(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_nested_login_does_not_restore_superseded_credentials(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    first_models_started = asyncio.Event()
+    second_models_started = asyncio.Event()
+    release_first_models = asyncio.Event()
+    token_exchanges = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_exchanges
+        if str(request.url) == TOKEN_URL:
+            token_exchanges += 1
+            account_id = "account-a" if token_exchanges == 1 else "account-b"
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(account_id=account_id),
+                    "access_token": _jwt(account_id=account_id),
+                    "refresh_token": f"refresh-{account_id}",
+                },
+            )
+        if str(request.url) == CODEX_MODELS_URL:
+            account_id = request.headers["ChatGPT-Account-ID"]
+            if account_id == "account-a":
+                first_models_started.set()
+                await release_first_models.wait()
+            else:
+                second_models_started.set()
+                await asyncio.Event().wait()
+            return httpx.Response(200, json={"models": [{"slug": account_id}]})
+        raise AssertionError(str(request.url))
+
+    def transport_factory() -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+
+    first = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        callback_ports=(0,),
+        clock=lambda: 1_000,
+    )
+    second = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        callback_ports=(0,),
+        clock=lambda: 1_000,
+    )
+    first_task = asyncio.create_task(first.login(31, _send_browser_callback))
+    await first_models_started.wait()
+    second_task = asyncio.create_task(second.login(32, _send_browser_callback))
+    await second_models_started.wait()
+
+    release_first_models.set()
+    with pytest.raises(CodexAuthError) as first_error:
+        await first_task
+    assert first_error.value.problem.code == PROBLEM_LOGIN_SUPERSEDED
+
+    second.cancel_login(32)
+    with pytest.raises(CodexAuthError) as second_error:
+        await second_task
+    await first.aclose()
+    await second.aclose()
+
+    assert second_error.value.problem.code == PROBLEM_CANCELLED
+    assert not auth_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_account_changing_refresh_supersedes_inflight_login_and_catalog(
     tmp_path: Path,
 ) -> None:
@@ -938,14 +1262,19 @@ async def test_account_changing_refresh_supersedes_inflight_login_and_catalog(
             return httpx.Response(200, json={"models": [{"slug": "account-a-only"}]})
         raise AssertionError(str(request.url))
 
-    transport = httpx.MockTransport(handler)
-    login_service = CodexAuthService(
+    def transport_factory() -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+    login_service = _CodexHarness(
         auth_file,
-        transport=transport,
+        transport_factory=transport_factory,
         callback_ports=(0,),
         clock=lambda: 1_000,
     )
-    refresh_service = CodexAuthService(auth_file, transport=transport, clock=lambda: 1_000)
+    refresh_service = _CodexHarness(
+        auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
     login_task = asyncio.create_task(login_service.login(22, _send_browser_callback))
     await model_request_started.wait()
     login_generation = orjson.loads(auth_file.read_bytes())["credential_id"]
@@ -995,9 +1324,9 @@ async def test_new_account_never_inherits_previous_account_model_cache(tmp_path:
             raise httpx.ConnectError("offline", request=request)
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     snapshot, catalog = await service.login(21, _send_browser_callback)
@@ -1032,9 +1361,9 @@ async def test_cancelled_login_does_not_delete_newer_process_credentials(tmp_pat
             return httpx.Response(200, json={"models": [{"slug": "model-a"}]})
         raise AssertionError(str(request.url))
 
-    service = CodexAuthService(
+    service = _CodexHarness(
         auth_file,
-        transport=httpx.MockTransport(handler),
+        transport_factory=lambda: httpx.MockTransport(handler),
         callback_ports=(0,),
     )
     login_task = asyncio.create_task(service.login(22, _send_browser_callback))
@@ -1064,7 +1393,7 @@ async def test_cancelled_login_does_not_delete_newer_process_credentials(tmp_pat
 async def test_credential_store_failures_are_sanitized_domain_errors(tmp_path: Path) -> None:
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("blocked", encoding="utf-8")
-    service = CodexAuthService(blocked_parent / "auth.json")
+    service = _CodexHarness(blocked_parent / "auth.json")
 
     with pytest.raises(CodexAuthError) as caught:
         await service.disconnect()
@@ -1145,7 +1474,7 @@ async def test_legacy_cached_profile_is_rehydrated_with_official_metadata(
             }
         )
     )
-    service = CodexAuthService(auth_file)
+    service = _CodexHarness(auth_file)
 
     catalog = await service.catalog()
     await service.aclose()
@@ -1173,3 +1502,178 @@ def test_fallback_is_exact_and_secret_values_are_not_represented() -> None:
     )
     assert "token" not in repr(service_error).lower()
     assert extract_chatgpt_account_id(_jwt(account_id="account-x")) == "account-x"
+
+
+@pytest.mark.asyncio
+async def test_request_401_adopts_new_generation_with_same_bearer(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    shared_access = _jwt(exp=20_000, account_id="account-a")
+    _write_tokens(auth_file, shared_access, credential_id="generation-a")
+    initial_state = orjson.loads(auth_file.read_bytes())
+    initial_state.update({"expires_at": 20_000, "account_id": "account-a"})
+    auth_file.write_bytes(orjson.dumps(initial_state))
+    accounts: list[str] = []
+
+    def unexpected_transport() -> httpx.AsyncBaseTransport:
+        raise AssertionError("a newer credential generation must not be refreshed")
+
+    options = CodexAuthOptions(
+        auth_file=auth_file,
+        transport_factory=unexpected_transport,
+        clock=lambda: 1_000,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        accounts.append(request.headers["ChatGPT-Account-ID"])
+        if len(accounts) == 1:
+            rotated_state = dict(initial_state)
+            rotated_state.update(
+                {
+                    "access_token": shared_access,
+                    "account_id": "account-b",
+                    "credential_id": "generation-b",
+                }
+            )
+            auth_file.write_bytes(orjson.dumps(rotated_state))
+            return httpx.Response(401)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        auth=CodexRequestAuth(options=options),
+    ) as client:
+        response = await client.post("https://example.test/responses", content=b"body")
+
+    assert response.status_code == 200
+    assert accounts == ["account-a", "account-b"]
+    persisted = orjson.loads(auth_file.read_bytes())
+    assert persisted["credential_id"] == "generation-b"
+    assert persisted["account_id"] == "account-b"
+
+
+@pytest.mark.asyncio
+async def test_login_cancellation_rolls_back_its_account_changing_refresh(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    first_access = _jwt(exp=20_000, account_id="account-a")
+    refreshed_access = _jwt(exp=30_000, account_id="account-b")
+    second_model_request = asyncio.Event()
+    release_model_request = asyncio.Event()
+    model_requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal model_requests
+        if str(request.url) == TOKEN_URL:
+            if request.headers["Content-Type"].startswith(
+                "application/x-www-form-urlencoded"
+            ):
+                payload = {
+                    key: values[0]
+                    for key, values in parse_qs(request.content.decode()).items()
+                }
+            else:
+                payload = orjson.loads(request.content)
+            if payload["grant_type"] == "authorization_code":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id_token": _jwt(exp=20_000, account_id="account-a"),
+                        "access_token": first_access,
+                        "refresh_token": "refresh-a",
+                    },
+                )
+            assert payload["grant_type"] == "refresh_token"
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(exp=30_000, account_id="account-b"),
+                    "access_token": refreshed_access,
+                    "refresh_token": "refresh-b",
+                },
+            )
+        assert str(request.url) == CODEX_MODELS_URL
+        model_requests += 1
+        if model_requests == 1:
+            return httpx.Response(401)
+        second_model_request.set()
+        await release_model_request.wait()
+        return httpx.Response(200, json={"models": [{"slug": "model-b"}]})
+
+    options = CodexAuthOptions(
+        auth_file=auth_file,
+        transport_factory=lambda: httpx.MockTransport(handler),
+        callback_ports=(0,),
+        clock=lambda: 1_000,
+    )
+    operation = CodexLoginOperation(31, _send_browser_callback, options=options)
+    task = asyncio.create_task(operation.run())
+    await second_model_request.wait()
+
+    operation_state = orjson.loads(auth_file.read_bytes())
+    assert operation_state["account_id"] == "account-b"
+    operation.cancel()
+    try:
+        with pytest.raises(CodexAuthError) as caught:
+            await task
+    finally:
+        release_model_request.set()
+
+    assert caught.value.problem.code == PROBLEM_CANCELLED
+    assert model_requests == 2
+    assert not auth_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_reused_options_create_and_close_a_transport_per_operation(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    _write_tokens(auth_file, _jwt(exp=100, account_id="account-a"))
+    transports: list[ProbeTransport] = []
+
+    class ProbeTransport(httpx.AsyncBaseTransport):
+        def __init__(self, sequence: int) -> None:
+            self.sequence = sequence
+            self.closed = False
+
+        async def handle_async_request(
+            self,
+            request: httpx.Request,
+        ) -> httpx.Response:
+            access = _jwt(exp=20_000 + self.sequence, account_id="account-a")
+            return httpx.Response(
+                200,
+                json={
+                    "id_token": _jwt(
+                        exp=20_000 + self.sequence,
+                        account_id="account-a",
+                    ),
+                    "access_token": access,
+                    "refresh_token": f"refresh-{self.sequence}",
+                },
+                request=request,
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    def transport_factory() -> httpx.AsyncBaseTransport:
+        transport = ProbeTransport(len(transports) + 1)
+        transports.append(transport)
+        return transport
+
+    options = CodexAuthOptions(
+        auth_file=auth_file,
+        transport_factory=transport_factory,
+        clock=lambda: 1_000,
+    )
+
+    first = await ensure_codex_credentials(force_refresh=True, options=options)
+    second = await ensure_codex_credentials(force_refresh=True, options=options)
+
+    assert first.access_token != second.access_token
+    assert len(transports) == 2
+    assert all(transport.closed for transport in transports)

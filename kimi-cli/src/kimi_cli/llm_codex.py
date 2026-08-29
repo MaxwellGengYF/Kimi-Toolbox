@@ -11,11 +11,9 @@ from kosong.chat_provider.codex import OpenAICodex
 
 from kimi_cli.auth.codex import (
     CODEX_BASE_URL,
-    PROBLEM_MODEL_UNAVAILABLE,
-    CodexAuthError,
-    CodexAuthService,
     CodexModel,
-    CodexProblem,
+    CodexRequestAuth,
+    resolve_codex_model,
 )
 from kimi_cli.codex_context import (
     CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS as CODEX_AUTO_COMPACT_FALLBACK_BUFFER_TOKENS,
@@ -61,45 +59,6 @@ def _kimix_reasoning_efforts(model: CodexModel) -> tuple[str, ...]:
     return tuple(efforts)
 
 
-class CodexRequestAuth(httpx.Auth):
-    """Resolve the latest token for every request and replay one first 401."""
-
-    requires_request_body = True
-
-    def __init__(self, service: CodexAuthService) -> None:
-        self._service = service
-
-    async def async_auth_flow(self, request: httpx.Request):
-        credentials = await self._service.ensure_credentials()
-        self._apply(request, credentials.access_token, credentials.account_id)
-        response = yield request
-        if response.status_code != 401:
-            return
-        await response.aread()
-        credentials = await self._service.ensure_credentials(
-            force_refresh=True,
-            failed_access_token=credentials.access_token,
-        )
-        self._apply(request, credentials.access_token, credentials.account_id)
-        retry_response = yield request
-        if retry_response.status_code == 401:
-            await retry_response.aread()
-            # The replay used a freshly refreshed token and was still rejected;
-            # drop it so the next request re-authenticates instead of reusing a
-            # credential the backend has already refused.
-            await self._service.invalidate_credentials(credentials.access_token)
-
-    @staticmethod
-    def _apply(request: httpx.Request, access_token: str, account_id: str | None) -> None:
-        request.headers["Authorization"] = f"Bearer {access_token}"
-        if account_id:
-            request.headers["ChatGPT-Account-ID"] = account_id
-        else:
-            request.headers.pop("ChatGPT-Account-ID", None)
-        request.headers["User-Agent"] = get_user_agent()
-        request.headers["originator"] = "kimix"
-
-
 class CodexProviderLease:
     """Close one shared provider exactly once after the top-level session cleanup."""
 
@@ -129,7 +88,6 @@ class CodexProviderRuntime:
 
 
 async def create_codex_provider(
-    service: CodexAuthService,
     *,
     model_name: str,
     session_id: str,
@@ -137,13 +95,9 @@ async def create_codex_provider(
 ) -> CodexProviderRuntime:
     """Build the canonical provider without placing credentials in metadata."""
 
-    await service.ensure_credentials()
-    catalog = await service.catalog()
-    model = next((entry for entry in catalog.models if entry.slug == model_name), None)
-    if model is None:
-        raise CodexAuthError(CodexProblem(PROBLEM_MODEL_UNAVAILABLE))
+    model = await resolve_codex_model(model_name)
     http_client = httpx.AsyncClient(
-        auth=CodexRequestAuth(service),
+        auth=CodexRequestAuth(),
         headers={
             "User-Agent": get_user_agent(),
             "originator": "kimix",
