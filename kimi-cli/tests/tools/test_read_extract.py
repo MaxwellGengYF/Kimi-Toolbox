@@ -339,14 +339,15 @@ async def test_read_ipynb_via_tool(read_file_tool: ReadFile, temp_work_dir: Kaos
 
     result = await read_file_tool(Params(path=str(nb)))
     assert not result.is_error
-    assert "# ── Markdown cell 1 ──" in result.output
-    assert "# ── Code cell 1 ──" in result.output
+    assert "## Markdown cell 1" in result.output
+    assert "## Code cell 1" in result.output
     assert "print('hello')" in result.output
     assert "raw content" in result.output
     assert result.message.startswith(
-        "9 lines read from file starting from line 1. Total lines in file: 9. End of file reached."
+        "11 lines read from file starting from line 1. Total lines in file: 11. End of file reached."
     )
-    assert result.message.endswith(f" Path: {display_path} (extracted from .ipynb document)")
+    assert "(extracted from .ipynb document)" in result.message
+    assert result.message.endswith(f" Path: {display_path}")
 
 
 async def test_read_docx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -359,9 +360,10 @@ async def test_read_docx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosP
     assert "Hello\tWorld" in result.output
     assert "Second para" in result.output
     assert result.message.startswith(
-        "3 lines read from file starting from line 1. Total lines in file: 3. End of file reached."
+        "2 lines read from file starting from line 1. Total lines in file: 2. End of file reached."
     )
-    assert result.message.endswith(f" Path: {display_path} (extracted from .docx document)")
+    assert "(extracted from .docx document)" in result.message
+    assert result.message.endswith(f" Path: {display_path}")
 
 
 async def test_read_xlsx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -371,13 +373,14 @@ async def test_read_xlsx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosP
 
     result = await read_file_tool(Params(path=str(xlsx)))
     assert not result.is_error
-    assert "# ── Sheet: Data ──" in result.output
-    assert "Name\t42" in result.output
+    assert "## Sheet: Data" in result.output
+    assert "| Name | 42 |" in result.output
     assert "Alice" in result.output
     # Hidden sheet is skipped.
     assert "HiddenSheet" not in result.output
     assert "secret" not in result.output
-    assert result.message.endswith(f" Path: {display_path} (extracted from .xlsx document)")
+    assert "(extracted from .xlsx document)" in result.message
+    assert result.message.endswith(f" Path: {display_path}")
 
 
 async def test_read_pptx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -386,10 +389,11 @@ async def test_read_pptx_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosP
 
     result = await read_file_tool(Params(path=str(pptx)))
     assert not result.is_error
-    assert "# ── Slide 1 ──" in result.output
+    assert "## Slide 1" in result.output
     assert "Title line" in result.output
-    assert "A\tB" in result.output
-    assert result.message.endswith("(extracted from .pptx document)")
+    assert "| A | B |" in result.output
+    assert "(extracted from .pptx document)" in result.message
+    assert "Path:" in result.message
 
 
 async def test_read_pdf_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPath):
@@ -398,9 +402,10 @@ async def test_read_pdf_via_tool(read_file_tool: ReadFile, temp_work_dir: KaosPa
 
     result = await read_file_tool(Params(path=str(pdf)))
     assert not result.is_error
-    assert "# ── Page 1 ──" in result.output
+    assert "## Page 1" in result.output
     assert "PDF text page 1" in result.output
-    assert result.message.endswith("(extracted from .pdf document)")
+    assert "(extracted from .pdf document)" in result.message
+    assert "Path:" in result.message
 
 
 async def test_read_malformed_docx_bad_zip(read_file_tool: ReadFile, temp_work_dir: KaosPath):

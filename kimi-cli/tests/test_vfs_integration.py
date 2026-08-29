@@ -68,6 +68,7 @@ def _mock_runtime(work_dir: Path):
         additional_dirs = []
         skills_dirs = []
         environment = MockEnvironment()
+        session = _mock_session()
 
     return MockRuntime()
 

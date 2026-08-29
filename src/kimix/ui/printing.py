@@ -7,6 +7,7 @@ Color enums, ANSI helpers, the custom ``print``, ``PrintStream`` and the
 
 from __future__ import annotations
 
+import builtins
 import functools
 import io
 import os
@@ -17,6 +18,11 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
+
+# Snapshot of the real builtin print; used as a fallback when stdout has been
+# replaced (e.g., pytest's capsys captures sys.stdout) because the native C print
+# writes to the OS file descriptor and bypasses Python-level replacements.
+_BUILTIN_PRINT = builtins.print
 
 from kimi_cli.native_loader import (
     get_compat as _native_get_compat,
@@ -269,7 +275,14 @@ def _native_print_func(
     wrapper only forwards the arguments to keep the hot path at one hop.
     Writes go through ``runtime_py.print.native_print`` — GIL released,
     fflushed when ``flush=True``.
+
+    When ``sys.stdout`` has been replaced (e.g., by pytest's ``capsys``
+    fixture), the C extension writes to the original OS file descriptor and
+    bypasses the replacement. In that case we fall back to the builtin
+    ``print`` so the capture sees the output.
     """
+    if file is None and sys.stdout is not sys.__stdout__:
+        return _BUILTIN_PRINT(*values, sep=sep, end=end, file=file, flush=flush)
     _NATIVE_PRINT(*values, sep=sep, end=end, file=file, flush=flush)
 
 
