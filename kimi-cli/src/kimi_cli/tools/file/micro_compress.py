@@ -382,7 +382,7 @@ def _factor_common_indent(
 def renumber_lines(text: str) -> str:
     """Compact fixed-width line numbers ("  42\\t" -> "42\\t").
 
-    Only fires when *every* substantial line matches ^\s*\d+\\t
+    Only fires when *every* substantial line matches ^\\s*\\d+\\t
     (ReadFile-style output).  The bijection is preserved exactly.
     """
     if _native_use_native("TOOLS") and _NATIVE_TOOLS is not None and text.isascii():
