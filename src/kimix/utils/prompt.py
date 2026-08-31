@@ -694,20 +694,18 @@ async def _resume_for_text_block(
     When the preceding agent turn finished with a trailing tool call or a
     reasoning-only block (no final text answer), the task may be unfinished:
     the loop "quit" without delivering a result. This resumes the exact same
-    session with a short continuation prompt (up to
+    session with a short, concise continuation prompt (up to
     ``_MAX_TEXT_BLOCK_RESUME_ROUNDS`` times) asking it to finish the remaining
     work and end with a plain text block.
     """
     cli = getattr(session, "_cli", None)
     if cli is None:
         return
-    runtime = getattr(cli, "_runtime", None)
     work_dir = getattr(session, "work_dir", None)
     if work_dir is None:
         cli_session = getattr(cli, "session", None)
         work_dir = getattr(cli_session, "work_dir", None) if cli_session is not None else None
     work_dir_str = str(work_dir) if work_dir is not None else None
-    current_prompt = getattr(runtime, "current_prompt", None) if runtime is not None else None
 
     for attempt in range(_MAX_TEXT_BLOCK_RESUME_ROUNDS):
         kind = _trailing_content_kind(session)
@@ -715,22 +713,12 @@ async def _resume_for_text_block(
             return
 
         lines = [
-            "The previous response did not end with a plain text block "
-            "(it ended with reasoning or a tool call, which means the work may be unfinished).",
+            "The previous response did not end with a plain text block, CONTINUE work.",
             "",
-            "Rules for this continuation:",
-            "1. Do NOT call any tools unless truly necessary to finish the task.",
-            "2. Finish any remaining work from the original request.",
-            "3. End your response with a plain text block — a final text message that "
-            "summarizes what was done and states the result. No trailing tool calls and "
-            "no trailing reasoning.",
+            "Rules:",
+            "1. Finish any remaining work.",
+            "2. End with a plain text block summarizing what was done. No trailing tool calls or reasoning.",
         ]
-        if work_dir_str:
-            lines.append(f"4. Working directory: {work_dir_str}")
-        if current_prompt:
-            truncated = current_prompt if len(current_prompt) <= 400 else current_prompt[:200] + "..." + current_prompt[-200:]
-            lines.append("")
-            lines.append(f"Original request: {truncated}")
         resume_prompt = "\n".join(lines)
 
         label = "Resume to finish (text block)..." if attempt == 0 else "Final text-block check..."

@@ -149,8 +149,8 @@ async def test_resume_when_trailing_tool_call(monkeypatch: Any) -> None:
 
     assert len(session.prompts) == 1
     assert "did not end with a plain text block" in session.prompts[0]
-    # The resume prompt carries the original request for context.
-    assert "Original request" not in session.prompts[0]  # current_prompt unset
+    # The resume prompt does not copy the original request.
+    assert "Original request" not in session.prompts[0]
 
 
 @pytest.mark.asyncio
@@ -170,7 +170,7 @@ async def test_resume_when_trailing_tool_call_has_text_preamble(monkeypatch: Any
 
 
 @pytest.mark.asyncio
-async def test_resume_includes_original_request_and_workdir(monkeypatch: Any) -> None:
+async def test_resume_includes_workdir_but_not_original_request(monkeypatch: Any) -> None:
     _suppress_output(monkeypatch)
     session = FakeSession(
         history=_tool_call_history(),
@@ -186,7 +186,9 @@ async def test_resume_includes_original_request_and_workdir(monkeypatch: Any) ->
     await prompt_mod._resume_for_text_block(session, None, None, False, False, False, None)
 
     assert len(session.prompts) == 1
-    assert "Original request: Implement the feature" in session.prompts[0]
+    # The original request is intentionally NOT copied into the resume prompt.
+    assert "Original request" not in session.prompts[0]
+    assert "Implement the feature" not in session.prompts[0]
     assert "/tmp/proj" in session.prompts[0]
 
 
@@ -364,7 +366,7 @@ async def test_dry_run_continue_backend_interrupt_resumes_until_text(
     assert len(session.prompts) == 2
     assert session.prompts[0] == "continue"
     assert "did not end with a plain text block" in session.prompts[1]
-    assert "Original request: continue" in session.prompts[1]
+    assert "Original request" not in session.prompts[1]
     assert r"C:\proj\feature" in session.prompts[1]
     assert len(resume_sent) == 1
     # The session now ends on a text block — the gate is satisfied.
