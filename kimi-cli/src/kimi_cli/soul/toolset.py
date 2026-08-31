@@ -753,8 +753,42 @@ def _build_repeat_reminder(
     return "none", None
 
 
-# Different-args tool call repetition thresholds
+# Different-args tool call repetition thresholds.  These are the counts at
+# which a graded warning is emitted, and must stay below
+# ``_DIFF_ARGS_HARD_STOP_START`` so the model sees a warning ladder before the
+# turn is force-stopped.
 _DIFF_ARGS_WARN_THRESHOLDS: tuple[int, ...] = (15, 25, 35)
+
+# --- Interleaved ("cyclic") repeat detection -------------------------------
+# The consecutive-streak detector above only sees *adjacent* repeats: a cycle
+# such as ``A(x) -> B(x) -> C(x) -> A(x) -> B(x) -> C(x) -> ...`` resets the
+# streak on every call, so the model can replay identical work forever without
+# ever tripping it.  These thresholds punish the same call *anywhere* in the
+# turn once it reappears separated by other calls.
+_CYCLE_REMINDER_START = 2
+_CYCLE_REMINDER_2_START = 3
+_CYCLE_FORCE_STOP = 4
+
+_CYCLE_REMINDER_TEXT = (
+    "\n\n<system-reminder>\n"
+    "The same tool call (identical tool and arguments) already ran earlier this turn "
+    "with other calls in between. Re-running it will not produce new information. "
+    "Use the result you already have, change your approach, or finish the task."
+    "\n</system-reminder>"
+)
+
+
+def _make_cycle_reminder_text_2(tool_name: str, cycle_count: int) -> str:
+    return (
+        "\n\n<system-reminder>\n"
+        f"You have replayed the identical '{tool_name}' call {cycle_count} times this turn "
+        "in a cycle. You are looping without progress.\n"
+        "Stop calling tools with these arguments. Either take a genuinely different action "
+        "or return a text-only summary that says what is blocking you."
+        "\n</system-reminder>"
+    )
+
+
 
 _DIFF_ARGS_REMINDER_TEXT_1 = (
     "\n\n<system-reminder>\n"
@@ -884,6 +918,10 @@ class KimiToolset:
         self._tool_call_counts: dict[str, int] = {}  # tool_name → total calls this turn
         self._tool_warned_at: dict[str, set[int]] = {}  # thresholds already warned
         self._turn_tool_warning_issued: bool = False  # avoid flooding multiple tools
+        # Per-call-key repeat counting across the whole turn (cycle-aware).  Unlike
+        # the consecutive streak, this is never reset by interleaved calls, so
+        # ``A(x) -> B(x) -> C(x) -> A(x)`` is counted as a repeating call.
+        self._call_key_counts: dict[ToolCallKey, int] = {}
         self._turn_id: str = ""
         self._step_no: int = 0
 
@@ -1021,6 +1059,7 @@ class KimiToolset:
         if turn_id and turn_id != self._turn_id:
             self._tool_call_counts.clear()
             self._tool_warned_at.clear()
+            self._call_key_counts.clear()
             self._turn_total_calls = 0
         self._turn_tool_warning_issued = False  # Reset per-step
 
@@ -1029,10 +1068,15 @@ class KimiToolset:
             self._seen_call_keys = set()
             self._consecutive_key = None
             self._consecutive_count = 0
+            # Fresh call history (turn start, a retried step, or a
+            # back-to-the-future revert): what ran before is no longer relevant,
+            # so cycle counting restarts with it.
+            self._call_key_counts.clear()
             if not turn_id:
                 # No turn id provided: rely on previous_calls emptiness
                 self._tool_call_counts.clear()
                 self._tool_warned_at.clear()
+                self._call_key_counts.clear()
                 self._turn_total_calls = 0
         else:
             self._seen_call_keys.update(self._previous_step_calls)
@@ -1172,15 +1216,40 @@ class KimiToolset:
 
                 return asyncio.create_task(_await_dup())
 
+            # Cycle-aware per-call-key counting.  Counted only for calls that
+            # actually execute: a same-step duplicate above is a copied result,
+            # not extra work, so it must not inflate the count.
+            self._call_key_counts[call_key] = self._call_key_counts.get(call_key, 0) + 1
+            cycle_count = self._call_key_counts[call_key]
+
             is_cross_step_dup = call_key in self._seen_call_keys
             reminder_text: str | None = None
+            repeat_count = self._projected_streak_for_call(call_index)
             if is_cross_step_dup:
-                repeat_count = self._projected_streak_for_call(call_index)
                 action, reminder_text = _build_repeat_reminder(
                     repeat_count, tool_name, canonical_args
                 )
                 self._dedup_triggered = True
                 if action == "stop":
+                    self._force_stop_turn = True
+
+            # Cycle-aware repeat punishment.  The streak counter above only sees
+            # *adjacent* repeats, so an interleaved cycle such as
+            # ``A(x) -> B(x) -> C(x) -> A(x) -> ...`` never trips it even though the
+            # identical call keeps running.  When this exact call reappears while
+            # the consecutive streak is not itself growing, punish it on its own
+            # occurrence count for the turn.
+            if cycle_count >= _CYCLE_REMINDER_START and repeat_count <= 1:
+                cycle_reminder = (
+                    _make_cycle_reminder_text_2(tool_name, cycle_count)
+                    if cycle_count >= _CYCLE_REMINDER_2_START
+                    else _CYCLE_REMINDER_TEXT
+                )
+                if reminder_text is None:
+                    reminder_text = cycle_reminder
+                else:
+                    reminder_text = reminder_text + cycle_reminder
+                if cycle_count >= _CYCLE_FORCE_STOP:
                     self._force_stop_turn = True
 
             # Different-args per-tool overuse check (relaxed limitation)

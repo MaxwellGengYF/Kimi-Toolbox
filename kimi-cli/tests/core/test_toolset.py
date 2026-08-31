@@ -13,10 +13,15 @@ from kosong.tooling.error import ToolNotFoundError as KosongToolNotFoundError
 from pydantic import BaseModel
 
 from kimi_cli.soul.toolset import (
+    _DIFF_ARGS_HARD_STOP_START,
+    _DIFF_ARGS_REMINDER_TEXT_1,
+    _DIFF_ARGS_WARN_THRESHOLDS,
     _PLATFORM_REDIRECTS_NORM,
+    _TURN_TOOL_CALL_HARD_STOP,
     KimiToolset,
     _build_platform_redirects,
     _collect_candidates,
+    _make_diff_args_reminder,
     _parse_stringified_arguments,
     _repair_argument_format,
     _repair_todo_arguments,
@@ -747,7 +752,11 @@ async def test_turn_total_calls_hard_stop_ceiling():
 
 
 async def test_different_args_below_hard_stop_not_force_stopped():
-    """A moderate number of different-args calls must not force-stop the turn."""
+    """A moderate number of different-args calls must not force-stop the turn.
+
+    Stay below both ``_DIFF_ARGS_HARD_STOP_START`` (per-tool) and
+    ``_TURN_TOOL_CALL_HARD_STOP`` (per-turn) ceilings.
+    """
     ts = _make_toolset()
     ts.begin_step([], turn_id="turn-diff-ok")
 
@@ -764,6 +773,283 @@ async def test_different_args_below_hard_stop_not_force_stopped():
         await result
 
     assert ts.force_stop_turn is False
+
+
+# --- Ceiling invariants -----------------------------------------------------
+
+
+def test_hard_stop_thresholds_are_loose():
+    """The different-args / turn-total ceilings are 40 and 60."""
+    from kimi_cli.soul.toolset import (
+        _DIFF_ARGS_HARD_STOP_START,
+        _TURN_TOOL_CALL_HARD_STOP,
+    )
+
+    assert _DIFF_ARGS_HARD_STOP_START == 40
+    assert _TURN_TOOL_CALL_HARD_STOP == 60
+    # the warning ladder must fire strictly before the hard stop
+    assert max(_DIFF_ARGS_WARN_THRESHOLDS) < _DIFF_ARGS_HARD_STOP_START
+
+
+async def test_different_args_hard_stop_at_ten_calls():
+    """One tool called 10 times with different args force-stops the turn."""
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-diff-10")
+
+    stop_at = None
+    for i in range(_DIFF_ARGS_HARD_STOP_START):
+        result = ts.handle(
+            ToolCall(
+                id=f"tc-d10-{i}",
+                function=ToolCall.FunctionBody(
+                    name="ToolA", arguments=json.dumps({"value": str(i)})
+                ),
+            )
+        )
+        assert isinstance(result, asyncio.Task)
+        await result
+        if ts.force_stop_turn:
+            stop_at = i + 1
+            break
+
+    assert stop_at == _DIFF_ARGS_HARD_STOP_START
+
+
+async def test_turn_total_hard_stop_at_fifteen_calls_across_tools():
+    """Distinct calls spread over several tools still stop at the total ceiling."""
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-total-15")
+
+    stop_at = None
+    for i in range(_TURN_TOOL_CALL_HARD_STOP):
+        # alternate tools so no single tool reaches its own ceiling first
+        name = "ToolA" if i % 2 == 0 else "ToolB"
+        result = ts.handle(
+            ToolCall(
+                id=f"tc-t15-{i}",
+                function=ToolCall.FunctionBody(name=name, arguments=json.dumps({"value": str(i)})),
+            )
+        )
+        assert isinstance(result, asyncio.Task)
+        await result
+        if ts.force_stop_turn:
+            stop_at = i + 1
+            break
+
+    assert ts._turn_total_calls == _TURN_TOOL_CALL_HARD_STOP
+    assert stop_at == _TURN_TOOL_CALL_HARD_STOP
+    # neither tool reached its own per-tool ceiling: it is the total that stopped it
+    assert ts._tool_call_counts["ToolA"] < _DIFF_ARGS_HARD_STOP_START
+    assert ts._tool_call_counts["ToolB"] < _DIFF_ARGS_HARD_STOP_START
+
+
+async def test_diff_args_warning_ladder():
+    """The graded warnings land at 15/25/35 and the strongest text at the ceiling."""
+    assert _make_diff_args_reminder("ToolA", 15) == _DIFF_ARGS_REMINDER_TEXT_1
+    assert "called 25 times with different args" in _make_diff_args_reminder("ToolA", 25)
+    assert "called 35 times. Stop now." in _make_diff_args_reminder("ToolA", 35)
+    assert "called 40 times. Stop now." in _make_diff_args_reminder("ToolA", 40)
+
+
+# --- Cycle-aware interleaved repeat punishment ------------------------------
+
+
+def _call_args(value: str) -> str:
+    return json.dumps({"value": value})
+
+
+async def _run_cycle(
+    ts: KimiToolset, seq: list[tuple[str, str]], max_steps: int = 40, turn_id: str = "T1"
+):
+    """Replay *seq* one call per step (as KimiSoul drives the toolset).
+
+    Returns (stop_step, reminder_steps) where reminder_steps maps step number to
+    the output text of that step.
+    """
+    previous: list[tuple[str, str]] = []
+    outputs: dict[int, str] = {}
+    for step in range(1, max_steps + 1):
+        tool, args = seq[(step - 1) % len(seq)]
+        ts.begin_step(previous, step_no=step, turn_id=turn_id)
+        result = ts.handle(
+            ToolCall(id=f"c{step}", function=ToolCall.FunctionBody(name=tool, arguments=args))
+        )
+        assert isinstance(result, asyncio.Task)
+        tr = await result
+        outputs[step] = tr.return_value.output  # type: ignore[assignment]
+        previous = ts.end_step()
+        if ts.force_stop_turn:
+            return step, outputs
+    return None, outputs
+
+
+def test_interleaved_cycle_thresholds():
+    """Cycle punishment: warn at 2 occurrences, escalate at 3, stop at 4."""
+    from kimi_cli.soul.toolset import (
+        _CYCLE_FORCE_STOP,
+        _CYCLE_REMINDER_2_START,
+        _CYCLE_REMINDER_START,
+    )
+
+    assert _CYCLE_REMINDER_START == 2
+    assert _CYCLE_REMINDER_2_START == 3
+    assert _CYCLE_FORCE_STOP == 4
+    assert _CYCLE_FORCE_STOP <= _TURN_TOOL_CALL_HARD_STOP
+
+
+async def test_interleaved_abc_cycle_is_punished():
+    """``A(x) -> B(x) -> C(x) -> A(x)`` must be punished despite a flat streak."""
+    ts = _make_extended_toolset()
+    args = _call_args("x")
+    seq = [("ToolA", args), ("ToolB", args), ("LongNamedTool", args)]
+
+    stop_step, outputs = await _run_cycle(ts, seq)
+
+    # 4th round of A is the 10th call — far below both the per-tool and per-turn
+    # ceilings, so only the cycle detector can stop it.
+    assert stop_step == 10
+    assert ts._turn_total_calls == 10
+    assert ts._tool_call_counts["ToolA"] == 4 < _DIFF_ARGS_HARD_STOP_START
+    # the consecutive streak never grew, i.e. the old detector saw nothing
+    assert ts._consecutive_count <= 1
+    # first repetition of A(x) already warns
+    assert "already ran earlier this turn" in outputs[4]
+    # third repetition gets the stronger warning
+    assert "replayed the identical 'ToolA' call 3 times" in outputs[7]
+    # the stopping call carries the strongest cycle warning
+    assert "replayed the identical 'ToolA' call 4 times" in outputs[10]
+
+
+async def test_interleaved_ab_cycle_is_punished():
+    """A period-2 alternation of identical calls also force-stops the turn."""
+    ts = _make_toolset()
+    args = _call_args("x")
+    stop_step, outputs = await _run_cycle(ts, [("ToolA", args), ("ToolB", args)])
+
+    # A(x) runs on calls 1/3/5/7: its 4th occurrence stops the turn on call 7,
+    # well below both the per-tool (40) and total (60) ceilings.
+    assert stop_step == 7
+    assert ts._turn_total_calls == 7
+    assert ts._tool_call_counts["ToolA"] == 4 < _DIFF_ARGS_HARD_STOP_START
+    assert "already ran earlier this turn" in outputs[3]
+    assert "replayed the identical 'ToolA' call 4 times" in outputs[7]
+    assert ts.force_stop_turn is True
+
+
+async def test_cycle_punishment_is_per_key_not_per_tool():
+    """Same tool with *different* args is not a cycle; only identical keys count."""
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-cycle-args")
+    previous: list[tuple[str, str]] = []
+
+    for i in range(6):
+        for name in ("ToolA", "ToolB"):
+            args = _call_args(f"{name}-{i}")
+            ts.begin_step(previous, step_no=i + 1, turn_id="turn-cycle-args")
+            result = ts.handle(
+                ToolCall(id=f"c-{i}-{name}", function=ToolCall.FunctionBody(name=name, arguments=args))
+            )
+            assert isinstance(result, asyncio.Task)
+            tr = await result
+            assert "already ran earlier this turn" not in tr.return_value.output
+            assert "replayed the identical" not in tr.return_value.output
+            previous = ts.end_step()
+
+    assert ts.force_stop_turn is False
+    # every key seen exactly once per tool
+    assert all(count == 1 for count in ts._call_key_counts.values())
+
+
+async def test_adjacent_streak_is_not_double_punished_by_cycle_detector():
+    """Plain adjacent repeats keep using the streak ladder, without cycle text."""
+    args = _call_args("x")
+    ts = _make_toolset()
+    previous: list[tuple[str, str]] = []
+    texts: list[str] = []
+    for step in range(1, 13):
+        ts.begin_step(previous, step_no=step, turn_id="turn-streak-only")
+        result = ts.handle(
+            ToolCall(id=f"s{step}", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+        )
+        assert isinstance(result, asyncio.Task)
+        tr = await result
+        texts.append(tr.return_value.output)  # type: ignore[arg-type]
+        previous = ts.end_step()
+
+    assert ts.force_stop_turn is False  # streak stops at 16
+    assert not any("already ran earlier this turn" in t for t in texts)
+    assert not any("replayed the identical" in t for t in texts)
+    # streak reminders still appear at its own thresholds
+    assert "You are repeating the exact same tool call" in texts[2]
+
+
+async def test_same_step_duplicate_is_not_counted_as_a_cycle():
+    """A duplicate inside one step copies the result and stays unpunished."""
+    ts = _make_toolset()
+    args = _call_args("x")
+    ts.begin_step([], turn_id="turn-same-step")
+
+    first = ts.handle(
+        ToolCall(id="a1", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(first, asyncio.Task)
+    tr1 = await first
+    assert tr1.return_value.output == "a"
+
+    second = ts.handle(
+        ToolCall(id="a2", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(second, asyncio.Task)
+    tr2 = await second
+    assert "already ran earlier this turn" not in tr2.return_value.output
+    assert ts._call_key_counts[(("ToolA"), json.dumps({"value": "x"}).replace(" ", ""))] == 1
+    assert ts.force_stop_turn is False
+
+
+async def test_cycle_counts_reset_on_new_turn():
+    """A repeated call across two turns is legitimate work, not a loop."""
+    args = _call_args("x")
+    ts = _make_toolset()
+
+    # turn 1: A(x) B(x) A(x) -> warns once but does not stop
+    stop_step, _ = await _run_cycle(ts, [("ToolA", args), ("ToolB", args)], max_steps=3)
+    assert stop_step is None
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 2
+
+    # turn 2: same sequence restarts counting from zero
+    ts.begin_step([], step_no=1, turn_id="turn-2")
+    result = ts.handle(
+        ToolCall(id="n1", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "a"
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 1
+    assert ts.force_stop_turn is False
+
+
+async def test_cycle_counts_reset_on_retried_step():
+    """Re-running a cancelled step (empty previous calls) clears cycle counts."""
+    args = _call_args("x")
+    ts = _make_toolset()
+    ts.begin_step([], step_no=1, turn_id="t")
+    first = ts.handle(
+        ToolCall(id="r1", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(first, asyncio.Task)
+    await first
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 1
+
+    # retry of the very same step: no previous calls -> clean slate
+    ts.begin_step([], step_no=1, turn_id="t")
+    assert ts._call_key_counts == {}
+    result = ts.handle(
+        ToolCall(id="r2", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "a"
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 1
 
 
 # --- Dynamic tool output byte budget ---
