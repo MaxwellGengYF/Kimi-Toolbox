@@ -37,7 +37,10 @@ def _shutdown_all_sessions() -> None:
     for sess in sessions:
         try:
             close_session(sess)
-        except Exception:
+        except BaseException:
+            # Never let cleanup errors (including KeyboardInterrupt raised
+            # while the shutdown event loop is being created on Windows)
+            # escape during interpreter shutdown — the process must exit.
             pass
 
 
@@ -252,6 +255,15 @@ def close_session(session: Session) -> None:
     _globals._untrack_session(session)
     try:
         asyncio.run(session.close())
+    except KeyboardInterrupt:
+        # Ctrl+C can land inside asyncio.run() while it is creating the
+        # event loop (e.g. ProactorEventLoop's socketpair() on Windows),
+        # especially when a background tool (like a glob) was running.
+        # The session is being torn down anyway; the OS reclaims the
+        # sockets and the aiosqlite worker thread is a daemon-less thread
+        # that the interpreter will still join, but nothing more we can do
+        # here — swallow the interrupt so shutdown completes cleanly.
+        pass
     except RuntimeError as exc:
         # Transports bound to a now-closed ProactorEventLoop (Windows
         # Python 3.14) raise RuntimeError('Event loop is closed').
