@@ -84,10 +84,13 @@ def _tool_call_history() -> list[Message]:
 # ── _trailing_content_kind unit tests ────────────────────────────────────
 
 
-def test_trailing_kind_text_wins_even_with_tool_calls() -> None:
+def test_trailing_kind_tool_wins_even_with_text_preamble() -> None:
+    # A message that issues tool calls is a tool turn, even if it also has
+    # explanatory text. After the tool result, the session should resume for a
+    # final text block instead of ending silently.
     msg = Message(role="assistant", content=[TextPart(text="done")], tool_calls=[_tool_call()])
     session = FakeSession(history=[msg])
-    assert prompt_mod._trailing_content_kind(session) == "text"
+    assert prompt_mod._trailing_content_kind(session) == "tool"
 
 
 def test_trailing_kind_tool_when_no_text() -> None:
@@ -120,6 +123,18 @@ def test_trailing_kind_none_without_cli_or_history() -> None:
 # ── _resume_for_text_block behavior ──────────────────────────────────────
 
 
+def _tool_call_with_text_preamble_history() -> list[Message]:
+    """A history whose last assistant message mixes a text preamble with a tool call."""
+    return [
+        Message(role="user", content="hello"),
+        Message(
+            role="assistant",
+            content=[TextPart(text="I will verify this now.")],
+            tool_calls=[_tool_call()],
+        ),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_resume_when_trailing_tool_call(monkeypatch: Any) -> None:
     _suppress_output(monkeypatch)
@@ -136,6 +151,22 @@ async def test_resume_when_trailing_tool_call(monkeypatch: Any) -> None:
     assert "did not end with a plain text block" in session.prompts[0]
     # The resume prompt carries the original request for context.
     assert "Original request" not in session.prompts[0]  # current_prompt unset
+
+
+@pytest.mark.asyncio
+async def test_resume_when_trailing_tool_call_has_text_preamble(monkeypatch: Any) -> None:
+    _suppress_output(monkeypatch)
+    session = FakeSession(history=_tool_call_with_text_preamble_history())
+
+    def on_resume() -> None:
+        session.history.append(Message(role="assistant", content=[TextPart(text="final answer")]))
+
+    session._on_resume = on_resume
+
+    await prompt_mod._resume_for_text_block(session, None, None, False, False, False, None)
+
+    assert len(session.prompts) == 1
+    assert "did not end with a plain text block" in session.prompts[0]
 
 
 @pytest.mark.asyncio

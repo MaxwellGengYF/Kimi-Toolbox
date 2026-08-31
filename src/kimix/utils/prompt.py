@@ -13,7 +13,7 @@ from kaos.path import KaosPath
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
 from kimi_cli.llm import LoopDetectedError, TextLoopDetector
-from kosong.message import ContentPart, TextPart, ThinkPart
+from kosong.message import ContentPart, TextPart, ThinkPart, ToolCall, ToolCallPart
 from kimix.ui.printing import Color, MessageType, Style
 from kimix.ui.stream import print_agent_json, print_agent_json_flush_text
 from kimix.tools.common import _export_to_temp_file
@@ -527,6 +527,11 @@ def _trailing_content_kind(session: Session) -> str | None:
     the last assistant message that carries content parts. Returns ``"text"``,
     ``"think"`` or ``"tool"``; ``None`` when there is no inspectable history
     (e.g. fake sessions used in tests).
+
+    A message that contains both text and tool calls is classified as ``"tool"``:
+    text parts before/after a tool request are treated as commentary or a
+    preamble, not a final answer. The gate only passes when the assistant's
+    turn ends on a plain text block with no pending tool calls.
     """
     try:
         cli = getattr(session, "_cli", None)
@@ -543,15 +548,22 @@ def _trailing_content_kind(session: Session) -> str | None:
             if message.role != "assistant":
                 continue
             parts = message.content or []
-            if not parts and not message.tool_calls:
+            has_tool_calls = bool(message.tool_calls)
+            if not parts and not has_tool_calls:
                 continue
-            # A text part always wins: the turn ended with a real answer.
-            if any(isinstance(p, TextPart) for p in parts):
-                return "text"
-            if message.tool_calls:
+            # If the assistant requested any tool calls, the turn is not a final
+            # text answer, even if it also contained explanatory text.
+            if has_tool_calls:
                 return "tool"
-            if any(isinstance(p, ThinkPart) for p in parts):
-                return "think"
+            # No tool calls: classify by the last meaningful content part.
+            if parts:
+                last_part = parts[-1]
+                if isinstance(last_part, TextPart):
+                    return "text"
+                if isinstance(last_part, ThinkPart):
+                    return "think"
+                if isinstance(last_part, (ToolCall, ToolCallPart)):
+                    return "tool"
             return None
     except Exception:
         return None
