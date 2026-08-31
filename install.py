@@ -2,6 +2,7 @@
 """Install script for the project using uv."""
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -426,15 +427,30 @@ def _kimix_base_download_url(
     return f"{KIMIX_BASE_RELEASE_URL}/{_kimix_base_archive_name(os_name, arch, version)}"
 
 
-def _download_file(url: str, dest: Path) -> None:
+def _download_request(url: str, extra_headers: dict[str, str] | None = None) -> "urllib.request.Request":
+    """Build an HTTP request with the installer's User-Agent."""
+    headers = {"User-Agent": "kimi-agent-install/1.0"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return urllib.request.Request(url, headers=headers)
+
+
+def _download_once(
+    url: str,
+    dest: Path,
+    timeout: float = 300.0,
+    extra_headers: dict[str, str] | None = None,
+) -> None:
     """Download *url* to *dest* with a progress indicator.
+
+    *extra_headers* are merged into the request (the fallback needs
+    ``Accept: application/octet-stream`` for the GitHub API asset endpoint).
 
     Raises urllib.error.HTTPError / urllib.error.URLError on failure.
     """
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "kimi-agent-install/1.0"}
-    )
-    with urllib.request.urlopen(request, timeout=300) as resp:
+    with urllib.request.urlopen(
+        _download_request(url, extra_headers), timeout=timeout
+    ) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         downloaded = 0
         with open(dest, "wb") as fh:
@@ -449,6 +465,97 @@ def _download_file(url: str, dest: Path) -> None:
                     sys.stdout.write(f"\r  {pct}%")
                     sys.stdout.flush()
         print()  # newline after the progress line
+
+
+def _kimix_base_api_release_url() -> str:
+    """Return the GitHub API URL for the kimix_base ``Release`` tag.
+
+    ``github.com`` release downloads redirect to Azure blob storage.  From some
+    networks the *github.com* hop itself is intermittently unreachable (connect
+    timeouts / resets) while ``api.github.com`` stays healthy, so the fallback
+    resolves the asset through the GitHub API and downloads from the CDN host
+    directly (bypassing the flaky ``github.com`` hop).
+    """
+    return (
+        "https://api.github.com/repos/Sikao-Engine/KimiX-native/releases/tags/Release"
+    )
+
+
+def _kimix_base_fallback_url(archive_name: str) -> str | None:
+    """Resolve *archive_name* to a direct CDN download URL via the GitHub API.
+
+    Returns the release *asset* API URL (``/releases/assets/<id>``).  That
+    endpoint redirects straight to ``release-assets.githubusercontent.com`` when
+    opened with ``Accept: application/octet-stream`` — unlike
+    ``browser_download_url``, which points back at the same flaky
+    ``github.com`` download hop that the primary attempts already failed on.
+    """
+    api_url = _kimix_base_api_release_url()
+    print("   Looking up direct asset URL via GitHub API ...")
+    try:
+        with urllib.request.urlopen(_download_request(api_url), timeout=30) as resp:
+            release = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"   ⚠️  GitHub API lookup failed: {exc}")
+        return None
+    for asset in release.get("assets", []):
+        if asset.get("name") == archive_name:
+            asset_url = asset.get("url")
+            if isinstance(asset_url, str) and asset_url:
+                print(f"   Resolved direct asset URL: {asset_url}")
+                return asset_url
+    print(f"   ⚠️  Asset {archive_name!r} not found in the Release tag.")
+    return None
+
+
+def _download_file(url: str, dest: Path) -> None:
+    """Download *url* to *dest*, retrying on transient network failures.
+
+    The primary source (``github.com`` release redirect) is retried because
+    from some networks the route to ``github.com`` is intermittently
+    blackholed (connect timeouts / connection resets) — the exact failure seen
+    downloading the kimix_base native runtime.  After the retries are
+    exhausted a GitHub-API-resolved direct CDN URL is attempted as a fallback
+    that bypasses the flaky ``github.com`` hop entirely.
+
+    Raises urllib.error.HTTPError / urllib.error.URLError on failure.
+    """
+    max_attempts = 3
+    backoff = 1.0
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if attempt == 1:
+                print(f"   Downloading {url}")
+            else:
+                print(f"   Retry {attempt}/{max_attempts} ...")
+            _download_once(url, dest)
+            return
+        except urllib.error.HTTPError:
+            # Authoritative response (e.g. 404/403): not transient, propagate.
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            print(f"   ⚠️  Download attempt {attempt}/{max_attempts} failed: {exc}")
+            if attempt < max_attempts:
+                time.sleep(backoff)
+                backoff *= 2
+    # Transient-route escape hatch: resolve the asset through the GitHub API and
+    # download straight from the CDN blob host, bypassing the flaky github.com hop.
+    archive_name = Path(url).name
+    fallback = _kimix_base_fallback_url(archive_name)
+    if fallback is None:
+        if last_error is None:
+            last_error = urllib.error.URLError(f"failed to download {url}")
+        raise last_error
+    print(f"   Downloading via direct CDN fallback: {fallback}")
+    try:
+        _download_once(
+            fallback, dest, extra_headers={"Accept": "application/octet-stream"}
+        )
+        return
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise exc from last_error
 
 
 def _extract_zip(archive: Path, dest: Path) -> None:

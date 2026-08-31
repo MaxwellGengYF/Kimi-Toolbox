@@ -269,21 +269,26 @@ version config files are touched — never hard-code the version anywhere else.
 | repo | file | role |
 |---|---|---|
 | kimix-base | `version.txt` (root) | **single source of truth** (`X.Y.Z`). `publish.py`, `bootstrap.py` and the Python shim all read it; `src/xmake.lua` generates the C++ `kimix_version.h` header from it at build time, so `runtime_py.version()` reports `kimix-runtime <version>`. |
-| kimi-agent | KIMIX_NATIVE_VERSION (root) | fallback marker read by native_loader._fallback_version() (kimi_cli/native_loader.py) and synced by install.py. Keep the file **without a trailing newline** (matches git history). |
+| kimi-agent | KIMIX_NATIVE_VERSION (root) | **version-gate marker** for the native runtime: `bin/kimix_native/__init__.py` compares it against `runtime_py.version()` at import time — a mismatch disables native (pure-Python fallback; `KIMIX_NATIVE=1` raises ImportError). Also read by native_loader._fallback_version() (kimi_cli/native_loader.py) and synced by install.py. Keep the file **without a trailing newline** (matches git history). |
 | kimi-agent | `install.py` → `KIMIX_BASE_VERSION` | used for the GitHub release download URL and binary verification; `_sync_kimix_native_version(KIMIX_BASE_VERSION)` rewrites `KIMIX_NATIVE_VERSION` during install. |
 
 ### Minimal-change workflow
 
-That is the whole diff. Do **not** edit bin/kimix_native/init.py (it reads
-version.txt at runtime) or kimi-cli/src/kimi_cli/native_loader.py (it reads
-KIMIX_NATIVE_VERSION).
+That is the whole diff. Do **not** edit bin/kimix_native/init.py (it compares
+`runtime_py.version()` against `KIMIX_NATIVE_VERSION` at runtime) or
+kimi-cli/src/kimi_cli/native_loader.py (it reads `KIMIX_NATIVE_VERSION`).
 
 ### Rebuild + re-stage (the version is baked into the binary)
 
 Because the C++ build embeds the version at compile time, bumping the config is
 not enough — the staged binary must be rebuilt and re-synced or the consistency
-tests fail (`test_verify_native_binaries_repo_bin` compares the staged
-`runtime_py` version against `KIMIX_BASE_VERSION`):
+tests fail (test_verify_native_binaries_repo_bin compares the staged
+runtime_py version against KIMIX_BASE_VERSION). The shim's version gate makes
+the same rule self-enforcing at runtime: if the staged `runtime_py` version
+does **not** match `KIMIX_NATIVE_VERSION`, `bin/kimix_native` disables itself
+(`_native = None`, `DISABLE_REASON` set, `use_native()` returns False for
+every kernel) instead of running a mismatched binary; `KIMIX_NATIVE=1` raises
+ImportError instead.
 
 ```bash
 cd <kimix-base>

@@ -9,8 +9,10 @@ success contract.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -107,6 +109,173 @@ def test_download_file_file_uri(tmp_path):
     dest = tmp_path / "out.zip"
     install_mod._download_file(src.as_uri(), dest)
     assert dest.read_bytes() == b"zip-bytes"
+
+
+def test_download_file_retries_then_succeeds(tmp_path, monkeypatch):
+    """Transient URLErrors are retried; a later attempt succeeds."""
+    src = tmp_path / "asset.zip"
+    src.write_bytes(b"zip-bytes")
+    dest = tmp_path / "out.zip"
+    calls = {"n": 0}
+    real_once = install_mod._download_once
+
+    def flaky(url, dest_path, timeout=300.0, extra_headers=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("winerror 10061 conn refused")
+        return real_once(url, dest_path, timeout, extra_headers)
+
+    monkeypatch.setattr(install_mod, "_download_once", flaky)
+    install_mod._download_file(src.as_uri(), dest)
+    assert calls["n"] == 2
+    assert dest.read_bytes() == b"zip-bytes"
+
+
+def test_download_file_exhausts_retries_and_fallback_fails(tmp_path, monkeypatch):
+    """All primary attempts fail AND the fallback download fails -> raises."""
+    dest = tmp_path / "out.zip"
+    fallback_url = "https://release-assets.githubusercontent.com/direct.zip"
+
+    def always_fail(url, dest_path, timeout=300.0, extra_headers=None):
+        if url == fallback_url:
+            raise urllib.error.URLError("fallback failed")
+        raise urllib.error.URLError("winerror 10060 timed out")
+
+    monkeypatch.setattr(install_mod, "_download_once", always_fail)
+    monkeypatch.setattr(install_mod, "_kimix_base_fallback_url", lambda name: fallback_url)
+    with pytest.raises(urllib.error.URLError, match="fallback failed"):
+        install_mod._download_file(
+            "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/"
+            "kimix_base-linux-x64-1.0.0.zip",
+            dest,
+        )
+    assert not dest.exists()
+
+
+def test_download_file_fallback_succeeds(tmp_path, monkeypatch):
+    """The API-resolved direct CDN fallback completes the download."""
+    src = tmp_path / "asset.zip"
+    src.write_bytes(b"zip-bytes")
+    dest = tmp_path / "out.zip"
+    fallback_url = "https://api.github.com/repos/Sikao-Engine/KimiX-native/releases/assets/534870525"
+    primary_url = (
+        "https://github.com/Sikao-Engine/KimiX-native/releases/download/Release/"
+        "kimix_base-linux-x64-1.0.0.zip"
+    )
+    fallback_headers: dict | None = None
+
+    def dispatch(url, dest_path, timeout=300.0, extra_headers=None):
+        nonlocal fallback_headers
+        if url == fallback_url:
+            fallback_headers = extra_headers
+            dest_path.write_bytes(b"zip-bytes")
+            return
+        if url == primary_url:
+            raise urllib.error.URLError("winerror 10060 timed out")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(install_mod, "_download_once", dispatch)
+    monkeypatch.setattr(install_mod, "_kimix_base_fallback_url", lambda name: fallback_url)
+    install_mod._download_file(primary_url, dest)
+    assert dest.read_bytes() == b"zip-bytes"
+    # The GitHub API asset endpoint must be opened as an octet stream so it
+    # redirects straight to the CDN blob host instead of returning JSON.
+    assert fallback_headers == {"Accept": "application/octet-stream"}
+
+
+def test_download_file_raises_when_fallback_unavailable(tmp_path, monkeypatch):
+    """If no fallback URL can be resolved, the last URLError is raised."""
+    dest = tmp_path / "out.zip"
+
+    def always_fail(url, dest_path, timeout=300.0, extra_headers=None):
+        raise urllib.error.URLError("winerror 10060 timed out")
+
+    monkeypatch.setattr(install_mod, "_download_once", always_fail)
+    monkeypatch.setattr(install_mod, "_kimix_base_fallback_url", lambda name: None)
+    with pytest.raises(urllib.error.URLError, match="winerror 10060"):
+        install_mod._download_file("https://example.com/asset.zip", dest)
+    assert not dest.exists()
+
+
+def test_download_file_http_error_not_retried(tmp_path, monkeypatch):
+    """An authoritative HTTP error (e.g. 404) propagates immediately."""
+    dest = tmp_path / "out.zip"
+    calls = {"n": 0}
+
+    def http_error(url, dest_path, timeout=300.0, extra_headers=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(install_mod, "_download_once", http_error)
+    with pytest.raises(urllib.error.HTTPError):
+        install_mod._download_file("https://github.com/x/y.zip", dest)
+    assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# GitHub API fallback URL resolution
+# ---------------------------------------------------------------------------
+
+
+class _FakeHTTPResponse:
+    """Minimal file-like response for urlopen monkeypatching."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_fallback_url_resolves_asset(monkeypatch, tmp_path):
+    """_kimix_base_fallback_url returns the matching asset's API URL."""
+    asset_url = "https://api.github.com/repos/Sikao-Engine/KimiX-native/releases/assets/534870525"
+    release = {
+        "tag_name": "Release",
+        "assets": [
+            {"name": "kimix_base-windows-x64-1.0.0.zip",
+             "url": "https://api.github.com/.../assets/1",
+             "browser_download_url": "https://github.com/.../windows.zip"},
+            {"name": "kimix_base-linux-x64-1.0.0.zip",
+             "url": asset_url,
+             "browser_download_url": "https://github.com/.../linux.zip"},
+        ],
+    }
+
+    def fake_urlopen(request, timeout):
+        return _FakeHTTPResponse(json.dumps(release).encode("utf-8"))
+
+    monkeypatch.setattr(install_mod.urllib.request, "urlopen", fake_urlopen)
+    assert (
+        install_mod._kimix_base_fallback_url("kimix_base-linux-x64-1.0.0.zip") == asset_url
+    )
+
+
+def test_fallback_url_missing_asset_returns_none(monkeypatch):
+    """A release without the requested asset yields None (no exception)."""
+    release = {"tag_name": "Release", "assets": []}
+
+    def fake_urlopen(request, timeout):
+        return _FakeHTTPResponse(json.dumps(release).encode("utf-8"))
+
+    monkeypatch.setattr(install_mod.urllib.request, "urlopen", fake_urlopen)
+    assert install_mod._kimix_base_fallback_url("kimix_base-linux-x64-1.0.0.zip") is None
+
+
+def test_fallback_url_api_error_returns_none(monkeypatch):
+    """A failed GitHub API lookup yields None (no exception)."""
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("api down")
+
+    monkeypatch.setattr(install_mod.urllib.request, "urlopen", fake_urlopen)
+    assert install_mod._kimix_base_fallback_url("kimix_base-linux-x64-1.0.0.zip") is None
 
 
 # ---------------------------------------------------------------------------
