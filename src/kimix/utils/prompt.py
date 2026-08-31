@@ -27,6 +27,17 @@ from kimix.utils.session import (
 from kimix.utils.system_prompt import SystemPromptType
 
 
+_MAX_TEXT_BLOCK_RESUME_ROUNDS = 2
+"""Maximum number of follow-up prompts used to force a session to end on a
+plain text block.
+
+When the agent's turn ends with a trailing tool call or reasoning-only block,
+the task may be unfinished: the agent loop "quits" without a final answer. In
+that case the session is resumed with a continuation prompt (up to this many
+rounds) that asks it to finish the work and end with a plain text block.
+"""
+
+
 def _read_subagent_state(path: Path) -> dict[str, Any]:
     """Read a subagent state file, returning an empty dict on missing/corrupt data."""
     import orjson
@@ -509,6 +520,44 @@ async def _run_prompt_attempts(
             await asyncio.sleep(1)
 
 
+def _trailing_content_kind(session: Session) -> str | None:
+    """Return the content kind of the session's last user-visible block.
+
+    Inspects the most recent meaningful block of the conversation history:
+    the last assistant message that carries content parts. Returns ``"text"``,
+    ``"think"`` or ``"tool"``; ``None`` when there is no inspectable history
+    (e.g. fake sessions used in tests).
+    """
+    try:
+        cli = getattr(session, "_cli", None)
+        if cli is None:
+            return None
+        soul = getattr(cli, "soul", None)
+        if soul is None:
+            return None
+        context = getattr(soul, "context", None)
+        history = getattr(context, "history", None)
+        if history is None:
+            return None
+        for message in reversed(history):
+            if message.role != "assistant":
+                continue
+            parts = message.content or []
+            if not parts and not message.tool_calls:
+                continue
+            # A text part always wins: the turn ended with a real answer.
+            if any(isinstance(p, TextPart) for p in parts):
+                return "text"
+            if message.tool_calls:
+                return "tool"
+            if any(isinstance(p, ThinkPart) for p in parts):
+                return "think"
+            return None
+    except Exception:
+        return None
+    return None
+
+
 async def _run_single_prompt(
     session: Session,
     prompt_str: str,
@@ -617,6 +666,82 @@ async def _run_single_prompt(
     if primary_exc is not None:
         raise primary_exc
     return False
+
+
+async def _resume_for_text_block(
+    session: Session,
+    output_function: Callable[[str, MessageType], Any] | None,
+    cancel_callable: Callable[[], bool] | None,
+    merge_wire_messages: bool,
+    info_print: bool,
+    format_output: bool,
+    timeout: float | None,
+) -> None:
+    """Force the session to end on a plain text block.
+
+    When the preceding agent turn finished with a trailing tool call or a
+    reasoning-only block (no final text answer), the task may be unfinished:
+    the loop "quit" without delivering a result. This resumes the exact same
+    session with a short continuation prompt (up to
+    ``_MAX_TEXT_BLOCK_RESUME_ROUNDS`` times) asking it to finish the remaining
+    work and end with a plain text block.
+    """
+    cli = getattr(session, "_cli", None)
+    if cli is None:
+        return
+    runtime = getattr(cli, "_runtime", None)
+    work_dir = getattr(session, "work_dir", None)
+    if work_dir is None:
+        cli_session = getattr(cli, "session", None)
+        work_dir = getattr(cli_session, "work_dir", None) if cli_session is not None else None
+    work_dir_str = str(work_dir) if work_dir is not None else None
+    current_prompt = getattr(runtime, "current_prompt", None) if runtime is not None else None
+
+    for attempt in range(_MAX_TEXT_BLOCK_RESUME_ROUNDS):
+        kind = _trailing_content_kind(session)
+        if kind in (None, "text"):
+            return
+
+        lines = [
+            "The previous response did not end with a plain text block "
+            "(it ended with reasoning or a tool call, which means the work may be unfinished).",
+            "",
+            "Rules for this continuation:",
+            "1. Do NOT call any tools unless truly necessary to finish the task.",
+            "2. Finish any remaining work from the original request.",
+            "3. End your response with a plain text block — a final text message that "
+            "summarizes what was done and states the result. No trailing tool calls and "
+            "no trailing reasoning.",
+        ]
+        if work_dir_str:
+            lines.append(f"4. Working directory: {work_dir_str}")
+        if current_prompt:
+            truncated = current_prompt if len(current_prompt) <= 400 else current_prompt[:200] + "..." + current_prompt[-200:]
+            lines.append("")
+            lines.append(f"Original request: {truncated}")
+        resume_prompt = "\n".join(lines)
+
+        label = "Resume to finish (text block)..." if attempt == 0 else "Final text-block check..."
+        try:
+            await _run_single_prompt(
+                session,
+                resume_prompt,
+                output_function,
+                cancel_callable,
+                merge_wire_messages,
+                info_print,
+                label=label,
+                format_output=format_output,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            base._stream.colorful_print_word(
+                f"Text-block resume failed: {exc}",
+                fg=Color.BRIGHT_RED,
+                styles=[Style.BOLD],
+                require_new_line=True,
+            )
+            return
 
 
 async def prompt_async(
@@ -732,6 +857,22 @@ async def prompt_async(
                     break
         elif not prompt_success:
             base._stream.colorful_print_word("prompt failed.", fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True)
+
+        if prompt_success:
+            # ── Text-block gate: never end the session on tool/reasoning ──────
+            # The agent loop can quit even when the task is unfinished, leaving
+            # a trailing tool call or reasoning-only block with no final text
+            # answer. Resume the same session until the last assistant block is
+            # a plain text message.
+            await _resume_for_text_block(
+                session,
+                output_function,
+                cancel_callable,
+                merge_wire_messages,
+                info_print,
+                format_output,
+                timeout,
+            )
 
 
     finally:
