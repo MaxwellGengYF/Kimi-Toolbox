@@ -726,6 +726,15 @@ _REPEAT_REMINDER_1_START = 3
 _REPEAT_REMINDER_2_START = 8
 _REPEAT_REMINDER_3_START = 12
 _REPEAT_FORCE_STOP_STREAK = 16
+# A full turn may legitimately reuse one tool many times (e.g. ``read``/``bash``
+# while exploring).  Only flag a different-args tool loop when the count is high
+# enough that the model is clearly grinding instead of making progress.
+_DIFF_ARGS_HARD_STOP_START = 40
+
+# Absolute ceiling on tool calls in a single turn.  A healthy turn rarely
+# exceeds this; crossing it means the agent is stuck in a loop that the
+# per-call reminders failed to break, so the turn is force-stopped.
+_TURN_TOOL_CALL_HARD_STOP = 60
 
 type RepeatAction = Literal["none", "r1", "r2", "r3", "stop"]
 
@@ -774,7 +783,9 @@ def _make_diff_args_reminder_text_3(tool_name: str, call_count: int) -> str:
 
 def _make_diff_args_reminder(tool_name: str, call_count: int) -> str:
     """Return progressively stronger warnings based on the call count."""
-    if call_count <= _DIFF_ARGS_WARN_THRESHOLDS[0]:
+    if call_count >= _DIFF_ARGS_HARD_STOP_START:
+        return _make_diff_args_reminder_text_3(tool_name, call_count)
+    elif call_count <= _DIFF_ARGS_WARN_THRESHOLDS[0]:
         return _DIFF_ARGS_REMINDER_TEXT_1
     elif call_count <= _DIFF_ARGS_WARN_THRESHOLDS[1]:
         return _make_diff_args_reminder_text_2(tool_name, call_count)
@@ -867,6 +878,7 @@ class KimiToolset:
         self._step_closed: bool = False
         self._dedup_triggered: bool = False
         self._force_stop_turn: bool = False
+        self._turn_total_calls: int = 0
 
         # "Different-args" per-tool call tracking (relaxed limitation)
         self._tool_call_counts: dict[str, int] = {}  # tool_name → total calls this turn
@@ -989,6 +1001,11 @@ class KimiToolset:
             previous_calls: Tool calls from the previous step.
             step_no: The current step number (1-based).
             turn_id: The current turn identifier.
+
+        When *turn_id* is empty, the call-count windows are kept in sync with
+        the dedup reset: a fresh previous-calls history (e.g. after a
+        back-to-the-future revert) also resets per-tool counts and the total
+        call ceiling.
         """
         self._previous_step_calls = [
             _normalize_call_key(tool_name, arguments) for tool_name, arguments in previous_calls
@@ -1004,6 +1021,7 @@ class KimiToolset:
         if turn_id and turn_id != self._turn_id:
             self._tool_call_counts.clear()
             self._tool_warned_at.clear()
+            self._turn_total_calls = 0
         self._turn_tool_warning_issued = False  # Reset per-step
 
         self._turn_id = turn_id
@@ -1015,6 +1033,7 @@ class KimiToolset:
                 # No turn id provided: rely on previous_calls emptiness
                 self._tool_call_counts.clear()
                 self._tool_warned_at.clear()
+                self._turn_total_calls = 0
         else:
             self._seen_call_keys.update(self._previous_step_calls)
             if self._consecutive_key is None and self._consecutive_count == 0:
@@ -1026,6 +1045,11 @@ class KimiToolset:
             self._advance_consecutive_streak(self._current_step_calls)
             self._seen_call_keys.update(self._current_step_calls)
             self._step_closed = True
+        # Absolute per-turn tool-call ceiling: if the model kept calling tools
+        # beyond the hard limit even after the repeated-call reminders, mark the
+        # turn for a forced stop instead of letting the loop continue forever.
+        if self._turn_total_calls >= _TURN_TOOL_CALL_HARD_STOP:
+            self._force_stop_turn = True
         return list(self._current_step_calls)
 
     def _advance_consecutive_streak(self, calls: list[ToolCallKey]) -> None:
@@ -1129,6 +1153,7 @@ class KimiToolset:
             call_key = (tool_name, canonical_args)
             call_index = len(self._current_step_calls)
             self._current_step_calls.append(call_key)
+            self._turn_total_calls += 1
 
             # Per-tool different-args call counting (relaxed limitation)
             self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
@@ -1166,6 +1191,16 @@ class KimiToolset:
                     warned_at.add(call_count)
                     self._turn_tool_warning_issued = True
                     diff_args_reminder_text = _make_diff_args_reminder(tool_name, call_count)
+
+            # Hard per-tool call ceiling (different args): the model is grinding
+            # with the same tool, so stop the turn instead of looping forever.
+            if not is_cross_step_dup and call_count >= _DIFF_ARGS_HARD_STOP_START:
+                self._force_stop_turn = True
+
+            # Absolute per-turn tool-call ceiling: stop as soon as the total
+            # number of tool calls this turn exceeds the hard limit.
+            if self._turn_total_calls >= _TURN_TOOL_CALL_HARD_STOP:
+                self._force_stop_turn = True
 
             # Merge reminder texts if both are set
             if reminder_text is not None and diff_args_reminder_text is not None:

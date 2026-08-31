@@ -701,6 +701,70 @@ async def test_cross_step_dedup_not_triggered_after_back_to_the_future():
     assert ts.dedup_triggered is False
 
 
+async def test_different_args_hard_stop_after_many_repeats():
+    """Repeated calls with different args must force-stop once the per-tool ceiling is crossed."""
+    from kimi_cli.soul.toolset import _DIFF_ARGS_HARD_STOP_START
+
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-hard-diff")
+
+    for i in range(_DIFF_ARGS_HARD_STOP_START):
+        tc = ToolCall(
+            id=f"tc-diff-{i}",
+            function=ToolCall.FunctionBody(
+                name="ToolA",
+                arguments=json.dumps({"value": str(i)}),
+            ),
+        )
+        result = ts.handle(tc)
+        assert isinstance(result, asyncio.Task)
+        await result
+
+    assert ts._tool_call_counts["ToolA"] == _DIFF_ARGS_HARD_STOP_START
+    assert ts.force_stop_turn is True
+
+
+async def test_turn_total_calls_hard_stop_ceiling():
+    """Crossing the absolute per-turn tool-call ceiling force-stops the turn."""
+    from kimi_cli.soul.toolset import _TURN_TOOL_CALL_HARD_STOP
+
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-total")
+
+    for i in range(_TURN_TOOL_CALL_HARD_STOP):
+        tc = ToolCall(
+            id=f"tc-total-{i}",
+            function=ToolCall.FunctionBody(
+                name="ToolA",
+                arguments=json.dumps({"value": str(i)}),
+            ),
+        )
+        result = ts.handle(tc)
+        assert isinstance(result, asyncio.Task)
+        await result
+
+    assert ts.force_stop_turn is True
+
+
+async def test_different_args_below_hard_stop_not_force_stopped():
+    """A moderate number of different-args calls must not force-stop the turn."""
+    ts = _make_toolset()
+    ts.begin_step([], turn_id="turn-diff-ok")
+
+    for i in range(12):
+        tc = ToolCall(
+            id=f"tc-diff-ok-{i}",
+            function=ToolCall.FunctionBody(
+                name="ToolA",
+                arguments=json.dumps({"value": str(i)}),
+            ),
+        )
+        result = ts.handle(tc)
+        assert isinstance(result, asyncio.Task)
+        await result
+
+    assert ts.force_stop_turn is False
+
 
 # --- Dynamic tool output byte budget ---
 
