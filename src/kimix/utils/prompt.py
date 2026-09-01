@@ -13,7 +13,7 @@ from kaos.path import KaosPath
 from kimi_agent_sdk import Session
 from kosong.chat_provider import APIStatusError
 from kimi_cli.llm import LoopDetectedError, TextLoopDetector
-from kosong.message import ContentPart, TextPart, ThinkPart, ToolCall, ToolCallPart
+from kosong.message import ContentPart, TextPart, ThinkPart
 from kimix.ui.printing import Color, MessageType, Style
 from kimix.ui.stream import print_agent_json, print_agent_json_flush_text
 from kimix.tools.common import _export_to_temp_file
@@ -25,17 +25,6 @@ from kimix.utils.session import (
     close_session_async,
 )
 from kimix.utils.system_prompt import SystemPromptType
-
-
-_MAX_TEXT_BLOCK_RESUME_ROUNDS = 2
-"""Maximum number of follow-up prompts used to force a session to end on a
-plain text block.
-
-When the agent's turn ends with a trailing tool call or reasoning-only block,
-the task may be unfinished: the agent loop "quits" without a final answer. In
-that case the session is resumed with a continuation prompt (up to this many
-rounds) that asks it to finish the work and end with a plain text block.
-"""
 
 
 def _read_subagent_state(path: Path) -> dict[str, Any]:
@@ -520,56 +509,6 @@ async def _run_prompt_attempts(
             await asyncio.sleep(1)
 
 
-def _trailing_content_kind(session: Session) -> str | None:
-    """Return the content kind of the session's last user-visible block.
-
-    Inspects the most recent meaningful block of the conversation history:
-    the last assistant message that carries content parts. Returns ``"text"``,
-    ``"think"`` or ``"tool"``; ``None`` when there is no inspectable history
-    (e.g. fake sessions used in tests).
-
-    A message that contains both text and tool calls is classified as ``"tool"``:
-    text parts before/after a tool request are treated as commentary or a
-    preamble, not a final answer. The gate only passes when the assistant's
-    turn ends on a plain text block with no pending tool calls.
-    """
-    try:
-        cli = getattr(session, "_cli", None)
-        if cli is None:
-            return None
-        soul = getattr(cli, "soul", None)
-        if soul is None:
-            return None
-        context = getattr(soul, "context", None)
-        history = getattr(context, "history", None)
-        if history is None:
-            return None
-        for message in reversed(history):
-            if message.role != "assistant":
-                continue
-            parts = message.content or []
-            has_tool_calls = bool(message.tool_calls)
-            if not parts and not has_tool_calls:
-                continue
-            # If the assistant requested any tool calls, the turn is not a final
-            # text answer, even if it also contained explanatory text.
-            if has_tool_calls:
-                return "tool"
-            # No tool calls: classify by the last meaningful content part.
-            if parts:
-                last_part = parts[-1]
-                if isinstance(last_part, TextPart):
-                    return "text"
-                if isinstance(last_part, ThinkPart):
-                    return "think"
-                if isinstance(last_part, (ToolCall, ToolCallPart)):
-                    return "tool"
-            return None
-    except Exception:
-        return None
-    return None
-
-
 async def _run_single_prompt(
     session: Session,
     prompt_str: str,
@@ -678,72 +617,6 @@ async def _run_single_prompt(
     if primary_exc is not None:
         raise primary_exc
     return False
-
-
-async def _resume_for_text_block(
-    session: Session,
-    output_function: Callable[[str, MessageType], Any] | None,
-    cancel_callable: Callable[[], bool] | None,
-    merge_wire_messages: bool,
-    info_print: bool,
-    format_output: bool,
-    timeout: float | None,
-) -> None:
-    """Force the session to end on a plain text block.
-
-    When the preceding agent turn finished with a trailing tool call or a
-    reasoning-only block (no final text answer), the task may be unfinished:
-    the loop "quit" without delivering a result. This resumes the exact same
-    session with a short, concise continuation prompt (up to
-    ``_MAX_TEXT_BLOCK_RESUME_ROUNDS`` times) asking it to finish the remaining
-    work and end with a plain text block.
-    """
-    cli = getattr(session, "_cli", None)
-    if cli is None:
-        return
-    work_dir = getattr(session, "work_dir", None)
-    if work_dir is None:
-        cli_session = getattr(cli, "session", None)
-        work_dir = getattr(cli_session, "work_dir", None) if cli_session is not None else None
-    work_dir_str = str(work_dir) if work_dir is not None else None
-
-    for attempt in range(_MAX_TEXT_BLOCK_RESUME_ROUNDS):
-        kind = _trailing_content_kind(session)
-        if kind in (None, "text"):
-            return
-
-        lines = [
-            "The previous response did not end with a plain text block, CONTINUE work.",
-            "",
-            "Rules:",
-            "1. Finish any remaining work.",
-            "2. End with a plain text block summarizing what was done. No trailing tool calls or reasoning.",
-        ]
-        resume_prompt = "\n".join(lines)
-
-        label = "Resume to finish (text block)..." if attempt == 0 else "Final text-block check..."
-        try:
-            await _run_single_prompt(
-                session,
-                resume_prompt,
-                output_function,
-                cancel_callable,
-                merge_wire_messages,
-                info_print,
-                label=label,
-                format_output=format_output,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            base._stream.colorful_print_word(
-                f"Text-block resume failed: {exc}",
-                fg=Color.BRIGHT_RED,
-                styles=[Style.BOLD],
-                require_new_line=True,
-            )
-            return
-
-
 async def prompt_async(
     prompt_str: str,
     session: Session | None = None,
@@ -857,23 +730,6 @@ async def prompt_async(
                     break
         elif not prompt_success:
             base._stream.colorful_print_word("prompt failed.", fg=Color.BRIGHT_RED, styles=[Style.BOLD], require_new_line=True)
-
-        if prompt_success:
-            # ── Text-block gate: never end the session on tool/reasoning ──────
-            # The agent loop can quit even when the task is unfinished, leaving
-            # a trailing tool call or reasoning-only block with no final text
-            # answer. Resume the same session until the last assistant block is
-            # a plain text message.
-            await _resume_for_text_block(
-                session,
-                output_function,
-                cancel_callable,
-                merge_wire_messages,
-                info_print,
-                format_output,
-                timeout,
-            )
-
 
     finally:
         try:

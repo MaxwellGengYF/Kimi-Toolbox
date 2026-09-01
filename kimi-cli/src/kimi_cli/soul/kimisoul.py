@@ -131,6 +131,39 @@ SKILL_COMMAND_PREFIX = "skill:"
 FLOW_COMMAND_PREFIX = "flow:"
 DEFAULT_MAX_FLOW_MOVES = 1000
 
+_MAX_TEXT_BLOCK_CONTINUATION_ROUNDS = 2
+"""Maximum number of continuation steps used to force a turn to end on a
+plain text block.
+
+When the agent's last step finishes with an empty or non-text message (e.g.
+a reasoning-only block, or an empty response caused by a truncated stream
+after tool execution), the soul appends a short continuation user message
+and forces another step. This protects against the session "quitting" right
+after a tool call and makes the prompt-level ``Resume to finish`` gate
+rarely needed.
+"""
+
+
+def _is_final_text_block(message: Message | None) -> bool:
+    """Return ``True`` when *message* ends the turn on a plain text block.
+
+    A valid final answer must have visible text content and must not end
+    with tool calls or reasoning. Empty messages and messages whose last
+    meaningful part is a ``ThinkPart`` or ``ToolCall`` are rejected so the
+    soul can force a continuation.
+    """
+    if message is None:
+        return False
+    parts = message.content or []
+    if message.tool_calls:
+        return False
+    if not parts:
+        return False
+    last_part = parts[-1]
+    if isinstance(last_part, TextPart) and last_part.text.strip():
+        return True
+    return False
+
 
 class _RateLimitAwareWait(wait_base):
     """Tenacity wait callable that honors ``Retry-After`` for 429 responses."""
@@ -1243,6 +1276,7 @@ class KimiSoul:
         # ═══════════════════════════════════════════════════════════════════════
         step_no = 0
         self._current_step_no = 0
+        continuation_rounds = 0
         while True:
             step_no += 1
 
@@ -1450,6 +1484,52 @@ class KimiSoul:
                     if step_outcome.stop_reason == "no_tool_calls"
                     else None
                 )
+
+                # ── Text-block gate (LLM-service protection) ───────────────────
+                # Do not let the turn end on an empty message, a reasoning-only
+                # block, or a tool call. When this happens (often caused by a
+                # truncated stream after tool execution), force another step
+                # with a concise continuation prompt. This keeps the protection
+                # inside the LLM service and makes the prompt-level resume gate
+                # rarely needed.
+                if (
+                    step_outcome.stop_reason == "no_tool_calls"
+                    and not _is_final_text_block(final_message)
+                ):
+                    if continuation_rounds < _MAX_TEXT_BLOCK_CONTINUATION_ROUNDS:
+                        continuation_rounds += 1
+                        logger.info(
+                            "Turn would end without a plain text block "
+                            "(continuation {round}/{max_rounds}); forcing another step",
+                            round=continuation_rounds,
+                            max_rounds=_MAX_TEXT_BLOCK_CONTINUATION_ROUNDS,
+                        )
+                        wire_send(
+                            TextPart(
+                                text="\n[Continue] The previous response did not end with a plain text block. Continuing...\n"
+                            )
+                        )
+                        await self._context.append_message(
+                            Message(
+                                role="user",
+                                content=[
+                                    TextPart(
+                                        text=(
+                                            "The previous response did not end with a plain text block. "
+                                            "Continue and finish with a plain text block summarizing what was done. "
+                                            "No trailing tool calls or reasoning."
+                                        )
+                                    )
+                                ],
+                            )
+                        )
+                        continue
+                    logger.warning(
+                        "Turn still ends without a plain text block after "
+                        "{max_rounds} continuation attempts; giving up",
+                        max_rounds=_MAX_TEXT_BLOCK_CONTINUATION_ROUNDS,
+                    )
+
                 return TurnOutcome(
                     stop_reason=step_outcome.stop_reason,
                     final_message=final_message,
