@@ -982,6 +982,12 @@ async def prompt_plan_async(requirement: str, plan_file: str | Path = "plan.md")
         planner_provider["loop_control"]["compact_reminder_enabled"] = False
         planner_provider["loop_control"]["todo_reminder_enabled"] = False
         planner_provider["loop_control"]["target_churn_enabled"] = False
+        # Plan sessions are short-lived and focused on a single requirement.
+        # Disable history auto-retrieval so archived/working/recency memory
+        # injections do not show up as extra "user" messages in the planner.
+        planner_provider["loop_control"]["auto_retrieve_history"] = False
+        planner_provider["loop_control"]["auto_retrieve_working_memory"] = False
+        planner_provider["loop_control"]["auto_retrieve_recency_memory"] = False
         # Inherit the caller's working directory so relative plan paths and
         # AGENTS.md/skills resolution match the session that spawned the planner
         # (a planner session that defaults to the process CWD cannot find the

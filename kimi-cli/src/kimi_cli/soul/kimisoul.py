@@ -1524,7 +1524,10 @@ class KimiSoul:
         # ═══════════════════════════════════════════════════════════════════════
         # 2e.1. NOTIFICATION DELIVERY (root role only)
         # ═══════════════════════════════════════════════════════════════════════
-        if self.is_root:
+        # Read-only sessions (e.g. plan-mode TodoMaker) should not receive
+        # actionable notifications; the planner's sole input is the planning
+        # requirement, and pending notifications look like extra user requests.
+        if self.is_root and not self._runtime.read_only:
 
             async def _append_notification(view: NotificationView) -> None:
                 await self._context.append_message(build_notification_message(view, self._runtime))
