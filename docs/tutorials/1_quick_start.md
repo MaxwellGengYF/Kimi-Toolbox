@@ -4,103 +4,19 @@
 
 ---
 
-## 一、快速安装
+## 一、安装
 
-如果你只想快速体验 Kimix，可直接通过 pip 安装：
+在项目根目录（包含 `pyproject.toml` 的目录）直接运行：
 
 ```bash
-# 安装
-pip install kimix
-# 运行
-python -m kimix.cli
-# 或
-python -m kimix
+python install.py
 ```
 
-如需从源码进行更深入的定制或开发，请参考下方的详细步骤。
+`install.py` 会自动完成：依赖同步、原生运行时下载、命令行工具注册等初始化工作。安装完成后即可使用 `kimix` 命令。
 
 ---
 
-## 二、Git Submodule 的拉取
-
-Kimix 项目依赖部分通过 Git Submodule 管理。在首次获取代码后，需要确保所有子模块都已正确拉取。
-
-### 1. 克隆时一并拉取
-
-如果你在克隆仓库时已经使用了 `--recursive` 参数，submodule 会随主仓库一起下载，无需额外操作：
-
-```bash
-git clone --recursive <仓库地址>
-```
-
-### 2. 已克隆仓库后补拉或更新
-
-如果你已经克隆了仓库但忘记添加 `--recursive`，或者需要更新已有的 submodule，可采用以下任一方式：
-
-#### 方式 A：使用项目提供的脚本（推荐）
-
-Kimix 提供了 `clone_submodule.py` 脚本，可一键完成 submodule 的拉取：
-
-```bash
-uv run clone_submodule.py
-```
-
-该脚本会自动处理 submodule 的初始化与递归更新，适合不想手动输入 Git 命令的用户。
-
-#### 方式 B：手动执行 Git 命令
-
-在仓库根目录执行以下命令：
-
-```bash
-git submodule update --init --recursive
-```
-
-该命令会完成两件事：
-
-- `--init`：初始化本地配置文件，将 submodule 注册到 `.git/config` 中；
-- `--recursive`：递归地拉取并更新所有嵌套的子模块到对应提交的版本。
-
-执行完毕后，项目依赖的第三方库、工具脚本或其他资源即会完整就绪。
-
----
-
-## 三、使用 uv 安装与运行
-
-推荐使用 [uv](https://docs.astral.sh/uv/) 进行 Python 包管理和环境隔离。以下是 Kimix 的标准安装流程：
-
-### 1. 进入项目根目录
-
-项目根目录即包含 `pyproject.toml` 的目录：
-
-```bash
-cd /path/to/kimix
-```
-
-### 2. 可编辑模式安装并注册快捷命令
-
-```bash
-uv tool install -e .
-```
-
-说明：
-
-- `-e .` 表示将当前目录以**可编辑方式**安装，代码修改无需重新安装即可生效；
-- `uv tool install` 会将 `kimix` 命令注册到 uv 的工具路径中，使其在终端可直接调用。
-
-### 3. 在任意目录运行 Kimix
-
-```bash
-uv run kimix
-```
-
-说明：
-
-- `uv run kimix` 会自动使用 uv 管理的 Python 环境运行 `kimix`；
-- 无需手动激活虚拟环境，也无需担心当前工作目录下的依赖冲突。
-
----
-
-## 四、环境变量配置
+## 二、环境变量配置
 
 在运行 Kimix 之前，需要配置 API 密钥。优先使用 JSON 配置文件中的 `api_key` 字段，若未配置则依次读取以下环境变量（代码逻辑参考 `src/kimix/utils/config.py`、`src/kimix/cli_impl/init.py`）：
 
@@ -113,7 +29,7 @@ uv run kimix
 
 ### 其他环境变量
 
-除 API 密钥外，其他模型参数（URL、模型名、上下文长度等）均通过 JSON 配置文件管理，不再通过环境变量设置。详见下方「5.2 初始化 LLM 配置」。
+除 API 密钥外，其他模型参数（URL、模型名、上下文长度等）均通过 JSON 配置文件管理，不再通过环境变量设置。详见下方「3.2 初始化 LLM 配置」。
 
 **示例（Linux / macOS）：**
 
@@ -129,11 +45,11 @@ $env:KIMI_API_KEY="your-api-key"
 
 ---
 
-## 五、CLI 基本用法
+## 三、CLI 基本用法
 
 Kimix 的命令行接口分为「子命令」「启动参数」和「交互命令」三部分，以下内容整理自 `src/kimix/cli_impl/`。
 
-### 5.1 子命令
+### 3.1 子命令
 
 除默认的交互式客户端外，`kimix` 还支持以下子命令：
 
@@ -142,29 +58,29 @@ Kimix 的命令行接口分为「子命令」「启动参数」和「交互命�
 | `serve` | 启动 Kimix HTTP 服务器（OpenCode 风格） | `--host`/`--hostname`（默认 `127.0.0.1`）、`--port`（默认 `4096`） |
 | `gui` | 启动 Kimix 后端 + TypeScript/Vite 前端开发服务器 | `--host`/`--hostname`（默认 `127.0.0.1`）、`--port`（后端端口，默认 `4096`）、`--fe-port`（前端端口，默认 `5173`）、`--build`（启动前先执行 `npm run build`）、`--no-fe`（仅启动后端，跳过前端；适合未安装 Node.js/npm 的环境） |
 | `ssecli` | 启动 SSE CLI 调试器，连接 `kimix serve` 进行交互式测试。内部支持 `/help`、`/new`、`/abort`、`/status`、`/sessions`、`/messages`、`/clear`、`/export[:path]`、`/compact[:N]` 等命令；按 `Ctrl+C` 或输入 `EOF`（`Ctrl+D` / `Ctrl+Z`）退出 | `--host`、`--port`、`--debug`（保存原始事件日志为 `sse_log_<YYYYMMDD_HHMMSS>.txt`） |
-| `mcp` | MCP（Model Context Protocol）服务器管理：`mcp serve`（将 Kimix 作为 MCP 服务器对外提供服务）、`mcp list`（列出已配置的服务器）、`mcp test <name>`（测试连接） | 详见「六、MCP」 |
+| `mcp` | MCP（Model Context Protocol）服务器管理：`mcp serve`（将 Kimix 作为 MCP 服务器对外提供服务）、`mcp list`（列出已配置的服务器）、`mcp test <name>`（测试连接） | 详见「四、MCP」 |
 
 **示例：**
 
 ```bash
 # 启动 HTTP 服务
-uv run kimix serve --port 4096
+kimix serve --port 4096
 
 # 启动 GUI（后端 + 前端开发服务器）
-uv run kimix gui --port 4096 --fe-port 5173
+kimix gui --port 4096 --fe-port 5173
 
 # 仅启动 GUI 后端（本机未安装 Node.js/npm 时）
-uv run kimix gui --no-fe
+kimix gui --no-fe
 
 # 使用 SSE CLI 调试
-uv run kimix ssecli --host 127.0.0.1 --port 4096 --debug
+kimix ssecli --host 127.0.0.1 --port 4096 --debug
 
 # 管理 MCP 服务器
-uv run kimix mcp list
-uv run kimix mcp test my-server
+kimix mcp list
+kimix mcp test my-server
 ```
 
-### 5.2 初始化 LLM 配置
+### 3.2 初始化 LLM 配置
 
 Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--config` 指定自定义配置，将自动加载 `src/kimix/default_config.json`（由 `/init` 生成）；若该文件不存在，则回退到内置的默认配置模板（模型 `kimi-for-coding`，见 `src/kimix/cli_impl/init.py`）。
 
@@ -209,7 +125,7 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 }
 ```
 
-你也可以创建自定义配置文件并通过 `uv run kimix --config=<path>` 加载。配置字段说明如下：
+你也可以创建自定义配置文件并通过 `kimix --config=<path>` 加载。配置字段说明如下：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -284,7 +200,7 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 }
 ```
 
-### 5.3 启动参数
+### 3.3 启动参数
 
 在启动 `kimix` 时，可附加以下选项来控制行为：
 
@@ -302,12 +218,12 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 **示例：**
 
 ```bash
-uv run kimix --clean --manually-cot
+kimix --clean --manually-cot
 ```
 
 > **Skill 目录的自动加载**：启动时，Kimix 还会读取当前目录下的 `.kimix/skill.json` 文件。如果其中包含 `skill_dir` 字段（字符串或字符串数组），且对应目录存在，这些目录会被自动追加到默认 skill 搜索路径中。
 
-### 5.4 交互命令
+### 3.4 交互命令
 
 进入 Kimix 交互式终端后，可通过以下命令与 Agent 交互：
 
@@ -342,7 +258,7 @@ uv run kimix --clean --manually-cot
 
 ---
 
-## 六、MCP（Model Context Protocol）
+## 四、MCP（Model Context Protocol）
 
 Kimix 同时支持作为 MCP 客户端和 MCP 服务器使用。
 

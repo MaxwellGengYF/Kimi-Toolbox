@@ -2,19 +2,13 @@
 
 > [中文文档](README_zh.md)
 
-## Install from Source
+## Install
+
 ```bash
 python install.py
 ```
 
-## pip Install
-```bash
-pip install kimix
-python -m kimix.cli
-# or
-kimix
-python -m kimix
-```
+`install.py` handles the whole setup: dependency sync, native runtime download, and tool registration.
 
 > **Note:** This repo supports not only KIMI LLM but also various API keys! Like OpenAI, Anthropic, etc. Default config templates are in `docs/`; use `kimix --config=xx.json` after setup.
 
@@ -136,7 +130,7 @@ The `todo_write` tool tracks multi-step plans:
 
 | Document | Description |
 |----------|-------------|
-| [`docs/tutorials/1_quick_start_en.md`](docs/tutorials/1_quick_start_en.md) | Quick start guide: Git submodules, `uv` env setup, CLI args, and interactive commands. |
+| [`docs/tutorials/1_quick_start_en.md`](docs/tutorials/1_quick_start_en.md) | Quick start guide: one-command install, CLI args, and interactive commands. |
 | [`docs/tutorials/2_long_task_en.md`](docs/tutorials/2_long_task_en.md) | Long task strategy in KimiX. |
 | [`docs/tutorials/3_builtin_tools_en.md`](docs/tutorials/3_builtin_tools_en.md) | Complete built-in tool guide: file I/O, search, code execution, process management, doc conversion, plan mode, sub-agents, plus prompt strategies and best practices. |
 | [`docs/tutorials/4_skills_en.md`](docs/tutorials/4_skills_en.md) | Custom skill authoring: design principles, directory structure, `SKILL.md` spec, resource organization, testing, packaging, and installation. |

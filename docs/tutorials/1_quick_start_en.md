@@ -4,49 +4,15 @@ This guide covers environment setup, installation, and basic CLI usage.
 
 ---
 
-## Quick Install
+## Install
+
+From the project root (the directory containing `pyproject.toml`), run:
 
 ```bash
-pip install kimix
-python -m kimix.cli
-# or
-python -m kimix
+python install.py
 ```
 
-For source-based development, see the detailed steps below.
-
----
-
-## Git Submodules
-
-Kimix uses Git submodules for some dependencies.
-
-**Clone with submodules:**
-```bash
-git clone --recursive <repo-url>
-```
-
-**Update existing clone:**
-```bash
-uv run clone_submodule.py
-# or manually:
-git submodule update --init --recursive
-```
-
----
-
-## Install with uv
-
-Recommended: use [uv](https://docs.astral.sh/uv/) for Python environment management.
-
-```bash
-cd /path/to/kimix
-uv tool install -e .
-uv run kimix
-```
-
-- `-e .` installs in editable mode (changes reflect without reinstall)
-- `uv run kimix` uses uv's managed environment automatically
+`install.py` handles the full setup: dependency sync, native runtime download, and command-line tool registration. Once finished, the `kimix` command is ready to use.
 
 ---
 
@@ -81,9 +47,13 @@ $env:KIMI_API_KEY="your-api-key"
 | `ssecli` | SSE CLI debugger for `kimix serve`. Supports `/new`, `/abort`, `/status`, `/sessions`, `/messages`, `/clear`, `/compact[:N]`, `/export[:path]`, `/help`; press `Ctrl+C` or send EOF (`Ctrl+D` / `Ctrl+Z`) to exit | `--host`, `--port`, `--debug` (saves raw event log as `sse_log_<YYYYMMDD_HHMMSS>.txt`) |
 
 **Examples:**
+
 ```bash
-uv run kimix serve --port 4096
-uv run kimix ssecli --host 127.0.0.1 --port 4096 --debug
+# Start HTTP server
+kimix serve --port 4096
+
+# Use SSE CLI debugger
+kimix ssecli --host 127.0.0.1 --port 4096 --debug
 ```
 
 ### LLM Config Initialization
@@ -153,7 +123,7 @@ Run `/init` in the interactive terminal to create the default config interactive
 
 Load custom config:
 ```bash
-uv run kimix --config=<path>
+kimix --config=<path>
 ```
 
 ### Launch Options

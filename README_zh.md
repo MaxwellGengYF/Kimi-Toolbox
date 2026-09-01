@@ -1,20 +1,12 @@
 # Kimi-CLI-X
 
-## 源码安装
+## 安装
+
 ```bash
 python install.py
 ```
 
-## pip 安装
-```bash
-# 安装
-pip install kimix
-# 运行
-python -m kimix.cli
-# 或
-kimix
-python -m kimix
-```
+`install.py` 会完成全部安装流程：同步依赖、下载原生运行时、注册命令行工具等。
 
 注意！这个仓库不止支持 KIMI LLM，支持各类 API Key! 如 OpenAI, Anthropic 等。各类默认 config 模板在 `docs/`, 配置后通过 `kimix --config=xx.json` 即可使用 !
 
@@ -141,7 +133,7 @@ Kimi-CLI-X 在 `KimiSoul` 核心循环中内建了一套**自动上下文记忆�
 
 | 文档 | 简介 |
 |------|------|
-| [`docs/tutorials/1_quick_start.md`](docs/tutorials/1_quick_start.md) | **快速入门指南**。涵盖 Git Submodule 拉取、`uv` 环境安装、CLI 启动参数与交互命令的完整说明。 |
+| [`docs/tutorials/1_quick_start.md`](docs/tutorials/1_quick_start.md) | **快速入门指南**。涵盖一键安装、CLI 启动参数与交互命令的完整说明。 |
 | [`docs/tutorials/2_long_task.md`](docs/tutorials/2_long_task.md) | **Long Task**。KimiX 对于长任务的策略。 |
 | [`docs/tutorials/3_builtin_tools.md`](docs/tutorials/3_builtin_tools.md) | **内置工具完全指南**。系统介绍 Agent 的全部内置工具（文件 I/O、搜索、代码执行、进程管理、文档转换、计划模式、子代理等），并给出提示词引导策略与最佳实践。 |
 | [`docs/tutorials/4_skills.md`](docs/tutorials/4_skills.md) | **自定义 Skill 编写教程**。讲解 Skill 的设计原则、目录结构、`SKILL.md` 编写规范、附属资源组织方式、测试打包流程及安装使用方法。 |
