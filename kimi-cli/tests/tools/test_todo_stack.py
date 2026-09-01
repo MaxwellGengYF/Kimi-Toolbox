@@ -700,6 +700,53 @@ class TestReminderSignature:
         assert len(again) == 1
         assert "- (stack: A)" in again[0].content
 
+    async def test_get_injections_handle_todo_models_with_content_field(self) -> None:
+        """Provider must accept Todo models (title stored as ``content``)."""
+        provider = TodoReminderProvider(
+            todos_loader=lambda: [Todo(content="P", status="pending")],
+        )
+        soul = SimpleNamespace(_current_step_no=1)
+        injections = await provider.get_injections([], soul)  # type: ignore[arg-type]
+        assert len(injections) == 1
+        assert "- [pending] P" in injections[0].content
+
+    async def test_no_injection_after_all_done_and_state_resets(self) -> None:
+        """Once every todo is done the reminder must stop and not reappear."""
+        state = {
+            "todos": [
+                TodoItemState(title="A", status="in_progress"),
+                TodoItemState(title="B", status="pending"),
+            ]
+        }
+        provider = TodoReminderProvider(
+            todos_loader=lambda: state["todos"],
+            interval_steps=100,
+        )
+        soul = SimpleNamespace(_current_step_no=1)
+        first = await provider.get_injections([], soul)  # type: ignore[arg-type]
+        assert len(first) == 1
+        assert "- [in_progress] A" in first[0].content
+        assert "- [pending] B" in first[0].content
+
+        # Mark everything as done.
+        state["todos"] = [
+            TodoItemState(title="A", status="done"),
+            TodoItemState(title="B", status="done"),
+        ]
+        soul._current_step_no = 2
+        assert await provider.get_injections([], soul) == []  # type: ignore[arg-type]
+
+        # Reminder stays off while everything remains done.
+        soul._current_step_no = 3
+        assert await provider.get_injections([], soul) == []  # type: ignore[arg-type]
+
+        # A new pending todo triggers an immediate reminder after the reset.
+        state["todos"] = [TodoItemState(title="C", status="pending")]
+        soul._current_step_no = 4
+        again = await provider.get_injections([], soul)  # type: ignore[arg-type]
+        assert len(again) == 1
+        assert "- [pending] C" in again[0].content
+
 
 # ---------------------------------------------------------------------------
 # 8. Native-gated recursive status counts

@@ -79,11 +79,13 @@ class TodoReminderProvider(DynamicInjectionProvider):
             digest.update(b"\x02")
         digest.update(b"\x03")
         for depth, item in flatten_todo_tree(todos):
+            title = getattr(item, "title", None) or getattr(item, "content", "")
+            status = getattr(item, "status", "") or ""
             digest.update(str(depth).encode("utf-8"))
             digest.update(b"\x00")
-            digest.update(item.status.encode("utf-8"))
+            digest.update(status.encode("utf-8"))
             digest.update(b"\x01")
-            digest.update(item.title.encode("utf-8"))
+            digest.update(title.encode("utf-8"))
             digest.update(b"\x04")
         return digest.hexdigest()
 
@@ -133,7 +135,9 @@ class TodoReminderProvider(DynamicInjectionProvider):
         if stack:
             lines.append(f"- (stack: {' > '.join(stack)})")
         for depth, item in unfinished[: self._max_items]:
-            lines.append(f"{'  ' * depth}- [{item.status}] {item.title}")
+            status = getattr(item, "status", "?") or "?"
+            title = getattr(item, "title", None) or getattr(item, "content", "<untitled>")
+            lines.append(f"{'  ' * depth}- [{status}] {title}")
         if len(unfinished) > self._max_items:
             lines.append(f"- … and {len(unfinished) - self._max_items} more (call `todo_write` to read all)")
         lines.append(

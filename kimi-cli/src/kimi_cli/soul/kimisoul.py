@@ -97,7 +97,7 @@ from kimi_cli.soul.message import (
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
 from kimi_cli.tools.context_prune import context_prune
-from kimi_cli.tools.todo import TodoList
+from kimi_cli.tools.todo import Todo, TodoList
 from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.export import perform_export
 from kimi_cli.utils.logging import logger
@@ -562,9 +562,19 @@ class KimiSoul:
         with what the tool would report. Never raises — a broken state file
         must not break the agent loop.
         """
+
+        def convert(todo: Todo) -> TodoItemState:
+            # Todo models store the title as ``content``; TodoItemState uses ``title``.
+            return TodoItemState(
+                title=todo.content,
+                status=todo.status,
+                notes=todo.notes,
+                children=[convert(child) for child in todo.children],
+            )
+
         try:
             todos = TodoList(self._runtime)._load_todos()
-            return [TodoItemState(**todo.model_dump()) for todo in todos]
+            return [convert(todo) for todo in todos]
         except Exception:
             logger.debug("Failed to load todos for reminder", exc_info=True)
             return []
