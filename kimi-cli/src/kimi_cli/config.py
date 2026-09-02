@@ -317,9 +317,9 @@ Default is 3."""
     adaptive_preserve_enabled: bool = Field(default=True)
     """When true, dynamically adjust preserve depth based on session signals
     (errors, tool calls, reasoning). Default is true."""
-    compact_reminder_enabled: bool = Field(default=True)
+    compact_reminder_enabled: bool = Field(default=False)
     """When true, inject a system-reminder to suggest compaction when context usage
-    exceeds compact_reminder_threshold. Default is true."""
+    exceeds compact_reminder_threshold. Default is false."""
     compact_reminder_threshold: float = Field(default=0.70, ge=0.5, le=0.95)
     """Context usage ratio at which the compact reminder is injected.
     Should be lower than compaction_trigger_ratio to give the agent a heads-up.
@@ -327,10 +327,10 @@ Default is 3."""
 
     # ── Recency-edge re-injection & memory durability ────────────────────────
 
-    todo_reminder_enabled: bool = Field(default=True)
+    todo_reminder_enabled: bool = Field(default=False)
     """When true, periodically re-inject unfinished todo_write items at the end
     of the context window, where model attention is strongest (recency edge).
-    Default is true."""
+    Default is false."""
     todo_reminder_interval_steps: int = Field(default=20, ge=1)
     """Minimum number of steps between repeated todo reminder injections when
     the todo list has not changed. Default is 20."""
@@ -349,7 +349,7 @@ Default is 3."""
     """When true, inject a reminder when the agent repeatedly modifies the same
     file target (across different tools) or hits the same normalized error
     repeatedly — loop shapes that per-call streak detection cannot catch.
-    Default is true."""
+    Default is false."""
     target_churn_file_warn: int = Field(default=8, ge=2)
     """Number of edits to the same file target that triggers a churn reminder.
     Default is 8."""
@@ -380,7 +380,7 @@ Default is 3."""
     budget_reminder_enabled: bool = Field(default=False)
     """When true, inject budget-awareness reminders as step (or wall-clock)
     usage crosses ``budget_warn_ratios`` of the per-turn budget, so the
-    agent can plan its wrap-up. Default is true."""
+    agent can plan its wrap-up. Default is false."""
     budget_warn_ratios: tuple[float, ...] = Field(default=(0.7, 0.9))
     """Ascending usage ratios of the per-turn budget that each trigger one
     reminder per turn. The final ratio issues an urgent wrap-up reminder.
@@ -405,11 +405,11 @@ Default is 3."""
     'self_eval' (one model review call) or 'majority' (pairwise votes).
     Default is 'self_eval'."""
 
-    context_meter_enabled: bool = Field(default=True)
+    context_meter_enabled: bool = Field(default=False)
     """When true, inject a reminder to recall past history with the `Retrieve`
     tool when usage materially changes, so the agent can self-regulate
     (recall past decisions, paths, or errors) before the harness compacts.
-    Default is true."""
+    Default is false."""
     context_meter_min_delta: float = Field(default=0.15, ge=0.0, le=0.5)
     """Minimum usage-ratio change since the last context-meter injection
     required to inject again. Default is 0.15 (15%)."""
