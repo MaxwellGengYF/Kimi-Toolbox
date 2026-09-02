@@ -140,8 +140,11 @@ async def test_soul_forces_continuation_after_empty_final_message(
     assert final.role == "assistant"
     assert final.content == [TextPart(text="All done.")]
 
-    # The continuation user message should have been injected into history.
-    user_messages = [m for m in soul.context.history if m.role == "user"]
+    # The continuation user message should have been injected. Because it is
+    # a system-reminder, it is stripped from the persisted history; verify it
+    # was sent on the wire instead.
     assert any(
-        "did not end with a plain text block" in m.extract_text() for m in user_messages
-    )
+        isinstance(msg, TextPart)
+        and "did not end with a plain text block" in msg.text
+        for msg in received
+    ), f"No continuation text was sent on the wire. Received: {received}"

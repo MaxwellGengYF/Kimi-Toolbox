@@ -687,9 +687,8 @@ def _repair_todo_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[st
 
 _REMINDER_TEXT_1 = (
     "\n\n<system-reminder>\n"
-    "You are repeating the exact same tool call with identical parameters."
-    " Please carefully analyze the previous result. If the task is not yet complete,"
-    " try a different method or parameters instead of repeating the same call."
+    "Stop repeating the same tool call with identical parameters. "
+    "Try a different method or finish."
     "\n</system-reminder>"
 )
 
@@ -697,27 +696,19 @@ _REMINDER_TEXT_1 = (
 def _make_reminder_text_2(tool_name: str, repeat_count: int, canonical_args: str) -> str:
     return (
         "\n\n<system-reminder>\n"
-        "You have repeatedly called the same tool with identical parameters many times.\n"
-        "Repeated tool call detected:\n"
+        "Repeated identical call:\n"
         f"- tool: {tool_name}\n"
         f"- repeated_times: {repeat_count}\n"
         f"- arguments: {canonical_args}\n"
-        "The previous repeated calls did not make progress. Do not call this exact same tool "
-        "with the exact same arguments again.\n"
-        "Carefully inspect the latest tool result and choose a different next action, "
-        "different parameters, or finish the task if enough evidence has been gathered."
+        "Stop repeating. Choose a different action or finish."
         "\n</system-reminder>"
     )
 
 
 _REMINDER_TEXT_3 = (
     "\n\n<system-reminder>\n"
-    "You are stuck in a dead end and have repeatedly made the same function call without "
-    "progress.\n"
-    "Stop all function calls immediately. Do not call any tool in your next response.\n"
-    "In analysis, review the current execution state and identify why progress is blocked.\n"
-    "Then return a text-only summary to the user that reports the current problem, what has "
-    "already been tried, and what information or decision is needed next."
+    "Dead-end loop detected. Stop all tool calls. "
+    "Return a text-only summary of the problem and what is needed next."
     "\n</system-reminder>"
 )
 
@@ -731,10 +722,19 @@ _REPEAT_FORCE_STOP_STREAK = 16
 # enough that the model is clearly grinding instead of making progress.
 _DIFF_ARGS_HARD_STOP_START = 40
 
-# Absolute ceiling on tool calls in a single turn.  A healthy turn rarely
-# exceeds this; crossing it means the agent is stuck in a loop that the
-# per-call reminders failed to break, so the turn is force-stopped.
-_TURN_TOOL_CALL_HARD_STOP = 60
+# Soft reminder for very long turns.  Instead of force-stopping the session, we
+# nudge the model with the current total call count so it can decide to finish
+# or change approach.
+_TURN_TOTAL_REMINDER_START = 60
+_TURN_TOTAL_REMINDER_INTERVAL = 20
+
+
+def _make_turn_total_reminder(total_calls: int) -> str:
+    return (
+        "\n\n<system-reminder>\n"
+        f"Tool calls repeat {total_calls} times. Stop or finish."
+        "\n</system-reminder>"
+    )
 
 type RepeatAction = Literal["none", "r1", "r2", "r3", "stop"]
 
@@ -771,9 +771,8 @@ _CYCLE_FORCE_STOP = 4
 
 _CYCLE_REMINDER_TEXT = (
     "\n\n<system-reminder>\n"
-    "The same tool call (identical tool and arguments) already ran earlier this turn "
-    "with other calls in between. Re-running it will not produce new information. "
-    "Use the result you already have, change your approach, or finish the task."
+    "This tool call already ran earlier this turn. "
+    "Use the existing result or change approach."
     "\n</system-reminder>"
 )
 
@@ -781,10 +780,8 @@ _CYCLE_REMINDER_TEXT = (
 def _make_cycle_reminder_text_2(tool_name: str, cycle_count: int) -> str:
     return (
         "\n\n<system-reminder>\n"
-        f"You have replayed the identical '{tool_name}' call {cycle_count} times this turn "
-        "in a cycle. You are looping without progress.\n"
-        "Stop calling tools with these arguments. Either take a genuinely different action "
-        "or return a text-only summary that says what is blocking you."
+        f"'{tool_name}' repeated {cycle_count} times in a cycle. "
+        "Stop using these arguments or finish."
         "\n</system-reminder>"
     )
 
@@ -792,7 +789,7 @@ def _make_cycle_reminder_text_2(tool_name: str, cycle_count: int) -> str:
 
 _DIFF_ARGS_REMINDER_TEXT_1 = (
     "\n\n<system-reminder>\n"
-    "Same tool called repeatedly with different args. Reconsider your approach."
+    "Same tool called repeatedly with different args. Change approach or finish."
     "\n</system-reminder>"
 )
 
@@ -801,7 +798,7 @@ def _make_diff_args_reminder_text_2(tool_name: str, call_count: int) -> str:
     return (
         "\n\n<system-reminder>\n"
         f"'{tool_name}' called {call_count} times with different args. "
-        "Stop if stuck — try a different approach or finish now."
+        "Stop or finish."
         "\n</system-reminder>"
     )
 
@@ -810,7 +807,7 @@ def _make_diff_args_reminder_text_3(tool_name: str, call_count: int) -> str:
     return (
         "\n\n<system-reminder>\n"
         f"'{tool_name}' called {call_count} times. Stop now. "
-        "Change approach or finish the task."
+        "Change approach or finish."
         "\n</system-reminder>"
     )
 
@@ -1089,11 +1086,6 @@ class KimiToolset:
             self._advance_consecutive_streak(self._current_step_calls)
             self._seen_call_keys.update(self._current_step_calls)
             self._step_closed = True
-        # Absolute per-turn tool-call ceiling: if the model kept calling tools
-        # beyond the hard limit even after the repeated-call reminders, mark the
-        # turn for a forced stop instead of letting the loop continue forever.
-        if self._turn_total_calls >= _TURN_TOOL_CALL_HARD_STOP:
-            self._force_stop_turn = True
         return list(self._current_step_calls)
 
     def _advance_consecutive_streak(self, calls: list[ToolCallKey]) -> None:
@@ -1266,16 +1258,24 @@ class KimiToolset:
             if not is_cross_step_dup and call_count >= _DIFF_ARGS_HARD_STOP_START:
                 self._force_stop_turn = True
 
-            # Absolute per-turn tool-call ceiling: stop as soon as the total
-            # number of tool calls this turn exceeds the hard limit.
-            if self._turn_total_calls >= _TURN_TOOL_CALL_HARD_STOP:
-                self._force_stop_turn = True
+            # Soft nudge for very long turns: instead of force-stopping, remind
+            # the model how many tools it has called so it can decide to finish.
+            turn_total_reminder_text: str | None = None
+            if self._turn_total_calls >= _TURN_TOTAL_REMINDER_START and (
+                self._turn_total_calls == _TURN_TOTAL_REMINDER_START
+                or (self._turn_total_calls - _TURN_TOTAL_REMINDER_START)
+                % _TURN_TOTAL_REMINDER_INTERVAL
+                == 0
+            ):
+                turn_total_reminder_text = _make_turn_total_reminder(self._turn_total_calls)
 
-            # Merge reminder texts if both are set
-            if reminder_text is not None and diff_args_reminder_text is not None:
-                reminder_text = reminder_text + diff_args_reminder_text
-            elif diff_args_reminder_text is not None:
-                reminder_text = diff_args_reminder_text
+            # Merge all reminder texts
+            all_reminders = [
+                text
+                for text in (reminder_text, diff_args_reminder_text, turn_total_reminder_text)
+                if text is not None
+            ]
+            reminder_text = "".join(all_reminders) if all_reminders else None
 
             tool = self._tool_dict[tool_name]
 

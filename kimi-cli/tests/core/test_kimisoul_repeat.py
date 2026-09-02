@@ -17,9 +17,7 @@ from kimi_cli.soul.context import Context
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.toolset import (
     _CYCLE_FORCE_STOP,
-    _DIFF_ARGS_HARD_STOP_START,
     _REPEAT_FORCE_STOP_STREAK,
-    _TURN_TOOL_CALL_HARD_STOP,
     KimiToolset,
 )
 
@@ -147,12 +145,7 @@ async def test_turn_force_stops_on_adjacent_identical_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn replaying one identical call ends via the loop guard.
-
-    Whichever ceiling is hit first wins: the consecutive-streak force stop
-    (``_REPEAT_FORCE_STOP_STREAK``) or the absolute per-turn call ceiling
-    (``_TURN_TOOL_CALL_HARD_STOP``).
-    """
+    """A turn replaying one identical call ends via the consecutive-streak guard."""
     toolset = KimiToolset()
     toolset.add(_DummyTool())
     llm = LLM(
@@ -173,7 +166,7 @@ async def test_turn_force_stops_on_adjacent_identical_calls(
     outcome = await soul._turn(Message(role="user", content="go"))
 
     assert outcome.stop_reason == "tool_call_repeat"
-    assert outcome.step_count == min(_REPEAT_FORCE_STOP_STREAK, _TURN_TOOL_CALL_HARD_STOP)
+    assert outcome.step_count == _REPEAT_FORCE_STOP_STREAK
 
 
 @pytest.mark.asyncio
@@ -184,10 +177,9 @@ async def test_turn_force_stops_on_interleaved_cycle(
 ) -> None:
     """``A(x) -> B(x) -> A(x) -> B(x)`` must stop via the cycle detector.
 
-    The consecutive streak can never grow here, and neither the per-tool
-    (``_DIFF_ARGS_HARD_STOP_START``) nor the per-turn
-    (``_TURN_TOOL_CALL_HARD_STOP``) ceiling is reached — only the cycle-aware
-    punishment stops the loop.
+    The consecutive streak can never grow here, and the per-tool
+    different-args ceiling is not reached — only the cycle-aware punishment
+    stops the loop.
     """
     toolset = KimiToolset()
     toolset.add(_DummyTool())
@@ -214,7 +206,4 @@ async def test_turn_force_stops_on_interleaved_cycle(
     # ToolA replays its identical call on steps 1,3,5,7 -> cycle stop at 2*n-1
     expected_step = 2 * _CYCLE_FORCE_STOP - 1
     assert outcome.step_count == expected_step
-    # strictly below every other ceiling
-    assert expected_step < _TURN_TOOL_CALL_HARD_STOP
-    assert expected_step // 2 < _DIFF_ARGS_HARD_STOP_START
 
