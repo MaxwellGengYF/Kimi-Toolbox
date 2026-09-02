@@ -600,7 +600,7 @@ class Bash(CallableTool2[BashParams]):
 
     name: str = "bash"
     description: str = (
-        "Execute a bash command (POSIX syntax). Prefer `glob`/`grep` over "
+        "Execute a bash command (native POSIX syntax). Prefer `glob`/`grep` over "
         "`find`/`ls`/`grep`/`rg` for file and content search. "
         + _interactive_scope_text(is_shell=True)
     )
