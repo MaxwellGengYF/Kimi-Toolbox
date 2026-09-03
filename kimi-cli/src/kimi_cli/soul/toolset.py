@@ -736,6 +736,20 @@ def _make_turn_total_reminder(total_calls: int) -> str:
         "\n</system-reminder>"
     )
 
+
+def _has_reasoning_parts(parts: Iterable[ContentPart]) -> bool:
+    """True when the assistant content carries any non-empty thinking block.
+
+    A model that emits a reasoning block between tool calls is making
+    progress, so the infinity-loop detectors must not treat its identical or
+    cycling tool calls as a loop.  Empty ``ThinkPart``(s) (e.g. a provider
+    placeholder that carried no actual reasoning) do not count.
+    """
+    return any(
+        isinstance(part, ThinkPart) and bool(part.think)
+        for part in parts
+    )
+
 type RepeatAction = Literal["none", "r1", "r2", "r3", "stop"]
 
 
@@ -909,6 +923,8 @@ class KimiToolset:
         self._step_closed: bool = False
         self._dedup_triggered: bool = False
         self._force_stop_turn: bool = False
+        self._force_stop_reason: str | None = None
+        self._force_stop_key: ToolCallKey | None = None
         self._turn_total_calls: int = 0
 
         # "Different-args" per-tool call tracking (relaxed limitation)
@@ -1050,6 +1066,8 @@ class KimiToolset:
         self._step_closed = False
         self._dedup_triggered = False
         self._force_stop_turn = False
+        self._force_stop_reason = None
+        self._force_stop_key = None
         self._step_no = step_no
 
         # Detect new turn and reset per-tool different-args tracking
@@ -1088,6 +1106,36 @@ class KimiToolset:
             self._step_closed = True
         return list(self._current_step_calls)
 
+    def reset_loop_detectors(self) -> None:
+        """Reset all turn-scoped loop-detection counters.
+
+        Called by KimiSoul whenever the previous assistant step produced a
+        reasoning (ThinkPart) block: a model that thinks between tool calls is
+        making progress, so consecutive/cycle/diff-args/turn-total counters
+        and any loop force-stop trip state all restart from zero.
+
+        ``_previous_step_calls``/``_current_step_calls`` are intentionally not
+        cleared here — ``begin_step``/``end_step`` already handle the per-step
+        window and ``end_step()`` must still return this step's calls to
+        KimiSoul.  ``_dedup_triggered`` is also left alone: it is a per-step
+        flag owned by the current step and cleared by the next ``begin_step``.
+        """
+        self._consecutive_key = None
+        self._consecutive_count = 0
+        self._seen_call_keys = set()
+        self._call_key_counts.clear()
+        self._tool_call_counts.clear()
+        self._tool_warned_at.clear()
+        self._turn_total_calls = 0
+        # A reasoned step may itself have tripped the detectors mid-stream
+        # (``handle()`` marks the trip while parts stream).  The requirement
+        # says a thinking block between tool calls means progress, so clear the
+        # trip too — KimiSoul invokes this reset BEFORE consulting
+        # ``force_stop_turn``.
+        self._force_stop_turn = False
+        self._force_stop_reason = None
+        self._force_stop_key = None
+
     def _advance_consecutive_streak(self, calls: list[ToolCallKey]) -> None:
         for call_key in calls:
             if call_key == self._consecutive_key:
@@ -1115,6 +1163,26 @@ class KimiToolset:
     @property
     def force_stop_turn(self) -> bool:
         return self._force_stop_turn
+
+    @property
+    def force_stop_reason(self) -> str | None:
+        """Why the turn was flagged for a forced stop (``None`` when clear).
+
+        One of ``"adjacent-repeat"``, ``"cycle-repeat"`` or
+        ``"different-args-overuse"``.
+        """
+        return self._force_stop_reason
+
+    @property
+    def force_stop_key(self) -> ToolCallKey | None:
+        """The tool call key (``(tool_name, canonical_args)``) that tripped the
+        loop detector, when applicable."""
+        return self._force_stop_key
+
+    def _mark_force_stop(self, reason: str, call_key: ToolCallKey) -> None:
+        self._force_stop_turn = True
+        self._force_stop_reason = reason
+        self._force_stop_key = call_key
 
     def handle(self, tool_call: ToolCall) -> HandleResult:
         token = current_tool_call.set(tool_call)
@@ -1223,7 +1291,7 @@ class KimiToolset:
                 )
                 self._dedup_triggered = True
                 if action == "stop":
-                    self._force_stop_turn = True
+                    self._mark_force_stop("adjacent-repeat", call_key)
 
             # Cycle-aware repeat punishment.  The streak counter above only sees
             # *adjacent* repeats, so an interleaved cycle such as
@@ -1242,7 +1310,7 @@ class KimiToolset:
                 else:
                     reminder_text = reminder_text + cycle_reminder
                 if cycle_count >= _CYCLE_FORCE_STOP:
-                    self._force_stop_turn = True
+                    self._mark_force_stop("cycle-repeat", call_key)
 
             # Different-args per-tool overuse check (relaxed limitation)
             diff_args_reminder_text: str | None = None
@@ -1256,7 +1324,7 @@ class KimiToolset:
             # Hard per-tool call ceiling (different args): the model is grinding
             # with the same tool, so stop the turn instead of looping forever.
             if not is_cross_step_dup and call_count >= _DIFF_ARGS_HARD_STOP_START:
-                self._force_stop_turn = True
+                self._mark_force_stop("different-args-overuse", call_key)
 
             # Soft nudge for very long turns: instead of force-stopping, remind
             # the model how many tools it has called so it can decide to finish.

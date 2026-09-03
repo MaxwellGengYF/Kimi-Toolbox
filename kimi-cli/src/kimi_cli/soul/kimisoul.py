@@ -143,6 +143,69 @@ after a tool call and makes the prompt-level ``Resume to finish`` gate
 rarely needed.
 """
 
+# Bounded recovery budget for repeated-tool-call force-stops.  When the
+# toolset's cycle / streak / different-args loop detectors fire, we do NOT
+# end the turn silently (that would drop the user's request).  Instead we
+# feed the model up to this many plain-user recovery prompts that restate
+# the top-level requirement and demand either a different action or a
+# text-only progress summary.
+_MAX_LOOP_RECOVERY_ROUNDS = 3
+_LOOP_RECOVERY_TEXT_MARKER = "[loop-recovery]"
+
+
+def _make_loop_recovery_prompt(
+    user_requirement: str,
+    attempt: int,
+    max_attempts: int,
+    *,
+    loop_reason: str | None = None,
+    loop_tool: str | None = None,
+) -> str:
+    """Build a recovery prompt used when repeated-tool-call detection fires.
+
+    The prompt must be a REAL user message (never ``<system-reminder>``) so
+    ``strip_system_reminders`` cannot remove it before the next LLM step.
+    """
+    detail = ""
+    if loop_reason:
+        detail = f"\nLoop detector: {loop_reason}."
+    if loop_tool:
+        detail += f"\nRepeated tool: {loop_tool}."
+    lines = [
+        f"{_LOOP_RECOVERY_TEXT_MARKER} You are repeating tool calls without making progress.",
+        "",
+        f"Your original task from the user was: {user_requirement}",
+        "",
+        "Do ONE of the following in your next response:",
+        "1. Take a genuinely different action that advances the task, or",
+        "2. If you truly cannot complete the task, stop calling tools and return a "
+        "plain-text summary of what you already tried, what is blocking you, and "
+        "what is needed next.",
+        "",
+        "Do NOT call the same tool with the same or equivalent arguments again.",
+        f"(loop recovery {attempt}/{max_attempts})",
+    ]
+    if detail:
+        # Insert the loop-detector detail right after the marker line.
+        lines.insert(1, detail.strip())
+    return "\n".join(lines)
+
+
+def _synthesize_loop_recovery_text(user_requirement: str) -> str:
+    """Return a final plain-text fallback when the model keeps looping.
+
+    Guarantees the turn ALWAYS ends on a text block that answers the top-level
+    user requirement instead of silently stopping after a tool call.
+    """
+    return (
+        "I could not complete the original request without falling into a repeated "
+        "tool-call loop.\n\n"
+        f"Original request: {user_requirement}\n\n"
+        "Progress made so far is preserved in the session history above. Please "
+        "rephrase the request, narrow its scope, or provide additional context so "
+        "I can continue from where the previous attempts stopped."
+    )
+
 
 def _is_final_text_block(message: Message | None) -> bool:
     """Return ``True`` when *message* ends the turn on a plain text block.
@@ -163,6 +226,26 @@ def _is_final_text_block(message: Message | None) -> bool:
     if isinstance(last_part, TextPart) and last_part.text.strip():
         return True
     return False
+
+
+def _message_has_reasoning(message: Message | None) -> bool:
+    """True when the assistant message contains any non-empty ThinkPart.
+
+    Reasoning-enabled providers emit thinking blocks as ``ThinkPart``(s)
+    inside ``message.content``.  A step that produced such a block is
+    "reasoned": the infinity-loop detectors in ``KimiToolset`` must reset
+    because the model is making progress by thinking between tool calls.
+    """
+    if message is None:
+        return False
+    # Local import: keep the module-level import surface minimal (mirrors how
+    # the other *Part helpers in this file already rely on wire types).
+    from kosong.message import ThinkPart
+
+    return any(
+        isinstance(part, ThinkPart) and bool(part.think)
+        for part in (message.content or [])
+    )
 
 
 class _RateLimitAwareWait(wait_base):
@@ -1277,6 +1360,7 @@ class KimiSoul:
         step_no = 0
         self._current_step_no = 0
         continuation_rounds = 0
+        loop_recovery_rounds = 0
         while True:
             step_no += 1
 
@@ -1476,6 +1560,76 @@ class KimiSoul:
                         )
                         continue  # do not end the turn; force another step
 
+                # ── 2h-ii. Loop-recovery gate (repeated tool calls) ───────────
+                # When the toolset's cycle / streak / different-args loop
+                # detectors fire we must NOT end the turn silently: the user's
+                # request would be dropped with no answer.  Feed the model a
+                # bounded number of plain-user recovery prompts that restate
+                # the top-level requirement.  Only after the budget is
+                # exhausted do we fall through to a synthesized text answer.
+                if step_outcome.stop_reason == "tool_call_repeat":
+                    if loop_recovery_rounds < _MAX_LOOP_RECOVERY_ROUNDS:
+                        loop_recovery_rounds += 1
+                        logger.warning(
+                            "Repeated tool-call loop detected; recovery {round}/{max_rounds}",
+                            round=loop_recovery_rounds,
+                            max_rounds=_MAX_LOOP_RECOVERY_ROUNDS,
+                        )
+                        loop_reason: str | None = None
+                        loop_tool: str | None = None
+                        if isinstance(self._agent.toolset, KimiToolset):
+                            loop_reason = self._agent.toolset.force_stop_reason
+                            key = self._agent.toolset.force_stop_key
+                            if key is not None:
+                                loop_tool = key[0]
+                        recovery_text = _make_loop_recovery_prompt(
+                            self._current_turn_user_text
+                            or "<original user request is not available in this context>",
+                            loop_recovery_rounds,
+                            _MAX_LOOP_RECOVERY_ROUNDS,
+                            loop_reason=loop_reason,
+                            loop_tool=loop_tool,
+                        )
+                        wire_send(
+                            TextPart(
+                                text="\n[Recovering from repeated tool calls...]\n"
+                            )
+                        )
+                        await self._context.append_message(
+                            Message(
+                                role="user",
+                                content=[TextPart(text=recovery_text)],
+                            )
+                        )
+                        # Re-arm the toolset so the recovery step starts with a
+                        # fresh per-step dedup window (the toolset's
+                        # force-stop is cleared at the next begin_step; also
+                        # make the next LLM call proceed past the loop guard).
+                        continue
+
+                    # Recovery budget exhausted: never return with no final
+                    # text.  Synthesize a fallback that references the user
+                    # request so the session can hand control back cleanly.
+                    logger.warning(
+                        "Loop recovery budget exhausted; synthesizing final text "
+                        "for user requirement",
+                    )
+                    final_text = _synthesize_loop_recovery_text(
+                        self._current_turn_user_text
+                        or "<original user request is not available in this context>"
+                    )
+                    fallback_message = Message(
+                        role="assistant",
+                        content=[TextPart(text=final_text)],
+                    )
+                    await self._context.append_message(fallback_message)
+                    wire_send(TextPart(text=final_text))
+                    return TurnOutcome(
+                        stop_reason="no_tool_calls",
+                        final_message=fallback_message,
+                        step_count=step_no,
+                    )
+
                 # ═══════════════════════════════════════════════════════════════
                 # 3. TURN RESOLUTION
                 # ═══════════════════════════════════════════════════════════════
@@ -1492,12 +1646,24 @@ class KimiSoul:
                 # with a concise continuation prompt. This keeps the protection
                 # inside the LLM service and makes the prompt-level resume gate
                 # rarely needed.
+                #
+                # NOTE: the continuation must be a REAL user message (plain
+                # TextPart), NOT a ``<system-reminder>``. ``strip_system_reminders``
+                # runs at the start of every ``_step`` (2e.2a) and would remove a
+                # reminder before the LLM ever sees it, silently defeating this
+                # gate and letting the turn end on an empty message.
                 if (
                     step_outcome.stop_reason == "no_tool_calls"
                     and not _is_final_text_block(final_message)
                 ):
                     if continuation_rounds < _MAX_TEXT_BLOCK_CONTINUATION_ROUNDS:
                         continuation_rounds += 1
+                        logger.info(
+                            "Turn would end without a plain text block "
+                            "(continuation {round}/{max_rounds}); forcing another step",
+                            round=continuation_rounds,
+                            max_rounds=_MAX_TEXT_BLOCK_CONTINUATION_ROUNDS,
+                        )
                         wire_send(
                             TextPart(
                                 text="\n[Continue] The previous response did not end with a plain text block. Continuing...\n"
@@ -1507,18 +1673,44 @@ class KimiSoul:
                             Message(
                                 role="user",
                                 content=[
-                                    system_reminder(
-                                        "The previous response did not end with a plain text block. "
-                                        "Continue and finish with a plain text block summarizing what was done. "
-                                        "No trailing tool calls or reasoning."
+                                    TextPart(
+                                        text=(
+                                            "The previous response did not end with a plain text block. "
+                                            "Continue and finish with a plain text block summarizing what was done. "
+                                            "No trailing tool calls or reasoning."
+                                        )
                                     )
                                 ],
                             )
                         )
                         continue
+                    logger.warning(
+                        "Turn still ends without a plain text block after "
+                        "{max_rounds} continuation attempts; giving up",
+                        max_rounds=_MAX_TEXT_BLOCK_CONTINUATION_ROUNDS,
+                    )
+                    # Never end the turn without a plain text answer.  If the
+                    # model keeps refusing to emit text even after the
+                    # continuation rounds, synthesize a fallback that names the
+                    # original user requirement.
+                    fallback_text = _synthesize_loop_recovery_text(
+                        self._current_turn_user_text
+                        or "<original user request is not available in this context>"
+                    )
+                    fallback_message = Message(
+                        role="assistant",
+                        content=[TextPart(text=fallback_text)],
+                    )
+                    await self._context.append_message(fallback_message)
+                    wire_send(TextPart(text=fallback_text))
+                    final_message = fallback_message
 
                 return TurnOutcome(
-                    stop_reason=step_outcome.stop_reason,
+                    stop_reason=(
+                        "no_tool_calls"
+                        if step_outcome.stop_reason == "tool_call_repeat"
+                        else step_outcome.stop_reason
+                    ),
                     final_message=final_message,
                     step_count=step_no,
                 )
@@ -1915,6 +2107,20 @@ class KimiSoul:
         # ═══════════════════════════════════════════════════════════════════════
         # shield the context manipulation from interruption
         await asyncio.shield(self._grow_context(result, results))
+
+        # ── 2e.7.5 Reasoning-aware loop counting ─────────────────────────────
+        # A step that emitted a thinking block is progress: reset the toolset's
+        # loop detectors (counters AND any trip state set mid-stream by
+        # handle()) so detection only accumulates across consecutive
+        # no-thinking tool-call steps, and so a reasoned step never ends the
+        # turn with ``tool_call_repeat``.  This must run AFTER the assistant
+        # message is appended (2e.7) and BEFORE the outcome-resolution checks
+        # (2e.8) consult ``force_stop_turn``.
+        if (
+            isinstance(self._agent.toolset, KimiToolset)
+            and _message_has_reasoning(result.message)
+        ):
+            self._agent.toolset.reset_loop_detectors()
 
         # ═══════════════════════════════════════════════════════════════════════
         # 2e.8. OUTCOME RESOLUTION

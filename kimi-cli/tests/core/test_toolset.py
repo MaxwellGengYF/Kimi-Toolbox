@@ -22,13 +22,20 @@ from kimi_cli.soul.toolset import (
     KimiToolset,
     _build_platform_redirects,
     _collect_candidates,
+    _has_reasoning_parts,
     _make_diff_args_reminder,
     _parse_stringified_arguments,
     _repair_argument_format,
     _repair_todo_arguments,
     _unwrap_nested_arguments,
 )
-from kimi_cli.wire.types import TextPart, ToolCall, ToolResult
+from kimi_cli.wire.types import (
+    ContentPart,
+    TextPart,
+    ThinkPart,
+    ToolCall,
+    ToolResult,
+)
 
 
 class DummyParams(BaseModel):
@@ -937,6 +944,16 @@ async def test_interleaved_ab_cycle_is_punished():
     assert ts.force_stop_turn is True
 
 
+async def test_cycle_force_stop_reports_reason_and_key():
+    """The cycle detector records why/what tripped for soul-level recovery."""
+    ts = _make_toolset()
+    args = _call_args("x")
+    stop_step, _ = await _run_cycle(ts, [("ToolA", args), ("ToolB", args)])
+    assert stop_step == 7
+    assert ts.force_stop_reason == "cycle-repeat"
+    assert ts.force_stop_key == ("ToolA", '{"value":"x"}')
+
+
 async def test_cycle_punishment_is_per_key_not_per_tool():
     """Same tool with *different* args is not a cycle; only identical keys count."""
     ts = _make_toolset()
@@ -1683,3 +1700,174 @@ async def test_handle_repairs_relaxedly_stringified_arguments():
     assert isinstance(result, asyncio.Task)
     tr = await result
     assert tr.return_value.output == "relaxed"
+
+
+# --- Reasoning-gated loop detection reset --------------------------------
+# A model that emits a ThinkPart (thinking block) between tool calls is
+# making progress; the repeat/loop detectors must reset their counting
+# window so only consecutive no-thinking tool-call steps are punished.
+
+
+async def _inflate_cycle_state(ts: KimiToolset) -> None:
+    """Run enough A(x)->B(x) steps to reach warning territory (call 3, A#2)."""
+    args = _call_args("x")
+    await _run_cycle(ts, [("ToolA", args), ("ToolB", args)], max_steps=3)
+    assert ts.force_stop_turn is False
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 2
+
+
+async def test_reset_loop_detectors_clears_every_counter():
+    """The public reset clears every turn-scoped loop counter and trip state."""
+    ts = _make_toolset()
+    await _inflate_cycle_state(ts)
+
+    ts.reset_loop_detectors()
+
+    assert ts._consecutive_key is None
+    assert ts._consecutive_count == 0
+    assert ts._seen_call_keys == set()
+    assert ts._call_key_counts == {}
+    assert ts._tool_call_counts == {}
+    assert ts._tool_warned_at == {}
+    assert ts._turn_total_calls == 0
+    assert ts.force_stop_turn is False
+    assert ts.force_stop_reason is None
+    assert ts.force_stop_key is None
+
+
+async def test_reset_loop_detectors_allows_legitimate_rerun_after_reasoning():
+    """After a reasoning reset the same call is fresh work, not a cycle repeat."""
+    ts = _make_toolset()
+    await _inflate_cycle_state(ts)
+    ts.reset_loop_detectors()
+
+    args = _call_args("x")
+    ts.begin_step([], step_no=4, turn_id="T1")
+    result = ts.handle(
+        ToolCall(id="rerun", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(result, asyncio.Task)
+    tr = await result
+    assert tr.return_value.output == "a"
+    assert "already ran earlier this turn" not in tr.return_value.output
+    assert ts.force_stop_turn is False
+    assert ts._call_key_counts[(("ToolA"), '{"value":"x"}')] == 1
+
+
+async def test_adjacent_streak_restarts_after_reset():
+    """A reasoned step restarts the adjacent-repeat streak at the 3rd call."""
+    args = _call_args("x")
+    ts = _make_toolset()
+    previous: list[tuple[str, str]] = []
+    texts: list[str] = []
+
+    # First 12 consecutive identical calls -> sparse reminders at 3rd/8th/12th
+    # (the adjacent-repeat detector reminds on every call once past a threshold,
+    # so assert the exact threshold texts rather than a total count).
+    for step in range(1, 13):
+        ts.begin_step(previous, step_no=step, turn_id="turn-streak-reset")
+        result = ts.handle(
+            ToolCall(id=f"pre-{step}", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+        )
+        assert isinstance(result, asyncio.Task)
+        tr = await result
+        texts.append(str(tr.return_value.output))
+        previous = ts.end_step()
+    assert "Stop repeating the same tool call with identical parameters" in texts[2]
+    assert "Repeated identical call" in texts[7]
+    assert "Dead-end loop detected" in texts[11]
+    assert ts.force_stop_turn is False  # streak stops only at 16
+
+    # Reasoning step resets the consecutive streak AND the seen-set, so
+    # continued identical calls restart the ladder at the new 3rd call.
+    ts.reset_loop_detectors()
+    # The reset clears _seen_call_keys, so the first post-reset call is no
+    # longer a cross-step duplicate -> plain output, count 1.
+    post_texts: list[str] = []
+    for step in range(13, 16):
+        ts.begin_step(previous, step_no=step, turn_id="turn-streak-reset")
+        result = ts.handle(
+            ToolCall(id=f"post-{step}", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+        )
+        assert isinstance(result, asyncio.Task)
+        tr = await result
+        post_texts.append(str(tr.return_value.output))
+        previous = ts.end_step()
+    assert post_texts[0] == "a"  # no cross-step duplicate at all: count restarts at 1
+    assert "Stop repeating" in post_texts[1]  # the new 2nd identical call is a fresh duplicate
+    assert ts.force_stop_turn is False
+
+
+async def test_reasoned_step_resets_cycle_before_force_stop():
+    """A reasoning block between cycle occurrences delays the force-stop by a full round."""
+    args = _call_args("x")
+    ts = _make_toolset()
+    previous: list[tuple[str, str]] = []
+    seq = [("ToolA", args), ("ToolB", args)]
+
+    for step in range(1, 6):  # A B A B A  (A#3, one below the cycle force-stop)
+        tool, tool_args = seq[(step - 1) % len(seq)]
+        ts.begin_step(previous, step_no=step, turn_id="turn-reason-cycle")
+        result = ts.handle(
+            ToolCall(
+                id=f"cyc-{step}",
+                function=ToolCall.FunctionBody(name=tool, arguments=tool_args),
+            )
+        )
+        assert isinstance(result, asyncio.Task)
+        tr = await result
+        previous = ts.end_step()
+        if step == 5:
+            ts.reset_loop_detectors()  # the reasoning step (ThinkPart) between calls
+
+    # After reset, A(x) needs its own 4th occurrence to force-stop -> A B A B A B A = step 12.
+    stop_step: int | None = None
+    for step in range(6, 20):
+        tool, tool_args = seq[(step - 1) % len(seq)]
+        ts.begin_step(previous, step_no=step, turn_id="turn-reason-cycle")
+        result = ts.handle(
+            ToolCall(
+                id=f"cyc-{step}",
+                function=ToolCall.FunctionBody(name=tool, arguments=tool_args),
+            )
+        )
+        assert isinstance(result, asyncio.Task)
+        await result
+        previous = ts.end_step()
+        if ts.force_stop_turn:
+            stop_step = step
+            break
+    assert stop_step == 12
+    assert ts.force_stop_reason == "cycle-repeat"
+
+
+async def test_reset_loop_detectors_clears_force_stop_trip():
+    """A reasoned step clears a mid-stream force-stop trip so it cannot end the turn."""
+    ts = _make_toolset()
+    args = _call_args("x")
+    stop_step, _ = await _run_cycle(ts, [("ToolA", args), ("ToolB", args)])
+    assert stop_step == 7
+    assert ts.force_stop_turn is True
+    assert ts.force_stop_reason == "cycle-repeat"
+    assert ts.force_stop_key is not None
+
+    ts.reset_loop_detectors()
+    assert ts.force_stop_turn is False
+    assert ts.force_stop_reason is None
+    assert ts.force_stop_key is None
+    assert ts._turn_total_calls == 0
+
+
+def test_has_reasoning_parts_helper():
+    """The toolset reasoning-part helper only accepts non-empty ThinkParts."""
+    assert _has_reasoning_parts([ThinkPart(think="let me think")]) is True
+    assert _has_reasoning_parts([ThinkPart(think="")]) is False
+    assert _has_reasoning_parts([TextPart(text="answer")]) is False
+    assert _has_reasoning_parts([TextPart(text="x"), ThinkPart(think="why")]) is True
+    assert _has_reasoning_parts([]) is False
+
+
+def test_has_reasoning_parts_accepts_generic_content_parts():
+    """The helper is typed on ContentPart and accepts any part subclass at runtime."""
+    parts: list[ContentPart] = [ThinkPart(think="reason")]
+    assert _has_reasoning_parts(parts) is True

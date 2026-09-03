@@ -82,6 +82,7 @@ class _RepeatChatProvider:
     def __init__(self, cycle: Sequence[tuple[str, str]] | None = None) -> None:
         self._n = 0
         self._cycle: Sequence[tuple[str, str]] = cycle or [("ToolA", '{"value":"x"}')]
+        self._histories: list[list[Message]] = []
 
     @property
     def model_name(self) -> str:
@@ -97,6 +98,7 @@ class _RepeatChatProvider:
         tools: Sequence[Tool],
         history: Sequence[Message],
     ) -> _RepeatStream:
+        self._histories.append(list(history))
         name, arguments = self._cycle[self._n % len(self._cycle)]
         self._n += 1
         tc = ToolCall(
@@ -145,7 +147,12 @@ async def test_turn_force_stops_on_adjacent_identical_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn replaying one identical call ends via the consecutive-streak guard."""
+    """A turn replaying one identical call must NOT end silently.
+
+    The toolset's consecutive-streak guard fires; the soul then runs bounded
+    loop-recovery prompts and finally returns a synthesized plain-text answer
+    that references the user requirement, never an empty tool-only stop.
+    """
     toolset = KimiToolset()
     toolset.add(_DummyTool())
     llm = LLM(
@@ -165,8 +172,14 @@ async def test_turn_force_stops_on_adjacent_identical_calls(
 
     outcome = await soul._turn(Message(role="user", content="go"))
 
-    assert outcome.stop_reason == "tool_call_repeat"
-    assert outcome.step_count == _REPEAT_FORCE_STOP_STREAK
+    # The turn must end on a plain-text answer, never with an empty stop.
+    assert outcome.stop_reason == "no_tool_calls"
+    assert outcome.final_message is not None
+    assert outcome.final_message.content
+    text = outcome.final_message.extract_text(" ")
+    assert "Original request: go" in text
+    # The loop is caught at the consecutive-streak guard, then recovery runs.
+    assert outcome.step_count >= _REPEAT_FORCE_STOP_STREAK
 
 
 @pytest.mark.asyncio
@@ -175,11 +188,12 @@ async def test_turn_force_stops_on_interleaved_cycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``A(x) -> B(x) -> A(x) -> B(x)`` must stop via the cycle detector.
+    """``A(x) -> B(x) -> A(x) -> B(x)`` must NOT end silently.
 
     The consecutive streak can never grow here, and the per-tool
     different-args ceiling is not reached — only the cycle-aware punishment
-    stops the loop.
+    stops the loop. The soul must convert that into a recovery prompt and a
+    final plain-text answer for the user requirement.
     """
     toolset = KimiToolset()
     toolset.add(_DummyTool())
@@ -202,8 +216,75 @@ async def test_turn_force_stops_on_interleaved_cycle(
 
     outcome = await soul._turn(Message(role="user", content="go"))
 
-    assert outcome.stop_reason == "tool_call_repeat"
-    # ToolA replays its identical call on steps 1,3,5,7 -> cycle stop at 2*n-1
-    expected_step = 2 * _CYCLE_FORCE_STOP - 1
-    assert outcome.step_count == expected_step
+    assert outcome.stop_reason == "no_tool_calls"
+    assert outcome.final_message is not None
+    assert outcome.final_message.content
+    text = outcome.final_message.extract_text(" ")
+    assert "Original request: go" in text
+    # ToolA replays its identical call on steps 1,3,5,7 -> cycle stop at 2*n-1,
+    # then the soul runs its bounded recovery rounds.
+    cycle_stop = 2 * _CYCLE_FORCE_STOP - 1
+    assert outcome.step_count >= cycle_stop
+
+
+@pytest.mark.asyncio
+async def test_loop_recovery_prompt_reaches_llm_and_requirement_kept(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the cycle detector fires, recovery prompts must reach the LLM.
+
+    Regression for the session-truncation symptom: the toolset's
+    ``Interleaved ('cyclic') repeat detection`` used to force-stop the turn
+    with no final text.  Now the soul injects plain-user recovery prompts
+    that restate the top-level user requirement, and if the model keeps
+    looping the turn ends on a synthesized text fallback referencing it.
+    """
+    toolset = KimiToolset()
+    toolset.add(_DummyTool())
+    toolset.add(_DummyToolB())
+    args = '{"value":"x"}'
+    provider = _RepeatChatProvider([("ToolA", args), ("ToolB", args)])
+    llm = LLM(
+        chat_provider=provider,
+        max_context_size=100_000,
+        capabilities=set(),
+    )
+    soul = _make_soul(runtime, llm, toolset, tmp_path)
+
+    monkeypatch.setattr(kimisoul_module, "wire_send", lambda _msg: None)
+
+    async def _noop_checkpoint() -> None:
+        return None
+
+    monkeypatch.setattr(soul, "_checkpoint", _noop_checkpoint)
+    monkeypatch.setattr(soul._denwa_renji, "set_n_checkpoints", lambda _n: None)
+
+    outcome = await soul._turn(Message(role="user", content="deploy the service"))
+
+    # Never ends without a top-level answer.
+    assert outcome.stop_reason == "no_tool_calls"
+    assert outcome.final_message is not None
+    final_text = outcome.final_message.extract_text(" ")
+    assert "deploy the service" in final_text
+
+    # The recovery prompts must actually be visible to later LLM steps
+    # (not stripped as system reminders).
+    recovery_calls = [
+        hist
+        for hist in provider._histories
+        if any(
+            m.role == "user" and "[loop-recovery]" in m.extract_text(" ")
+            for m in hist
+        )
+    ]
+    assert recovery_calls, "No LLM call ever saw a loop-recovery prompt"
+    recovery_texts = [
+        m.extract_text(" ")
+        for hist in recovery_calls
+        for m in hist
+        if m.role == "user" and "[loop-recovery]" in m.extract_text(" ")
+    ]
+    assert any("deploy the service" in t for t in recovery_texts)
 
