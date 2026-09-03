@@ -3,3 +3,4 @@ Execute a PowerShell command (pwsh -Command) and return its stdout/stderr. Each 
 Quick reference:
 - Cmdlets use Verb-Noun names: Get-ChildItem, Get-Content, Set-Location, Copy-Item, Move-Item, Remove-Item, New-Item, Select-String.
 - Prefer glob/grep over Get-ChildItem/Select-String for search.
+- Use `| Out-Null` or `> $null`, not `> nul`, to discard output — `> nul` would create an empty file named `nul` in PowerShell.

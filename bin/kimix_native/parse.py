@@ -33,14 +33,14 @@ Native-path notes (documented deviations):
 
 from __future__ import annotations
 
-import re
+import regex as re
 
 from . import _native, use_native
 from . import _parse_compat as _compat
 from . import _shell_compat as _shell
 
 # Reference Comment / ParseResult / BashFix / PwshFix shapes.
-from ._parse_compat import Comment, ParseResult, BaseParser  # noqa: F401
+from ._parse_compat import BaseParser, Comment, ParseResult  # noqa: F401
 from ._shell_compat import BashFix, PwshFix  # noqa: F401
 
 _LANG_NAMES = ("c", "python", "shell", "sql", "html", "lisp", "pascal")
@@ -103,6 +103,16 @@ _SHELL_WRAPPER_RE = _WRAPPER_RE
 # ``--chdir=/tmp`` route too, as do paths inside quoted data) — a harmless
 # perf cost, never a behaviour change.
 _GIT_BASH_ABS_PATH_RE = re.compile(r"/(?:tmp\b|[A-Za-z]/)")
+
+# Windows-style null-device redirections (``> nul``, ``2> NUL``, ``&> nul``,
+# ``>> nul``) create an accidental empty ``nul`` file in Git Bash and
+# PowerShell.  The nul rewrite was added after the compiled PARSE kernel was
+# built, so any command that might contain such a redirection is routed to the
+# pure-Python reference (``_shell_compat`` mirrors ``bash_fix.py`` /
+# ``pwsh_fix.py``) to keep behaviour bit-identical.  Matching is deliberately
+# broad (``nul`` inside a quoted string routes too) — a harmless perf cost for
+# rare commands, never a behaviour change.
+_NUL_REDIRECT_RE = re.compile(r"[0-9]*&?>+\|?[ \t]*nul\b", re.IGNORECASE)
 
 _COMPAT_PARSERS = {
     "c": _compat.CParser,
@@ -496,8 +506,12 @@ def fix_bash_command(cmd: str) -> BashFix:
     # which the compiled kernel also predates.
     if _GIT_BASH_ABS_PATH_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
+    # Same for null-device redirections (``> nul`` etc.), which the compiled
+    # kernel also predates.
+    if _NUL_REDIRECT_RE.search(cmd):
+        return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
-    edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)
+    edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)[:3]
     names = [n.decode("utf-8", "surrogatepass") for n in names_bytes]
     if not names and not edits:
         source = cmd
@@ -526,7 +540,7 @@ def _process_unquoted(cmd: str) -> str:
         return _shell._process_unquoted(cmd)
     # No Unicode-sensitive decisions in this scanner: native on any input.
     data = cmd.encode("utf-8", "surrogatepass")
-    edits, _, _ = _native.parse.shell_scan("bash_process_unquoted", data)
+    edits, _, _ = _native.parse.shell_scan("bash_process_unquoted", data)[:3]
     return _apply_edits(data, edits).decode("utf-8", "surrogatepass")
 
 
@@ -551,6 +565,10 @@ def fix_pwsh_command(cmd: str) -> PwshFix | None:
     if not cmd or not cmd.strip():
         return None
     if not _shell_native("pwsh_fix", cmd):
+        return _shell.fix_pwsh_command(cmd)
+    # Same for null-device redirections (``> nul`` etc.), which the compiled
+    # kernel also predates.
+    if _NUL_REDIRECT_RE.search(cmd):
         return _shell.fix_pwsh_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     code = _native.parse.pwsh_fix_warning(data)

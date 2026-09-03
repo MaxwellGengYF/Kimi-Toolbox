@@ -53,6 +53,13 @@ class TestPrepareBashCommand:
         else:
             assert result == r"cat src\a.py"
 
+    def test_nul_redirect_rewritten(self) -> None:
+        result = shell_common.prepare_bash_command("echo hi > nul")
+        if sys.platform == "win32":
+            assert result == "echo hi > /dev/null"
+        else:
+            assert result == "echo hi > nul"
+
 
 class TestBashArgv:
     def test_login_argv_and_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,6 +136,14 @@ class TestPwshArgv:
         assert "transformed" in argv[7]
         assert _is_powershell_name(argv[0])
         assert hint == f"PowerShell executable not found: {argv[0]}"
+
+    def test_nul_redirect_rewritten(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from kimix.tools.file.bash import pwsh_tool
+
+        monkeypatch.setattr(pwsh_tool, "find_pwsh", lambda: r"C:\pwsh.exe")
+        argv, _hint = shell_common.pwsh_argv("Write-Output hi > nul")  # type: ignore[misc]
+        assert argv is not None
+        assert "try{Write-Output hi > $null}" in argv[7]
 
 
 class TestPwshFileArgv:

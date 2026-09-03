@@ -161,49 +161,35 @@ def _make_loop_recovery_prompt(
     loop_reason: str | None = None,
     loop_tool: str | None = None,
 ) -> str:
-    """Build a recovery prompt used when repeated-tool-call detection fires.
+    """Build a concise recovery prompt for a repeated-tool-call stop.
 
-    The prompt must be a REAL user message (never ``<system-reminder>``) so
+    Returns a real user message (never ``<system-reminder>``) so
     ``strip_system_reminders`` cannot remove it before the next LLM step.
     """
-    detail = ""
-    if loop_reason:
-        detail = f"\nLoop detector: {loop_reason}."
-    if loop_tool:
-        detail += f"\nRepeated tool: {loop_tool}."
     lines = [
-        f"{_LOOP_RECOVERY_TEXT_MARKER} You are repeating tool calls without making progress.",
-        "",
-        f"Your original task from the user was: {user_requirement}",
-        "",
-        "Do ONE of the following in your next response:",
-        "1. Take a genuinely different action that advances the task, or",
-        "2. If you truly cannot complete the task, stop calling tools and return a "
-        "plain-text summary of what you already tried, what is blocking you, and "
-        "what is needed next.",
-        "",
-        "Do NOT call the same tool with the same or equivalent arguments again.",
-        f"(loop recovery {attempt}/{max_attempts})",
+        f"{_LOOP_RECOVERY_TEXT_MARKER} Stop repeating tool calls.",
+        f"Original task: {user_requirement}",
+        "Next: do something different, or stop tools and summarize progress/blockers.",
+        f"(recovery {attempt}/{max_attempts})",
     ]
-    if detail:
-        # Insert the loop-detector detail right after the marker line.
-        lines.insert(1, detail.strip())
+    if loop_reason:
+        lines.insert(1, f"Loop detector: {loop_reason}.")
+    if loop_tool:
+        lines.insert(2, f"Repeated tool: {loop_tool}.")
     return "\n".join(lines)
 
 
 def _synthesize_loop_recovery_text(user_requirement: str) -> str:
-    """Return a final plain-text fallback when the model keeps looping.
+    """Return a concise plain-text fallback when the model keeps looping.
 
-    Guarantees the turn ALWAYS ends on a text block that answers the top-level
-    user requirement instead of silently stopping after a tool call.
+    Guarantees the turn ends on a text block that answers the top-level user
+    requirement instead of silently stopping after a tool call.
     """
     return (
-        "I could not complete the original request without falling into a repeated "
-        "tool-call loop.\n\n"
+        "I could not complete the task without repeating tool calls.\n\n"
         f"Original request: {user_requirement}\n\n"
-        "Progress made so far is preserved in the session history above. Please "
-        "rephrase the request, narrow its scope, or provide additional context so "
-        "I can continue from where the previous attempts stopped."
+        "Progress is preserved above. Rephrase, narrow the scope, or add context "
+        "so I can continue."
     )
 
 

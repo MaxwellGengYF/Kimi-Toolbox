@@ -131,6 +131,7 @@ def fix_bash_command(command: str) -> BashFix:
             replacements=tuple(result.replacements),
             path_changes=tuple(result.path_changes),
             shell_wrappers=tuple(getattr(result, "shell_wrappers", ())),
+            nul_fixes=tuple(getattr(result, "nul_fixes", ())),
         )
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
@@ -143,4 +144,5 @@ def fix_bash_command(command: str) -> BashFix:
         replacements=tuple(result.replacements),
         path_changes=tuple(result.path_changes),
         shell_wrappers=tuple(getattr(result, "shell_wrappers", ())),
+        nul_fixes=tuple(getattr(result, "nul_fixes", ())),
     )

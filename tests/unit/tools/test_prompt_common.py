@@ -45,11 +45,11 @@ def _build_tools() -> dict[str, Any]:
     sentences are always appended, keeping the snapshots deterministic on
     every platform.
     """
+    from kimix.tools.file import run as rt
     from kimix.tools.file.bash import bash_tool as bt
     from kimix.tools.file.bash import pwsh_tool as pt
     from kimix.tools.file.bash.bash_tool import Bash
     from kimix.tools.file.bash.pwsh_tool import Powershell
-    from kimix.tools.file import run as rt
     from kimix.tools.file.run import Run
     from kimix.tools.py import python
 
@@ -175,12 +175,14 @@ def test_descriptions_unchanged() -> None:
     )
 
     assert tools["bash"].description == (
-        "Execute a bash command (POSIX syntax). Prefer `glob`/`grep` over "
+        "Execute a bash command (native POSIX syntax). Prefer `glob`/`grep` over "
         "`find`/`ls`/`grep`/`rg` for file and content search. "
         "For long sessions: interactive=True, then task_id=<id> to continue; "
         "wait_for_pattern to block; job_output to monitor; send 'exit' to close. "
         "On Windows, unquoted backslash paths auto-convert to forward slashes; "
-        "quoted backslashes are preserved."
+        "quoted backslashes are preserved. "
+        "Use /dev/null, not `> nul`, to discard output — `> nul` would create "
+        "an empty file named `nul` in Git Bash."
         + self_kill_hint_text
     )
 

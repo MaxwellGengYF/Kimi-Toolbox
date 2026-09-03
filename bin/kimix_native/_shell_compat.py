@@ -717,14 +717,18 @@ class BashFix:
     ``/c/x``), or cmd.exe ``/d`` flag were rewritten for Git Bash.
     ``shell_wrappers`` records each redundant ``bash``/``sh``
     invocation that was unwrapped (``bash <cmd> ...`` or ``bash -c <script>``)
-    so the command runs directly in the Bash tool.  Empty tuples mean the
-    command was returned byte-for-byte unchanged.
+    so the command runs directly in the Bash tool.  ``nul_fixes`` records each
+    unquoted redirection target ``nul``/``NUL`` that was rewritten to
+    ``/dev/null`` (Git Bash treats ``nul`` as an ordinary filename, silently
+    creating an empty ``nul`` file instead of discarding output).  Empty
+    tuples mean the command was returned byte-for-byte unchanged.
     """
 
     command: str
     replacements: tuple[str, ...] = ()
     path_changes: tuple[str, ...] = ()
     shell_wrappers: tuple[str, ...] = ()
+    nul_fixes: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -733,6 +737,7 @@ class BashFix:
             bool(self.replacements)
             or bool(self.path_changes)
             or bool(self.shell_wrappers)
+            or bool(self.nul_fixes)
         )
 
     @property
@@ -754,6 +759,13 @@ class BashFix:
             names = ", ".join(f"`{name}`" for name in self.shell_wrappers)
             parts.append(
                 f"Removed redundant shell wrapper(s): {names}."
+            )
+        if self.nul_fixes:
+            words = ", ".join(f"`{word}`" for word in self.nul_fixes)
+            parts.append(
+                "Rewrote null-device redirection target(s) for Git Bash: "
+                f"{words} -> `/dev/null` (an unquoted `nul` would otherwise "
+                "create an empty file named `nul`)."
             )
         return " ".join(parts)
 
@@ -777,7 +789,7 @@ class _BashHereDoc:
 class _BashFixScanner:
     """Conservative scanner for Bash executable command positions."""
 
-    __slots__ = ("s", "n", "edits", "names", "path_notes", "shell_notes", "heredoc_events", "nest_depth")
+    __slots__ = ("s", "n", "edits", "names", "path_notes", "shell_notes", "heredoc_events", "nest_depth", "nul_fixes")
 
     def __init__(self, command: str) -> None:
         self.s = command
@@ -788,6 +800,7 @@ class _BashFixScanner:
         self.shell_notes: list[str] = []
         self.heredoc_events: list[tuple[int, int]] = []
         self.nest_depth = 0
+        self.nul_fixes: list[str] = []
 
     def fix(self) -> BashFix:
         try:
@@ -796,7 +809,12 @@ class _BashFixScanner:
             # Malformed or adversarial nesting must never make the Bash tool
             # fail before Bash itself can report the syntax error.
             return BashFix(self.s)
-        if not self.names and not self.edits and not self.shell_notes:
+        if (
+            not self.names
+            and not self.edits
+            and not self.shell_notes
+            and not self.nul_fixes
+        ):
             return BashFix(self.s)
         unique_names = list(dict.fromkeys(self.names))
         definitions = "\n".join(_FALLBACKS[name] for name in unique_names)
@@ -814,6 +832,7 @@ class _BashFixScanner:
             tuple(self.names),
             tuple(self.path_notes),
             tuple(self.shell_notes),
+            tuple(self.nul_fixes),
         )
 
     def _build_source(self) -> str:
@@ -1103,6 +1122,7 @@ class _BashFixScanner:
         command_expected = True
         redirect_expected = False
         redirect_resume = True
+        redirect_op: str | None = None
         wrapper: _BashWrapper | None = None
         heredoc_operator: str | None = None
         herestring_flag = False
@@ -1131,6 +1151,7 @@ class _BashFixScanner:
                     pending_heredocs.clear()
                 command_expected = True
                 redirect_expected = False
+                redirect_op = None
                 heredoc_operator = None
                 herestring_flag = False
                 wrapper = None
@@ -1157,6 +1178,7 @@ class _BashFixScanner:
                 if op:
                     redirect_resume = command_expected
                     redirect_expected = True
+                    redirect_op = op
                     herestring_flag = op == "<<<"
                     if op in {"<<", "<<-"}:
                         # The delimiter is captured when the following word is
@@ -1191,13 +1213,29 @@ class _BashFixScanner:
                         )
                 elif not herestring_flag:
                     raw_word = s[i:word_end]
-                    replacement = self._path_replacement(raw_word)
-                    if replacement is not None:
-                        self.edits.append((i, word_end, replacement))
-                        self.path_notes.append(raw_word)
+                    # ``> nul`` / ``2> NUL`` / ``&> nul`` / ``>> nul`` would
+                    # silently create a file literally named ``nul`` in Git
+                    # Bash (Windows-style null-device redirection).  Only an
+                    # *unquoted* literal ``nul`` target is rewritten; quoted
+                    # ``'nul'``/``"nul"`` is an intentional filename, and input
+                    # redirections (``< nul``) never create a file.
+                    if (
+                        redirect_op is not None
+                        and not redirect_op.startswith("<")
+                        and raw_word.casefold() == "nul"
+                        and not any(q in raw_word for q in "'\"\\`$")
+                    ):
+                        self.edits.append((i, word_end, "/dev/null"))
+                        self.nul_fixes.append(raw_word)
+                    else:
+                        replacement = self._path_replacement(raw_word)
+                        if replacement is not None:
+                            self.edits.append((i, word_end, replacement))
+                            self.path_notes.append(raw_word)
                 i = word_end
                 command_expected = redirect_resume
                 redirect_expected = False
+                redirect_op = None
                 heredoc_operator = None
                 continue
 
@@ -2575,6 +2613,7 @@ def fix_bash_command(command: str) -> BashFix:
         result.replacements,
         result.path_changes,
         result.shell_wrappers,
+        result.nul_fixes,
     )
 
 
@@ -2932,6 +2971,79 @@ _W_TRAILING_CONTINUATION = (
     "appended a newline so the continuation does not join with the "
     "try/catch wrapper used to execute the command."
 )
+_W_NUL_REDIRECT = (
+    "Rewrote Windows-style null-device redirection target(s) `nul` to "
+    "`$null` so PowerShell discards the output instead of creating a file "
+    "named `nul`."
+)
+
+# Redirection operators that can create a file in PowerShell: ``>``, ``>>``,
+# ``*>`` (all streams) and an fd/stream prefix such as ``2>`` / ``2>>``.  A
+# target that is the unquoted word ``nul`` is the Windows null-device spelling
+# (cmd.exe ``> NUL``); PowerShell treats it as an ordinary filename and would
+# create an empty ``nul`` file, so it is rewritten to the ``$null`` sink.
+_PWSH_NUL_REDIRECT_RE = re.compile(
+    r"(?P<op>(?:[0-9]|\*)?>+)[ \t]*(?P<target>nul)(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_pwsh_nul_redirections(cmd: str) -> tuple[str, str]:
+    """Rewrite unquoted ``> nul``-style redirections to the ``$null`` sink.
+
+    Returns ``(rewritten_command, warning)`` where *warning* is
+    ``_W_NUL_REDIRECT`` when at least one target was rewritten, else ``""``.
+
+    Quoting/comment/here-string awareness comes from :func:`_build_region_mask`
+    (the same region scanner the PS7->PS5.1 transformer uses), so a literal
+    ``nul`` inside a string/comment is never touched.  After ``--%`` the rest
+    of the line is passed literally to the native executable (where ``> NUL``
+    is valid cmd.exe syntax), so those regions are carved out of the mask too.
+    Append redirections (``>> nul`` / ``2>> nul``) collapse to a single
+    ``>``/``2>`` because appending to ``$null`` is meaningless.
+    """
+    if "nul" not in cmd.casefold() or ">" not in cmd:
+        return cmd, ""
+    mask = _build_region_mask(cmd)
+    n = len(cmd)
+    # ``--%`` stop-parsing: the rest of that line is literal for the native
+    # command (cmd.exe ``> NUL`` is valid there and must not be rewritten).
+    i = 0
+    while i < n:
+        if cmd[i] == "-" and cmd.startswith("--%", i) and mask[i]:
+            if i == 0 or not (cmd[i - 1].isalnum() or cmd[i - 1] == "_"):
+                line_end = cmd.find("\n", i + 3)
+                end = n if line_end < 0 else line_end
+                mask[i:end] = b"\x00" * (end - i)
+                i = end
+                continue
+        i += 1
+
+    out: list[str] = []
+    previous = 0
+    changed = False
+    for m in _PWSH_NUL_REDIRECT_RE.finditer(cmd):
+        op_start, op_end = m.span("op")
+        target_start, target_end = m.span("target")
+        # Only code-region matches are rewritten (strings/comments are 0).
+        if not (mask[op_start] and mask[target_end - 1]):
+            continue
+        # Ensure every byte of the op+whitespace+target run is code.  A quoted
+        # target (``> 'nul'``) has mask 0 at the quote, so the target_end-1
+        # check above already preserves it.
+        op_text = m.group("op")
+        prefix = op_text.rstrip(">")  # preserve fd/stream prefix: 2>, *>
+        between = cmd[op_end:target_start]
+        space = " " if between else ""
+        replacement = prefix + ">" + space + "$null"
+        out.append(cmd[previous:op_start])
+        out.append(replacement)
+        previous = target_end
+        changed = True
+    if not changed:
+        return cmd, ""
+    out.append(cmd[previous:])
+    return "".join(out), _W_NUL_REDIRECT
 
 
 @dataclass(frozen=True)
@@ -2957,22 +3069,24 @@ def fix_pwsh_command(cmd: str) -> PwshFix | None:
 
     Returns a :class:`PwshFix` (``command`` may equal *cmd* when the command
     is already legal), or ``None`` when the command cannot be repaired.
+
+    Null-device redirections (``> nul`` etc.) are rewritten both before and
+    after the quote-repair scanner: the first pass catches plain commands that
+    would otherwise skip the scanner's fast path, and the second pass catches
+    any target newly exposed when the scanner appends a missing closing quote
+    or newline.
     """
     if not cmd or not cmd.strip():
         return None
-    # Fast path: no quote/comment/continuation/here-string/stop-parsing
-    # characters at all — the command is valid as-is and cannot affect the
-    # try/catch wrapper.  Avoids the O(n) Python scan for plain commands.
-    if (
-        '"' not in cmd
-        and "'" not in cmd
-        and "#" not in cmd
-        and "`" not in cmd
-        and "@" not in cmd
-        and "--%" not in cmd
-    ):
-        return PwshFix(cmd, "")
-    return _PwshScanner(cmd).fix()
+    first, nul_warning = _rewrite_pwsh_nul_redirections(cmd)
+    if not first.strip():
+        return None
+    result = _PwshScanner(first).fix()
+    if result is None:
+        return None
+    second, nul_warning_after = _rewrite_pwsh_nul_redirections(result.command)
+    warnings = [w for w in (nul_warning, result.warning, nul_warning_after) if w]
+    return PwshFix(second, "\n".join(warnings))
 
 
 class _PwshScanner:

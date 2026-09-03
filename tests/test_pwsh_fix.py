@@ -34,16 +34,13 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kimi_cli.session import Session
 
 from kimi_agent_sdk import ToolError, ToolOk
-from kimi_cli.session import Session
-from kimi_cli.tools import SkipThisTool
-
+from kimix.tools.background.utils import _pop_task_data
 from kimix.tools.file.bash import Powershell
 from kimix.tools.file.bash.pwsh_fix import PwshFix, fix_pwsh_command
-from kimix.tools.file.bash.pwsh_tool import PowershellParams, _PWSH_CONSOLE_INIT
-from kimix.tools.background.utils import _pop_task_data
-
+from kimix.tools.file.bash.pwsh_tool import _PWSH_CONSOLE_INIT, PowershellParams
 
 PWSH = shutil.which("pwsh")
 NEEDS_PWSH = pytest.mark.skipif(PWSH is None, reason="pwsh is not installed")
@@ -491,6 +488,76 @@ class TestFixPwshCommandParserCorners:
             assert fix is not None
             assert fix.command == cmd
             assert not fix.changed
+
+
+# ============================================================================
+# nul redirection -> $null rewrite
+# ============================================================================
+
+class TestFixPwshCommandNulRedirect:
+    @pytest.mark.parametrize(
+        ("cmd", "expected"),
+        [
+            ("Write-Output hi > nul", "Write-Output hi > $null"),
+            ("Write-Output hi >NUL", "Write-Output hi >$null"),
+            ("Write-Output hi >> nul", "Write-Output hi > $null"),
+            ("Write-Output hi >nul", "Write-Output hi >$null"),
+            ("Write-Output hi 2> nul", "Write-Output hi 2> $null"),
+            ("Write-Output hi 2>> nul", "Write-Output hi 2> $null"),
+            ("Write-Output hi *> nul", "Write-Output hi *> $null"),
+            ("Write-Output 'nul' > nul", "Write-Output 'nul' > $null"),
+        ],
+    )
+    def test_rewrites_unquoted_nul_target(self, cmd: str, expected: str) -> None:
+        fix = fix_pwsh_command(cmd)
+        assert fix is not None
+        assert fix.command == expected
+        assert fix.changed is True
+        assert "nul" in fix.warning
+        assert "$null" in fix.warning
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "Write-Output hi > 'nul'",
+            'Write-Output hi > "nul"',
+            "cmd /c echo --% > nul\nWrite-Output after",
+            "cmd /c echo --% > nul",
+            'Write-Output "hi > nul"',
+            "Write-Output 'text > nul'",
+            "# comment > nul\nWrite-Output hi",
+            "Write-Output nul",
+            "Write-Output hi > nul.txt",
+            "Write-Output hi > $null",
+        ],
+    )
+    def test_preserved_cases_are_unchanged(self, cmd: str) -> None:
+        fix = fix_pwsh_command(cmd)
+        assert fix is not None
+        if cmd == "cmd /c echo --% > nul":
+            # The stop-parsing marker itself forces a trailing newline so the
+            # try/catch wrapper is not swallowed; the ``> nul`` text is kept.
+            assert fix.changed is True
+            assert fix.command == cmd + "\n"
+            assert "> nul" in fix.command
+            assert "$null" not in fix.command
+            return
+        assert fix.command == cmd
+        assert fix.changed is False
+        assert fix.warning == ""
+
+    def test_multiple_targets_all_rewritten(self) -> None:
+        fix = fix_pwsh_command(
+            "Write-Output a > nul; Write-Output b >> nul; Write-Output c 2> nul"
+        )
+        assert fix is not None
+        assert (
+            fix.command
+            == "Write-Output a > $null; Write-Output b > $null; Write-Output c 2> $null"
+        )
+        assert fix.changed is True
+        assert "nul" in fix.warning
+        assert "$null" in fix.warning
 
 
 # ============================================================================

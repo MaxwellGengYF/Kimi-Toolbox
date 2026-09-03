@@ -621,7 +621,9 @@ class Bash(CallableTool2[BashParams]):
         if sys.platform == "win32":
             self.description += (
                 " On Windows, unquoted backslash paths auto-convert to forward slashes; "
-                "quoted backslashes are preserved."
+                "quoted backslashes are preserved. "
+                "Use /dev/null, not `> nul`, to discard output — `> nul` would create "
+                "an empty file named `nul` in Git Bash."
             )
 
         # Pre-normalize forbidden commands once at init time for O(1) per-call lookup.

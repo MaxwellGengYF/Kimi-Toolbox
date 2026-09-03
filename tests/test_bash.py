@@ -986,6 +986,58 @@ class TestBashFixShellWrappers:
         assert not result.changed
 
 
+class TestBashFixNulRedirection:
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("echo hi > nul", "echo hi > /dev/null"),
+            ("echo hi >NUL", "echo hi >/dev/null"),
+            ("echo hi 2> nul", "echo hi 2> /dev/null"),
+            ("echo hi &> nul", "echo hi &> /dev/null"),
+            ("echo hi >> nul", "echo hi >> /dev/null"),
+            ("echo hi 2>> nul", "echo hi 2>> /dev/null"),
+            ("echo hi>nul", "echo hi>/dev/null"),
+            (
+                "echo hi > nul; echo bye > nul",
+                "echo hi > /dev/null; echo bye > /dev/null",
+            ),
+            ("echo 'nul' > nul", "echo 'nul' > /dev/null"),
+        ],
+    )
+    def test_rewrites_unquoted_nul_target(self, command: str, expected: str) -> None:
+        result = _fix_for_windows(command)
+        assert result.command == expected
+        assert result.changed is True
+        assert result.nul_fixes
+        for spelling in result.nul_fixes:
+            assert spelling.casefold() == "nul"
+        assert "/dev/null" in result.warning
+        assert "nul" in result.warning
+
+    def test_multiple_targets_record_each_original_spelling(self) -> None:
+        result = _fix_for_windows("echo a > nul; echo b > NUL; echo c >nul")
+        assert result.command == "echo a > /dev/null; echo b > /dev/null; echo c >/dev/null"
+        assert result.nul_fixes == ("nul", "NUL", "nul")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi > 'nul'",
+            'echo hi > "nul"',
+            "echo hi < nul",
+            "echo nul",
+            "echo /dev/null > nul.txt",
+            "echo hi > null",
+            "echo hi > /dev/null",
+        ],
+    )
+    def test_preserved_cases_are_byte_for_byte(self, command: str) -> None:
+        result = _fix_for_windows(command)
+        assert result == BashFix(command)
+        assert result.nul_fixes == ()
+        assert not result.changed
+
+
 class TestBashFixFalsePositives:
     @pytest.mark.parametrize(
         "command",

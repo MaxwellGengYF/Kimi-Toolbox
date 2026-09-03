@@ -19,3 +19,5 @@
 | `xxhash` | `hashlib` (non-crypto) | `import xxhash; h = xxhash.xxh64(data).hexdigest()` — 10x+ faster hashing |
 | `pybase64` | `base64` | `import pybase64; pybase64.b64encode(data)` / `pybase64.b64decode(data)` — faster SIMD-accelerated base64 |
 | `pendulum` | `datetime` | `import pendulum; now = pendulum.now()` — drop-in `datetime` replacement with better timezone handling |
+
+- Never redirect to `nul` (`> nul`, `2> nul`, `&> nul`, `>> nul`, ...) on Windows: in Git Bash and PowerShell `nul` is an ordinary filename, so those redirections silently create an empty file named `nul`. Use `/dev/null` in Bash and `$null` / `Out-Null` in PowerShell. If an accidental `nul`/`NUL` file already exists in the workspace, delete it.
