@@ -33,6 +33,7 @@ from kimi_cli.approval_runtime import (
     reset_current_approval_source,
     set_current_approval_source,
 )
+from kimi_cli.auth.codex import CODEX_OAUTH_KEY
 from kimi_cli.background import build_active_task_snapshot
 from kimi_cli.hooks.engine import HookEngine
 from kimi_cli.llm import ModelCapability
@@ -2437,6 +2438,14 @@ class KimiSoul:
                 else None
             )
             if not (active_provider and active_provider.oauth):
+                raise
+            # ChatGPT Codex owns credential resolution and its sole 401 replay
+            # inside CodexRequestAuth.  Retrying again here could duplicate a
+            # request whose first replay already reached the backend.
+            if (
+                active_provider.type == "openai-codex"
+                and active_provider.oauth.key == CODEX_OAUTH_KEY
+            ):
                 raise
             logger.warning(
                 "Received 401 during {name}, attempting token refresh",

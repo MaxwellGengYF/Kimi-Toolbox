@@ -613,7 +613,7 @@ def login(
     provider: Annotated[
         str,
         typer.Argument(
-            help="OAuth provider to log into (kimi or xai).",
+            help="OAuth provider to log into (kimi, xai, or codex).",
             case_sensitive=False,
         ),
     ] = "kimi",
@@ -630,14 +630,14 @@ def login(
         ),
     ] = None,
 ) -> None:
-    """Login to an OAuth provider account (kimi or xai)."""
+    """Login to an OAuth provider account (kimi, xai, or codex)."""
     import asyncio
     from collections.abc import AsyncIterator, Callable
 
     from rich.console import Console
     from rich.status import Status
 
-    from kimi_cli.auth.oauth import OAuthEvent, login_kimi_code, login_xai, register_xai_api_key
+    from kimi_cli.auth.oauth import OAuthEvent, login_codex, login_kimi_code, login_xai, register_xai_api_key
     from kimi_cli.config import Config, load_config
 
     provider = provider.lower()
@@ -661,8 +661,13 @@ def login(
             async for event in login_xai(config):
                 yield event
         login_fn = _xai_oauth_login
+    elif provider == "codex":
+        async def _codex_login(config: Config) -> AsyncIterator[OAuthEvent]:
+            async for event in login_codex(config):
+                yield event
+        login_fn = _codex_login
     else:
-        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai.", err=True)
+        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai, codex.", err=True)
         raise typer.Exit(code=1)
 
     async def _run() -> bool:
@@ -712,7 +717,7 @@ def logout(
     provider: Annotated[
         str,
         typer.Argument(
-            help="OAuth provider to log out from (kimi or xai).",
+            help="OAuth provider to log out from (kimi, xai, or codex).",
             case_sensitive=False,
         ),
     ] = "kimi",
@@ -722,18 +727,18 @@ def logout(
         help="Emit OAuth events as JSON lines.",
     ),
 ) -> None:
-    """Logout from an OAuth provider account (kimi or xai)."""
+    """Logout from an OAuth provider account (kimi, xai, or codex)."""
     import asyncio
 
     from rich.console import Console
 
-    from kimi_cli.auth.oauth import logout_kimi_code, logout_xai
+    from kimi_cli.auth.oauth import logout_codex, logout_kimi_code, logout_xai
     from kimi_cli.config import load_config
 
     provider = provider.lower()
-    logout_fn = {"kimi": logout_kimi_code, "xai": logout_xai}.get(provider)
+    logout_fn = {"kimi": logout_kimi_code, "xai": logout_xai, "codex": logout_codex}.get(provider)
     if logout_fn is None:
-        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai.", err=True)
+        typer.echo(f"Unknown provider: {provider}. Supported: kimi, xai, codex.", err=True)
         raise typer.Exit(code=1)
 
     async def _run() -> bool:
