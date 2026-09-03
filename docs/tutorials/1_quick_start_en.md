@@ -119,12 +119,18 @@ Run `/init` in the interactive terminal to create the default config interactive
 | `openai-codex` | OpenAI Codex (ChatGPT backend) |
 | `copilot-acp` | GitHub Copilot ACP subprocess (external agent; no in-process LLM) |
 
-To use a ChatGPT subscription, let Kimix configure the `openai-codex` provider and
-refresh its shared credentials instead of copying a token into provider JSON:
+For a ChatGPT subscription, use [`openai_codex.json`](../openai_codex.json). From the project root, sign in through the browser, then start Kimix with the sample:
 
 ```bash
 uv run kimi login codex
-# Sign out and remove the shared credentials
+uv run kimix --config=docs/openai_codex.json
+```
+
+The `api_key` value `oauth-managed` is a placeholder. The actual token comes from the shared credentials referenced by `oauth/openai-codex` and is refreshed before requests. You can change `model` to a Codex model available to your account. If you set `KIMI_SHARE_DIR`, use the same directory for login and runtime.
+
+To sign out and remove the shared credentials:
+
+```bash
 uv run kimi logout codex
 ```
 

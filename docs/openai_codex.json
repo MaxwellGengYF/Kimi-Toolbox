@@ -1,0 +1,17 @@
+{
+    "model": "gpt-5.6-sol",
+    "max_context_size": 272000,
+    "capabilities": [
+        "thinking",
+        "image_in"
+    ],
+    "url": "https://chatgpt.com/backend-api/codex",
+    "type": "openai-codex",
+    "api_key": "oauth-managed",
+    "oauth": {
+        "storage": "file",
+        "key": "oauth/openai-codex"
+    },
+    "max_tokens": 128000,
+    "thinking_effort": "medium"
+}

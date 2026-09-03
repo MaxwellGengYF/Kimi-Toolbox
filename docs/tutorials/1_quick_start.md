@@ -180,12 +180,18 @@ Kimix 通过 JSON 配置文件初始化 LLM Provider。若启动时未通过 `--
 | `openai-codex` | OpenAI Codex（ChatGPT 后端） |
 | `copilot-acp` | GitHub Copilot ACP 子进程（外部 Agent，无进程内 LLM） |
 
-使用 ChatGPT 订阅登录 Codex 时无需手写 token 或 provider JSON；Kimix 会配置
-`openai-codex` Provider，并在请求前刷新共享凭据：
+使用 ChatGPT 订阅可参考 [`openai_codex.json`](../openai_codex.json)。在项目根目录先通过浏览器登录，再使用样例启动：
 
 ```bash
 uv run kimi login codex
-# 退出并清除共享凭据
+uv run kimix --config=docs/openai_codex.json
+```
+
+样例中的 `api_key` 值 `oauth-managed` 是占位值，实际令牌由 `oauth/openai-codex` 引用的共享凭据提供，并在请求前自动刷新。可将 `model` 改为账号可用的 Codex 模型；如设置了 `KIMI_SHARE_DIR`，登录和运行时须使用同一目录。
+
+退出并清除共享凭据：
+
+```bash
 uv run kimi logout codex
 ```
 
