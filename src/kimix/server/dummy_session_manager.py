@@ -23,6 +23,7 @@ from kimix.ui.printing import MessageType
 from kimix.ui.stream import format_tool_args
 from kimix.server.bus import bus, BusEvent
 from kimix.utils.session import _create_session_async
+from kimix.utils.prompt import build_plan_retry_reminder
 from kimix.utils.system_prompt import SystemPromptType
 
 
@@ -535,11 +536,7 @@ async def _process_plan(
                     break
 
                 if attempt < max_plan_attempts - 1:
-                    prompt_text = (
-                        "The plan file was not generated. "
-                        "Please generate the plan and save it using the WritePlan tool.\n\n"
-                        f"Requirement:\n{text.strip()}"
-                    )
+                    prompt_text = build_plan_retry_reminder(text)
             except Exception as exc:
                 if attempt == max_plan_attempts - 1:
                     raise

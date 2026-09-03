@@ -31,6 +31,7 @@ from kimix.server.bus import bus, BusEvent
 from kimix.utils import (
     _create_session_async,
     close_session_async,
+    build_plan_retry_reminder,
 )
 from kimi_cli.session_state import load_session_state
 from kosong.utils.jsonx import loads_relaxed
@@ -1782,11 +1783,7 @@ class SessionManager:
                             break
 
                         if attempt < max_plan_attempts - 1:
-                            prompt_text = (
-                                "The plan file was not generated. "
-                                "Please generate the plan and save it using the WritePlan tool.\n\n"
-                                f"Requirement:\n{text.strip()}"
-                            )
+                            prompt_text = build_plan_retry_reminder(text)
                     except Exception as exc:
                         logger.error("Plan generation attempt %d failed: %s", attempt + 1, exc)
                         if attempt == max_plan_attempts - 1:
