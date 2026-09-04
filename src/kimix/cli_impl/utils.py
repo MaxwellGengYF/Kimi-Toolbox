@@ -253,8 +253,11 @@ _STRIKE_RE = re.compile(r"~~([^~]+)~~")
 _BOLD_ITALIC_RE = re.compile(r"(\*\*\*|___)(.+?)\1")
 # Bold: **text** or __text__
 _BOLD_RE = re.compile(r"(\*\*|__)(.+?)\1")
-# Italic: *text* or _text_
-_ITALIC_RE = re.compile(r"(\*|_)(.+?)\1")
+# Italic: *text* only.  Underscore emphasis (_text_) is intentionally NOT
+# transformed: agent output frequently contains literal tokens such as _TEXT_
+# or snake_case identifiers whose underscores must be preserved verbatim
+# instead of being converted into colored italic text.
+_ITALIC_RE = re.compile(r"\*([^*]+)\*")
 
 
 def _md_apply_inline_styles(segment: str, theme: dict[str, Any]) -> str:
@@ -281,7 +284,7 @@ def _md_apply_inline_styles(segment: str, theme: dict[str, Any]) -> str:
         return body
 
     def _italic_repl(m: re.Match[str]) -> str:
-        return colorful_text(m.group(2), **theme["italic"])
+        return colorful_text(m.group(1), **theme["italic"])
 
     segment = _IMAGE_RE.sub(_image_repl, segment)
     segment = _LINK_RE.sub(_link_repl, segment)
