@@ -69,6 +69,40 @@ _text_buffer: io.StringIO | None = None
 _TOOL_TYPES = (ToolCall, ToolCallPart, ToolResult)
 _PRINT_AGENT_JSON_MESSAGE_TYPE_ATTR = "_kimix_print_agent_json_message_type"
 
+# -- reasoning debug stub ------------------------------------------------------
+#
+# Env-gated diagnostics for the "reasoning was streamed by the provider but
+# never printed" class of issues.  Uses the same ``KIMIX_DEBUG_REASONING``
+# switch as the provider-side stub in
+# ``kosong.chat_provider.openai_common`` so one env var traces a thinking
+# block end to end (chunk -> ThinkPart -> wire -> print).  The flag is read
+# once and cached; tests may reset ``_REASONING_DEBUG_ENABLED`` to re-read.
+_REASONING_DEBUG_ENABLED: bool | None = None
+
+
+def _reasoning_debug_enabled() -> bool:
+    global _REASONING_DEBUG_ENABLED
+    if _REASONING_DEBUG_ENABLED is None:
+        _REASONING_DEBUG_ENABLED = os.getenv("KIMIX_DEBUG_REASONING", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return _REASONING_DEBUG_ENABLED
+
+
+def _reasoning_debug_log(message: str) -> None:
+    """Emit one reasoning-debug line on stderr.
+
+    Uses the real builtin print so the debug stream never goes through the
+    (possibly native/buffered) ``_print_func`` being debugged.
+    """
+    if _reasoning_debug_enabled():
+        import builtins
+
+        builtins.print(f"[reasoning-debug] {message}", file=sys.stderr, flush=True)
+
 
 def _message_transition_type(wire_msg: Any) -> MessageType | None:
     if isinstance(wire_msg, TextPart):
@@ -1030,6 +1064,11 @@ def _handle_compaction_begin(_wire_msg: Any, _output_function: Callable[[str, Me
 
 def _handle_think_part(wire_msg: ThinkPart, output_function: Callable[[str, MessageType], Any] | None, _session: Session, format_output: bool = False) -> None:
     think_content = wire_msg.think
+    _reasoning_debug_log(
+        f"print_agent_json received ThinkPart ({len(think_content)} chars, "
+        f"encrypted={wire_msg.encrypted is not None}, quiet={_quiet}, "
+        f"state={_stream._state.name})"
+    )
     if not _quiet:
         if output_function:
             output_function(think_content, MessageType.Thinking)
@@ -1040,6 +1079,8 @@ def _handle_think_part(wire_msg: ThinkPart, output_function: Callable[[str, Mess
             _stream.colorful_print_word(
                 f"{think_content}", fg=Color.BRIGHT_CYAN, require_new_line=False, flush=True)
         _stream._state = StreamPrintState.Thinking
+    else:
+        _reasoning_debug_log("ThinkPart NOT printed because _quiet is set")
 
 
 def _handle_text_part(wire_msg: TextPart, output_function: Callable[[str, MessageType], Any] | None, _session: Session, format_output: bool = False) -> None:

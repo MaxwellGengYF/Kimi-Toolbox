@@ -1567,3 +1567,70 @@ async def test_stream_fuzzy_alias_changes_maps_to_edit(monkeypatch: Any) -> None
     assert "\x1b[91maaa\x1b[0m" in output
     assert "\x1b[92mbbb\x1b[0m" in output
     assert base._stream._last_char_was_newline is True
+
+
+async def test_print_agent_json_think_parts_across_tool_boundary_all_printed(monkeypatch: Any) -> None:
+    """Regression test for "thinking received by the provider but not printed".
+
+    Multi-step agents think again after a tool result; every ThinkPart must
+    reach the terminal regardless of the surrounding stream state
+    (Thinking -> ToolCalling -> Thinking transitions).
+    """
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+
+    await base.print_agent_json(ThinkPart(think="step1 thinking"), session)
+    tool_call = ToolCall(
+        id="call-1",
+        function=ToolCall.FunctionBody(name="Run", arguments='{"command": "ls"}'),
+    )
+    await base.print_agent_json(tool_call, session)
+    await base.print_agent_json(
+        ToolResult(
+            tool_call_id="call-1",
+            return_value=ToolReturnValue(is_error=False, message="ok", output="", display=[]),
+        ),
+        session,
+    )
+    await base.print_agent_json(ThinkPart(think="step2 "), session)
+    await base.print_agent_json(ThinkPart(think="thinking"), session)
+
+    plain = _plain(chunks)
+    assert "step1 thinking" in plain
+    assert "step2 thinking" in plain
+    # Each step's first ThinkPart re-prints the [Think] banner after the
+    # state was reset by the tool call in between.
+    assert plain.count("[Think]") == 2
+
+
+async def test_print_agent_json_think_part_reaches_output_function(monkeypatch: Any) -> None:
+    """Every ThinkPart must be forwarded to output_function as Thinking."""
+    chunks = _capture_base_stream(monkeypatch)
+    session = FakeSession()
+    received: list[tuple[str, object]] = []
+
+    def output_function(text: str, msg_type: object) -> None:
+        received.append((text, msg_type))
+
+    await base.print_agent_json(ThinkPart(think="abc"), session, output_function=output_function)
+    await base.print_agent_json(ThinkPart(think="def"), session, output_function=output_function)
+
+    from kimix.ui.printing import MessageType
+
+    thinking = [t for t, ty in received if ty == MessageType.Thinking]
+    assert thinking == ["abc", "def"]
+    assert "abcdef" in _plain(chunks)
+
+
+async def test_print_agent_json_think_part_emits_reasoning_debug(monkeypatch: Any, capsys: Any) -> None:
+    """The KIMIX_DEBUG_REASONING stub must log ThinkPart receipt to stderr."""
+    _capture_base_stream(monkeypatch)
+    monkeypatch.setattr(stream_mod, "_REASONING_DEBUG_ENABLED", True)
+    session = FakeSession()
+
+    await base.print_agent_json(ThinkPart(think="debug me"), session)
+
+    err = capsys.readouterr().err
+    assert "[reasoning-debug]" in err
+    assert "ThinkPart" in err
+    assert "8 chars" in err

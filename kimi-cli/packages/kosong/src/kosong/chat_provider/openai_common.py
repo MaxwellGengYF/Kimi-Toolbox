@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
 import copy
+import os
 import ssl
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping, Sequence
@@ -626,6 +628,41 @@ def extract_reasoning_from_content(
     return reasoning, visible
 
 
+# -- reasoning debug stub ------------------------------------------------------
+#
+# Env-gated diagnostics for the "reasoning reached the provider but was never
+# rendered" class of issues.  Set ``KIMIX_DEBUG_REASONING=1`` (or
+# true/yes/on) to get stderr lines for:
+#
+# * every message/delta whose reasoning-ish fields were present but yielded
+#   no extractable text (the drop detector in ``extract_reasoning_text``), and
+# * every ``ThinkPart`` yielded by the streaming/non-streaming converters
+#   (``OpenAICompatibleStreamedMessage``).
+#
+# The flag is read once and cached; tests may reset ``_REASONING_DEBUG_ENABLED``
+# to re-read the environment.
+_REASONING_DEBUG_ENABLED: bool | None = None
+
+
+def reasoning_debug_enabled() -> bool:
+    """Return whether reasoning debug logging is active (``KIMIX_DEBUG_REASONING``)."""
+    global _REASONING_DEBUG_ENABLED
+    if _REASONING_DEBUG_ENABLED is None:
+        _REASONING_DEBUG_ENABLED = os.getenv("KIMIX_DEBUG_REASONING", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return _REASONING_DEBUG_ENABLED
+
+
+def _reasoning_debug_log(message: str) -> None:
+    """Emit one reasoning-debug line on stderr (bypasses the native print path)."""
+    if reasoning_debug_enabled():
+        print(f"[reasoning-debug] {message}", file=sys.stderr, flush=True)
+
+
 def extract_reasoning_text(message_or_delta: object, reasoning_key: str | None) -> str | None:
     """Extract reasoning text from an OpenAI-compatible message/delta object.
 
@@ -634,13 +671,22 @@ def extract_reasoning_text(message_or_delta: object, reasoning_key: str | None) 
     * DeepSeek/Moonshot-style: ``reasoning_content`` (the configured key).
     * Command Code (``api.commandcode.ai``): ``reasoning`` (plain string) and
       ``reasoning_details`` (list of ``{"type": "reasoning.text", "text": ...}``
-      blocks, Anthropic-style).
+      blocks, Anthropic-style).  OpenRouter-style gateways may also emit
+      ``{"type": "reasoning.summary", "summary": ...}`` blocks.
 
     The configured ``reasoning_key`` is tried first, then the ``reasoning`` /
     ``reasoning_details`` fallbacks, so providers that return reasoning under a
     different field still surface a ``ThinkPart`` (rendered as the ``[thinking]``
     block). Returns ``None`` when no field carries text, and also when
     ``reasoning_key`` is falsy (``""`` explicitly disables reasoning).
+
+    Extraction prefers the first field that yields **non-empty** text: a field
+    that is present but empty (e.g. ``reasoning_content: ""`` emitted by some
+    gateways alongside a populated ``reasoning``) must not shadow populated
+    fallbacks.  When every present field yields only empty text, the empty
+    string is still returned so an explicitly empty reasoning block round-trips
+    (Moonshot rejects thinking-mode histories whose assistant messages lost
+    their reasoning field).
     """
     if not reasoning_key:
         return None
@@ -651,24 +697,49 @@ def extract_reasoning_text(message_or_delta: object, reasoning_key: str | None) 
         if isinstance(value, list):
             parts: list[str] = []
             for block in value:
+                text: object
                 if isinstance(block, dict):
                     text = block.get("text")
+                    if not isinstance(text, str):
+                        # OpenRouter-style `reasoning.summary` blocks carry the
+                        # text under `summary` instead of `text`.
+                        text = block.get("summary")
                 else:
                     text = getattr(block, "text", None)
+                    if not isinstance(text, str):
+                        text = getattr(block, "summary", None)
+                # Never read `data`: `reasoning.encrypted` blocks carry an
+                # encrypted signature, not displayable text.
                 if isinstance(text, str):
                     parts.append(text)
             return "".join(parts) if parts else None
         return None
 
-    value = getattr(message_or_delta, reasoning_key, None)
-    if (text := _text(value)) is not None:
-        return text
-    value = getattr(message_or_delta, "reasoning", None)
-    if (text := _text(value)) is not None:
-        return text
-    value = getattr(message_or_delta, "reasoning_details", None)
-    if (text := _text(value)) is not None:
-        return text
+    empty_extraction: str | None = None
+    present_fields: list[str] = []
+    # Deduplicate while preserving priority order (a configured reasoning_key
+    # equal to "reasoning"/"reasoning_details" must not be tried twice).
+    for key in dict.fromkeys((reasoning_key, "reasoning", "reasoning_details")):
+        value = getattr(message_or_delta, key, None)
+        if value is None:
+            continue
+        present_fields.append(f"{key}({type(value).__name__})")
+        text = _text(value)
+        if text is None:
+            continue
+        if text:
+            return text
+        if empty_extraction is None:
+            empty_extraction = text
+    if empty_extraction is not None:
+        return empty_extraction
+    if present_fields:
+        # Reasoning-ish fields were present but none yielded text (e.g. only
+        # encrypted reasoning_details blocks, or an unrecognized field shape).
+        # This is the "received by the provider but never rendered" drop point.
+        _reasoning_debug_log(
+            "reasoning fields present but no text extracted: " + ", ".join(present_fields)
+        )
     return None
 
 
@@ -853,6 +924,10 @@ class OpenAICompatibleStreamedMessage(BaseStreamedMessage):
         # next request passes the field back (Moonshot rejects thinking-mode
         # histories whose assistant messages lost their reasoning field).
         if reasoning_content is not None:
+            _reasoning_debug_log(
+                f"non-stream response {response.id or '?'}: yielding ThinkPart "
+                f"({len(reasoning_content)} chars)"
+            )
             yield ThinkPart(think=reasoning_content)
         if message.content:
             yield TextPart(text=message.content)
@@ -899,6 +974,10 @@ class OpenAICompatibleStreamedMessage(BaseStreamedMessage):
                 # Same presence-vs-truthiness rule as the non-stream path:
                 # preserve an explicitly empty reasoning_content delta.
                 if reasoning_content is not None:
+                    _reasoning_debug_log(
+                        f"stream chunk {chunk.id or '?'}: yielding ThinkPart "
+                        f"({len(reasoning_content)} chars)"
+                    )
                     yield ThinkPart(think=reasoning_content)
 
                 # extract text content

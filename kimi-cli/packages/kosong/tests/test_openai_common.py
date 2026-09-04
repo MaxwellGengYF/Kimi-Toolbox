@@ -758,3 +758,83 @@ class TestExtractReasoningText:
             content = "hi"
 
         assert extract_reasoning_text(Msg(), "reasoning_content") is None
+
+    def test_empty_configured_key_does_not_shadow_reasoning(self) -> None:
+        """A present-but-empty higher-priority field must not hide real text.
+
+        Some gateways (OpenRouter-style normalizers) emit
+        ``reasoning_content: ""`` alongside a populated ``reasoning``; the
+        empty string used to win and the real reasoning was silently dropped.
+        """
+        class Msg:
+            reasoning_content = ""
+            reasoning = "real thinking"
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "real thinking"
+
+    def test_empty_reasoning_does_not_shadow_reasoning_details(self) -> None:
+        class Msg:
+            reasoning = ""
+            reasoning_details = [{"type": "reasoning.text", "text": "details text"}]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "details text"
+
+    def test_empty_string_still_returned_when_everything_empty(self) -> None:
+        """Round-trip preservation: all fields empty -> empty string, not None."""
+        class Msg:
+            reasoning_content = ""
+            reasoning = ""
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == ""
+
+    def test_reasoning_details_summary_blocks(self) -> None:
+        """OpenRouter-style ``reasoning.summary`` blocks carry text under
+        ``summary`` instead of ``text``."""
+        class Msg:
+            reasoning_details = [
+                {"type": "reasoning.summary", "summary": "summary text"},
+            ]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "summary text"
+
+    def test_reasoning_details_encrypted_only_returns_none(self) -> None:
+        """``reasoning.encrypted`` blocks carry a signature, not text — they
+        must not surface as visible thinking."""
+        class Msg:
+            reasoning_details = [
+                {"type": "reasoning.encrypted", "data": "signature-bytes"},
+            ]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") is None
+
+    def test_reasoning_details_mixed_text_and_encrypted(self) -> None:
+        class Msg:
+            reasoning_details = [
+                {"type": "reasoning.text", "text": "visible"},
+                {"type": "reasoning.encrypted", "data": "signature-bytes"},
+            ]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "visible"
+
+    def test_reasoning_field_as_block_list(self) -> None:
+        class Msg:
+            reasoning = [{"text": "block "}, {"text": "list"}]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "block list"
+
+    def test_object_block_with_summary_only(self) -> None:
+        class Block:
+            text = None
+            summary = "obj summary"
+
+        class Msg:
+            reasoning_details = [Block()]
+
+        assert extract_reasoning_text(Msg(), "reasoning_content") == "obj summary"
+
+    def test_configured_key_matching_fallback_name_tried_once(self) -> None:
+        """reasoning_key="reasoning" must not double-count the same field."""
+        class Msg:
+            reasoning = "single pass"
+
+        assert extract_reasoning_text(Msg(), "reasoning") == "single pass"
