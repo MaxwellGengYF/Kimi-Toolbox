@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import SecretStr
 
+from kimi_cli.auth.codex import CODEX_OAUTH_KEY
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
     OAuthManager,
@@ -44,6 +45,19 @@ def _make_oauth_manager(config: Config, initial_token: OAuthToken | None = None)
         return OAuthManager(config)
 
 
+def _make_codex_config() -> Config:
+    return Config(
+        provider=LLMProvider(
+            type="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_key=SecretStr(""),
+            oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+        ),
+        model=LLMModel(model="gpt-5.4", max_context_size=272_000),
+        services=Services(),
+    )
+
+
 def test_resolve_api_key_returns_oauth_token_when_available():
     config = _make_config(with_oauth=True)
     token = OAuthToken(
@@ -59,6 +73,41 @@ def test_resolve_api_key_returns_oauth_token_when_available():
     result = oauth.resolve_api_key(SecretStr(""), ref)
 
     assert result == "oauth-access-123"
+
+
+@pytest.mark.asyncio
+async def test_codex_auth_is_not_cached_or_refreshed_by_oauth_manager():
+    config = _make_codex_config()
+    with patch("kimi_cli.auth.oauth.load_tokens") as load_tokens:
+        oauth = OAuthManager(config)
+        await oauth.ensure_fresh(force=True)
+        resolved = oauth.resolve_api_key(
+            SecretStr("provider-owned"),
+            config.provider.oauth,
+        )
+
+    load_tokens.assert_not_called()
+    assert oauth.get_cached_access_token(CODEX_OAUTH_KEY) is None
+    assert resolved == "provider-owned"
+
+
+def test_custom_oauth_ref_still_resolves_its_persisted_token():
+    config = _make_config(with_oauth=False)
+    token = OAuthToken(
+        access_token="plugin-access",
+        refresh_token="plugin-refresh",
+        expires_at=0.0,
+        scope="",
+        token_type="Bearer",
+    )
+    ref = OAuthRef(storage="file", key="oauth/plugin")
+    oauth = OAuthManager(config)
+
+    with patch("kimi_cli.auth.oauth.load_tokens", return_value=token) as load_tokens:
+        resolved = oauth.resolve_api_key(SecretStr("fallback"), ref)
+
+    load_tokens.assert_called_once_with(ref)
+    assert resolved == "plugin-access"
 
 
 def test_resolve_api_key_falls_back_to_api_key_when_no_token():

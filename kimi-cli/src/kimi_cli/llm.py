@@ -381,7 +381,7 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
 def _kimi_default_headers(provider: LLMProvider, oauth: OAuthManager | None) -> dict[str, str]:
     user_agent = get_user_agent() if provider.type in {"kimi", "_chaos"} else None
     headers = {"User-Agent": user_agent} if user_agent else dict()
-    if oauth:
+    if oauth and provider.type != "openai-codex":
         headers.update(oauth.common_headers())
     if provider.custom_headers:
         headers.update(provider.custom_headers)
@@ -449,8 +449,15 @@ def create_llm(
         return None
     
     assert not thinking_effort or thinking_effort in LEGAL_THINKING_EFFORT, 'thinking_effort must be `off`, `low`, `medium`, `high`, `xhigh` and `max`'
+    codex_oauth = False
+    if provider.type == "openai-codex" and provider.oauth is not None:
+        from kimi_cli.auth.codex import CODEX_OAUTH_KEY
+
+        codex_oauth = provider.oauth.key == CODEX_OAUTH_KEY
     resolved_api_key = (
-        oauth.resolve_api_key(provider.api_key, provider.oauth)
+        "oauth-managed"
+        if codex_oauth
+        else oauth.resolve_api_key(provider.api_key, provider.oauth)
         if oauth and provider.oauth
         else provider.api_key.get_secret_value()
     )
@@ -741,13 +748,45 @@ def create_llm(
                 default_headers=_kimi_default_headers(provider, oauth),
                 supported_efforts=model.supported_efforts,
             ).with_parallel_tool_calls(enabled=True)
-        case "openai-codex" | "actual":
-            if provider.type == "openai-codex":
-                from kosong.chat_provider.codex import OpenAICodex as CodexProvider
-            else:
-                from kosong.chat_provider.codex import Actual as CodexProvider
+        case "openai-codex":
+            import httpx
+            from kosong.chat_provider.codex import OpenAICodex
 
-            chat_provider = CodexProvider(
+            from kimi_cli.auth.codex import CodexRequestAuth, extract_chatgpt_account_id
+
+            codex_headers = {
+                "User-Agent": get_user_agent(),
+                "originator": "kimix",
+            }
+            if provider.custom_headers:
+                codex_headers.update(provider.custom_headers)
+            codex_client_kwargs: dict[str, object] = {}
+            codex_api_key = resolved_api_key
+            if codex_oauth:
+                codex_client_kwargs["http_client"] = httpx.AsyncClient(
+                    auth=CodexRequestAuth(),
+                    headers=codex_headers,
+                )
+                codex_api_key = "oauth-managed"
+            elif account_id := extract_chatgpt_account_id(resolved_api_key):
+                codex_headers["ChatGPT-Account-ID"] = account_id
+
+            chat_provider = OpenAICodex(
+                session_id=session_id,
+                own_http_client=True,
+                model=model.model,
+                base_url=provider.base_url,
+                api_key=codex_api_key,
+                default_headers=codex_headers,
+                max_retries=0,
+                supported_efforts=model.supported_efforts,
+                **codex_client_kwargs,
+            ).with_parallel_tool_calls(enabled=True)
+
+        case "actual":
+            from kosong.chat_provider.codex import Actual
+
+            chat_provider = Actual(
                 model=model.model,
                 base_url=provider.base_url,
                 api_key=resolved_api_key,

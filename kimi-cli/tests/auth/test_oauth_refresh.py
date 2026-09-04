@@ -1,5 +1,6 @@
 """Tests for OAuth token refresh: retry with backoff and force refresh."""
 
+import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -9,6 +10,19 @@ import aiohttp
 import pytest
 from pydantic import SecretStr
 
+from kimi_cli.auth.codex import (
+    AUTH_CONNECTED,
+    AUTH_LOGIN_REQUIRED,
+    CODEX_BASE_URL,
+    CODEX_OAUTH_KEY,
+    PROBLEM_CREDENTIAL_STORE_UNAVAILABLE,
+    PROBLEM_LOGIN_REQUIRED,
+    CodexAuthError,
+    CodexAuthSnapshot,
+    CodexModel,
+    CodexModelCatalog,
+    CodexProblem,
+)
 from kimi_cli.auth.oauth import (
     _REJECTED_REFRESH_TOKENS,
     XAI_API_KEY_ENV,
@@ -24,7 +38,9 @@ from kimi_cli.auth.oauth import (
     _refresh_threshold,
     _save_to_file,
     has_xai_api_key_env,
+    login_codex,
     login_xai,
+    logout_codex,
     logout_xai,
     read_xai_api_key_env,
     refresh_token,
@@ -34,6 +50,33 @@ from kimi_cli.config import Config, LLMModel, LLMProvider, OAuthRef, Services
 from kimi_cli.llm import LLM
 
 # ── helpers ──────────────────────────────────────────────────────
+
+
+class _FakeCodexLoginOperation:
+    def __init__(self, operation_id, challenge_callback, runner) -> None:
+        self.operation_id = operation_id
+        self._challenge_callback = challenge_callback
+        self._runner = runner
+        self._task = None
+        self.cancel_calls = 0
+
+    async def run(self):
+        self._task = asyncio.current_task()
+        return await self._runner(self.operation_id, self._challenge_callback)
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+
+def _codex_login_factory(runner, operations):
+    def create(operation_id, challenge_callback):
+        operation = _FakeCodexLoginOperation(operation_id, challenge_callback, runner)
+        operations.append(operation)
+        return operation
+
+    return create
 
 
 @pytest.fixture(autouse=True)
@@ -806,3 +849,209 @@ async def test_logout_xai_clears_api_key_provider(tmp_path, monkeypatch):
     assert config.provider is None
     assert config.model is None
     mock_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_login_codex_configures_shared_oauth_provider(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    operations = []
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        model = CodexModel(
+            slug="gpt-5.4",
+            display_name="GPT-5.4",
+            reasoning_efforts=("low", "high"),
+            default_reasoning_effort="high",
+        )
+        return (
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (model,), False),
+        )
+
+    with (
+        patch(
+            "kimi_cli.auth.oauth.CodexLoginOperation",
+            side_effect=_codex_login_factory(fake_login, operations),
+        ),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert [event.type for event in events] == ["verification_url", "waiting", "success"]
+    assert config.provider is not None
+    assert config.provider.type == "openai-codex"
+    assert config.provider.base_url == CODEX_BASE_URL
+    assert config.provider.oauth == OAuthRef(storage="file", key=CODEX_OAUTH_KEY)
+    assert config.model is not None
+    assert config.model.model == "gpt-5.4"
+    assert config.model.supported_efforts == {"low", "high"}
+    assert config.max_tokens == 128_000
+    mock_save.assert_called_once_with(config)
+
+
+@pytest.mark.asyncio
+async def test_login_codex_maps_ultra_effort_to_max(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    operations = []
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        model = CodexModel(
+            slug="gpt-5.6-sol",
+            display_name="GPT-5.6-Sol",
+            reasoning_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
+            default_reasoning_effort="low",
+        )
+        return (
+            CodexAuthSnapshot(operation_id, AUTH_CONNECTED),
+            CodexModelCatalog(operation_id, (model,), False),
+        )
+
+    with (
+        patch(
+            "kimi_cli.auth.oauth.CodexLoginOperation",
+            side_effect=_codex_login_factory(fake_login, operations),
+        ),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config"),
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert any(event.type == "success" for event in events)
+    assert config.model is not None
+    assert config.model.supported_efforts == {"low", "medium", "high", "xhigh", "max"}
+    assert "ultra" not in config.model.supported_efforts
+
+
+@pytest.mark.asyncio
+async def test_login_codex_does_not_report_success_for_terminal_snapshot(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    original_provider = config.provider
+    original_model = config.model
+    operations = []
+
+    async def fake_login(operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        problem = CodexProblem(PROBLEM_LOGIN_REQUIRED)
+        model = CodexModel(slug="fallback")
+        return (
+            CodexAuthSnapshot(
+                operation_id,
+                AUTH_LOGIN_REQUIRED,
+                problem=problem,
+            ),
+            CodexModelCatalog(operation_id, (model,), True, problem),
+        )
+
+    with (
+        patch(
+            "kimi_cli.auth.oauth.CodexLoginOperation",
+            side_effect=_codex_login_factory(fake_login, operations),
+        ),
+        patch("kimi_cli.auth.oauth.webbrowser.open", return_value=True),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in login_codex(config)]
+
+    assert [event.type for event in events] == ["verification_url", "waiting", "error"]
+    assert config.provider is original_provider
+    assert config.model is original_model
+    mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_closing_login_codex_generator_cancels_background_login(tmp_path):
+    config = _make_config()
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    cancelled = asyncio.Event()
+    operations = []
+
+    async def fake_login(_operation_id, challenge_callback):
+        await challenge_callback(
+            SimpleNamespace(authorization_url="https://auth.openai.test/authorize")
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    generator = login_codex(config)
+    with patch(
+        "kimi_cli.auth.oauth.CodexLoginOperation",
+        side_effect=_codex_login_factory(fake_login, operations),
+    ):
+        event = await anext(generator)
+        assert event.type == "verification_url"
+        await generator.aclose()
+
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    assert len(operations) == 1
+    assert operations[0].cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_logout_codex_clears_shared_provider(tmp_path):
+    config = _make_config()
+    config.provider = LLMProvider(
+        type="openai-codex",
+        base_url=CODEX_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    disconnect = AsyncMock()
+
+    with (
+        patch("kimi_cli.auth.oauth.disconnect_codex", disconnect),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in logout_codex(config)]
+
+    assert [event.type for event in events] == ["success"]
+    disconnect.assert_awaited_once_with()
+    assert config.provider is None
+    assert config.model is None
+    mock_save.assert_called_once_with(config)
+
+
+@pytest.mark.asyncio
+async def test_logout_codex_preserves_config_when_credential_removal_fails(tmp_path):
+    config = _make_config()
+    config.provider = LLMProvider(
+        type="openai-codex",
+        base_url=CODEX_BASE_URL,
+        api_key=SecretStr(""),
+        oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+    )
+    config.source_file = tmp_path / "config.toml"
+    config.is_from_default_location = True
+    original_provider = config.provider
+    disconnect = AsyncMock(
+        side_effect=CodexAuthError(CodexProblem(PROBLEM_CREDENTIAL_STORE_UNAVAILABLE))
+    )
+
+    with (
+        patch("kimi_cli.auth.oauth.disconnect_codex", disconnect),
+        patch("kimi_cli.auth.oauth.save_config") as mock_save,
+    ):
+        events = [event async for event in logout_codex(config)]
+
+    assert [event.type for event in events] == ["error"]
+    assert config.provider is original_provider
+    mock_save.assert_not_called()

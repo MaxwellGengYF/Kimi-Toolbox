@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import orjson
 import pytest
 
 from kimi_cli.config import (
@@ -296,3 +297,72 @@ def test_load_config_model_defaults_version_numbers_not_confused():
     with pytest.raises(SystemExit) as exc_info:
         load_config_from_string(_model_config("openai/gpt-5.6"))
     assert exc_info.value.code == 1
+
+
+def test_official_codex_applies_loop_control_defaults():
+    from kimi_cli.auth.codex import CODEX_BASE_URL
+
+    config = load_config_from_string(
+        orjson.dumps(
+            {
+                "model": {
+                    "model": "gpt-5.4",
+                    "max_context_size": 272000,
+                    "max_tokens": 128000,
+                },
+                "provider": {
+                    "type": "openai-codex",
+                    "base_url": CODEX_BASE_URL,
+                    "api_key": "",
+                },
+            }
+        ).decode()
+    )
+    assert config.loop_control.reserved_context_size == 261_184
+    assert config.loop_control.compaction_trigger_ratio == 0.95
+    assert config.loop_control.compact_reminder_threshold == pytest.approx(
+        238_656 / 272_000
+    )
+    assert config.loop_control.compact_reminder_enabled is False
+    assert config.loop_control.todo_reminder_enabled is False
+    assert config.loop_control.context_meter_enabled is False
+
+
+def test_custom_codex_url_keeps_default_loop_control():
+    config = load_config_from_string(
+        orjson.dumps(
+            {
+                "model": {"model": "gpt-5.4", "max_context_size": 272000},
+                "provider": {
+                    "type": "openai-codex",
+                    "base_url": "https://codex-proxy.test/v1",
+                    "api_key": "k",
+                },
+            }
+        ).decode()
+    )
+    assert config.loop_control.reserved_context_size == 75_000
+    assert config.loop_control.compaction_trigger_ratio == 0.8
+
+
+def test_official_codex_preserves_explicit_reserved_context_size():
+    from kimi_cli.auth.codex import CODEX_BASE_URL
+
+    config = load_config_from_string(
+        orjson.dumps(
+            {
+                "loop_control": {"reserved_context_size": 30000},
+                "model": {"model": "gpt-5.4", "max_context_size": 272000},
+                "provider": {
+                    "type": "openai-codex",
+                    "base_url": CODEX_BASE_URL,
+                    "api_key": "",
+                },
+            }
+        ).decode()
+    )
+    assert config.loop_control.reserved_context_size == 30000
+    assert config.loop_control.compaction_trigger_ratio == 0.95
+    assert config.loop_control.compact_reminder_threshold == pytest.approx(
+        238_656 / 272_000
+    )

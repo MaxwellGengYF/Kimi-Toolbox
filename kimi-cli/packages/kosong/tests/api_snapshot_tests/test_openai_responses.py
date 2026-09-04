@@ -1,15 +1,19 @@
 """Snapshot tests for OpenAI Responses API chat provider."""
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
+import orjson
 import respx
 from common import COMMON_CASES, Case, run_test_cases
 from httpx import Response
 from inline_snapshot import snapshot
+from openai.types.responses import ResponseInputParam
 
 from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
 from kosong.message import Message, TextPart, ThinkPart
+from kosong.tooling import Tool
 
 
 def make_response() -> dict[str, Any]:
@@ -47,6 +51,39 @@ TEST_CASES: dict[str, Case] = {
         ],
     },
 }
+
+
+async def test_openai_responses_generate_delegates_request_construction():
+    hook_calls: list[tuple[str, int, int]] = []
+
+    class HookedOpenAIResponses(OpenAIResponses):
+        def _request_kwargs(
+            self,
+            system_prompt: str,
+            tools: Sequence[Tool],
+            history: Sequence[Message],
+        ) -> tuple[dict[str, Any], ResponseInputParam]:
+            hook_calls.append((system_prompt, len(tools), len(history)))
+            request, inputs = super()._request_kwargs(system_prompt, tools, history)
+            request["metadata"] = {"request_hook": "used"}
+            return request, inputs
+
+    with respx.mock(base_url="https://api.openai.com") as mock:
+        mock.post("/v1/responses").mock(return_value=Response(200, json=make_response()))
+        provider = HookedOpenAIResponses(model="gpt-4.1", api_key="test-key", stream=False)
+        try:
+            stream = await provider.generate(
+                "You are helpful.", [], [Message(role="user", content="Hi")]
+            )
+            parts = [part async for part in stream]
+            body = orjson.loads(mock.calls.last.request.content)
+        finally:
+            await provider.aclose()
+
+        assert hook_calls == [("You are helpful.", 0, 1)]
+        assert body["metadata"] == {"request_hook": "used"}
+        assert isinstance(parts[0], TextPart)
+        assert parts[0].text == "Hello"
 
 
 async def test_openai_responses_message_conversion():

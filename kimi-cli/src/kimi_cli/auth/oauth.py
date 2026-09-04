@@ -20,6 +20,14 @@ import orjson
 from pydantic import SecretStr
 
 from kimi_cli.auth import KIMI_CODE_PLATFORM_ID
+from kimi_cli.auth.codex import (
+    AUTH_CONNECTED,
+    CODEX_OAUTH_KEY,
+    CodexAuthError,
+    CodexLoginOperation,
+    disconnect_codex,
+    kimix_reasoning_efforts,
+)
 from kimi_cli.auth.platforms import (
     ModelInfo,
     get_platform_by_id,
@@ -1156,6 +1164,134 @@ async def logout_xai(config: Config) -> AsyncIterator[OAuthEvent]:
     return
 
 
+async def login_codex(config: Config) -> AsyncIterator[OAuthEvent]:
+    """Log in to ChatGPT Codex and configure it as the active provider."""
+
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Login requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    from kimi_cli.auth.codex import CODEX_BASE_URL
+
+    loop = asyncio.get_running_loop()
+    challenge_ready: asyncio.Future[Any] = loop.create_future()
+    operation_id = uuid.uuid4().int
+
+    async def _publish_challenge(challenge: Any) -> None:
+        if not challenge_ready.done():
+            challenge_ready.set_result(challenge)
+
+    login_operation = CodexLoginOperation(operation_id, _publish_challenge)
+    login_task = asyncio.create_task(login_operation.run())
+    try:
+        done, _pending = await asyncio.wait(
+            {challenge_ready, login_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if challenge_ready in done:
+            challenge = challenge_ready.result()
+            yield OAuthEvent(
+                "verification_url",
+                challenge.authorization_url,
+                {"url": challenge.authorization_url},
+            )
+            try:
+                opened = await asyncio.to_thread(webbrowser.open, challenge.authorization_url)
+            except Exception as exc:
+                logger.warning("Failed to open Codex authorization URL: {error}", error=exc)
+                opened = False
+            if not opened:
+                yield OAuthEvent("info", "Open the authorization URL in your browser to continue.")
+            yield OAuthEvent("waiting", "Waiting for ChatGPT authorization...")
+
+        try:
+            snapshot, catalog = await login_task
+        except CodexAuthError as exc:
+            yield OAuthEvent("error", f"Codex login failed: {exc.problem.code}")
+            return
+        except OSError, TimeoutError:
+            yield OAuthEvent("error", "Codex login failed: credential_store_unavailable")
+            return
+
+        if snapshot.state != AUTH_CONNECTED:
+            problem = snapshot.problem or catalog.problem
+            code = problem.code if problem is not None else snapshot.state
+            yield OAuthEvent("error", f"Codex login failed: {code}")
+            return
+        if not catalog.models:
+            yield OAuthEvent("error", "Codex login failed: invalid_response")
+            return
+
+        model = catalog.models[0]
+        inherit_max_tokens = config.model is None or config.max_tokens == config.model.max_tokens
+        capabilities: set[str] = {"thinking"}
+        modalities = {value.lower() for value in model.input_modalities}
+        if modalities & {"image", "images", "vision"}:
+            capabilities.add("image_in")
+        if modalities & {"video", "videos"}:
+            capabilities.add("video_in")
+        supported_efforts = set(kimix_reasoning_efforts(model.reasoning_efforts))
+        config.provider = LLMProvider(
+            type="openai-codex",
+            base_url=CODEX_BASE_URL,
+            api_key=SecretStr(""),
+            oauth=OAuthRef(storage="file", key=CODEX_OAUTH_KEY),
+        )
+        model_data: dict[str, Any] = {
+            "model": model.slug,
+            "display_name": model.display_name,
+            "max_context_size": model.max_context_size,
+            "max_tokens": model.max_tokens,
+            "capabilities": capabilities,
+        }
+        if supported_efforts:
+            model_data["supported_efforts"] = supported_efforts
+        config.model = LLMModel(**model_data)
+        if inherit_max_tokens and model.max_tokens is not None:
+            config.max_tokens = model.max_tokens
+        save_config(config)
+        yield OAuthEvent("success", "Logged in to ChatGPT Codex successfully.")
+    finally:
+        if not challenge_ready.done():
+            challenge_ready.cancel()
+        if not login_task.done():
+            login_operation.cancel()
+        with suppress(asyncio.CancelledError, CodexAuthError, OSError, TimeoutError):
+            await login_task
+
+
+async def logout_codex(config: Config) -> AsyncIterator[OAuthEvent]:
+    """Remove shared Codex credentials and its active provider configuration."""
+
+    if not config.is_from_default_location:
+        yield OAuthEvent(
+            "error",
+            "Logout requires the default config file; restart without --config/--config-file.",
+        )
+        return
+
+    try:
+        await disconnect_codex()
+    except CodexAuthError as exc:
+        yield OAuthEvent("error", f"Codex logout failed: {exc.problem.code}")
+        return
+    except OSError, TimeoutError:
+        yield OAuthEvent("error", "Codex logout failed: credential_store_unavailable")
+        return
+    provider = config.provider
+    if provider is not None and (
+        provider.type == "openai-codex"
+        or (provider.oauth is not None and provider.oauth.key == CODEX_OAUTH_KEY)
+    ):
+        config.provider = None
+        config.model = None
+    save_config(config)
+    yield OAuthEvent("success", "Logged out of ChatGPT Codex successfully.")
+
+
 class OAuthManager:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -1227,7 +1363,7 @@ class OAuthManager:
             save_config(self._config)
 
     def _load_initial_tokens(self) -> None:
-        for ref in self._iter_oauth_refs():
+        for ref in self._iter_known_oauth_refs():
             token = load_tokens(ref)
             if token and not self._should_suppress_persisted_token(ref, token):
                 self._cache_access_token(ref, token)
@@ -1275,6 +1411,11 @@ class OAuthManager:
         return _common_headers()
 
     def resolve_api_key(self, api_key: SecretStr, oauth: OAuthRef | None) -> str:
+        if oauth and oauth.key == CODEX_OAUTH_KEY:
+            # Codex request auth is file-authoritative and must not leak into
+            # this session-scoped token cache. Other custom OAuth refs retain
+            # their historical persisted-token resolution behavior.
+            return api_key.get_secret_value()
         if oauth:
             token = self._access_tokens.get(oauth.key)
             if token is None:
@@ -1291,7 +1432,9 @@ class OAuthManager:
             )
         return api_key.get_secret_value()
 
-    _KNOWN_OAUTH_KEYS: set[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY})
+    # Codex owns request-time authentication in ``auth.codex`` and must never
+    # enter this session-scoped cache.  Only Kimi/xAI use OAuthManager.
+    _KNOWN_OAUTH_KEYS: frozenset[str] = frozenset({KIMI_CODE_OAUTH_KEY, XAI_OAUTH_KEY})
 
     def _iter_known_oauth_refs(self) -> list[OAuthRef]:
         """Return configured OAuth refs for providers we know how to refresh."""
