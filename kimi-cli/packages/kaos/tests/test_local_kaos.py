@@ -196,3 +196,57 @@ async def test_exec_wait_timeout(local_kaos: LocalKaos):
         if process.returncode is None:
             await process.kill()
         await process.wait()
+
+
+async def test_writetext_encode_failure_preserves_existing_file(local_kaos: LocalKaos):
+    """A strict-encode failure on overwrite must not truncate the target."""
+    tmp_path = local_kaos.getcwd()
+    file_path = tmp_path / "keep.txt"
+    await local_kaos.writetext(file_path, "original content")
+    with pytest.raises(UnicodeEncodeError):
+        # '€' is unencodable in strict ascii; previously the file was
+        # truncated by the mode="w" open before the encode error surfaced.
+        await local_kaos.writetext(file_path, "euro: €", encoding="ascii")
+    assert await local_kaos.readtext(file_path) == "original content"
+
+
+async def test_writetext_append_encode_failure_appends_nothing(local_kaos: LocalKaos):
+    """A strict-encode failure on append must not touch the file at all."""
+    tmp_path = local_kaos.getcwd()
+    file_path = tmp_path / "append_keep.txt"
+    await local_kaos.writetext(file_path, "base")
+    with pytest.raises(UnicodeEncodeError):
+        await local_kaos.writetext(file_path, "€", mode="a", encoding="ascii")
+    assert await local_kaos.readtext(file_path) == "base"
+
+
+async def test_writetext_overwrite_is_atomic_and_leaves_no_temp_files(local_kaos: LocalKaos):
+    """Overwrite publishes via temp+replace; no *.tmp siblings remain."""
+    tmp_path = local_kaos.getcwd()
+    file_path = tmp_path / "atomic.txt"
+    await local_kaos.writetext(file_path, "v1")
+    await local_kaos.writetext(file_path, "v2-longer-content")
+    assert await local_kaos.readtext(file_path) == "v2-longer-content"
+    leftovers = [p async for p in local_kaos.iterdir(tmp_path)]
+    assert [p.name for p in leftovers] == ["atomic.txt"]
+
+
+async def test_writebytes_is_atomic(local_kaos: LocalKaos):
+    """writebytes overwrites fully and leaves no temp files behind."""
+    tmp_path = local_kaos.getcwd()
+    file_path = tmp_path / "data.bin"
+    await local_kaos.writebytes(file_path, b"old")
+    await local_kaos.writebytes(file_path, b"new-bytes")
+    assert await local_kaos.readbytes(file_path) == b"new-bytes"
+    leftovers = [p.name async for p in local_kaos.iterdir(tmp_path)]
+    assert leftovers == ["data.bin"]
+
+
+async def test_writetext_non_utf8_encoding_roundtrip(local_kaos: LocalKaos):
+    """Explicit encodings (e.g. utf-8-sig BOM) still round-trip correctly."""
+    tmp_path = local_kaos.getcwd()
+    file_path = tmp_path / "bom.txt"
+    await local_kaos.writetext(file_path, "你好", encoding="utf-8-sig")
+    raw = await local_kaos.readbytes(file_path)
+    assert raw == b"\xef\xbb\xbf" + "你好".encode("utf-8")
+    assert await local_kaos.readtext(file_path, encoding="utf-8-sig") == "你好"

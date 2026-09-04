@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import os
 from asyncio.subprocess import Process as AsyncioProcess
@@ -150,8 +151,31 @@ class LocalKaos:
 
     async def writebytes(self, path: StrOrKaosPath, data: bytes) -> int:
         local_path = path.unsafe_to_local_path() if isinstance(path, KaosPath) else Path(path)
-        async with aiofiles.open(local_path, mode="wb") as f:
-            return await f.write(data)
+        # Atomic overwrite: write to a temp sibling, then os.replace. A plain
+        # "wb" open truncates the target first, so any failure mid-write
+        # (encode error, crash, cancellation) would destroy the old content.
+        return await self._atomic_write_bytes(local_path, data)
+
+    async def _atomic_write_bytes(self, local_path: Path, data: bytes) -> int:
+        import tempfile
+
+        fd, tmp_name = await asyncio.to_thread(
+            tempfile.mkstemp,
+            dir=str(local_path.parent),
+            prefix=local_path.name + ".",
+            suffix=".tmp",
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            async with aiofiles.open(fd, mode="wb") as f:
+                written = await f.write(data)
+            await asyncio.to_thread(os.replace, tmp_path, local_path)
+            return written
+        except BaseException:
+            # Never leave the temp file behind; the original target is intact.
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(os.unlink, tmp_path)
+            raise
 
     async def writetext(
         self,
@@ -163,10 +187,20 @@ class LocalKaos:
         errors: Literal["strict", "ignore", "replace"] = "strict",
     ) -> int:
         local_path = path.unsafe_to_local_path() if isinstance(path, KaosPath) else Path(path)
-        async with aiofiles.open(
-            local_path, mode=mode, encoding=encoding, errors=errors, newline=""
-        ) as f:
-            return await f.write(data)
+        if mode == "a":
+            # Append keeps existing content; a failed encode mid-write can only
+            # leave a partial tail, never destroy prior data. Pre-encode anyway
+            # so an encode failure happens before the file is touched at all.
+            encoded = data.encode(encoding, errors)
+            async with aiofiles.open(local_path, mode="ab") as f:
+                await f.write(encoded)
+            return len(data)
+        # Overwrite path: encode BEFORE opening anything, so an unencodable
+        # character raises while the target file is still untouched; then
+        # publish via an atomic temp-file + os.replace.
+        encoded = data.encode(encoding, errors)
+        await self._atomic_write_bytes(local_path, encoded)
+        return len(data)
 
     async def mkdir(
         self, path: StrOrKaosPath, parents: bool = False, exist_ok: bool = False

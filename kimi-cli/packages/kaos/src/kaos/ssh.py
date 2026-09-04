@@ -256,6 +256,10 @@ class SSHKaos:
         encoding: str = "utf-8",
         errors: Literal["strict", "ignore", "replace"] = "strict",
     ) -> int:
+        # Encode BEFORE opening: an unencodable character must raise while the
+        # remote file is still untouched (mode "w" truncates on open), so a
+        # failed encode can never leave a truncated/corrupt target behind.
+        data.encode(encoding, errors)
         async with self._sftp.open(str(path), mode, encoding=encoding, errors=errors) as f:
             return await f.write(data)
 
