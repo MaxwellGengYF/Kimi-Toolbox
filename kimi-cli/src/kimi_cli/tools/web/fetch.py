@@ -82,6 +82,22 @@ async def _check_url_safety(url: str) -> tuple[str | None, str]:
     return None, normalized_url
 
 
+def _derived_service_url(runtime: Runtime, suffix: str) -> str | None:
+    """Derive ``<llm provider base_url>/<suffix>`` for the 404 self-heal retry.
+
+    The fetch/search services are served from the same origin as the LLM API
+    (``https://api.kimi.com/coding/v1`` -> ``.../fetch``); when the configured
+    service URL is stale (e.g. legacy ``api.moonshot.cn/v1`` paths, which
+    return 404 ``url.not_found``) the derived URL is the current canonical
+    endpoint. Returns None when no provider ``base_url`` is configured.
+    """
+    provider = getattr(getattr(runtime, "config", None), "provider", None)
+    base_url = getattr(provider, "base_url", None) if provider is not None else None
+    if not base_url:
+        return None
+    return f"{str(base_url).rstrip('/')}/{suffix}"
+
+
 class fetch_url(CallableTool2[Params]):
     name: str = "fetch_url"
     description: str = "Fetch a URL and extract main text."
@@ -252,27 +268,49 @@ class fetch_url(CallableTool2[Params]):
         from kimi_cli.utils.aiohttp import new_client_session
 
         try:
-            async with (
-                new_client_session() as session,
-                session.post(
-                    self._service_config.base_url,
-                    headers=headers,
-                    json={"url": normalized_url},
-                ) as response,
-            ):
-                if response.status != 200:
+            async with new_client_session() as session:
+
+                async def _post(url: str) -> tuple[int, str | None]:
+                    async with session.post(
+                        url,
+                        headers=headers,
+                        json={"url": normalized_url},
+                    ) as response:
+                        if response.status != 200:
+                            return response.status, None
+                        return 200, await response.text()
+
+                status, text = await _post(self._service_config.base_url)
+                if status == 404:
+                    # Self-heal: a 404 means the configured service URL is stale;
+                    # retry once against the URL derived from the LLM provider
+                    # base URL (skipped when there is nothing new to try).
+                    fallback_url = _derived_service_url(self._runtime, "fetch")
+                    if (
+                        fallback_url is not None
+                        and fallback_url != self._service_config.base_url
+                    ):
+                        logger.warning(
+                            "fetch_url service returned 404 at {url}; "
+                            "retrying derived URL {fallback_url}",
+                            url=self._service_config.base_url,
+                            fallback_url=fallback_url,
+                        )
+                        status, text = await _post(fallback_url)
+
+                if status != 200:
                     logger.warning(
                         "fetch_url service HTTP error: status={status}, url={url}",
-                        status=response.status,
+                        status=status,
                         url=normalized_url,
                     )
                     return builder.error(
-                        f"Failed to fetch URL via service. Status: {response.status}.",
+                        f"Failed to fetch URL via service. Status: {status}.",
                         brief="Failed to fetch URL via fetch service",
                     )
 
-                content = await response.text()
-                builder.write(content)
+                assert text is not None
+                builder.write(text)
                 return builder.ok(
                     "The returned content is the main content extracted from the page."
                 )
